@@ -408,6 +408,7 @@ fn set_media_model_field(field: &str, value: String) -> impl FnOnce(&mut super::
             "image_model" => cfg.media.image_model = resolved,
             "audio_model" => cfg.media.audio_model = resolved,
             "video_model" => cfg.media.video_model = resolved,
+            "file_model" => cfg.media.file_model = resolved,
             _ => unreachable!("unknown media model field `{field}`"),
         }
     }
@@ -452,4 +453,16 @@ pub async fn set_media_video_model(value: String) -> Result<()> {
         );
     }
     update_config(set_media_model_field("video_model", value)).await
+}
+
+/// Persist or clear `[media].file_model`. Empty clears the route.
+pub async fn set_media_file_model(value: String) -> Result<()> {
+    if value.len() > MAX_DEFAULT_MODEL_LEN {
+        anyhow::bail!(
+            "media file model name too long ({} > {} bytes)",
+            value.len(),
+            MAX_DEFAULT_MODEL_LEN
+        );
+    }
+    update_config(set_media_model_field("file_model", value)).await
 }

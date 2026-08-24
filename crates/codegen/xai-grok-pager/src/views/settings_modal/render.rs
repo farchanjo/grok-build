@@ -2196,6 +2196,16 @@ fn dynamic_value_display<'a>(meta: &SettingMeta, canonical: &'a str) -> std::bor
         (DynamicEnumSource::CompactionFallbackModelCatalog, "") => {
             std::borrow::Cow::Borrowed("No fallback")
         }
+        (DynamicEnumSource::MediaImageModelCatalog, "@session")
+        | (DynamicEnumSource::MediaVideoModelCatalog, "@session")
+        | (DynamicEnumSource::MediaFileModelCatalog, "@session") => {
+            std::borrow::Cow::Borrowed("Session model")
+        }
+        (DynamicEnumSource::MediaVideoModelCatalog, "")
+        | (DynamicEnumSource::MediaFileModelCatalog, "") => std::borrow::Cow::Borrowed("Unset"),
+        (DynamicEnumSource::MediaAudioModelCatalog, "") => {
+            std::borrow::Cow::Borrowed("Automatic xAI STT")
+        }
         _ => std::borrow::Cow::Borrowed(canonical),
     }
 }

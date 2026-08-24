@@ -110,6 +110,9 @@ pub fn audio_stt_error_from_aux(
         }
         AuxiliaryRouteError::CredentialUnavailable { .. }
         | AuxiliaryRouteError::SessionRouteRequired => AudioSttError::AuthUnavailable,
+        AuxiliaryRouteError::VisionFallbackUnavailable => {
+            AudioSttError::UnsupportedRoute("@session".to_owned())
+        }
         AuxiliaryRouteError::ConstructionFailed { detail, .. } => {
             // Non-xAI session pin: refuse sibling/current bearer use.
             AudioSttError::Transport(detail)

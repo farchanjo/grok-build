@@ -16,6 +16,7 @@ mode = "auto"                 # auto | tools_only | off
 image_model = "@session"      # session route or catalog model ID
 audio_model = "xai-streaming-stt" # optional; xAI streaming STT aliases only
 video_model = ""                   # optional frame-description catalog model ID
+file_model = ""                    # optional file/PDF catalog model ID; unset reuses image_model
 image_limit = 16               # 1..=64
 audio_max_seconds = 120        # 1..=900
 video_max_seconds = 600        # 1..=7200
@@ -59,9 +60,9 @@ Remote model catalogs can also supply modality metadata. A local `[model.<id>]` 
 
 ## Images
 
-When the active model explicitly supports image input, Grok keeps the normal native image path. Otherwise, in `auto` mode, the configured image route produces a text description before the active model sees the turn.
+When the active model explicitly supports image input, Grok keeps the normal native image path. Otherwise, in `auto` mode, the configured image route produces a text description before the active model sees the turn. The same vision fallback covers user attachments, `read_file` images, PDF page renders, sampled video frames, and images extracted from other tool results.
 
-`image_model = "@session"` reuses the active route. That only works when the active model itself can accept images. For a text-only session model, select an image-capable catalog model instead.
+`image_model = "@session"` reuses the active route when that model advertises `supports_image_input = true`. If the session model is text-only or unknown, Grok automatically selects a catalog model that advertises image input: same provider first, then first-party xAI, then any other credentialed vision model. Pin `[media].image_model`, `[media].video_model`, or `[media].file_model` in `/settings` under **Models** when you want a specific route. If no vision model is in the catalog, the turn or tool result fails closed with an explicit diagnostic.
 
 Image descriptions are cached by media content, source, and prompt fingerprint. Tool reads and compaction backfill use a stable prompt so their descriptors can be reused across turns.
 
@@ -82,6 +83,20 @@ If transcription is unavailable or extraction fails, the model receives an expli
 `read_file` recognizes common video formats and probes their metadata. Video understanding samples at most `video_max_frames` frames from at most `video_max_seconds` of the file. Frames are described through `video_model` when configured, otherwise through `image_model`. This is image-based frame understanding rather than a raw-video inference request. An available audio track is bounded by the audio limit and uses xAI streaming STT.
 
 Frame extraction uses argv-only `ffmpeg`/`ffprobe` subprocesses with input-size, captured-output, and wall-clock limits. Grok reports missing tools or extraction failures explicitly.
+
+---
+
+## Files
+
+`read_file` is the coding tool. Source, JSON, Markdown, and any other **text** payload (`FileContent`) always stay on the **session** model. The File model is never used to rewrite or re-sample that text.
+
+The File model is only for **binary** payloads the session model cannot consume natively:
+
+- PDF pages rendered as images (`PdfPageImages`);
+- image files (`ImageContent`);
+- video frames (via the Video model, falling back to Image).
+
+The file route is `[media].file_model` when set in `/settings` (File model). When that setting is Unset, Grok reuses the image understanding model, then `@session`, then the same catalog vision fallback used for images. Office documents that `read_file` extracts as text follow the session path, not this auxiliary route.
 
 ---
 
@@ -138,8 +153,7 @@ After confirming the new setting works, you may remove `[models].image_descripti
 ### The active model rejects an image
 
 - Confirm the model advertises `supports_image_input = true` only if the endpoint really accepts images.
-- For a text-only model, set `[media].image_model` to an image-capable catalog route.
-- Do not use `@session` as the auxiliary image route when the session model is text-only.
+- For a text-only session model, Grok auto-selects a catalog vision route when `[media].image_model` is `@session`. Pin a specific vision model if you want to override that choice, or if the catalog has no image-capable model.
 
 ### Audio or video extraction fails
 
@@ -153,6 +167,7 @@ After confirming the new setting works, you may remove `[models].image_descripti
 - `tools_only` limits auxiliary processing to explicit tool reads.
 - `off` disables auxiliary inference.
 - Confirm the selected auxiliary model exists in the current catalog and has suitable input capabilities.
+- For `@session` on a text-only model, confirm at least one catalog entry has `supports_image_input = true` and usable credentials.
 
 ### Compaction shows a placeholder
 

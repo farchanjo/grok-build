@@ -1439,6 +1439,7 @@ fn media_config_uses_defaults_and_clamps_explicit_limits() {
                 image_model = "  vision-route  "
                 audio_model = "speech-route"
                 video_model = "video-route"
+                file_model = "file-route"
                 image_limit = 0
                 audio_max_seconds = 99999
                 video_max_seconds = 0
@@ -1451,6 +1452,10 @@ fn media_config_uses_defaults_and_clamps_explicit_limits() {
             assert_eq!(resolved.image_model.as_deref(), Some("vision-route"));
             assert_eq!(resolved.audio_model.as_deref(), Some("speech-route"));
             assert_eq!(resolved.video_model.as_deref(), Some("video-route"));
+            assert_eq!(resolved.file_model.as_deref(), Some("file-route"));
+            assert_eq!(resolved.file_route(), "file-route");
+            assert_eq!(resolved.video_route(), "video-route");
+            assert_eq!(resolved.image_route(), "vision-route");
             assert_eq!(resolved.image_limit, 1);
             assert_eq!(
                 resolved.audio_max_seconds,
@@ -1458,6 +1463,18 @@ fn media_config_uses_defaults_and_clamps_explicit_limits() {
             );
             assert_eq!(resolved.video_max_seconds, 1);
             assert_eq!(resolved.video_max_frames, 32);
+
+            let fallback: toml::Value = toml::from_str(
+                r#"
+                [media]
+                image_model = "vision-route"
+                "#,
+            )
+            .unwrap();
+            let fallback = MediaConfig::resolve(&fallback, None);
+            assert_eq!(fallback.file_route(), "vision-route");
+            assert_eq!(fallback.video_route(), "vision-route");
+            assert!(fallback.file_model.is_none());
         },
     );
 }

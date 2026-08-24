@@ -82,6 +82,7 @@ const ALL_SETTINGS_EXERCISED: &[&str] = &[
     "media_image_model",
     "media_audio_model",
     "media_video_model",
+    "media_file_model",
     "media_status",
     // Dedicated compaction strategy, trigger, bands, model routes, and status.
     "compaction_strategy",
@@ -1870,6 +1871,7 @@ fn registry_kind_membership_through_pr_14() {
             "default_model",
             "fork_secondary_model",
             "media_audio_model",
+            "media_file_model",
             "media_image_model",
             "media_video_model",
         ],
@@ -2022,8 +2024,9 @@ fn defaults_round_trip_through_registry() {
             "media_image_model" => SettingValue::String("@session".to_string()),
             "media_audio_model" => SettingValue::String(String::new()),
             "media_video_model" => SettingValue::String(String::new()),
+            "media_file_model" => SettingValue::String(String::new()),
             "media_status" => SettingValue::String(
-                "Auto · image: Session model · audio: Automatic xAI STT · video: Unset".to_string(),
+                "Auto · image: Session model · audio: Automatic xAI STT · video: Unset · files: Unset".to_string(),
             ),
             "show_thinking_blocks" => SettingValue::Bool(true),
             "prompt_suggestions" => SettingValue::Bool(true),
@@ -8441,13 +8444,14 @@ fn media_image_model_is_dynamic_enum_with_session_default() {
     assert_eq!(meta.category, SettingCategory::Models);
 }
 
-/// Audio/video media models default to empty (unset).
+/// Audio/video/file media models default to empty (unset).
 #[test]
 fn media_audio_and_video_models_default_to_unset() {
     let reg = SettingsRegistry::defaults();
     for (key, source_expected) in [
         ("media_audio_model", "MediaAudioModelCatalog"),
         ("media_video_model", "MediaVideoModelCatalog"),
+        ("media_file_model", "MediaFileModelCatalog"),
     ] {
         let meta = reg.find(key).expect("media model registered");
         let SettingKind::DynamicEnum {
@@ -8464,6 +8468,9 @@ fn media_audio_and_video_models_default_to_unset() {
             }
             "MediaVideoModelCatalog" => {
                 assert_eq!(*source, DynamicEnumSource::MediaVideoModelCatalog)
+            }
+            "MediaFileModelCatalog" => {
+                assert_eq!(*source, DynamicEnumSource::MediaFileModelCatalog)
             }
             _ => unreachable!(),
         }
@@ -8487,7 +8494,7 @@ fn media_status_is_read_only_status_kind() {
 fn media_status_shows_external_provider_disclosure() {
     let snapshot = PagerLocalSnapshot {
         media_status:
-            "Auto · image: External Vision (external provider) · audio: Unset · video: Unset"
+            "Auto · image: External Vision (external provider) · audio: Unset · video: Unset · files: Unset"
                 .to_owned(),
         ..PagerLocalSnapshot::default()
     };

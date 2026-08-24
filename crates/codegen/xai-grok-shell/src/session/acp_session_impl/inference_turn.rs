@@ -950,10 +950,51 @@ impl SessionActor {
         let grok_home = self.auth_manager.as_ref().map(|am| am.grok_home());
         let selection_id = self.selection_model_id.borrow().0.to_string();
         let frozen = self.route_context.borrow().clone();
+        let media_vision_pin = if matches!(
+            purpose,
+            crate::session::auxiliary_route::AuxiliaryPurpose::MediaDescribe
+                | crate::session::auxiliary_route::AuxiliaryPurpose::MediaVideo
+                | crate::session::auxiliary_route::AuxiliaryPurpose::MediaPdf
+        ) {
+            let active_supports_images = self
+                .chat_state_handle
+                .get_inference_settings()
+                .await
+                .and_then(|settings| settings.supports_image_input);
+            let zdr = self
+                .auth_manager
+                .as_ref()
+                .and_then(|am| am.current_or_expired())
+                .is_some_and(|auth| auth.is_zdr_team());
+            let pin = crate::session::auxiliary_route::effective_media_vision_pin(
+                slug,
+                &self.models_manager,
+                selection_id.as_str(),
+                session_key.as_deref(),
+                disable_api_key_auth,
+                active_supports_images,
+                zdr,
+                active.provider_identity,
+            )?;
+            let session_pin = slug.trim().is_empty()
+                || slug.trim() == crate::session::auxiliary_route::SESSION_ROUTE_SENTINEL;
+            if session_pin && pin != crate::session::auxiliary_route::SESSION_ROUTE_SENTINEL {
+                tracing::debug!(
+                    from = slug,
+                    to = %pin,
+                    purpose = purpose.as_str(),
+                    "media @session pin routed to a catalog vision model"
+                );
+            }
+            Some(pin)
+        } else {
+            None
+        };
+        let requested = media_vision_pin.as_deref().unwrap_or(slug);
         let mut resolved = crate::session::auxiliary_route::resolve_auxiliary_route(
             crate::session::auxiliary_route::AuxiliaryRouteInputs {
                 purpose,
-                requested: slug,
+                requested,
                 models_manager: &self.models_manager,
                 frozen_session_route: frozen.as_ref(),
                 frozen_session_inference: &active,
@@ -986,7 +1027,9 @@ impl SessionActor {
     }
 
     /// Resolve the media-describe route. Explicit pins fail closed (no silent
-    /// session fallback). `@session` requires a frozen route.
+    /// session fallback). `@session` inherits the frozen route when the
+    /// session model advertises image input; otherwise it is rewritten to a
+    /// catalog vision model.
     pub(super) async fn resolve_media_describe(
         &self,
         pin: &str,

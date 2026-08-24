@@ -85,6 +85,7 @@ mode = "auto"                         # auto | tools_only | off
 image_model = "@session"              # session route or catalog model ID
 # audio_model = "xai-streaming-stt"    # optional; xAI streaming STT aliases only
 # video_model = "my-vision-model"       # optional frame-description model
+# file_model = "my-vision-model"        # optional binary/PDF model; text read_file stays on session
 image_limit = 16                       # 1..=64
 audio_max_seconds = 120                # 1..=900
 video_max_seconds = 600                # 1..=7200
@@ -95,8 +96,8 @@ respect_gitignore = false              # default: false; set true to make every 
 ```
 
 For automatic compaction strategy, trigger, band, and model details, see
-[Compaction Settings](25-compaction.md). For capability-aware image, audio, and
-video routing, bounded extraction, persistence, privacy, and migration from the
+[Compaction Settings](25-compaction.md). For capability-aware image, audio, video, and
+file routing, bounded extraction, persistence, privacy, and migration from the
 legacy image-description setting, see [Media Understanding](28-media-understanding.md).
 
 #### Input mode

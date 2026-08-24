@@ -1033,6 +1033,13 @@ pub(super) fn action_for_string(
                 Some(Action::SetMediaVideoModel(acp::ModelId::new(value)))
             }
         }
+        "media_file_model" => {
+            if value.is_empty() {
+                Some(Action::ClearMediaFileModel)
+            } else {
+                Some(Action::SetMediaFileModel(acp::ModelId::new(value)))
+            }
+        }
 
         _ => {
             let _ = value;

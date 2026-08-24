@@ -2162,68 +2162,53 @@ impl SessionActor {
         &self,
         video: &xai_grok_tools::types::output::VideoContent,
         media: &crate::config::MediaConfig,
-        active_supports_images: Option<bool>,
         runner: &dyn xai_grok_tools::util::ffmpeg::ProcessRunner,
         transcriber: Option<&dyn crate::session::media_stt::AsyncAudioTranscriber>,
     ) -> Result<String, acp::Error> {
         // Frame descriptions use MediaVideo purpose so pacing/attribution
-        // operation partition is distinct from image describe.
-        let route = media
-            .video_model
-            .as_deref()
-            .or(media.image_model.as_deref())
-            .unwrap_or("@session")
-            .to_owned();
-        let frame_route_usable = !(route == "@session" && active_supports_images != Some(true));
-        let (client, describe_model, provider_label, frame_route_policy) = if frame_route_usable {
-            match self
-                .resolve_media_purpose(
-                    crate::session::auxiliary_route::AuxiliaryPurpose::MediaVideo,
-                    &route,
-                )
-                .await
-            {
-                Ok(media_route) => {
-                    let describe_model = media_route.upstream_model_id;
-                    let sampler_config = media_route.inference;
-                    let route_ctx = media_route.route.clone();
-                    let provider = sampler_config.provider_identity;
-                    let frame_route_policy =
-                        crate::session::media_pipeline::auxiliary_media_route_allowed(
-                            provider,
-                            self.auth_manager.as_ref(),
-                        );
-                    let client = if frame_route_policy.is_ok() {
-                        Some(
-                            xai_grok_inference::InferenceClient::new_with_route_context(
-                                sampler_config,
-                                Some(route_ctx),
-                            )
-                            .map_err(|error| {
-                                acp::Error::internal_error().data(format!(
-                                    "failed to build video-describe sampling client: {error}"
-                                ))
-                            })?,
-                        )
-                    } else {
-                        None
-                    };
-                    (
-                        client,
-                        Some(describe_model),
-                        Some(provider.label().to_owned()),
-                        frame_route_policy,
-                    )
-                }
-                Err(error) => (None, None, None, Err(video_route_policy_error(error))),
-            }
-        } else {
-            (
-                None,
-                None,
-                None,
-                Err(crate::session::media_pipeline::MediaPolicyError::Disabled),
+        // operation partition is distinct from image describe. `@session` on a
+        // non-vision model is rewritten to a catalog vision route.
+        let route = media.video_route().to_owned();
+        let (client, describe_model, provider_label, frame_route_policy) = match self
+            .resolve_media_purpose(
+                crate::session::auxiliary_route::AuxiliaryPurpose::MediaVideo,
+                &route,
             )
+            .await
+        {
+            Ok(media_route) => {
+                let describe_model = media_route.upstream_model_id;
+                let sampler_config = media_route.inference;
+                let route_ctx = media_route.route.clone();
+                let provider = sampler_config.provider_identity;
+                let frame_route_policy =
+                    crate::session::media_pipeline::auxiliary_media_route_allowed(
+                        provider,
+                        self.auth_manager.as_ref(),
+                    );
+                let client = if frame_route_policy.is_ok() {
+                    Some(
+                        xai_grok_inference::InferenceClient::new_with_route_context(
+                            sampler_config,
+                            Some(route_ctx),
+                        )
+                        .map_err(|error| {
+                            acp::Error::internal_error().data(format!(
+                                "failed to build video-describe sampling client: {error}"
+                            ))
+                        })?,
+                    )
+                } else {
+                    None
+                };
+                (
+                    client,
+                    Some(describe_model),
+                    Some(provider.label().to_owned()),
+                    frame_route_policy,
+                )
+            }
+            Err(error) => (None, None, None, Err(video_route_policy_error(error))),
         };
         Ok(crate::session::media_pipeline::understand_video(
             video,
@@ -2240,6 +2225,97 @@ impl SessionActor {
         )
         .await)
     }
+
+    /// Turn extracted tool-result images into text for a non-vision session
+    /// model. Never returns image content parts.
+    async fn describe_extracted_tool_images(
+        &self,
+        images: &[xai_grok_tools::util::base64_images::ExtractedImage],
+        image_description_model: &str,
+        auxiliary_allowed: &Result<(), crate::session::media_pipeline::MediaPolicyError>,
+    ) -> String {
+        if let Err(error) = auxiliary_allowed {
+            return format!(
+                "[{} extracted image(s) were not understood: {error}]",
+                images.len()
+            );
+        }
+        let media_route = match self.resolve_media_describe(image_description_model).await {
+            Ok(route) => route,
+            Err(error) => {
+                return format!(
+                    "[{} extracted image(s) were not understood: {error}]",
+                    images.len()
+                );
+            }
+        };
+        let describe_model = media_route.upstream_model_id.clone();
+        let sampler_config = media_route.inference;
+        let route_ctx = media_route.route.clone();
+        if let Err(error) = crate::session::media_pipeline::auxiliary_media_route_allowed(
+            sampler_config.provider_identity,
+            self.auth_manager.as_ref(),
+        ) {
+            return format!(
+                "[{} extracted image(s) were not understood: {error}]",
+                images.len()
+            );
+        }
+        let provider_label = sampler_config.provider_identity.label();
+        let client = match xai_grok_inference::InferenceClient::new_with_route_context(
+            sampler_config,
+            Some(route_ctx),
+        ) {
+            Ok(client) => client,
+            Err(error) => {
+                return format!(
+                    "[{} extracted image(s) were not understood: failed to build image-describe sampling client: {error}]",
+                    images.len()
+                );
+            }
+        };
+        let mut parts = Vec::with_capacity(images.len());
+        for (index, image) in images.iter().enumerate() {
+            let label = format!("extracted image {}", index + 1);
+            let raw_bytes = match base64::Engine::decode(
+                &base64::engine::general_purpose::STANDARD,
+                &image.data,
+            ) {
+                Ok(bytes) => bytes,
+                Err(error) => {
+                    parts.push(format!("[{label} was not understood: invalid base64 ({error})]"));
+                    continue;
+                }
+            };
+            match crate::session::media_pipeline::describe_image(
+                &self.image_describe_cache,
+                &self.media_descriptor_store,
+                client.clone(),
+                &describe_model,
+                Some(provider_label),
+                &raw_bytes,
+                &image.mime_type,
+                None,
+                "Describe this file for the current coding task.",
+                crate::session::image_describe::ImageDescribeSource::ToolRead,
+                None,
+            )
+            .await
+            {
+                Ok(description) => parts.push(format!(
+                    "{label}:\n{}",
+                    crate::session::image_describe::render_image_description_block(&description)
+                )),
+                Err(error) => parts.push(format!("[{label} could not be transcribed: {error}]")),
+            }
+        }
+        if parts.is_empty() {
+            "[extracted images were not understood]".to_owned()
+        } else {
+            parts.join("\n\n")
+        }
+    }
+
     pub(super) async fn handle_bridge_tool_success(
         &self,
         tool_call_id: &acp::ToolCallId,
@@ -2364,6 +2440,9 @@ impl SessionActor {
         };
         let mut extracted_images = extraction.images;
         let prompt_text = extraction.text;
+        // Source / JSON / other text (`FileContent`) stays on the session
+        // coding model. Auxiliary image/file/video routes run only for typed
+        // binary payloads below (`ImageContent`, `PdfPageImages`, audio, video).
         if !self.is_cursor_harness()
             && let ToolsToolOutput::ReadFile(ReadFileOutput::FileContent(ref fc)) = result.output
         {
@@ -2376,7 +2455,7 @@ impl SessionActor {
             .and_then(|settings| settings.supports_image_input);
         let can_inline_images = !self.is_cursor_harness() && active_supports_images == Some(true);
         let media = self.media_config.borrow().clone();
-        let image_description_model = media.image_model.as_deref().unwrap_or("@session");
+        let image_description_model = media.image_route();
         let auxiliary_tool_media_allowed = crate::session::media_pipeline::auxiliary_media_allowed(
             media.mode,
             crate::session::image_describe::ImageDescribeSource::ToolRead,
@@ -2455,17 +2534,11 @@ impl SessionActor {
                     acp::Error::internal_error()
                         .data(format!("failed to decode read_file image result: {error}"))
                 })?;
-                if image_description_model == "@session" && active_supports_images != Some(true) {
-                    prompt_text = format!(
-                        "[Image from {path} could not be understood: configure an image-capable media route]"
-                    );
-                } else {
-                    match self.resolve_media_describe(image_description_model).await {
-                        Err(error) => {
-                            prompt_text =
-                                format!("[Image from {path} was not understood: {error}]");
-                        }
-                        Ok(media_route) => {
+                match self.resolve_media_describe(image_description_model).await {
+                    Err(error) => {
+                        prompt_text = format!("[Image from {path} was not understood: {error}]");
+                    }
+                    Ok(media_route) => {
                             let describe_model = media_route.upstream_model_id.clone();
                             let sampler_config = media_route.inference;
                             let route_ctx = media_route.route.clone();
@@ -2526,7 +2599,6 @@ impl SessionActor {
                             }
                         }
                     }
-                }
             }
         }
         if !can_inline_images
@@ -2537,17 +2609,14 @@ impl SessionActor {
                 .or_else(|| tool_parsed_args.get("path"))
                 .and_then(|value| value.as_str())
                 .unwrap_or("unknown");
-            if let Err(error) = auxiliary_tool_media_allowed {
+            if let Err(ref error) = auxiliary_tool_media_allowed {
                 prompt_text =
                     format!("[PDF {path} was rendered as images but was not understood: {error}]");
-            } else if image_description_model == "@session" && active_supports_images != Some(true)
-            {
-                prompt_text = format!(
-                    "[PDF {path} was rendered as images but could not be understood: configure an image-capable media route]"
-                );
             } else {
-                // PDF pages share the image pin but use MediaPdf operation partition.
-                let pdf_pin = media.image_model.as_deref().unwrap_or("@session");
+                // Binary PDF pages only. Prefer `[media].file_model` (TUI File
+                // model), then the image pin, then `@session` with vision
+                // fallback. `FileContent` text never enters this branch.
+                let pdf_pin = media.file_route();
                 match self
                     .resolve_media_purpose(
                         crate::session::auxiliary_route::AuxiliaryPurpose::MediaPdf,
@@ -2680,7 +2749,6 @@ impl SessionActor {
                 .understand_tool_video(
                     video,
                     &media,
-                    active_supports_images,
                     &xai_grok_tools::util::ffmpeg::SystemProcessRunner,
                     stt.as_deref(),
                 )
@@ -2711,37 +2779,48 @@ impl SessionActor {
                 count,
                 "base64 images extracted from tool result",
             );
-            let acp_images: Vec<agent_client_protocol::ImageContent> = extracted_images
-                .into_iter()
-                .map(|img| agent_client_protocol::ImageContent::new(img.data, img.mime_type))
-                .collect();
-            let is_cursor_for_tool_result = self.is_cursor_harness();
-            let mut norm_result = crate::session::image_normalize::normalize_images(
-                acp_images,
-                is_cursor_for_tool_result,
-            )
-            .await;
-            if !norm_result.re_encode_fallbacks.is_empty() {
-                tracing::warn!(
-                    session_id = %self.session_info.id,
-                    notes = %norm_result.re_encode_fallbacks.join(" "),
-                    "Extracted tool image kept original after re-encode failure",
-                );
-            }
-            if let Some((notice, notes)) = crate::session::image_normalize::dropped_to_envelope(
-                std::mem::take(&mut norm_result.dropped),
-                is_cursor_for_tool_result,
-            ) {
-                deferred_followups.push(ConversationItem::user(notice));
-                self.send_xai_notification(XaiSessionUpdate::ImageDropped { notes })
+            if can_inline_images {
+                let acp_images: Vec<agent_client_protocol::ImageContent> = extracted_images
+                    .into_iter()
+                    .map(|img| agent_client_protocol::ImageContent::new(img.data, img.mime_type))
+                    .collect();
+                let is_cursor_for_tool_result = self.is_cursor_harness();
+                let mut norm_result = crate::session::image_normalize::normalize_images(
+                    acp_images,
+                    is_cursor_for_tool_result,
+                )
+                .await;
+                if !norm_result.re_encode_fallbacks.is_empty() {
+                    tracing::warn!(
+                        session_id = %self.session_info.id,
+                        notes = %norm_result.re_encode_fallbacks.join(" "),
+                        "Extracted tool image kept original after re-encode failure",
+                    );
+                }
+                if let Some((notice, notes)) = crate::session::image_normalize::dropped_to_envelope(
+                    std::mem::take(&mut norm_result.dropped),
+                    is_cursor_for_tool_result,
+                ) {
+                    deferred_followups.push(ConversationItem::user(notice));
+                    self.send_xai_notification(XaiSessionUpdate::ImageDropped { notes })
+                        .await;
+                }
+                for norm in norm_result.images {
+                    let url = format!("data:{};base64,{}", norm.mime_type, norm.data);
+                    let mut image_msg =
+                        ConversationItem::user("[Image extracted from tool result above]");
+                    image_msg.add_image(url);
+                    deferred_followups.push(image_msg);
+                }
+            } else {
+                let described = self
+                    .describe_extracted_tool_images(
+                        &extracted_images,
+                        image_description_model,
+                        &auxiliary_tool_media_allowed,
+                    )
                     .await;
-            }
-            for norm in norm_result.images {
-                let url = format!("data:{};base64,{}", norm.mime_type, norm.data);
-                let mut image_msg =
-                    ConversationItem::user("[Image extracted from tool result above]");
-                image_msg.add_image(url);
-                deferred_followups.push(image_msg);
+                deferred_followups.push(ConversationItem::user(described));
             }
         }
         Ok(deferred_followups)

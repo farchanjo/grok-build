@@ -1516,6 +1516,18 @@ fn move_setting_away_from_default(app: &mut AppView, key: crate::settings::Setti
                 let _ = dispatch(Action::SetMediaVideoModel(id), app);
             }
         }
+        "media_file_model" => {
+            use agent_client_protocol as acp;
+            use std::sync::Arc;
+            if let ActiveView::Agent(aid) = app.active_view
+                && let Some(agent) = app.agents.get_mut(&aid)
+            {
+                let id = acp::ModelId::new(Arc::from("file-test-model"));
+                let info = acp::ModelInfo::new(id.clone(), "File Test".to_string());
+                agent.session.models.available.insert(id.clone(), info);
+                let _ = dispatch(Action::SetMediaFileModel(id), app);
+            }
+        }
         "media_status" => {
             panic!("media_status is read-only, no action to dispatch");
         }

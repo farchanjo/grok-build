@@ -2723,3 +2723,94 @@ pub(in crate::app::dispatch) fn clear_media_video_model(app: &mut AppView) -> Ve
         rollback_value: crate::settings::SettingValue::String(prev),
     }]
 }
+
+/// State-only mutation for `media_file_model`. Empty clears the route.
+pub(super) fn set_media_file_model_inner(app: &mut AppView, value: String) {
+    app.media_config.file_model = if value.is_empty() { None } else { Some(value) };
+}
+
+/// Outer dispatcher for `Action::SetMediaFileModel`.
+pub(in crate::app::dispatch) fn set_media_file_model(
+    app: &mut AppView,
+    new_id: acp::ModelId,
+) -> Vec<Effect> {
+    let ActiveView::Agent(aid) = app.active_view else {
+        tracing::error!(
+            target: "settings",
+            key = "media_file_model",
+            "Action::SetMediaFileModel dispatched with no active agent — no-op",
+        );
+        return vec![];
+    };
+    let (new_display, available_has_new) = {
+        let Some(agent) = app.agents.get(&aid) else {
+            tracing::error!(
+                target: "settings",
+                key = "media_file_model",
+                "Action::SetMediaFileModel: active_view::Agent points to missing agent",
+            );
+            return vec![];
+        };
+        let display = agent.session.models.display_name_for(&new_id);
+        let has = agent.session.models.available.contains_key(&new_id);
+        (display, has)
+    };
+    let new_id_str = new_id.0.to_string();
+    if new_id_str != "@session" && !available_has_new {
+        tracing::error!(
+            target: "settings",
+            key = "media_file_model",
+            id = ?new_id,
+            "Action::SetMediaFileModel dispatched with id not in catalog — \
+             validator skew; no-op",
+        );
+        return vec![];
+    }
+    let prev = app.media_config.file_model.clone().unwrap_or_default();
+    if prev == new_id_str {
+        return vec![];
+    }
+    set_media_file_model_inner(app, new_id_str.clone());
+    refresh_open_settings_modals(app);
+    let toast_label = if new_id_str == "@session" {
+        "Session model".to_owned()
+    } else {
+        new_display
+    };
+    tracing::info!(
+        target = "settings",
+        key = "media_file_model",
+        new = %toast_label,
+        new_id = %new_id_str,
+        "setting changed",
+    );
+    app.show_toast(&format!("\u{2713} File model: {toast_label}"));
+    vec![Effect::PersistSetting {
+        key: "media_file_model",
+        value: crate::settings::SettingValue::String(new_id_str),
+        rollback_value: crate::settings::SettingValue::String(prev),
+    }]
+}
+
+/// Clear the persisted file understanding model.
+pub(in crate::app::dispatch) fn clear_media_file_model(app: &mut AppView) -> Vec<Effect> {
+    let prev = app.media_config.file_model.clone().unwrap_or_default();
+    if prev.is_empty() {
+        app.show_toast("\u{2713} File model: already unset");
+        return vec![];
+    }
+    set_media_file_model_inner(app, String::new());
+    refresh_open_settings_modals(app);
+    tracing::info!(
+        target = "settings",
+        key = "media_file_model",
+        value = "<cleared>",
+        "setting changed",
+    );
+    app.show_toast("\u{2713} File model: Unset");
+    vec![Effect::PersistSetting {
+        key: "media_file_model",
+        value: crate::settings::SettingValue::String(String::new()),
+        rollback_value: crate::settings::SettingValue::String(prev),
+    }]
+}

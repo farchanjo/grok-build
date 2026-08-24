@@ -841,7 +841,7 @@ impl SessionActor {
             &xai_chat_state::compaction_utils::extract_user_query(&original_user_message),
         );
         let media = self.media_config.borrow().clone();
-        let image_description_model = media.image_model.as_deref().unwrap_or("@session");
+        let image_description_model = media.image_route();
         // Exact media route: explicit pins fail closed; @session needs frozen route.
         let media_route = self.resolve_media_describe(image_description_model).await?;
         let describe_model = media_route.upstream_model_id.clone();

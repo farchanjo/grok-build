@@ -117,6 +117,8 @@ pub enum DynamicEnumSource {
     MediaAudioModelCatalog,
     /// Media video understanding route. Prepends `Unset`, then `@session`.
     MediaVideoModelCatalog,
+    /// Media file/PDF understanding route. Prepends `Unset`, then `@session`.
+    MediaFileModelCatalog,
 }
 
 /// Build the owned choice list for a `DynamicEnum` at picker-open time.
@@ -247,6 +249,29 @@ pub fn dynamic_enum_choices(
             );
             out
         }
+        DynamicEnumSource::MediaFileModelCatalog => {
+            let mut out = Vec::with_capacity(snapshot.available_models.len() + 2);
+            out.push(OwnedEnumChoice {
+                canonical: String::new(),
+                display: "Unset".to_string(),
+                description:
+                    "Reuse the image model for binary files and PDFs. Source text still uses the session model."
+                        .to_string(),
+            });
+            out.push(OwnedEnumChoice {
+                canonical: "@session".to_string(),
+                display: "Session model".to_string(),
+                description:
+                    "Binary files follow the session model's vision capability. Source text always stays on the session model."
+                        .to_string(),
+            });
+            append_catalog(
+                &mut out,
+                None,
+                "binary file pages and the minimum relevant prompt context are sent to this provider; source text is not.",
+            );
+            out
+        }
     }
 }
 
@@ -366,6 +391,24 @@ mod compaction_choice_tests {
     }
 
     #[test]
+    fn media_file_choices_prepend_unset_and_session() {
+        let snapshot = PagerLocalSnapshot {
+            available_models: vec![model("Docs Model", "docs-1")],
+            ..PagerLocalSnapshot::default()
+        };
+        let choices = dynamic_enum_choices(DynamicEnumSource::MediaFileModelCatalog, &snapshot);
+        assert_eq!(choices[0].canonical, "");
+        assert_eq!(choices[0].display, "Unset");
+        assert_eq!(choices[1].canonical, "@session");
+        assert_eq!(choices[1].display, "Session model");
+        assert!(
+            choices
+                .iter()
+                .any(|choice| choice.canonical == "docs-1" && choice.display == "Docs Model")
+        );
+    }
+
+    #[test]
     fn external_media_choice_has_visible_privacy_warning() {
         let external_id = "openrouter:poolside/vision";
         let snapshot = PagerLocalSnapshot {
@@ -388,14 +431,14 @@ mod compaction_choice_tests {
         let ui = UiConfig::default();
         let snapshot = PagerLocalSnapshot {
             media_status:
-                "Tools only · image: Session model · audio: Automatic xAI STT · video: Unset"
+                "Tools only · image: Session model · audio: Automatic xAI STT · video: Unset · files: Unset"
                     .to_owned(),
             ..PagerLocalSnapshot::default()
         };
         assert_eq!(
             current_value_for("media_status", &ui, &snapshot),
             Some(SettingValue::String(
-                "Tools only · image: Session model · audio: Automatic xAI STT · video: Unset"
+                "Tools only · image: Session model · audio: Automatic xAI STT · video: Unset · files: Unset"
                     .to_owned()
             ))
         );
@@ -578,6 +621,8 @@ pub struct PagerLocalSnapshot {
     pub media_audio_model: String,
     /// Stable video understanding model ID. Empty means unset.
     pub media_video_model: String,
+    /// Stable file/PDF understanding model ID. Empty means unset (reuse image).
+    pub media_file_model: String,
     /// Read-only effective media summary, including external-provider disclosure.
     pub media_status: String,
 }
@@ -615,8 +660,10 @@ impl Default for PagerLocalSnapshot {
             media_image_model: "@session".to_string(),
             media_audio_model: String::new(),
             media_video_model: String::new(),
-            media_status: "Auto · image: Session model · audio: Automatic xAI STT · video: Unset"
-                .to_string(),
+            media_file_model: String::new(),
+            media_status:
+                "Auto · image: Session model · audio: Automatic xAI STT · video: Unset · files: Unset"
+                    .to_string(),
         }
     }
 }
@@ -1070,6 +1117,7 @@ pub fn current_value_for(
         "media_image_model" => Some(SettingValue::String(pager.media_image_model.clone())),
         "media_audio_model" => Some(SettingValue::String(pager.media_audio_model.clone())),
         "media_video_model" => Some(SettingValue::String(pager.media_video_model.clone())),
+        "media_file_model" => Some(SettingValue::String(pager.media_file_model.clone())),
         "media_status" => Some(SettingValue::String(pager.media_status.clone())),
         // Action deep-link row (Status kind); Enter opens retrieval modal.
         "open_retrieval_settings" => {
@@ -1617,6 +1665,12 @@ mod tests {
                         "media_video_model registry default must be empty string"
                     );
                 }
+                ("media_file_model", SettingKind::DynamicEnum { default, .. }) => {
+                    assert_eq!(
+                        *default, "",
+                        "media_file_model registry default must be empty string"
+                    );
+                }
                 ("media_status", SettingKind::Status) => {}
                 ("open_retrieval_settings", SettingKind::Status) => {}
 
@@ -1674,7 +1728,7 @@ mod tests {
                 ("media_status", SettingKind::Status) => {
                     assert_eq!(
                         pager.media_status,
-                        "Auto · image: Session model · audio: Automatic xAI STT · video: Unset",
+                        "Auto · image: Session model · audio: Automatic xAI STT · video: Unset · files: Unset",
                         "media_status default drifts from PagerLocalSnapshot::default()"
                     );
                 }

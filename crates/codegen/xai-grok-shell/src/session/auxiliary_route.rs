@@ -110,6 +110,9 @@ pub enum AuxiliaryRouteError {
     ConstructionFailed { selection: String, detail: String },
     ExplicitPinFailed { selection: String },
     NamespacedHijackRejected { input: String },
+    /// `@session` media pin on a non-vision model, and no catalog vision
+    /// route with usable credentials was available.
+    VisionFallbackUnavailable,
 }
 
 impl std::fmt::Display for AuxiliaryRouteError {
@@ -150,6 +153,10 @@ impl std::fmt::Display for AuxiliaryRouteError {
                     "namespaced auxiliary id `{input}` failed authoritative resolution"
                 )
             }
+            Self::VisionFallbackUnavailable => write!(
+                f,
+                "the active model does not explicitly support image input, and no image-capable catalog model is available; set [media].image_model to a vision-capable route"
+            ),
         }
     }
 }
@@ -623,11 +630,103 @@ fn is_historical_first_party_wire_slug(id: &str) -> bool {
     false
 }
 
+/// Pick a catalog model that can natively accept images.
+///
+/// Used when `[media].image_model` / `video_model` is `@session` (or empty)
+/// and the frozen session model does not advertise `supports_image_input`.
+/// Preference, first match in catalog insertion order:
+/// 1. same [`ProviderIdentity`] as the session;
+/// 2. first-party xAI;
+/// 3. any remaining credentialed vision model.
+///
+/// Skips the current session selection, unknown/false image capability,
+/// entries without a usable key, and (when `zdr`) non-xAI providers.
+pub fn select_vision_catalog_pin(
+    models_manager: &ModelsManager,
+    frozen_session_selection_id: &str,
+    session_key: Option<&str>,
+    disable_api_key_auth: bool,
+    zdr: bool,
+    session_provider: xai_grok_inference::config::ProviderIdentity,
+) -> Option<String> {
+    let models = models_manager.models();
+    let mut best: Option<(u8, String)> = None;
+    for (id, entry) in &models {
+        if id == frozen_session_selection_id {
+            continue;
+        }
+        if entry.info.supports_image_input != Some(true) {
+            continue;
+        }
+        let provider = crate::agent::config::provider_identity_for_model(entry);
+        if zdr && !provider.is_first_party() {
+            continue;
+        }
+        let credentials = crate::agent::config::resolve_credentials_enforced(
+            entry,
+            session_key,
+            disable_api_key_auth,
+        );
+        if credentials.api_key.is_none() {
+            continue;
+        }
+        let rank = if provider == session_provider {
+            0
+        } else if provider.is_first_party() {
+            1
+        } else {
+            2
+        };
+        match &best {
+            None => best = Some((rank, id.clone())),
+            Some((best_rank, _)) if rank < *best_rank => best = Some((rank, id.clone())),
+            _ => {}
+        }
+    }
+    best.map(|(_, id)| id)
+}
+
+/// Rewrite an empty/`@session` media pin to a catalog vision model when the
+/// session cannot accept native image input.
+///
+/// Explicit pins are returned unchanged. When the session *does* advertise
+/// image input, `@session` is preserved.
+pub fn effective_media_vision_pin(
+    requested: &str,
+    models_manager: &ModelsManager,
+    frozen_session_selection_id: &str,
+    session_key: Option<&str>,
+    disable_api_key_auth: bool,
+    active_supports_images: Option<bool>,
+    zdr: bool,
+    session_provider: xai_grok_inference::config::ProviderIdentity,
+) -> Result<String, AuxiliaryRouteError> {
+    let requested = requested.trim();
+    let is_session = requested.is_empty() || requested == SESSION_ROUTE_SENTINEL;
+    if !is_session {
+        return Ok(requested.to_owned());
+    }
+    if active_supports_images == Some(true) {
+        return Ok(SESSION_ROUTE_SENTINEL.to_owned());
+    }
+    select_vision_catalog_pin(
+        models_manager,
+        frozen_session_selection_id,
+        session_key,
+        disable_api_key_auth,
+        zdr,
+        session_provider,
+    )
+    .ok_or(AuxiliaryRouteError::VisionFallbackUnavailable)
+}
+
 /// Production seam: resolve media describe from an explicit pin or `@session`.
 ///
 /// Explicit pins fail closed (no silent session fallback). `@session` requires
 /// a frozen route. `purpose` must be a media purpose (`MediaDescribe`,
-/// `MediaVideo`, or `MediaPdf`).
+/// `MediaVideo`, or `MediaPdf`). Callers that want automatic vision fallback
+/// when `@session` is not image-capable should rewrite the pin with
+/// [`effective_media_vision_pin`] first.
 pub fn resolve_media_describe_route(
     mut inputs: AuxiliaryRouteInputs<'_>,
     purpose: AuxiliaryPurpose,
@@ -854,6 +953,23 @@ mod tests {
             auth_provider: None,
             api_base_url: None,
         }
+    }
+
+    fn vision_entry(
+        wire: &str,
+        provider_id: &str,
+        base_url: &str,
+        key: Option<&str>,
+    ) -> ModelEntry {
+        let mut entry = test_entry(wire, provider_id, base_url, key);
+        entry.info.supports_image_input = Some(true);
+        entry
+    }
+
+    fn xai_vision_entry(wire: &str, base_url: &str, key: Option<&str>) -> ModelEntry {
+        let mut entry = vision_entry(wire, "xai", base_url, key);
+        entry.model_provider = None;
+        entry
     }
 
     fn manager_with(
@@ -1373,5 +1489,227 @@ mod tests {
         assert_eq!(resolved.route.operation_partition(), "goal_evaluator");
         let partition = resolved.route.pacing_partition("m-wire");
         assert_eq!(partition.5, "goal_evaluator");
+    }
+
+    #[test]
+    fn session_media_pin_stays_session_when_active_model_is_vision() {
+        let dir = tempdir().unwrap();
+        let mut models = IndexMap::new();
+        models.insert(
+            "vision-b".into(),
+            vision_entry(
+                "vision-b-wire",
+                "prov-b",
+                "https://b.example/v1",
+                Some("key-b"),
+            ),
+        );
+        let mgr = manager_with(models, IndexMap::new(), "session-a", dir.path());
+        let pin = effective_media_vision_pin(
+            "@session",
+            &mgr,
+            "session-a",
+            Some("session-jwt"),
+            false,
+            Some(true),
+            false,
+            xai_grok_inference::config::ProviderIdentity::Custom,
+        )
+        .unwrap();
+        assert_eq!(pin, SESSION_ROUTE_SENTINEL);
+    }
+
+    #[test]
+    fn session_media_pin_selects_catalog_vision_when_active_model_is_not_vision() {
+        let dir = tempdir().unwrap();
+        let mut models = IndexMap::new();
+        models.insert(
+            "session-a".into(),
+            test_entry(
+                "session-wire",
+                "account-a",
+                "https://account-a.example/v1",
+                Some("key-a"),
+            ),
+        );
+        models.insert(
+            "vision-b".into(),
+            vision_entry(
+                "vision-b-wire",
+                "prov-b",
+                "https://b.example/v1",
+                Some("key-b"),
+            ),
+        );
+        let mgr = manager_with(models, IndexMap::new(), "session-a", dir.path());
+        let pin = effective_media_vision_pin(
+            "@session",
+            &mgr,
+            "session-a",
+            Some("session-jwt"),
+            false,
+            Some(false),
+            false,
+            xai_grok_inference::config::ProviderIdentity::Custom,
+        )
+        .unwrap();
+        assert_eq!(pin, "vision-b");
+        let empty_pin = effective_media_vision_pin(
+            "",
+            &mgr,
+            "session-a",
+            Some("session-jwt"),
+            false,
+            None,
+            false,
+            xai_grok_inference::config::ProviderIdentity::Custom,
+        )
+        .unwrap();
+        assert_eq!(empty_pin, "vision-b");
+    }
+
+    #[test]
+    fn session_media_pin_prefers_same_provider_vision_model() {
+        let dir = tempdir().unwrap();
+        let mut models = IndexMap::new();
+        models.insert(
+            "xai-vision".into(),
+            xai_vision_entry("grok-vision", "https://api.x.ai/v1", Some("xai-key")),
+        );
+        models.insert(
+            "same-prov-vision".into(),
+            vision_entry(
+                "ali-vision",
+                "account-a",
+                "https://account-a.example/v1",
+                Some("key-a"),
+            ),
+        );
+        let mgr = manager_with(models, IndexMap::new(), "session-a", dir.path());
+        let pin = effective_media_vision_pin(
+            "@session",
+            &mgr,
+            "session-a",
+            Some("session-jwt"),
+            false,
+            Some(false),
+            false,
+            xai_grok_inference::config::ProviderIdentity::Custom,
+        )
+        .unwrap();
+        assert_eq!(pin, "same-prov-vision");
+    }
+
+    #[test]
+    fn session_media_pin_zdr_skips_external_vision_models() {
+        let dir = tempdir().unwrap();
+        let mut models = IndexMap::new();
+        models.insert(
+            "external-vision".into(),
+            vision_entry(
+                "ext-vision",
+                "prov-b",
+                "https://b.example/v1",
+                Some("key-b"),
+            ),
+        );
+        models.insert(
+            "xai-vision".into(),
+            xai_vision_entry("grok-vision", "https://api.x.ai/v1", Some("xai-key")),
+        );
+        let mgr = manager_with(models, IndexMap::new(), "session-a", dir.path());
+        let pin = effective_media_vision_pin(
+            "@session",
+            &mgr,
+            "session-a",
+            Some("session-jwt"),
+            false,
+            Some(false),
+            true,
+            xai_grok_inference::config::ProviderIdentity::Custom,
+        )
+        .unwrap();
+        assert_eq!(pin, "xai-vision");
+    }
+
+    #[test]
+    fn session_media_pin_without_catalog_vision_fails_closed() {
+        let dir = tempdir().unwrap();
+        let mut models = IndexMap::new();
+        models.insert(
+            "session-a".into(),
+            test_entry(
+                "session-wire",
+                "account-a",
+                "https://account-a.example/v1",
+                Some("key-a"),
+            ),
+        );
+        let mgr = manager_with(models, IndexMap::new(), "session-a", dir.path());
+        let err = effective_media_vision_pin(
+            "@session",
+            &mgr,
+            "session-a",
+            Some("session-jwt"),
+            false,
+            Some(false),
+            false,
+            xai_grok_inference::config::ProviderIdentity::Custom,
+        )
+        .unwrap_err();
+        assert!(matches!(
+            err,
+            AuxiliaryRouteError::VisionFallbackUnavailable
+        ));
+    }
+
+    #[test]
+    fn explicit_media_pin_is_not_rewritten() {
+        let dir = tempdir().unwrap();
+        let mgr = manager_with(IndexMap::new(), IndexMap::new(), "session-a", dir.path());
+        let pin = effective_media_vision_pin(
+            "my-vision-pin",
+            &mgr,
+            "session-a",
+            None,
+            false,
+            Some(false),
+            false,
+            xai_grok_inference::config::ProviderIdentity::Custom,
+        )
+        .unwrap();
+        assert_eq!(pin, "my-vision-pin");
+    }
+
+    #[test]
+    fn session_media_pin_skips_vision_models_without_credentials() {
+        let dir = tempdir().unwrap();
+        let mut models = IndexMap::new();
+        models.insert(
+            "blind-vision".into(),
+            vision_entry("blind-wire", "prov-b", "https://b.example/v1", None),
+        );
+        models.insert(
+            "keyed-vision".into(),
+            vision_entry(
+                "keyed-wire",
+                "prov-c",
+                "https://c.example/v1",
+                Some("key-c"),
+            ),
+        );
+        let mgr = manager_with(models, IndexMap::new(), "session-a", dir.path());
+        let pin = effective_media_vision_pin(
+            "@session",
+            &mgr,
+            "session-a",
+            None,
+            false,
+            Some(false),
+            false,
+            xai_grok_inference::config::ProviderIdentity::Custom,
+        )
+        .unwrap();
+        assert_eq!(pin, "keyed-vision");
     }
 }

@@ -72,6 +72,9 @@ async fn save_config_locked(config: &Config) -> Result<()> {
             if config.media.video_model.is_none() {
                 media.remove("video_model");
             }
+            if config.media.file_model.is_none() {
+                media.remove("file_model");
+            }
         }
     }
     let toml_str = toml::to_string_pretty(&root)?;

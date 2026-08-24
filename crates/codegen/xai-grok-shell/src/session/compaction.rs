@@ -179,7 +179,7 @@ impl SessionActor {
             && xai_chat_state::compaction_utils::conversation_contains_images(conversation);
 
         let (client, model, provider) = if allow_lazy_backfill {
-            let image_description_model = media.image_model.as_deref().unwrap_or("@session");
+            let image_description_model = media.image_route();
             // Compaction backfill is best-effort: route miss skips lazy describe.
             match self.resolve_media_describe(image_description_model).await {
                 Ok(route) => {

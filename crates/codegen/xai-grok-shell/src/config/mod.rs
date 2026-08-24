@@ -601,6 +601,11 @@ pub struct MediaConfig {
     pub audio_model: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub video_model: Option<String>,
+    /// Optional catalog model for **binary** file understanding (PDF page
+    /// renders). Unset falls back to [`Self::image_model`], then `@session`.
+    /// Source, JSON, and other text from `read_file` never use this route.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file_model: Option<String>,
     pub image_limit: usize,
     pub audio_max_seconds: u64,
     pub video_max_seconds: u64,
@@ -614,6 +619,7 @@ impl Default for MediaConfig {
             image_model: Some("@session".to_owned()),
             audio_model: None,
             video_model: None,
+            file_model: None,
             image_limit: 16,
             audio_max_seconds: 120,
             video_max_seconds: 600,
@@ -634,6 +640,7 @@ impl MediaConfig {
         result.image_model = non_empty_model_override(result.image_model.as_deref());
         result.audio_model = non_empty_model_override(result.audio_model.as_deref());
         result.video_model = non_empty_model_override(result.video_model.as_deref());
+        result.file_model = non_empty_model_override(result.file_model.as_deref());
 
         let has_explicit_image_model = config
             .get("media")
@@ -671,6 +678,33 @@ impl MediaConfig {
         result.video_max_seconds = result.video_max_seconds.clamp(1, 7_200);
         result.video_max_frames = result.video_max_frames.clamp(1, 32);
         result
+    }
+
+    /// Image-describe pin. Empty/`None` is `@session`.
+    pub fn image_route(&self) -> &str {
+        self.image_model
+            .as_deref()
+            .filter(|value| !value.is_empty())
+            .unwrap_or("@session")
+    }
+
+    /// Video-describe pin: explicit `video_model`, else `image_model`, else `@session`.
+    pub fn video_route(&self) -> &str {
+        self.video_model
+            .as_deref()
+            .filter(|value| !value.is_empty())
+            .or(self.image_model.as_deref().filter(|value| !value.is_empty()))
+            .unwrap_or("@session")
+    }
+
+    /// Binary file/PDF-describe pin: explicit `file_model`, else `image_model`,
+    /// else `@session`. Never used for `ReadFileOutput::FileContent` text.
+    pub fn file_route(&self) -> &str {
+        self.file_model
+            .as_deref()
+            .filter(|value| !value.is_empty())
+            .or(self.image_model.as_deref().filter(|value| !value.is_empty()))
+            .unwrap_or("@session")
     }
 }
 

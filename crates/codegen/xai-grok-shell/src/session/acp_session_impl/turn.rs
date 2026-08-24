@@ -1538,18 +1538,12 @@ impl SessionActor {
             .and_then(|settings| settings.supports_image_input);
         let describe_user_images = self.is_cursor_harness() || active_supports_images != Some(true);
         let media = self.media_config.borrow().clone();
-        let image_description_model = media.image_model.as_deref().unwrap_or("@session");
         if describe_user_images && !user_images.is_empty() {
             crate::session::media_pipeline::auxiliary_media_allowed(
                 media.mode,
                 crate::session::image_describe::ImageDescribeSource::UserAttachment,
             )
             .map_err(|error| acp::Error::invalid_request().data(error.to_string()))?;
-            if image_description_model == "@session" && active_supports_images != Some(true) {
-                return Err(acp::Error::invalid_request().data(
-                    "The active model does not explicitly support image input, and the media image route is @session. Select an image-capable auxiliary model in Settings → Models or set [media].image_model.",
-                ));
-            }
         }
         // Normalize ACP audio immediately: confined session asset + text
         // envelope. Never persist an Audio conversation variant.

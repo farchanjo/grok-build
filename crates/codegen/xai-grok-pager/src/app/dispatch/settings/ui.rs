@@ -10,8 +10,9 @@ use super::setters::{
     set_default_selected_permission_inner, set_display_refresh_auto_cadence_inner,
     set_fork_secondary_model_inner, set_group_tool_verbs_inner, set_hunk_tracker_mode_inner,
     set_invert_scroll_inner, set_keep_text_selection_inner, set_max_thoughts_width_inner,
-    set_media_audio_model_inner, set_media_image_model_inner, set_media_routing_inner,
-    set_media_video_model_inner, set_multiline_mode, set_page_flip_on_send_inner,
+    set_media_audio_model_inner, set_media_file_model_inner, set_media_image_model_inner,
+    set_media_routing_inner, set_media_video_model_inner, set_multiline_mode,
+    set_page_flip_on_send_inner,
     set_prompt_suggestions_inner, set_remember_tool_approvals_inner, set_render_mermaid_inner,
     set_respect_manual_folds_inner, set_screen_mode_inner, set_scroll_lines_inner,
     set_scroll_mode_inner, set_scroll_speed_inner, set_show_thinking_blocks_inner,
@@ -1308,7 +1309,12 @@ fn format_media_status(
         available_models,
         external_ids,
     );
-    format!("{mode} · image: {image} · audio: {audio} · video: {video}")
+    let files = media_model_status_label(
+        config.file_model.as_deref(),
+        available_models,
+        external_ids,
+    );
+    format!("{mode} · image: {image} · audio: {audio} · video: {video} · files: {files}")
 }
 
 fn media_snapshot_fields(
@@ -1329,6 +1335,7 @@ fn media_snapshot_fields(
             .unwrap_or_else(|| "@session".to_string()),
         media_audio_model: config.audio_model.clone().unwrap_or_default(),
         media_video_model: config.video_model.clone().unwrap_or_default(),
+        media_file_model: config.file_model.clone().unwrap_or_default(),
         media_status: format_media_status(config, available_models, external_ids),
         ..Default::default()
     }
@@ -1347,6 +1354,7 @@ fn merge_compaction_and_media_snapshot(
     snap.media_image_model = media_fields.media_image_model;
     snap.media_audio_model = media_fields.media_audio_model;
     snap.media_video_model = media_fields.media_video_model;
+    snap.media_file_model = media_fields.media_file_model;
     snap.media_status = media_fields.media_status;
     snap
 }
@@ -1625,6 +1633,13 @@ pub(in crate::app::dispatch) fn action_for_reset(
                 Some(Action::ClearMediaVideoModel)
             } else {
                 Some(Action::SetMediaVideoModel(acp::ModelId::new(s.clone())))
+            }
+        }
+        ("media_file_model", SettingValue::String(s)) => {
+            if s.is_empty() {
+                Some(Action::ClearMediaFileModel)
+            } else {
+                Some(Action::SetMediaFileModel(acp::ModelId::new(s.clone())))
             }
         }
 
@@ -1932,6 +1947,9 @@ pub(in crate::app::dispatch) fn apply_setting_rollback(
         }
         ("media_video_model", SettingValue::String(s)) => {
             set_media_video_model_inner(app, s.clone());
+        }
+        ("media_file_model", SettingValue::String(s)) => {
+            set_media_file_model_inner(app, s.clone());
         }
 
         _ => {

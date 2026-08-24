@@ -535,6 +535,13 @@ fn every_dynamic_enum_setting_has_action_for_string_arm() {
                     Some(Action::SetMediaVideoModel(_))
                 ));
             }
+            "media_file_model" => {
+                assert!(matches!(empty_action, Some(Action::ClearMediaFileModel)));
+                assert!(matches!(
+                    nonempty_action,
+                    Some(Action::SetMediaFileModel(_))
+                ));
+            }
             other => panic!(
                 "Unknown DynamicEnum key `{other}` — add a discriminating arm in \
                  every_dynamic_enum_setting_has_action_for_string_arm so future \
@@ -785,6 +792,7 @@ fn rows_contain_categories_and_settings_through_pr_14() {
             "media_image_model",
             "media_audio_model",
             "media_video_model",
+            "media_file_model",
             "media_status",
             // Dedicated Compaction category.
             "compaction_strategy",

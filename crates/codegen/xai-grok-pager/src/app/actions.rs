@@ -649,6 +649,11 @@ pub enum Action {
     SetMediaVideoModel(acp::ModelId),
     /// Clear the persisted video understanding model.
     ClearMediaVideoModel,
+    /// Set the file/PDF understanding route to a stable catalog `ModelId`
+    /// (including the explicit `@session` sentinel).
+    SetMediaFileModel(acp::ModelId),
+    /// Clear the persisted file understanding model.
+    ClearMediaFileModel,
     /// Commit the `show_tips` preference. Persisted to `[cli].show_tips`.
     /// Restart-required — tips are resolved once at startup.
     SetShowTips(bool),
