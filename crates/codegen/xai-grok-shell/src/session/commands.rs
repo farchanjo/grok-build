@@ -269,12 +269,11 @@ pub enum SessionCommand {
     GetCurrentModel {
         responds_to: oneshot::Sender<String>,
     },
-    /// Return the current wire model and base URL together with the native-agent
-    /// provider marker retained in sampling config. The base URL disambiguates
-    /// catalog entries that intentionally share a model slug (for example,
-    /// OpenAI Platform and ChatGPT subscription routes for `gpt-5.6-sol`).
+    /// Return the canonical session selection id together with the native-agent
+    /// provider marker retained in sampling config. Callers must look up the
+    /// catalog by this exact selection id (never the upstream wire slug).
     GetCurrentModelRoute {
-        responds_to: oneshot::Sender<(String, String, Option<String>)>,
+        responds_to: oneshot::Sender<(String, Option<String>)>,
     },
     GetCurrentPromptMode {
         responds_to: oneshot::Sender<PromptMode>,

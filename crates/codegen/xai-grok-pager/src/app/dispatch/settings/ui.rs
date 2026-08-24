@@ -207,12 +207,24 @@ pub(in crate::app::dispatch) fn dispatch_open_providers(app: &mut AppView) -> Ve
     agent.active_modal = Some(ActiveModal::Providers {
         state: Box::new(state),
     });
-    // Shell-authoritative list (generation-tagged) + per-row status refresh.
+    // Shell-authoritative list (generation-tagged). Built-in Refresh then
+    // fills live ChatGPT email/models and Claude CLI; snapshot overlay
+    // preserves those fields if the list result lands after a Refresh.
     effects.push(Effect::ProviderOperation {
         agent_id: id,
         operation: crate::app::actions::ProviderOperation::LoadListSnapshot,
         repair: None,
     });
+    for provider in crate::views::providers_modal::ProviderKind::BUILTINS
+        .iter()
+        .cloned()
+    {
+        effects.push(Effect::ProviderOperation {
+            agent_id: id,
+            operation: crate::app::actions::ProviderOperation::Refresh(provider),
+            repair: None,
+        });
+    }
     effects
 }
 

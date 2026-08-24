@@ -2016,6 +2016,9 @@ mod rewind_cross_compaction_tests;
 #[cfg(test)]
 #[path = "acp_session_tests/rewind_synthetic_turn_tests.rs"]
 mod rewind_synthetic_turn_tests;
+#[cfg(test)]
+#[path = "acp_session_tests/set_session_model_atomic_tests.rs"]
+mod set_session_model_atomic_tests;
 /// Pins the `SubagentFinished` usage-fold attribution gate.
 #[cfg(test)]
 #[path = "acp_session_tests/subagent_usage_fold_tests.rs"]

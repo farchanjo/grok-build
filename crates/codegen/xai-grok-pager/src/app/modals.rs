@@ -468,6 +468,15 @@ impl AgentView {
 
         // Retrieval settings: shell-authoritative graph editor (no secrets).
         if let ActiveModal::RetrievalSettings { state } = modal {
+            // Conflicts and editor/confirm sub-modes own Esc so it cancels
+            // the sub-flow without closing the graph editor (mirrors
+            // Providers' editing sub-modes).
+            if state.owns_escape() {
+                if let Some(cmd) = state.handle_key(*key) {
+                    return InputOutcome::Action(Action::RetrievalCommand(cmd));
+                }
+                return InputOutcome::Changed;
+            }
             let chrome_cfg = mw::ModalWindowConfig {
                 title: "",
                 tabs: None,
@@ -481,16 +490,6 @@ impl AgentView {
                     return InputOutcome::Changed;
                 }
                 ModalWindowOutcome::Unhandled => {
-                    if matches!(key.code, KeyCode::Esc)
-                        && matches!(
-                            state.edit,
-                            crate::views::retrieval_settings_modal::RetrievalEditMode::Browse
-                        )
-                        && state.conflict.is_none()
-                    {
-                        self.active_modal = None;
-                        return InputOutcome::Changed;
-                    }
                     if let Some(cmd) = state.handle_key(*key) {
                         return InputOutcome::Action(Action::RetrievalCommand(cmd));
                     }
@@ -3185,5 +3184,110 @@ mod settings_memory_paste_routing_tests {
         };
         assert_eq!(state.query(), "a中b");
         assert_eq!(agent.prompt.text(), "hidden prompt");
+    }
+}
+
+#[cfg(test)]
+mod retrieval_settings_esc_ownership_tests {
+    use crate::app::actions::Action;
+    use crate::app::agent_view::test_fixtures::make_agent;
+    use crate::app::app_view::InputOutcome;
+    use crate::views::modal::ActiveModal;
+    use crate::views::retrieval_settings_modal::{RetrievalEditMode, RetrievalSettingsState};
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use xai_grok_shell::provider_registry::management::dto::RegistryGeneration;
+    use xai_grok_shell::retrieval_config::dto::RetrievalConflictInfo;
+
+    fn esc() -> KeyEvent {
+        KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)
+    }
+
+    #[test]
+    fn browse_esc_closes_retrieval_settings() {
+        let mut agent = make_agent();
+        agent.active_modal = Some(ActiveModal::RetrievalSettings {
+            state: Box::new(RetrievalSettingsState::new()),
+        });
+        let out = agent.handle_modal_key(&esc());
+        assert!(matches!(out, InputOutcome::Changed));
+        assert!(agent.active_modal.is_none(), "Browse Esc must close");
+    }
+
+    #[test]
+    fn edit_fields_esc_stays_open_and_returns_to_browse() {
+        let mut agent = make_agent();
+        let mut state = RetrievalSettingsState::new();
+        state.edit = RetrievalEditMode::EditFields {
+            kind: "embedding".into(),
+            id: "e1".into(),
+            is_new: false,
+            fields: vec![("id".into(), "e1".into())],
+            field_idx: 0,
+            editing_value: false,
+        };
+        agent.active_modal = Some(ActiveModal::RetrievalSettings {
+            state: Box::new(state),
+        });
+        let out = agent.handle_modal_key(&esc());
+        assert!(matches!(out, InputOutcome::Changed));
+        let Some(ActiveModal::RetrievalSettings { state }) = agent.active_modal.as_ref() else {
+            panic!("EditFields Esc must not close the modal");
+        };
+        assert!(
+            matches!(state.edit, RetrievalEditMode::Browse),
+            "EditFields Esc must return to Browse, got {:?}",
+            state.edit
+        );
+    }
+
+    #[test]
+    fn confirm_prime_rebuild_esc_stays_open_and_returns_to_browse() {
+        let mut agent = make_agent();
+        let mut state = RetrievalSettingsState::new();
+        state.edit = RetrievalEditMode::ConfirmPrimeRebuild {
+            collection: "skills".into(),
+            route: "main".into(),
+        };
+        agent.active_modal = Some(ActiveModal::RetrievalSettings {
+            state: Box::new(state),
+        });
+        let out = agent.handle_modal_key(&esc());
+        assert!(matches!(out, InputOutcome::Changed));
+        let Some(ActiveModal::RetrievalSettings { state }) = agent.active_modal.as_ref() else {
+            panic!("ConfirmPrimeRebuild Esc must not close the modal");
+        };
+        assert!(
+            matches!(state.edit, RetrievalEditMode::Browse),
+            "ConfirmPrimeRebuild Esc must return to Browse, got {:?}",
+            state.edit
+        );
+    }
+
+    #[test]
+    fn conflict_esc_keeps_draft_and_stays_open() {
+        let mut agent = make_agent();
+        let mut state = RetrievalSettingsState::new();
+        state.dirty = true;
+        state.conflict = Some(RetrievalConflictInfo {
+            client_generation: RegistryGeneration(1),
+            live_generation: RegistryGeneration(2),
+            changed_fields: vec!["embedding_models".into()],
+            guidance: "reload or keep".into(),
+        });
+        agent.active_modal = Some(ActiveModal::RetrievalSettings {
+            state: Box::new(state),
+        });
+        let out = agent.handle_modal_key(&esc());
+        match out {
+            InputOutcome::Action(Action::RetrievalCommand(
+                crate::views::retrieval_settings_modal::RetrievalCommand::DismissConflictKeepDraft,
+            )) => {}
+            other => panic!("conflict Esc must keep draft, got {other:?}"),
+        }
+        let Some(ActiveModal::RetrievalSettings { state }) = agent.active_modal.as_ref() else {
+            panic!("conflict Esc must not close the modal");
+        };
+        assert!(state.conflict.is_none());
+        assert!(state.dirty);
     }
 }

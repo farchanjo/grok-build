@@ -40,6 +40,21 @@ impl SessionActor {
         } else {
             None
         };
+        // Resolve/assert the exact canonical route BEFORE any mutation of chat
+        // state, credentials, compaction, selection, image budget, external
+        // runtime, or sampler. Disabled, tombstoned, or otherwise unusable
+        // routes fail closed and leave session state unchanged.
+        let home = crate::util::grok_home::grok_home();
+        let route = crate::session::route_context::resolve_for_models_manager_with_selection(
+            &inference_config,
+            &self.models_manager,
+            model_id.0.as_ref(),
+            Some(home.as_path()),
+        )
+        .map_err(|e| {
+            acp::Error::invalid_params()
+                .data(format!("provider route unusable for model switch: {e}"))
+        })?;
         let prev_backend = self.execution_backend.get();
         // When leaving external mode, or switching to a different external kind,
         // shut down the retained runtime (bridge + temp resources + child).
@@ -170,20 +185,9 @@ impl SessionActor {
         let agent_name = self.agent.borrow().definition().name.clone();
         let envelope = self.external_runtime.borrow().clone();
         // Envelope already validated while preparing `prepared_external_runtime`.
-        // Atomic session canonical + route with sampler config.
+        // Canonical selection + route with sampler config (route already asserted).
         let reasoning_effort = inference_config.reasoning_effort;
         *self.selection_model_id.borrow_mut() = model_id.clone();
-        let home = crate::util::grok_home::grok_home();
-        let route = crate::session::route_context::resolve_for_models_manager_with_selection(
-            &inference_config,
-            &self.models_manager,
-            model_id.0.as_ref(),
-            Some(home.as_path()),
-        )
-        .map_err(|e| {
-            acp::Error::invalid_params()
-                .data(format!("provider route unusable for model switch: {e}"))
-        })?;
         *self.route_context.borrow_mut() = Some(route.clone());
         let provenance = crate::session::storage::model_route::provenance_from_route_context(
             &route,

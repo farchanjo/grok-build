@@ -985,28 +985,6 @@ impl SessionActor {
         Ok(resolved)
     }
 
-    /// Resolve a standalone aux-model `InferenceConfig` for `slug` via the
-    /// exact auxiliary route resolver. `None` ⇒ caller falls back to the
-    /// session model (soft path for non-pin purposes).
-    pub(super) async fn resolve_aux_inference_config(
-        &self,
-        slug: &str,
-    ) -> Option<xai_grok_inference::InferenceConfig> {
-        match self
-            .resolve_aux_route(
-                crate::session::auxiliary_route::AuxiliaryPurpose::MediaDescribe,
-                slug,
-            )
-            .await
-        {
-            Ok(route) => Some(route.inference),
-            Err(err) => {
-                tracing::debug!(error = %err, slug = %slug, "aux route soft-miss");
-                None
-            }
-        }
-    }
-
     /// Resolve the media-describe route. Explicit pins fail closed (no silent
     /// session fallback). `@session` requires a frozen route.
     pub(super) async fn resolve_media_describe(

@@ -2630,17 +2630,14 @@ impl acp::Agent for MvpAgent {
             .send(crate::session::SessionCommand::GetCurrentModelRoute {
                 responds_to: model_tx,
             });
-        let (model, base_url, native_provider) = model_rx.await.unwrap_or_else(|_| {
-            let config = self.inference_config.borrow();
-            (config.model.clone(), config.base_url.clone(), None)
+        let (selection_model_id, native_provider) = model_rx.await.unwrap_or_else(|_| {
+            (self.models_manager.current_model_id().0.to_string(), None)
         });
         if native_provider.is_none()
-            && let Some(entry) = crate::agent::config::find_model_by_route(
+            && let Some(provider) = crate::agent::providers::missing_api_key_for_canonical_selection(
                 &self.models_manager.models(),
-                &model,
-                &base_url,
+                &selection_model_id,
             )
-            && let Some(provider) = crate::agent::providers::missing_api_key_provider(entry)
         {
             return Err(
                 acp::Error::invalid_params().data(provider.missing_api_key_message()),

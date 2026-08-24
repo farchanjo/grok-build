@@ -29,7 +29,7 @@ pub enum MediaFailurePolicy {
     Placeholder,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum MediaPolicyError {
     #[error("media understanding is disabled ([media].mode = off)")]
     Disabled,
@@ -39,6 +39,10 @@ pub enum MediaPolicyError {
     UserMediaSkippedByMode,
     #[error("ZDR policy blocks auxiliary media disclosure to {provider}")]
     ExternalProviderBlockedByZdr { provider: &'static str },
+    /// Secret-free route or client construction failure. Distinct from
+    /// [`Self::Disabled`] so the operator sees the actual fail-closed reason.
+    #[error("{0}")]
+    RouteUnusable(String),
 }
 
 /// Whether auxiliary media inference may run for this source. Native model
@@ -957,6 +961,50 @@ mod tests {
             .expect("video descriptor should be persisted");
         assert!(descriptor.model_id.is_none());
         assert!(descriptor.provider.is_none());
+    }
+
+    #[tokio::test]
+    async fn understand_video_surfaces_route_unusable_instead_of_disabled() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("clip.mp4");
+        std::fs::write(&path, b"video").unwrap();
+        let store = MediaDescriptorStore::empty(dir.path());
+        let video = VideoContent {
+            absolute_path: path,
+            mime_type: "video/mp4".to_owned(),
+            size_bytes: 5,
+            duration_secs: Some(1.0),
+            width: Some(640),
+            height: Some(360),
+            has_audio: false,
+        };
+        let runner = MockRunner::new(vec![Err(FfmpegError::ToolMissing { tool: "ffprobe" })]);
+        let unusable = Err(MediaPolicyError::RouteUnusable(
+            "auxiliary model `missing-video-route` is not in the catalog".to_owned(),
+        ));
+        let text = understand_video(
+            &video,
+            &MediaConfig::default(),
+            &ImageDescribeCache::new(),
+            &store,
+            None,
+            None,
+            None,
+            unusable,
+            ImageDescribeSource::ToolRead,
+            &runner,
+            None,
+        )
+        .await;
+
+        assert!(
+            text.contains("auxiliary model `missing-video-route` is not in the catalog"),
+            "route failures must stay actionable: {text}"
+        );
+        assert!(
+            !text.contains("media understanding is disabled"),
+            "route failures must not collapse to Disabled: {text}"
+        );
     }
 
     #[tokio::test]

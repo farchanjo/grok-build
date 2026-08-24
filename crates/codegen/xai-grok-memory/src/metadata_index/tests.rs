@@ -2304,3 +2304,29 @@ fn try_claim_rebuild_same_pid_reclaim_and_prefix_owners() {
         "stale timestamp must remain reclaimable by a different PID"
     );
 }
+
+#[test]
+fn collection_pending_to_json_escapes_quotes_and_backslashes() {
+    let tmp = TempDir::new().unwrap();
+    let (_, idx) = open(&tmp);
+    let pending = super::rebuild::CollectionPending {
+        id: r#"id"quote\slash"#.into(),
+        intended: r#"fp"x\y"#.into(),
+        status: r#"pend"ing"#.into(),
+        claim: r#"12:a"b\c"#.into(),
+        claimed_at: 42,
+        reason: r#"why "now" and \path"#.into(),
+        last_attempt_at: 7,
+    };
+    let json = pending.to_json();
+    serde_json::from_str::<serde_json::Value>(&json)
+        .expect("to_json must emit valid JSON for quote and backslash values");
+    idx.db()
+        .execute(
+            "UPDATE collections SET pending_json = ?1 WHERE name = ?2",
+            rusqlite::params![json, CollectionKind::Skills.as_str()],
+        )
+        .unwrap();
+    let stored = pending_state_required(&idx, CollectionKind::Skills);
+    assert_eq!(stored, pending);
+}

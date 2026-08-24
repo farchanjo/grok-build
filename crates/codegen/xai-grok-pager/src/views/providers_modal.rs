@@ -559,6 +559,20 @@ impl ProviderModalState {
         }
     }
 
+    /// ChatGPT subscription display fields live on the OpenAI status, not the
+    /// shell list snapshot. Preserve them across snapshot overlays so a list
+    /// reload cannot drop the email or per-model overrides.
+    fn preserved_openai_chatgpt_fields(&self) -> (Option<ChatgptAccountEmail>, Vec<ChatgptModel>) {
+        match self.status(&ProviderKind::OpenAi) {
+            ProviderStatus::Connected {
+                chatgpt_account_email,
+                chatgpt_models,
+                ..
+            } => (chatgpt_account_email.clone(), chatgpt_models.clone()),
+            _ => (None, Vec::new()),
+        }
+    }
+
     /// Apply a shell-authored list snapshot (never raw config.toml).
     pub fn apply_list_snapshot(
         &mut self,
@@ -571,6 +585,7 @@ impl ProviderModalState {
             .filter(|r| r.is_configured)
             .map(|r| r.id.clone())
             .collect();
+        let (openai_email, openai_models) = self.preserved_openai_chatgpt_fields();
         self.set_configured_providers(configured);
         // Overlay shell status labels when present.
         for row in &snapshot.rows {
@@ -586,8 +601,15 @@ impl ProviderModalState {
                 ProviderKind::Configured(row.id.clone())
             };
             let status = if row.credentials.has_application_key || row.credentials.has_oauth {
+                let (chatgpt_account_email, chatgpt_models) = if kind == ProviderKind::OpenAi {
+                    (openai_email.clone(), openai_models.clone())
+                } else {
+                    (None, Vec::new())
+                };
                 ProviderStatus::Connected {
                     detail: row.status_detail.clone(),
+                    chatgpt_account_email,
+                    chatgpt_models,
                 }
             } else if row.status_label.to_ascii_lowercase().contains("error") {
                 ProviderStatus::Error(row.status_label.clone())
@@ -1116,6 +1138,9 @@ pub fn handle_key(state: &mut ProviderModalState, key: &KeyEvent) -> ProviderMod
             };
             ProviderModalOutcome::Changed
         }
+        // Browse `e` opens the typed editor. Clone is an editor command
+        // (`EditorCommand::Clone`); there is no browse-level clone chord.
+        // An unadvertised `o` must not duplicate this OpenEditor path.
         KeyCode::Char('e') if key.modifiers.is_empty() => {
             let id = state.selected_provider().id_str().to_owned();
             ProviderModalOutcome::Command(ProviderCommand::OpenEditor { provider_id: id })
@@ -1131,11 +1156,6 @@ pub fn handle_key(state: &mut ProviderModalState, key: &KeyEvent) -> ProviderMod
         }
         KeyCode::Char('l') if key.modifiers.is_empty() => {
             ProviderModalOutcome::Command(ProviderCommand::LoadListSnapshot)
-        }
-        // Browse clone: open editor clone flow with a suggested id suffix.
-        KeyCode::Char('o') if key.modifiers.is_empty() => {
-            let id = state.selected_provider().id_str().to_owned();
-            ProviderModalOutcome::Command(ProviderCommand::OpenEditor { provider_id: id })
         }
         // Open named retrieval graph settings (PR15).
         KeyCode::Char('R') => ProviderModalOutcome::Command(ProviderCommand::OpenRetrievalSettings),
@@ -2829,5 +2849,129 @@ mod tests {
         assert_eq!(pending.id, "lab_vllm");
         assert_eq!(pending.base_url, "http://127.0.0.1:8000/v1");
         assert!(!format!("{pending:?}").contains("sk-"));
+    }
+
+    fn list_row(
+        id: &str,
+        connected: bool,
+    ) -> xai_grok_shell::provider_registry::management::dto::ProviderListRow {
+        use xai_grok_shell::provider_registry::management::dto::{
+            CredentialPresence, ProviderListRow,
+        };
+        ProviderListRow {
+            id: id.into(),
+            display_name: id.into(),
+            kind: id.into(),
+            enabled: true,
+            is_built_in: true,
+            is_configured: false,
+            base_url: None,
+            credentials: CredentialPresence {
+                has_oauth: connected,
+                ..CredentialPresence::default()
+            },
+            status_label: if connected {
+                "Connected".into()
+            } else {
+                "Missing".into()
+            },
+            status_detail: connected.then(|| "Connected with ChatGPT OAuth".into()),
+        }
+    }
+
+    #[test]
+    fn apply_list_snapshot_preserves_openai_chatgpt_email_and_models() {
+        use xai_grok_shell::provider_registry::management::dto::{
+            ProviderListSnapshot, RegistryGeneration,
+        };
+
+        let mut state = ProviderModalState::new();
+        let mut models = vec![sol_model()];
+        models[0].auto_compact_threshold = Some(60);
+        state.set_status(&ProviderKind::OpenAi, connected_openai(models));
+
+        state.apply_list_snapshot(&ProviderListSnapshot {
+            generation: RegistryGeneration(7),
+            rows: vec![
+                list_row("xai", false),
+                list_row("openai", true),
+                list_row("openrouter", false),
+                list_row("anthropic", false),
+            ],
+            warnings: vec![],
+        });
+
+        assert_eq!(state.list_generation, 7);
+        match state.status(&ProviderKind::OpenAi) {
+            ProviderStatus::Connected {
+                detail,
+                chatgpt_account_email,
+                chatgpt_models,
+            } => {
+                assert_eq!(detail.as_deref(), Some("Connected with ChatGPT OAuth"));
+                assert_eq!(
+                    chatgpt_account_email
+                        .as_ref()
+                        .map(ChatgptAccountEmail::as_str),
+                    Some("user@example.com")
+                );
+                assert_eq!(chatgpt_models.len(), 1);
+                assert_eq!(chatgpt_models[0].id, "chatgpt-gpt-5.6-sol");
+                assert_eq!(chatgpt_models[0].context_window, Some(272_000));
+                assert_eq!(chatgpt_models[0].auto_compact_threshold, Some(60));
+            }
+            other => panic!("expected connected OpenAI, got {other:?}"),
+        }
+        assert_eq!(state.status(&ProviderKind::Xai), &ProviderStatus::Missing);
+    }
+
+    #[test]
+    fn apply_list_snapshot_connected_openai_without_prior_chatgpt_is_empty() {
+        use xai_grok_shell::provider_registry::management::dto::{
+            ProviderListSnapshot, RegistryGeneration,
+        };
+
+        let mut state = ProviderModalState::new();
+        state.apply_list_snapshot(&ProviderListSnapshot {
+            generation: RegistryGeneration(1),
+            rows: vec![list_row("openai", true)],
+            warnings: vec![],
+        });
+        match state.status(&ProviderKind::OpenAi) {
+            ProviderStatus::Connected {
+                chatgpt_account_email,
+                chatgpt_models,
+                ..
+            } => {
+                assert!(chatgpt_account_email.is_none());
+                assert!(chatgpt_models.is_empty());
+            }
+            other => panic!("expected connected OpenAI, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn browse_o_is_not_a_clone_or_edit_shortcut() {
+        let mut state = ProviderModalState::new();
+        state.set_configured_providers(vec!["openai_work".into()]);
+        state.focus_provider("openai_work");
+        assert_eq!(
+            handle_key(&mut state, &key(KeyCode::Char('o'))),
+            ProviderModalOutcome::Unchanged,
+            "unadvertised browse `o` must not duplicate edit/clone"
+        );
+        assert_eq!(
+            handle_key(&mut state, &key(KeyCode::Char('e'))),
+            ProviderModalOutcome::Command(ProviderCommand::OpenEditor {
+                provider_id: "openai_work".into()
+            })
+        );
+        let footer = rendered_modal(&mut state);
+        assert!(
+            !footer.to_lowercase().contains(" o clone")
+                && !footer.contains("o edit")
+                && !footer.contains("o clone"),
+            "footer must not advertise browse `o`, got {footer}"
+        );
     }
 }

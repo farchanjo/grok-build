@@ -1156,6 +1156,245 @@ async fn fork_copy_clears_source_only_schema_fields_and_keeps_unknown_fields() {
     assert!(raw.contains(r#""futureSummaryField":"kept""#));
 }
 
+fn session_dir_for(adapter: &JsonlStorageAdapter, info: &Info) -> std::path::PathBuf {
+    adapter.summary_file(info).parent().unwrap().to_path_buf()
+}
+
+fn test_route_provenance(canonical: &str) -> xai_grok_models::ModelRouteProvenance {
+    let upstream = xai_grok_models::UpstreamModelId::new("gpt-4o").unwrap();
+    xai_grok_models::ModelRouteProvenance::new(
+        "openai",
+        Some("01234567-89ab-cdef-0123-456789abcdef"),
+        Some("openai"),
+        Some("openai_platform"),
+        &upstream,
+        2,
+    )
+    .unwrap()
+    .with_canonical_model(&xai_grok_models::CanonicalModelId::new(canonical).unwrap())
+    .with_pair_id("pair-token-aaaaaaaaaaaaaaaa")
+    .unwrap()
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    format!("{:x}", hasher.finalize())
+}
+
+fn install_identity_pair(adapter: &JsonlStorageAdapter, info: &Info) {
+    let summary = adapter.read_summary_sync(info).unwrap();
+    let session_dir = session_dir_for(adapter, info);
+    super::super::model_route::commit_summary_and_companion(
+        &session_dir,
+        &summary,
+        Some(&test_route_provenance(summary.current_model_id.0.as_ref())),
+        false,
+    )
+    .unwrap();
+}
+
+fn rebind_meta_digests(session_dir: &std::path::Path) {
+    let summary_bytes = std::fs::read(session_dir.join(super::super::SUMMARY_FILE)).unwrap();
+    let companion_bytes =
+        std::fs::read(session_dir.join(super::super::model_route::MODEL_ROUTE_FILE)).unwrap();
+    let meta_path = session_dir.join(super::super::model_route::MODEL_IDENTITY_META);
+    let mut meta: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&meta_path).unwrap()).unwrap();
+    meta["summary_sha256"] = serde_json::Value::String(sha256_hex(&summary_bytes));
+    meta["companion_sha256"] = serde_json::Value::String(sha256_hex(&companion_bytes));
+    std::fs::write(&meta_path, serde_json::to_vec_pretty(&meta).unwrap()).unwrap();
+}
+
+fn patch_source_summary_unknown_fields(summary_path: &std::path::Path) -> &'static str {
+    let raw_external = r#"{ "kind" : "claude_cli", "futureField" : [ 1, { "x" : true } ] }"#;
+    let mut summary = std::fs::read_to_string(summary_path).unwrap();
+    summary.pop();
+    summary.push_str(&format!(
+        ",\n  \"external_runtime\": {raw_external},\n  \"futureSummaryField\": \"kept\"\n}}"
+    ));
+    std::fs::write(summary_path, summary).unwrap();
+    raw_external
+}
+
+fn inject_unknown_companion_field(session_dir: &std::path::Path) {
+    let path = session_dir.join(super::super::model_route::MODEL_ROUTE_FILE);
+    let mut companion: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    companion
+        .as_object_mut()
+        .unwrap()
+        .insert(
+            "futureCompanionField".to_string(),
+            serde_json::json!("kept"),
+        );
+    std::fs::write(&path, serde_json::to_vec_pretty(&companion).unwrap()).unwrap();
+}
+
+#[tokio::test]
+async fn fork_with_complete_pair_preserves_unknown_summary_runtime_and_companion_fields() {
+    let temp_dir = TempDir::new().unwrap();
+    let adapter = JsonlStorageAdapter::with_root(temp_dir.path().to_path_buf());
+    let source_info = Info {
+        id: acp::SessionId::new("pair-keep-src"),
+        cwd: "/source/workspace".to_string(),
+    };
+    adapter
+        .init_session(&source_info, default_model_id())
+        .await
+        .unwrap();
+    install_identity_pair(&adapter, &source_info);
+    let source_dir = session_dir_for(&adapter, &source_info);
+    let raw_external = patch_source_summary_unknown_fields(&adapter.summary_file(&source_info));
+    inject_unknown_companion_field(&source_dir);
+    rebind_meta_digests(&source_dir);
+    assert!(
+        super::super::model_route::identity_pair_present(&source_dir).unwrap(),
+        "patched pair must remain a complete usable identity pair"
+    );
+
+    let target_info = Info {
+        id: acp::SessionId::new("pair-keep-dst"),
+        cwd: "/target/workspace".to_string(),
+    };
+    adapter
+        .copy_session_data(&source_info, &target_info, CopySessionOptions::default())
+        .await
+        .unwrap();
+
+    let copied = std::fs::read_to_string(adapter.summary_file(&target_info)).unwrap();
+    assert!(copied.contains(&format!(r#""external_runtime":{raw_external}"#)));
+    assert!(copied.contains(r#""futureSummaryField":"kept""#));
+    assert!(
+        adapter.summary_file(&target_info).is_file(),
+        "fork must publish a regular summary.json"
+    );
+
+    let target_dir = session_dir_for(&adapter, &target_info);
+    let target_summary = adapter.read_summary_sync(&target_info).unwrap();
+    let loaded = super::super::model_route::load_route_companion(&target_dir, &target_summary)
+        .unwrap()
+        .expect("same-model fork must retain a rebound identity pair");
+    assert_ne!(
+        loaded.pair_id.as_deref(),
+        Some("pair-token-aaaaaaaaaaaaaaaa")
+    );
+    let companion_raw =
+        std::fs::read_to_string(target_dir.join(super::super::model_route::MODEL_ROUTE_FILE))
+            .unwrap();
+    assert!(companion_raw.contains("futureCompanionField"));
+    assert!(companion_raw.contains("kept"));
+}
+
+#[tokio::test]
+async fn fork_with_pair_and_model_override_does_not_retain_source_route() {
+    let temp_dir = TempDir::new().unwrap();
+    let adapter = JsonlStorageAdapter::with_root(temp_dir.path().to_path_buf());
+    let source_info = Info {
+        id: acp::SessionId::new("pair-override-src"),
+        cwd: "/source/workspace".to_string(),
+    };
+    adapter
+        .init_session(&source_info, default_model_id())
+        .await
+        .unwrap();
+    install_identity_pair(&adapter, &source_info);
+    let source_dir = session_dir_for(&adapter, &source_info);
+    let raw_external = patch_source_summary_unknown_fields(&adapter.summary_file(&source_info));
+    rebind_meta_digests(&source_dir);
+
+    let source_model = adapter
+        .read_summary_sync(&source_info)
+        .unwrap()
+        .current_model_id
+        .0
+        .to_string();
+    let override_model = if source_model == "openai-gpt-4o" {
+        "grok-4.5"
+    } else {
+        "openai-gpt-4o"
+    };
+    let target_info = Info {
+        id: acp::SessionId::new("pair-override-dst"),
+        cwd: "/target/workspace".to_string(),
+    };
+    adapter
+        .copy_session_data(
+            &source_info,
+            &target_info,
+            CopySessionOptions {
+                new_model_id: Some(override_model.to_string()),
+                ..CopySessionOptions::default()
+            },
+        )
+        .await
+        .unwrap();
+
+    let copied_summary = adapter.read_summary_sync(&target_info).unwrap();
+    assert_eq!(copied_summary.current_model_id.0.as_ref(), override_model);
+    let copied = std::fs::read_to_string(adapter.summary_file(&target_info)).unwrap();
+    assert!(copied.contains(&format!(r#""external_runtime":{raw_external}"#)));
+    assert!(copied.contains(r#""futureSummaryField":"kept""#));
+
+    let target_dir = session_dir_for(&adapter, &target_info);
+    assert!(!target_dir
+        .join(super::super::model_route::MODEL_ROUTE_FILE)
+        .exists());
+    assert!(!target_dir
+        .join(super::super::model_route::MODEL_IDENTITY_META)
+        .exists());
+    assert!(
+        super::super::model_route::load_route_companion(&target_dir, &copied_summary)
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn fork_with_torn_identity_pair_still_writes_regular_summary() {
+    let temp_dir = TempDir::new().unwrap();
+    let adapter = JsonlStorageAdapter::with_root(temp_dir.path().to_path_buf());
+    let source_info = Info {
+        id: acp::SessionId::new("pair-torn-src"),
+        cwd: "/source/workspace".to_string(),
+    };
+    adapter
+        .init_session(&source_info, default_model_id())
+        .await
+        .unwrap();
+    install_identity_pair(&adapter, &source_info);
+    let source_dir = session_dir_for(&adapter, &source_info);
+    let raw_external = patch_source_summary_unknown_fields(&adapter.summary_file(&source_info));
+    std::fs::remove_file(source_dir.join(super::super::model_route::MODEL_IDENTITY_META)).unwrap();
+    assert!(!super::super::model_route::identity_pair_present(&source_dir).unwrap());
+
+    let target_info = Info {
+        id: acp::SessionId::new("pair-torn-dst"),
+        cwd: "/target/workspace".to_string(),
+    };
+    adapter
+        .copy_session_data(&source_info, &target_info, CopySessionOptions::default())
+        .await
+        .unwrap();
+
+    let summary_path = adapter.summary_file(&target_info);
+    assert!(
+        summary_path.is_file(),
+        "torn source pair must not publish a fork without summary.json"
+    );
+    let copied = std::fs::read_to_string(&summary_path).unwrap();
+    assert!(copied.contains(&format!(r#""external_runtime":{raw_external}"#)));
+    assert!(copied.contains(r#""futureSummaryField":"kept""#));
+    let target_dir = session_dir_for(&adapter, &target_info);
+    assert!(!target_dir
+        .join(super::super::model_route::MODEL_ROUTE_FILE)
+        .exists());
+    assert!(!target_dir
+        .join(super::super::model_route::MODEL_IDENTITY_META)
+        .exists());
+}
+
 #[test]
 fn summary_schema_probe_covers_conditional_fields() {
     let keys = super::summary_schema_keys();

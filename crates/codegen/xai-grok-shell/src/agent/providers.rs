@@ -1943,8 +1943,13 @@ pub(crate) fn stored_openai_oauth_account_id() -> Option<String> {
 /// This is used at model-selection and prompt boundaries so a missing BYOK
 /// key never becomes a misleading upstream 401 that tells the user to refresh
 /// their unrelated xAI session.
+///
+/// OpenAI kind entries are checked on their exact credential route: a ChatGPT
+/// Codex selection requires ChatGPT OAuth and must not inherit a sibling
+/// OpenAI Platform API key (and the reverse).
 pub(crate) fn missing_api_key_provider(model: &super::config::ModelEntry) -> Option<ProviderId> {
-    let provider = match model.model_provider.as_ref()?.kind {
+    let resolved_provider = model.model_provider.as_ref()?;
+    let provider = match resolved_provider.kind {
         ModelProviderKind::OpenAi => ProviderId::OpenAi,
         ModelProviderKind::OpenRouter => ProviderId::OpenRouter,
         ModelProviderKind::Anthropic => ProviderId::Anthropic,
@@ -1952,11 +1957,31 @@ pub(crate) fn missing_api_key_provider(model: &super::config::ModelEntry) -> Opt
             return None;
         }
     };
-    crate::agent::config::resolve_credentials(model, None)
-        .api_key
-        .as_deref()
-        .is_none_or(|key| key.trim().is_empty())
-        .then_some(provider)
+    let has_credential = if matches!(provider, ProviderId::OpenAi) {
+        model
+            .own_credential()
+            .is_some_and(|key| !key.trim().is_empty())
+            || stored_openai_credentials(resolved_provider, &model.info.base_url)
+                .is_some_and(|creds| !creds.bearer.trim().is_empty())
+    } else {
+        crate::agent::config::resolve_credentials(model, None)
+            .api_key
+            .as_deref()
+            .is_some_and(|key| !key.trim().is_empty())
+    };
+    (!has_credential).then_some(provider)
+}
+
+/// Exact catalog lookup for the ACP prompt missing-key preflight.
+///
+/// `selection_model_id` is the canonical catalog key. Never resolve by an
+/// ambiguous upstream wire slug — OpenAI Platform and ChatGPT subscription
+/// rows can share `gpt-5.6-sol`.
+pub(crate) fn missing_api_key_for_canonical_selection(
+    models: &indexmap::IndexMap<String, super::config::ModelEntry>,
+    selection_model_id: &str,
+) -> Option<ProviderId> {
+    missing_api_key_provider(models.get(selection_model_id)?)
 }
 
 fn credential_lookup_manager() -> ProviderManager {
@@ -3862,6 +3887,88 @@ mod tests {
         assert_eq!(
             missing_api_key_provider(&orphan),
             Some(ProviderId::Anthropic)
+        );
+        set_stored_key_home_for_tests(None);
+    }
+
+    fn openai_kind_entry(
+        catalog_id: &str,
+        wire: &str,
+        base_url: &str,
+    ) -> super::super::config::ModelEntry {
+        let mut entry = super::super::config::ModelEntry {
+            info: super::super::config::ModelInfo::fallback(wire),
+            model_provider: Some(super::super::model_providers::ResolvedModelProvider {
+                id: "grok_build_openai".into(),
+                kind: ModelProviderKind::OpenAi,
+                openrouter_fallback_models: Vec::new(),
+                openrouter_provider_preferences: None,
+                openrouter_plugins: Vec::new(),
+                openrouter_pacing: false,
+                command: Vec::new(),
+            }),
+            api_key: None,
+            env_key: None,
+            auth_provider: None,
+            api_base_url: None,
+        };
+        entry.info.id = Some(catalog_id.to_owned());
+        entry.info.model = wire.to_owned();
+        entry.info.base_url = base_url.to_owned();
+        entry
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn chatgpt_oauth_missing_is_not_masked_by_platform_sibling_slug() {
+        let home = tempfile::tempdir().unwrap();
+        let _openai = EnvGuard::unset("OPENAI_API_KEY");
+        set_stored_key_home_for_tests(Some(home.path().to_path_buf()));
+        let manager = ProviderManager::new(home.path());
+        manager
+            .set_api_key(ProviderId::OpenAi, "platform-api-key")
+            .unwrap();
+
+        let mut models = indexmap::IndexMap::new();
+        models.insert(
+            "openai-gpt-5.6-sol".to_owned(),
+            openai_kind_entry(
+                "openai-gpt-5.6-sol",
+                "gpt-5.6-sol",
+                "https://api.openai.com/v1",
+            ),
+        );
+        models.insert(
+            "chatgpt-gpt-5.6-sol".to_owned(),
+            openai_kind_entry(
+                "chatgpt-gpt-5.6-sol",
+                "gpt-5.6-sol",
+                crate::auth::chatgpt_oauth::CODEX_RESPONSES_BASE_URL,
+            ),
+        );
+
+        assert!(
+            super::super::config::find_model_by_id(&models, "gpt-5.6-sol").is_none(),
+            "shared upstream slug must stay ambiguous and must not bind either sibling"
+        );
+        assert!(
+            super::super::config::find_model_by_route(
+                &models,
+                "gpt-5.6-sol",
+                crate::auth::chatgpt_oauth::CODEX_RESPONSES_BASE_URL,
+            )
+            .is_none(),
+            "wire-slug + base_url lookup must not paper over an ambiguous catalog"
+        );
+        assert_eq!(
+            missing_api_key_for_canonical_selection(&models, "openai-gpt-5.6-sol"),
+            None,
+            "OpenAI Platform selection keeps its own API key"
+        );
+        assert_eq!(
+            missing_api_key_for_canonical_selection(&models, "chatgpt-gpt-5.6-sol"),
+            Some(ProviderId::OpenAi),
+            "ChatGPT OAuth missing must fail closed even when a Platform sibling with the same slug has a key"
         );
         set_stored_key_home_for_tests(None);
     }

@@ -690,6 +690,14 @@ impl RetrievalSettingsState {
         }
     }
 
+    /// Conflicts and non-Browse sub-modes own Esc so chrome cannot close
+    /// `/retrieval-settings` while a draft, confirm, or conflict is active
+    /// (mirrors `/providers` `owns_escape`). Browse with no conflict still
+    /// closes the modal via chrome `CloseRequested`.
+    pub(crate) fn owns_escape(&self) -> bool {
+        self.conflict.is_some() || !matches!(self.edit, RetrievalEditMode::Browse)
+    }
+
     pub fn handle_key(&mut self, key: KeyEvent) -> Option<RetrievalCommand> {
         if self.conflict.is_some() {
             return self.handle_conflict_key(key);
@@ -3071,5 +3079,96 @@ mod tests {
                 .any(|l| *l == "v Validate" || *l == "s Validate"),
             "duplicate Validate labels removed: {labels:?}"
         );
+    }
+
+    #[test]
+    fn esc_in_edit_fields_returns_to_browse_not_a_command() {
+        let mut s = RetrievalSettingsState::new();
+        s.apply_snapshot(snap_with_emb());
+        s.handle_key(key(KeyCode::Char('e')));
+        assert!(
+            matches!(s.edit, RetrievalEditMode::EditFields { .. }),
+            "e must open EditFields, got {:?}",
+            s.edit
+        );
+        assert!(s.owns_escape());
+        assert!(s.handle_key(key(KeyCode::Esc)).is_none());
+        assert!(
+            matches!(s.edit, RetrievalEditMode::Browse),
+            "Esc in EditFields must return to Browse, got {:?}",
+            s.edit
+        );
+        assert!(!s.owns_escape());
+    }
+
+    #[test]
+    fn esc_in_confirm_prime_rebuild_returns_to_browse() {
+        let mut s = RetrievalSettingsState::new();
+        s.apply_snapshot(snap_with_emb());
+        s.page = RetrievalPage::Prime;
+        s.prime_index = Some(xai_grok_shell::session::prime::PrimeIndexStatus {
+            api_version: 1,
+            generation: 1,
+            fingerprint_short: "abc123def456".into(),
+            skills: xai_grok_shell::session::prime::PrimeIndexCollectionStatus {
+                collection: "skills".into(),
+                generation: 1,
+                fingerprint_short: "abc123def456".into(),
+                item_count: 1,
+                vector_count: 0,
+                missing_vectors: 1,
+                readiness: "pending".into(),
+                route_id: Some("main".into()),
+                dimensions: None,
+            },
+            agents: xai_grok_shell::session::prime::PrimeIndexCollectionStatus {
+                collection: "agents".into(),
+                generation: 0,
+                fingerprint_short: String::new(),
+                item_count: 0,
+                vector_count: 0,
+                missing_vectors: 0,
+                readiness: "ready".into(),
+                route_id: None,
+                dimensions: None,
+            },
+            job: None,
+            configured_route: Some("main".into()),
+            capabilities: xai_grok_shell::session::prime::PrimeIndexCapabilities::SUPPORTED,
+            unchanged: false,
+        });
+        s.handle_key(key(KeyCode::Char('u')));
+        assert!(
+            matches!(s.edit, RetrievalEditMode::ConfirmPrimeRebuild { .. }),
+            "u must open ConfirmPrimeRebuild, got {:?}",
+            s.edit
+        );
+        assert!(s.owns_escape());
+        assert!(s.handle_key(key(KeyCode::Esc)).is_none());
+        assert!(
+            matches!(s.edit, RetrievalEditMode::Browse),
+            "Esc in ConfirmPrimeRebuild must return to Browse, got {:?}",
+            s.edit
+        );
+    }
+
+    #[test]
+    fn esc_in_conflict_keeps_draft() {
+        let mut s = RetrievalSettingsState::new();
+        s.apply_snapshot(snap_with_emb());
+        s.dirty = true;
+        s.conflict = Some(RetrievalConflictInfo {
+            client_generation: RegistryGeneration(1),
+            live_generation: RegistryGeneration(2),
+            changed_fields: vec!["embedding_models".into()],
+            guidance: "reload or keep".into(),
+        });
+        assert!(s.owns_escape());
+        match s.handle_key(key(KeyCode::Esc)) {
+            Some(RetrievalCommand::DismissConflictKeepDraft) => {}
+            other => panic!("conflict Esc must keep draft, got {other:?}"),
+        }
+        assert!(s.conflict.is_none());
+        assert!(s.dirty);
     }
 }

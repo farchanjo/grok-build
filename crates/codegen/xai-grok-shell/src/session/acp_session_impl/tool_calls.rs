@@ -36,6 +36,19 @@ async fn wait_for_pending_interjection(buf: &InterjectionBuffer<acp::ImageConten
     }
 }
 use crate::tools::tool_context::BlockingWaitGuard;
+/// Surface the secret-free auxiliary-route reason instead of collapsing to
+/// [`crate::session::media_pipeline::MediaPolicyError::Disabled`].
+fn video_route_policy_error(error: acp::Error) -> crate::session::media_pipeline::MediaPolicyError {
+    let message = error
+        .data
+        .as_ref()
+        .and_then(|value| value.as_str())
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned)
+        .unwrap_or_else(|| error.to_string());
+    crate::session::media_pipeline::MediaPolicyError::RouteUnusable(message)
+}
+
 /// Model-facing result when a wait is aborted for a pending interjection.
 fn interrupted_wait_tool_result(args: &serde_json::Value) -> ToolRunResult {
     interrupted_wait_tool_result_with_msg(args, "Wait interrupted: the user sent a message.")
@@ -2152,7 +2165,7 @@ impl SessionActor {
         active_supports_images: Option<bool>,
         runner: &dyn xai_grok_tools::util::ffmpeg::ProcessRunner,
         transcriber: Option<&dyn crate::session::media_stt::AsyncAudioTranscriber>,
-    ) -> String {
+    ) -> Result<String, acp::Error> {
         // Frame descriptions use MediaVideo purpose so pacing/attribution
         // operation partition is distinct from image describe.
         let route = media
@@ -2181,11 +2194,17 @@ impl SessionActor {
                             self.auth_manager.as_ref(),
                         );
                     let client = if frame_route_policy.is_ok() {
-                        xai_grok_inference::InferenceClient::new_with_route_context(
-                            sampler_config,
-                            Some(route_ctx),
+                        Some(
+                            xai_grok_inference::InferenceClient::new_with_route_context(
+                                sampler_config,
+                                Some(route_ctx),
+                            )
+                            .map_err(|error| {
+                                acp::Error::internal_error().data(format!(
+                                    "failed to build video-describe sampling client: {error}"
+                                ))
+                            })?,
                         )
-                        .ok()
                     } else {
                         None
                     };
@@ -2196,12 +2215,7 @@ impl SessionActor {
                         frame_route_policy,
                     )
                 }
-                Err(_) => (
-                    None,
-                    None,
-                    None,
-                    Err(crate::session::media_pipeline::MediaPolicyError::Disabled),
-                ),
+                Err(error) => (None, None, None, Err(video_route_policy_error(error))),
             }
         } else {
             (
@@ -2211,7 +2225,7 @@ impl SessionActor {
                 Err(crate::session::media_pipeline::MediaPolicyError::Disabled),
             )
         };
-        crate::session::media_pipeline::understand_video(
+        Ok(crate::session::media_pipeline::understand_video(
             video,
             media,
             &self.image_describe_cache,
@@ -2224,7 +2238,7 @@ impl SessionActor {
             runner,
             transcriber,
         )
-        .await
+        .await)
     }
     pub(super) async fn handle_bridge_tool_success(
         &self,
@@ -2670,7 +2684,7 @@ impl SessionActor {
                     &xai_grok_tools::util::ffmpeg::SystemProcessRunner,
                     stt.as_deref(),
                 )
-                .await;
+                .await?;
         }
         let tool_failed = result.output.is_error();
         let tool_chat = if inline_images.is_empty() {

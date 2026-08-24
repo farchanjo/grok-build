@@ -838,7 +838,10 @@ pub enum ButtonAction {
     /// Remove the marketplace source under the cursor (unconfigure + uninstall all its plugins).
     RemoveSelectedMarketplaceSource,
     ToggleExpand,
-    /// Cycle the status filter (All → Enabled → Disabled → All).
+    /// Cycle the active tab's status filter.
+    ///
+    /// Hooks, plugins, and MCP servers cycle All → Enabled → Disabled.
+    /// Skills cycle All → valid-pass → failed → quarantined → stale → untested.
     CycleFilter,
     /// Enter input mode: show an inline form so the user can type arguments,
     /// then submit the full command on Enter.
@@ -1317,6 +1320,7 @@ pub fn action_key_display(ch: char) -> &'static str {
         ' ' => "space",
         'a' => "a",
         'b' => "b",
+        'c' => "c",
         'd' => "d",
         'e' => "e",
         'f' => "f",
@@ -1366,21 +1370,21 @@ fn overlay_prime_safe_text(msg: &ModalMessage) -> String {
     }
 }
 
+/// Footer/picker keys for the current modal. Prime index keys (`b`, `u`, `c`)
+/// are hidden when the connected shell does not advertise `primeIndex`.
+pub fn extensions_action_keys_for_state(state: &ExtensionsModalState) -> Vec<(char, &'static str)> {
+    let mut keys = extensions_action_keys(state.active_tab);
+    if state.active_tab == ExtensionsTab::Skills && !state.prime_index_capable {
+        keys.retain(|(ch, _)| *ch != 'b' && *ch != 'u' && *ch != 'c');
+    }
+    keys
+}
+
 /// Per-tab action keys for the extensions modal (footer, picker, telemetry).
 ///
 /// Space stays labeled `"toggle"` on the wire for telemetry / picker identity;
 /// user-facing copy remaps via [`action_key_footer_desc`] /
 /// [`action_key_cheatsheet_desc`].
-/// Footer/picker keys for the current modal. Prime index keys are hidden when
-/// the connected shell does not advertise `primeIndex` (new pager / old shell).
-pub fn extensions_action_keys_for_state(state: &ExtensionsModalState) -> Vec<(char, &'static str)> {
-    let mut keys = extensions_action_keys(state.active_tab);
-    if state.active_tab == ExtensionsTab::Skills && !state.prime_index_capable {
-        keys.retain(|(ch, _)| *ch != 'b' && *ch != 'u');
-    }
-    keys
-}
-
 pub fn extensions_action_keys(tab: ExtensionsTab) -> Vec<(char, &'static str)> {
     match tab {
         ExtensionsTab::Hooks => vec![
@@ -1413,6 +1417,7 @@ pub fn extensions_action_keys(tab: ExtensionsTab) -> Vec<(char, &'static str)> {
             ('b', "backfill"),
             ('u', "rebuild"),
             ('x', "cancel"),
+            ('c', "cancel index"),
             ('r', "reload"),
         ],
         ExtensionsTab::McpServers => MCP_SERVERS_ACTION_KEYS.to_vec(),
@@ -1651,6 +1656,7 @@ pub fn resolve_key(tab: ExtensionsTab, ch: char) -> Option<ButtonAction> {
         (ExtensionsTab::Skills, 'b') => Some(ButtonAction::PrimeIndexBackfill),
         (ExtensionsTab::Skills, 'u') => Some(ButtonAction::PrimeIndexRebuild),
         (ExtensionsTab::Skills, 'x') => Some(ButtonAction::CancelSelectedSkillRegress),
+        (ExtensionsTab::Skills, 'c') => Some(ButtonAction::PrimeIndexCancel),
         (ExtensionsTab::McpServers, 'a') => Some(ButtonAction::StartInput {
             command_prefix: "mcp_add".into(),
             // URL is required, Name is optional (auto-derived from URL),
@@ -2330,8 +2336,6 @@ impl ExtensionsModalState {
         }
     }
 
-    /// Query to send to `x.ai/skills/search` in Smart mode. `None` means the
-    /// local description fallback should be used (and any cached rank cleared).
     /// Apply a version-tolerant Prime index notification without resetting
     /// search, filter, or selection.
     pub fn apply_prime_index_update(
@@ -2422,6 +2426,8 @@ impl ExtensionsModalState {
         self.skills_anchor_identity = None;
     }
 
+    /// Query to send to `x.ai/skills/search` in Smart mode. `None` means the
+    /// local description fallback should be used (and any cached rank cleared).
     pub fn skills_smart_search_query(&self) -> Option<&str> {
         if self.active_tab != ExtensionsTab::Skills {
             return None;
@@ -4689,6 +4695,7 @@ mod tests {
                     ('b', "backfill"),
                     ('u', "rebuild"),
                     ('x', "cancel"),
+                    ('c', "cancel_index"),
                     ('r', "reload"),
                 ],
             ),
@@ -5232,69 +5239,47 @@ mod tests {
     /// "product design framework" even though p, d, f appear in order.
     #[test]
     fn skills_search_is_substring_not_fuzzy() {
-        let skills = [
+        let skills = rows_from(vec![
             make_skill("pdf", "PDF manipulation"),
             make_skill("product-design-framework", "Design framework for products"),
-        ];
-        let query = "pdf";
-        let query_lower = query.to_lowercase();
-        let matches: Vec<(usize, bool)> = skills
-            .iter()
-            .enumerate()
-            .filter_map(|(si, skill)| {
-                let name_lower = skill.name.to_lowercase();
-                let desc_lower = skill.description.to_lowercase();
-                let name_hit = name_lower.contains(&query_lower);
-                let desc_hit = desc_lower.contains(&query_lower);
-                if name_hit {
-                    Some((si, true))
-                } else if desc_hit {
-                    Some((si, false))
-                } else {
-                    None
-                }
-            })
-            .collect();
-
+        ]);
+        let result = filter_and_sort_skills(
+            &skills,
+            "pdf",
+            SkillsStatusFilter::All,
+            SkillSearchMode::Local,
+            None,
+        );
         // Only "pdf" should match, not "product-design-framework".
-        assert_eq!(matches.len(), 1);
-        assert_eq!(matches[0], (0, true));
+        assert_eq!(result.matches.len(), 1);
+        assert_eq!(result.matches[0], (0, true));
     }
 
     /// Title matches should sort before description-only matches.
     #[test]
     fn skills_search_title_matches_first() {
-        let skills = [
+        let skills = rows_from(vec![
             make_skill("some-tool", "Run lint check"), // desc match only
             make_skill("check", "Run lint check"),     // name match
             make_skill("rust-check", "Rust pre-push checks"), // name match
-        ];
-        let query = "check";
-        let query_lower = query.to_lowercase();
-        let mut matches: Vec<(usize, bool)> = skills
-            .iter()
-            .enumerate()
-            .filter_map(|(si, skill)| {
-                let name_lower = skill.name.to_lowercase();
-                let desc_lower = skill.description.to_lowercase();
-                let name_hit = name_lower.contains(&query_lower);
-                let desc_hit = desc_lower.contains(&query_lower);
-                if name_hit {
-                    Some((si, true))
-                } else if desc_hit {
-                    Some((si, false))
-                } else {
-                    None
-                }
-            })
-            .collect();
-        matches.sort_by_key(|&(_, is_name)| !is_name);
-
-        assert_eq!(matches.len(), 3);
-        // Name matches first (check, rust-check), then desc-only (some-tool).
-        assert!(matches[0].1, "first result should be a name match");
-        assert!(matches[1].1, "second result should be a name match");
-        assert!(!matches[2].1, "third result should be a desc-only match");
+        ]);
+        // Smart local-fallback includes descriptions; production ranking
+        // puts name hits first.
+        let result = filter_and_sort_skills(
+            &skills,
+            "check",
+            SkillsStatusFilter::All,
+            SkillSearchMode::Smart,
+            None,
+        );
+        assert_eq!(result.matches.len(), 3);
+        assert!(result.matches[0].1, "first result should be a name match");
+        assert!(result.matches[1].1, "second result should be a name match");
+        assert!(
+            !result.matches[2].1,
+            "third result should be a desc-only match"
+        );
+        assert_eq!(result.matches[2].0, 0);
     }
 
     // ── Hooks: search forces groups expanded ─────────────────────────
@@ -6133,7 +6118,11 @@ mod tests {
         let mut state = ExtensionsModalState::new(ExtensionsTab::Skills);
         state.prime_index_capable = false;
         let keys = extensions_action_keys_for_state(&state);
-        assert!(!keys.iter().any(|(ch, _)| *ch == 'b' || *ch == 'u'));
+        assert!(
+            !keys
+                .iter()
+                .any(|(ch, _)| *ch == 'b' || *ch == 'u' || *ch == 'c')
+        );
         state.prime_index_capable = true;
         let keys = extensions_action_keys_for_state(&state);
         assert!(
@@ -6143,6 +6132,10 @@ mod tests {
         assert!(
             keys.iter()
                 .any(|(ch, label)| *ch == 'u' && *label == "rebuild")
+        );
+        assert!(
+            keys.iter()
+                .any(|(ch, label)| *ch == 'c' && *label == "cancel index")
         );
     }
 
@@ -7542,6 +7535,39 @@ mod tests {
             action,
             Some(ButtonAction::RemoveSelectedMarketplaceSource)
         ));
+    }
+
+    #[test]
+    fn skills_x_cancels_regress_and_c_cancels_prime_index() {
+        assert!(matches!(
+            resolve_key(ExtensionsTab::Skills, 'x'),
+            Some(ButtonAction::CancelSelectedSkillRegress)
+        ));
+        assert!(matches!(
+            resolve_key(ExtensionsTab::Skills, 'c'),
+            Some(ButtonAction::PrimeIndexCancel)
+        ));
+        assert!(
+            !matches!(
+                resolve_key(ExtensionsTab::Hooks, 'c'),
+                Some(ButtonAction::PrimeIndexCancel)
+            ),
+            "c must not steal hook actions"
+        );
+        assert!(
+            !matches!(
+                resolve_key(ExtensionsTab::Plugins, 'c'),
+                Some(ButtonAction::PrimeIndexCancel)
+            ),
+            "c must not steal plugin actions"
+        );
+        assert!(
+            !matches!(
+                resolve_key(ExtensionsTab::McpServers, 'c'),
+                Some(ButtonAction::PrimeIndexCancel)
+            ),
+            "c must not steal MCP actions"
+        );
     }
 
     #[test]

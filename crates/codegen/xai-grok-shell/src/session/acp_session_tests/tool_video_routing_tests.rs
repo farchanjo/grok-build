@@ -148,7 +148,8 @@ async fn video_model_overrides_image_route_and_describes_sampled_frames() {
             let media = actor.media_config.borrow().clone();
             let text = actor
                 .understand_tool_video(&video, &media, Some(false), &runner, None)
-                .await;
+                .await
+                .expect("video route should describe sampled frames");
 
             let request =
                 tokio::time::timeout(std::time::Duration::from_secs(1), request_rx.recv())
@@ -215,6 +216,113 @@ async fn video_model_overrides_image_route_and_describes_sampled_frames() {
             );
 
             server.abort();
+        })
+        .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn missing_video_route_stays_actionable_instead_of_collapsing_to_disabled() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (gateway_tx, _) =
+                tokio::sync::mpsc::unbounded_channel::<xai_acp_lib::AcpClientMessage>();
+            let (persistence_tx, _) = tokio::sync::mpsc::unbounded_channel::<PersistenceMsg>();
+            let actor = create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await;
+            actor.media_config.borrow_mut().video_model = Some("missing-video-route".to_owned());
+
+            let dir = tempfile::tempdir().expect("video fixture directory");
+            let video_path = dir.path().join("unusable-route.mp4");
+            std::fs::write(&video_path, b"video fixture").expect("write video fixture");
+            let runner = VideoFrameRunner {
+                frame: b"sampled-jpeg-frame".to_vec(),
+                calls: Mutex::new(Vec::new()),
+            };
+            let video = VideoContent {
+                absolute_path: video_path,
+                mime_type: "video/mp4".to_owned(),
+                size_bytes: 13,
+                duration_secs: Some(1.0),
+                width: Some(640),
+                height: Some(360),
+                has_audio: false,
+            };
+            let media = actor.media_config.borrow().clone();
+            let text = actor
+                .understand_tool_video(&video, &media, Some(false), &runner, None)
+                .await
+                .expect("unusable video route must still emit a descriptor");
+
+            assert!(
+                text.contains("auxiliary model `missing-video-route` is not in the catalog")
+                    || text.contains("missing-video-route"),
+                "video route failures must stay actionable: {text}"
+            );
+            assert!(
+                !text.contains("media understanding is disabled"),
+                "video route failures must not collapse to Disabled: {text}"
+            );
+        })
+        .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn invalid_video_describe_client_fails_closed_like_image_pdf() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (gateway_tx, _) =
+                tokio::sync::mpsc::unbounded_channel::<xai_acp_lib::AcpClientMessage>();
+            let (persistence_tx, _) = tokio::sync::mpsc::unbounded_channel::<PersistenceMsg>();
+            let actor = create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await;
+
+            let mut video_entry = crate::agent::config::ModelEntry {
+                info: crate::agent::config::ModelInfo::fallback("video-vision-model"),
+                model_provider: None,
+                api_key: Some("bad\nkey".to_owned()),
+                env_key: None,
+                auth_provider: None,
+                api_base_url: None,
+            };
+            video_entry.info.id = Some("video-bad-client".to_owned());
+            video_entry.info.base_url = "http://127.0.0.1:9/v1".to_owned();
+            video_entry.info.api_backend = crate::inference::ApiBackend::ChatCompletions;
+            video_entry.info.supports_image_input = Some(true);
+            actor
+                .models_manager
+                .insert_test_entry("video-bad-client", video_entry);
+            actor.media_config.borrow_mut().video_model = Some("video-bad-client".to_owned());
+
+            let dir = tempfile::tempdir().expect("video fixture directory");
+            let video_path = dir.path().join("bad-client.mp4");
+            std::fs::write(&video_path, b"video fixture").expect("write video fixture");
+            let runner = VideoFrameRunner {
+                frame: b"sampled-jpeg-frame".to_vec(),
+                calls: Mutex::new(Vec::new()),
+            };
+            let video = VideoContent {
+                absolute_path: video_path,
+                mime_type: "video/mp4".to_owned(),
+                size_bytes: 13,
+                duration_secs: Some(1.0),
+                width: Some(640),
+                height: Some(360),
+                has_audio: false,
+            };
+            let media = actor.media_config.borrow().clone();
+            let err = actor
+                .understand_tool_video(&video, &media, Some(false), &runner, None)
+                .await
+                .expect_err("invalid sampling client must fail closed");
+            let err_text = err.to_string();
+            assert!(
+                err_text.contains("failed to build video-describe sampling client"),
+                "client construction must match image/PDF fail-closed semantics: {err_text}"
+            );
+            assert!(
+                !err_text.contains("bad\nkey") && !err_text.contains("Bearer "),
+                "client construction errors must not leak secrets: {err_text}"
+            );
         })
         .await;
 }

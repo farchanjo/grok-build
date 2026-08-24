@@ -39,14 +39,17 @@ pub struct CollectionPending {
 
 impl CollectionPending {
     pub(crate) fn to_json(&self) -> String {
+        // Keep the historical key order so CAS against previously written
+        // markers still matches after an upgrade. String fields go through
+        // serde_json so quotes and backslashes round-trip.
         format!(
-            r#"{{"id":"{}","intended":"{}","status":"{}","claim":"{}","claimed_at":{},"reason":"{}","last_attempt_at":{}}}"#,
-            self.id,
-            self.intended,
-            self.status,
-            self.claim,
+            "{{\"id\":{},\"intended\":{},\"status\":{},\"claim\":{},\"claimed_at\":{},\"reason\":{},\"last_attempt_at\":{}}}",
+            json_string(&self.id),
+            json_string(&self.intended),
+            json_string(&self.status),
+            json_string(&self.claim),
             self.claimed_at,
-            self.reason,
+            json_string(&self.reason),
             self.last_attempt_at
         )
     }
@@ -85,6 +88,10 @@ impl CollectionPending {
                 .unwrap_or(0),
         })
     }
+}
+
+fn json_string(value: &str) -> String {
+    serde_json::to_string(value).unwrap_or_else(|_| "\"\"".to_string())
 }
 
 fn new_attempt_id() -> String {

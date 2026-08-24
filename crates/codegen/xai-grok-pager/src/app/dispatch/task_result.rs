@@ -244,6 +244,22 @@ pub(crate) fn deliver_doctor_message(app: &mut AppView, preferred: AgentId, mess
         action: None,
     });
 }
+/// Overlay catalog ChatGPT windows onto the open `/providers` OpenAI row
+/// after a list snapshot or Refresh follow-up.
+///
+/// List snapshots do not carry subscription models. Refresh fills them and
+/// applies persisted auto-compact thresholds; `apply_list_snapshot`
+/// preserves email/models/thresholds, then this reapplies `app.models`
+/// catalog windows so a reload cannot drop the listed context-window state.
+fn overlay_chatgpt_catalog_on_providers(
+    state: &mut crate::views::providers_modal::ProviderModalState,
+    catalog: &crate::acp::model_state::ModelState,
+) {
+    if let Some(status) = state.status_mut(&crate::views::providers_modal::ProviderKind::OpenAi) {
+        status.overlay_chatgpt_windows(|id| catalog.context_window_tokens_for(id));
+    }
+}
+
 /// Handle a completed async task result.
 pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec<Effect> {
     match result {
@@ -1701,6 +1717,7 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
                         }
                     }
                 }
+                overlay_chatgpt_catalog_on_providers(state, &catalog_windows);
                 true
             });
             if !applied && let Some(error) = fallback_error {

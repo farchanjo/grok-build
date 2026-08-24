@@ -2123,6 +2123,61 @@ fn set_chatgpt_auto_compact_threshold_emits_save_effect() {
     );
 }
 
+#[test]
+fn open_providers_loads_list_snapshot_and_refreshes_builtins_once() {
+    use crate::app::actions::ProviderOperation;
+    use crate::views::modal::ActiveModal;
+    use crate::views::providers_modal::ProviderKind;
+
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    let effects = dispatch(Action::OpenProviders, &mut app);
+    assert!(matches!(
+        app.agents[&id].active_modal,
+        Some(ActiveModal::Providers { .. })
+    ));
+    let snapshots = effects
+        .iter()
+        .filter(|e| {
+            matches!(
+                e,
+                Effect::ProviderOperation {
+                    operation: ProviderOperation::LoadListSnapshot,
+                    ..
+                }
+            )
+        })
+        .count();
+    assert_eq!(
+        snapshots, 1,
+        "open must emit one list snapshot, not a refresh loop, got {effects:?}"
+    );
+    for provider in ProviderKind::BUILTINS.iter() {
+        assert!(
+            effects.iter().any(|e| matches!(
+                e,
+                Effect::ProviderOperation {
+                    operation: ProviderOperation::Refresh(p),
+                    ..
+                } if p == provider
+            )),
+            "open must refresh built-in {provider:?}, got {effects:?}"
+        );
+    }
+    assert_eq!(
+        effects.len(),
+        1 + ProviderKind::BUILTINS.len(),
+        "open must not enqueue extra follow-ups, got {effects:?}"
+    );
+
+    let closed = dispatch(Action::OpenProviders, &mut app);
+    assert!(app.agents[&id].active_modal.is_none());
+    assert!(
+        closed.is_empty(),
+        "toggling closed must not enqueue another snapshot/refresh, got {closed:?}"
+    );
+}
+
 /// Store-bound API-key repair resume under an injectable tempfile auth home.
 #[test]
 fn store_bound_api_key_repair_resumes_once_with_temp_home() {

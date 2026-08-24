@@ -41,6 +41,33 @@ fn is_skill_regress_cancel_shortcut(
     }
 }
 
+fn is_prime_index_cancel_shortcut(
+    state: &crate::views::extensions_modal::ExtensionsModalState,
+    ch: char,
+) -> bool {
+    // `c` on Skills is dedicated Prime-index cancel. Independent of skill
+    // regression so both jobs can be aborted while they run together.
+    // Hidden (and ignored) when the shell does not advertise primeIndex.
+    state.prime_index_capable
+        && matches!(
+            crate::views::extensions_modal::resolve_key(state.active_tab, ch),
+            Some(crate::views::extensions_modal::ButtonAction::PrimeIndexCancel)
+        )
+}
+
+fn in_flight_cancel_action(
+    state: &crate::views::extensions_modal::ExtensionsModalState,
+    ch: char,
+) -> Option<crate::views::extensions_modal::ButtonAction> {
+    if is_skill_regress_cancel_shortcut(state, ch) {
+        Some(crate::views::extensions_modal::ButtonAction::CancelSelectedSkillRegress)
+    } else if is_prime_index_cancel_shortcut(state, ch) {
+        Some(crate::views::extensions_modal::ButtonAction::PrimeIndexCancel)
+    } else {
+        None
+    }
+}
+
 /// Drop any cached Smart rank, then dispatch Prime search when the skills
 /// tab is in Smart mode with a non-empty query. Clearing first keeps vector
 /// hits from query A out of the picker for query B until B lands.
@@ -497,9 +524,10 @@ impl AgentView {
         // modal so a hung list/refresh cannot trap the user; background
         // work (auth, refresh) continues without the UI lock.
         //
-        // Local skill regression is the exception: `x` must still dispatch
-        // cancel while "regressing..." is showing. Esc is not the only way
-        // out of an in-flight eval.
+        // Local skill regression (`x`) and Prime index cancel (`c`) are the
+        // exceptions: both must still dispatch while "regressing..." is
+        // showing so simultaneous jobs can be aborted independently. Esc is
+        // not the only way out of an in-flight eval.
         if self
             .extensions_modal
             .as_ref()
@@ -510,15 +538,16 @@ impl AgentView {
                     self.extensions_modal = None;
                     InputOutcome::Changed
                 }
-                KeyCode::Char(ch)
-                    if self
+                KeyCode::Char(ch) => {
+                    if let Some(action) = self
                         .extensions_modal
                         .as_ref()
-                        .is_some_and(|s| is_skill_regress_cancel_shortcut(s, ch)) =>
-                {
-                    self.execute_modal_button_action(
-                        crate::views::extensions_modal::ButtonAction::CancelSelectedSkillRegress,
-                    )
+                        .and_then(|s| in_flight_cancel_action(s, ch))
+                    {
+                        self.execute_modal_button_action(action)
+                    } else {
+                        InputOutcome::Changed
+                    }
                 }
                 _ => InputOutcome::Changed,
             };
@@ -1089,7 +1118,7 @@ impl AgentView {
             }
             // Block action shortcuts while an action is in-flight
             // (mirrors the keyboard guard in handle_extensions_modal_key),
-            // except `x` during an in-flight skill regression.
+            // except `x` (skill regress) and `c` (Prime index) cancel.
             if self
                 .extensions_modal
                 .as_ref()
@@ -1097,7 +1126,7 @@ impl AgentView {
                 && !self
                     .extensions_modal
                     .as_ref()
-                    .is_some_and(|s| is_skill_regress_cancel_shortcut(s, ch))
+                    .is_some_and(|s| in_flight_cancel_action(s, ch).is_some())
             {
                 return InputOutcome::Changed;
             }
@@ -1965,16 +1994,6 @@ impl AgentView {
                 return InputOutcome::Action(Action::PrimeIndexCancel);
             }
             ButtonAction::CancelSelectedSkillRegress => {
-                let index_running = self.extensions_modal.as_ref().is_some_and(|state| {
-                    state.prime_index.as_ref().is_some_and(|s| {
-                        s.job
-                            .as_ref()
-                            .is_some_and(|j| j.state == "running" || j.state == "cancelling")
-                    })
-                });
-                if index_running {
-                    return InputOutcome::Action(Action::PrimeIndexCancel);
-                }
                 if self.extensions_modal.as_ref().is_some_and(|state| {
                     state
                         .pending_action
@@ -2829,6 +2848,53 @@ mod skills_regress_dispatch_tests {
         crossterm::event::KeyEvent::new(code, crossterm::event::KeyModifiers::NONE)
     }
 
+    fn running_prime_index() -> xai_grok_shell::session::prime::PrimeIndexStatus {
+        xai_grok_shell::session::prime::PrimeIndexStatus {
+            api_version: 1,
+            generation: 4,
+            fingerprint_short: "abc123def456".into(),
+            skills: xai_grok_shell::session::prime::PrimeIndexCollectionStatus {
+                collection: "skills".into(),
+                generation: 4,
+                fingerprint_short: "abc123def456".into(),
+                item_count: 3,
+                vector_count: 1,
+                missing_vectors: 2,
+                readiness: "pending".into(),
+                route_id: Some("main".into()),
+                dimensions: None,
+            },
+            agents: xai_grok_shell::session::prime::PrimeIndexCollectionStatus {
+                collection: "agents".into(),
+                generation: 0,
+                fingerprint_short: String::new(),
+                item_count: 0,
+                vector_count: 0,
+                missing_vectors: 0,
+                readiness: "ready".into(),
+                route_id: None,
+                dimensions: None,
+            },
+            job: Some(xai_grok_shell::session::prime::PrimeIndexJobStatus {
+                api_version: 1,
+                job_id: "j1".into(),
+                kind: "backfill".into(),
+                collection: "skills".into(),
+                state: "running".into(),
+                generation: 4,
+                fingerprint_short: "abc123def456".into(),
+                done: 1,
+                total: 3,
+                confirm_configured_profile: false,
+                configured_route: Some("main".into()),
+                failure: None,
+            }),
+            configured_route: Some("main".into()),
+            capabilities: xai_grok_shell::session::prime::PrimeIndexCapabilities::SUPPORTED,
+            unchanged: false,
+        }
+    }
+
     #[test]
     fn x_cancels_in_flight_skill_regress_while_pending() {
         let (mut agent, mut modal) = skills_modal_with_row();
@@ -3028,6 +3094,74 @@ mod skills_regress_dispatch_tests {
             "x must not cancel a non-regression pending action, got {outcome:?}"
         );
         assert!(agent.extensions_modal.is_some());
+    }
+
+    #[test]
+    fn simultaneous_regress_and_index_x_cancels_regress_c_cancels_index() {
+        let (mut agent, mut modal) = skills_modal_with_row();
+        modal.pending_action = Some("regressing...".into());
+        modal.prime_index_capable = true;
+        modal.prime_index = Some(running_prime_index());
+        agent.skill_regress_in_flight = Some("deploy-prod".into());
+        agent.extensions_modal = Some(modal);
+
+        let outcome = agent.handle_extensions_modal_key(&key(crossterm::event::KeyCode::Char('x')));
+        match outcome {
+            InputOutcome::Action(Action::CancelSkillRegress { name }) => {
+                assert_eq!(name, "deploy-prod");
+            }
+            other => panic!("x must cancel skill regress, not the index, got {other:?}"),
+        }
+
+        let outcome = agent.handle_extensions_modal_key(&key(crossterm::event::KeyCode::Char('c')));
+        assert!(
+            matches!(outcome, InputOutcome::Action(Action::PrimeIndexCancel)),
+            "c must cancel the Prime index while regress is in flight, got {outcome:?}"
+        );
+        assert!(agent.extensions_modal.is_some());
+        assert_eq!(
+            agent
+                .extensions_modal
+                .as_ref()
+                .and_then(|s| s.pending_action.as_deref()),
+            Some("regressing...")
+        );
+    }
+
+    #[test]
+    fn idle_c_cancels_prime_index_without_stealing_x() {
+        let (mut agent, mut modal) = skills_modal_with_row();
+        modal.prime_index_capable = true;
+        modal.prime_index = Some(running_prime_index());
+        agent.extensions_modal = Some(modal);
+
+        let outcome = agent.handle_extensions_modal_key(&key(crossterm::event::KeyCode::Char('x')));
+        match outcome {
+            InputOutcome::Action(Action::CancelSkillRegress { name }) => {
+                assert_eq!(name, "deploy-prod");
+            }
+            other => panic!("idle x must still cancel skill regress, got {other:?}"),
+        }
+
+        let outcome = agent.handle_extensions_modal_key(&key(crossterm::event::KeyCode::Char('c')));
+        assert!(
+            matches!(outcome, InputOutcome::Action(Action::PrimeIndexCancel)),
+            "c must cancel the Prime index, got {outcome:?}"
+        );
+    }
+
+    #[test]
+    fn c_is_ignored_when_shell_lacks_prime_index() {
+        let (mut agent, mut modal) = skills_modal_with_row();
+        modal.prime_index_capable = false;
+        modal.prime_index = Some(running_prime_index());
+        agent.extensions_modal = Some(modal);
+
+        let outcome = agent.handle_extensions_modal_key(&key(crossterm::event::KeyCode::Char('c')));
+        assert!(
+            matches!(outcome, InputOutcome::Changed | InputOutcome::Unchanged),
+            "c must not cancel the index when primeIndex is not advertised, got {outcome:?}"
+        );
     }
 
     #[test]

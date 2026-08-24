@@ -1059,11 +1059,36 @@ pub fn read_summary_contained(session_dir: &Path) -> io::Result<Summary> {
     serde_json::from_slice(&bytes).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
 }
 
-/// Whether companion/meta pair files exist under the session dirfd.
+/// Whether a complete usable companion/meta pair exists after recovery.
+///
+/// Torn or half-written pairs (companion XOR meta) are treated as absent so
+/// fork copy can no-op after the target summary is already on disk. A
+/// complete pair that fails digest/model validation is also treated as
+/// absent rather than as a reason to skip writing `summary.json`.
 pub fn identity_pair_present(session_dir: &Path) -> io::Result<bool> {
     let root = SessionRoot::open(session_dir)?;
     recover_identity_txn(&root)?;
-    Ok(root.exists_nofollow(MODEL_ROUTE_FILE)? || root.exists_nofollow(MODEL_IDENTITY_META)?)
+    let companion = root.exists_nofollow(MODEL_ROUTE_FILE)?;
+    let meta = root.exists_nofollow(MODEL_IDENTITY_META)?;
+    if !companion || !meta {
+        return Ok(false);
+    }
+    if !root.exists_nofollow(SUMMARY_FILE)? {
+        return Ok(false);
+    }
+    let summary_bytes = match root.read_regular(SUMMARY_FILE) {
+        Ok(bytes) if !bytes.is_empty() => bytes,
+        _ => return Ok(false),
+    };
+    let Ok(summary) = serde_json::from_slice::<Summary>(&summary_bytes) else {
+        return Ok(false);
+    };
+    match load_route_companion(session_dir, &summary) {
+        Ok(Some(_)) => Ok(true),
+        Ok(None) => Ok(false),
+        Err(error) if error.kind() == io::ErrorKind::InvalidData => Ok(false),
+        Err(error) => Err(error),
+    }
 }
 
 /// Commit summary + optional companion as one identity transaction.
@@ -1390,40 +1415,120 @@ pub fn clear_route_companion(session_dir: &Path) -> io::Result<()> {
 /// Copy companion+meta from source session dir into target, rebinding digests
 /// to the already-written target summary. Used by fork/copy. No rewrite of
 /// the target summary. Fails closed on source pair mismatch.
+///
+/// Callers must write the target `summary.json` first. This function never
+/// typed-reserializes or overwrites that file: meta digests bind to the
+/// exact on-disk bytes. A model-identity change omits the companion so
+/// resume resolves the new canonical model instead of relabeling the
+/// source route. Unknown additive companion fields are preserved by
+/// patching the raw JSON object (pair_id only).
 pub fn copy_route_companion_for_fork(
     source_session_dir: &Path,
     target_session_dir: &Path,
     target_summary: &Summary,
 ) -> io::Result<()> {
-    // Load against source summary on disk so digests match source pair.
+    let target_root = SessionRoot::open(target_session_dir)?;
+    let _lock = target_root.lock_exclusive()?;
+    recover_identity_txn(&target_root)?;
+    if !target_root.exists_nofollow(SUMMARY_FILE)? {
+        return Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            "target summary.json is required before identity pair copy",
+        ));
+    }
+    let target_summary_bytes = target_root.read_regular(SUMMARY_FILE)?;
+    if target_summary_bytes.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "target summary.json is empty (0 bytes)",
+        ));
+    }
+    let on_disk_target: Summary = serde_json::from_slice(&target_summary_bytes)
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+
     let source_root = SessionRoot::open(source_session_dir)?;
     recover_identity_txn(&source_root)?;
-    if !source_root.exists_nofollow(MODEL_ROUTE_FILE)?
-        && !source_root.exists_nofollow(MODEL_IDENTITY_META)?
+    let companion_exists = source_root.exists_nofollow(MODEL_ROUTE_FILE)?;
+    let meta_exists = source_root.exists_nofollow(MODEL_IDENTITY_META)?;
+    if !companion_exists || !meta_exists {
+        // Torn/incomplete pair: no-op only because the target summary already
+        // exists. Resume will resolve the model without a companion.
+        return Ok(());
+    }
+    if !source_root.exists_nofollow(SUMMARY_FILE)? {
+        return Ok(());
+    }
+    let source_summary_bytes = source_root.read_regular(SUMMARY_FILE)?;
+    let source_summary: Summary = serde_json::from_slice(&source_summary_bytes)
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+
+    // Copy provenance only when the fork keeps the same canonical model.
+    // A `new_model_id` override must not relabel or retain the source route.
+    if source_summary.current_model_id != target_summary.current_model_id
+        || source_summary.current_model_id != on_disk_target.current_model_id
     {
         return Ok(());
     }
-    if source_root.exists_nofollow(SUMMARY_FILE)? {
-        let source_summary_bytes = source_root.read_regular(SUMMARY_FILE)?;
-        let source_summary: Summary = serde_json::from_slice(&source_summary_bytes)
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-        let companion = load_route_companion(source_session_dir, &source_summary)?;
-        if let Some(mut prov) = companion {
-            // Fresh pair id for the fork so source/target cannot share identity.
-            let new_pair = uuid::Uuid::new_v4().to_string();
-            prov = prov
-                .with_pair_id(&new_pair)
-                .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e.to_string()))?;
-            // Rebind canonical to the target summary's current model when present.
-            if let Ok(canon) =
-                xai_grok_models::CanonicalModelId::new(target_summary.current_model_id.0.as_ref())
-            {
-                prov = prov.with_canonical_model(&canon);
-            }
-            commit_summary_and_companion(target_session_dir, target_summary, Some(&prov), false)?;
-        }
-    }
-    Ok(())
+
+    let Some(prov) = load_route_companion(source_session_dir, &source_summary)? else {
+        return Ok(());
+    };
+
+    let companion_bytes = source_root.read_regular(MODEL_ROUTE_FILE)?;
+    let new_pair = uuid::Uuid::new_v4().to_string();
+    let _ = prov
+        .with_pair_id(&new_pair)
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e.to_string()))?;
+    let rebound_companion = patch_companion_pair_id(&companion_bytes, &new_pair)?;
+    let _: ModelRouteProvenance = serde_json::from_slice(&rebound_companion).map_err(|e| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("rebound model_route.json: {e}"),
+        )
+    })?;
+
+    let summary_sha = sha256_hex(&target_summary_bytes);
+    let companion_sha = sha256_hex(&rebound_companion);
+    let meta = IdentityMeta {
+        version: META_VERSION,
+        pair_id: new_pair,
+        canonical_model: source_summary.current_model_id.0.to_string(),
+        summary_sha256: summary_sha,
+        companion_sha256: Some(companion_sha.clone()),
+    };
+    let meta_bytes = serde_json::to_vec_pretty(&meta).map_err(io::Error::other)?;
+    let meta_sha = sha256_hex(&meta_bytes);
+
+    stage_and_commit(
+        &target_root,
+        None,
+        Some((
+            COMPANION_TMP,
+            MODEL_ROUTE_FILE,
+            &rebound_companion,
+            &companion_sha,
+        )),
+        Some((META_TMP, MODEL_IDENTITY_META, &meta_bytes, &meta_sha)),
+        None,
+    )
+}
+
+/// Preserve unknown additive companion keys while issuing a fresh pair token.
+fn patch_companion_pair_id(companion_bytes: &[u8], new_pair_id: &str) -> io::Result<Vec<u8>> {
+    let mut value: serde_json::Value = serde_json::from_slice(companion_bytes).map_err(|e| {
+        io::Error::new(io::ErrorKind::InvalidData, format!("model_route.json: {e}"))
+    })?;
+    let obj = value.as_object_mut().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "model_route.json must be a JSON object",
+        )
+    })?;
+    obj.insert(
+        "pair_id".to_string(),
+        serde_json::Value::String(new_pair_id.to_owned()),
+    );
+    serde_json::to_vec_pretty(&value).map_err(io::Error::other)
 }
 
 /// Build secret-free provenance from a live production route context.
@@ -1928,6 +2033,182 @@ mod tests {
         );
         assert!(!session.join(SUMMARY_TMP).exists());
         assert!(!session.join(MODEL_IDENTITY_TXN).exists());
+    }
+
+    fn write_owner_only(path: &Path, bytes: &[u8]) {
+        fs::write(path, bytes).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(path, fs::Permissions::from_mode(0o600)).unwrap();
+        }
+    }
+
+    fn inject_companion_extra(session: &Path, key: &str, value: serde_json::Value) {
+        let path = session.join(MODEL_ROUTE_FILE);
+        let mut companion: serde_json::Value =
+            serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        companion
+            .as_object_mut()
+            .unwrap()
+            .insert(key.to_string(), value);
+        let bytes = serde_json::to_vec_pretty(&companion).unwrap();
+        write_owner_only(&path, &bytes);
+        let mut meta: IdentityMeta =
+            serde_json::from_slice(&fs::read(session.join(MODEL_IDENTITY_META)).unwrap()).unwrap();
+        meta.companion_sha256 = Some(sha256_hex(&bytes));
+        write_owner_only(
+            &session.join(MODEL_IDENTITY_META),
+            &serde_json::to_vec_pretty(&meta).unwrap(),
+        );
+    }
+
+    fn inject_summary_digest(session: &Path, summary_bytes: &[u8]) {
+        write_owner_only(&session.join(SUMMARY_FILE), summary_bytes);
+        let mut meta: IdentityMeta =
+            serde_json::from_slice(&fs::read(session.join(MODEL_IDENTITY_META)).unwrap()).unwrap();
+        meta.summary_sha256 = sha256_hex(summary_bytes);
+        write_owner_only(
+            &session.join(MODEL_IDENTITY_META),
+            &serde_json::to_vec_pretty(&meta).unwrap(),
+        );
+    }
+
+    #[test]
+    fn identity_pair_present_requires_complete_usable_pair() {
+        let dir = tempdir().unwrap();
+        let session = dir.path().join("sess");
+        fs::create_dir_all(&session).unwrap();
+        let summary = sample_summary("openai-gpt-4o");
+        assert!(!identity_pair_present(&session).unwrap());
+
+        commit_summary_and_companion(
+            &session,
+            &summary,
+            Some(&provenance("openai-gpt-4o")),
+            false,
+        )
+        .unwrap();
+        assert!(identity_pair_present(&session).unwrap());
+
+        fs::remove_file(session.join(MODEL_IDENTITY_META)).unwrap();
+        assert!(!identity_pair_present(&session).unwrap());
+    }
+
+    #[test]
+    fn copy_rebinds_to_existing_summary_bytes_without_rewrite() {
+        let dir = tempdir().unwrap();
+        let source = dir.path().join("src");
+        let target = dir.path().join("dst");
+        fs::create_dir_all(&source).unwrap();
+        fs::create_dir_all(&target).unwrap();
+        let summary = sample_summary("openai-gpt-4o");
+        commit_summary_and_companion(&source, &summary, Some(&provenance("openai-gpt-4o")), false)
+            .unwrap();
+
+        let mut source_raw = fs::read_to_string(source.join(SUMMARY_FILE)).unwrap();
+        source_raw.pop();
+        source_raw.push_str(",\n  \"futureSummaryField\": \"kept\"\n}");
+        inject_summary_digest(&source, source_raw.as_bytes());
+        inject_companion_extra(&source, "futureCompanionField", serde_json::json!("kept"));
+
+        let mut target_summary = summary.clone();
+        target_summary.info.id = acp::SessionId::new("s2");
+        let target_bytes = {
+            let mut raw = serde_json::to_string_pretty(&target_summary).unwrap();
+            raw.pop();
+            raw.push_str(",\n  \"futureSummaryField\": \"kept\"\n}");
+            raw.into_bytes()
+        };
+        write_owner_only(&target.join(SUMMARY_FILE), &target_bytes);
+
+        copy_route_companion_for_fork(&source, &target, &target_summary).unwrap();
+        assert_eq!(fs::read(target.join(SUMMARY_FILE)).unwrap(), target_bytes);
+        let loaded = load_route_companion(&target, &target_summary)
+            .unwrap()
+            .expect("fork must keep a usable pair");
+        assert_ne!(
+            loaded.pair_id.as_deref(),
+            Some("pair-token-aaaaaaaaaaaaaaaa")
+        );
+        let companion_raw = fs::read_to_string(target.join(MODEL_ROUTE_FILE)).unwrap();
+        assert!(companion_raw.contains(r#""futureCompanionField""#));
+        assert!(companion_raw.contains(r#""kept""#));
+        let meta: IdentityMeta =
+            serde_json::from_slice(&fs::read(target.join(MODEL_IDENTITY_META)).unwrap()).unwrap();
+        assert_eq!(meta.summary_sha256, sha256_hex(&target_bytes));
+        let companion_sha = sha256_hex(companion_raw.as_bytes());
+        assert_eq!(
+            meta.companion_sha256.as_deref(),
+            Some(companion_sha.as_str())
+        );
+    }
+
+    #[test]
+    fn copy_omits_route_when_model_identity_changes() {
+        let dir = tempdir().unwrap();
+        let source = dir.path().join("src");
+        let target = dir.path().join("dst");
+        fs::create_dir_all(&source).unwrap();
+        fs::create_dir_all(&target).unwrap();
+        let summary = sample_summary("openai-gpt-4o");
+        commit_summary_and_companion(&source, &summary, Some(&provenance("openai-gpt-4o")), false)
+            .unwrap();
+
+        let mut target_summary = sample_summary("grok-4.5");
+        target_summary.info.id = acp::SessionId::new("s2");
+        let target_bytes = serde_json::to_vec_pretty(&target_summary).unwrap();
+        write_owner_only(&target.join(SUMMARY_FILE), &target_bytes);
+
+        copy_route_companion_for_fork(&source, &target, &target_summary).unwrap();
+        assert_eq!(fs::read(target.join(SUMMARY_FILE)).unwrap(), target_bytes);
+        assert!(!target.join(MODEL_ROUTE_FILE).exists());
+        assert!(!target.join(MODEL_IDENTITY_META).exists());
+        assert!(
+            load_route_companion(&target, &target_summary)
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn copy_noops_on_incomplete_pair_after_summary_exists() {
+        let dir = tempdir().unwrap();
+        let source = dir.path().join("src");
+        let target = dir.path().join("dst");
+        fs::create_dir_all(&source).unwrap();
+        fs::create_dir_all(&target).unwrap();
+        let summary = sample_summary("openai-gpt-4o");
+        commit_summary_and_companion(&source, &summary, Some(&provenance("openai-gpt-4o")), false)
+            .unwrap();
+        fs::remove_file(source.join(MODEL_IDENTITY_META)).unwrap();
+        assert!(!identity_pair_present(&source).unwrap());
+
+        let mut target_summary = summary.clone();
+        target_summary.info.id = acp::SessionId::new("s2");
+        let target_bytes = serde_json::to_vec_pretty(&target_summary).unwrap();
+        write_owner_only(&target.join(SUMMARY_FILE), &target_bytes);
+
+        copy_route_companion_for_fork(&source, &target, &target_summary).unwrap();
+        assert_eq!(fs::read(target.join(SUMMARY_FILE)).unwrap(), target_bytes);
+        assert!(!target.join(MODEL_ROUTE_FILE).exists());
+        assert!(!target.join(MODEL_IDENTITY_META).exists());
+    }
+
+    #[test]
+    fn copy_requires_target_summary_and_does_not_invent_one() {
+        let dir = tempdir().unwrap();
+        let source = dir.path().join("src");
+        let target = dir.path().join("dst");
+        fs::create_dir_all(&source).unwrap();
+        fs::create_dir_all(&target).unwrap();
+        let summary = sample_summary("openai-gpt-4o");
+        commit_summary_and_companion(&source, &summary, Some(&provenance("openai-gpt-4o")), false)
+            .unwrap();
+        let err = copy_route_companion_for_fork(&source, &target, &summary).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::NotFound);
+        assert!(!target.join(SUMMARY_FILE).exists());
+        assert!(!target.join(MODEL_ROUTE_FILE).exists());
     }
 
     #[cfg(unix)]

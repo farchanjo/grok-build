@@ -2353,25 +2353,25 @@ impl JsonlStorageAdapter {
             execution_backend: source_summary.execution_backend,
             external_runtime: source_summary.external_runtime,
         };
-        // Identity pair present: copy companion + rebind digests through the
-        // identity journal into staging. Old sessions without a pair keep the
-        // wrap-fork summary so unknown extra keys still round-trip.
-        match super::model_route::identity_pair_present(&source_dir) {
-            Ok(true) => {
-                super::model_route::copy_route_companion_for_fork(
-                    &source_dir,
-                    &staging.path,
-                    &target_summary,
-                )?;
+        // Always wrap the source summary first so unknown top-level keys and
+        // raw `external_runtime` survive even when a model_route identity pair
+        // is present. Pair copy then rebinds companion/meta to those exact
+        // on-disk bytes and must not typed-reserialize the summary.
+        let summary_bytes = wrap_fork_summary_json(&source_summary_raw, &target_summary)?;
+        super::write_bytes_atomic(&staging_adapter.summary_file(target_info), &summary_bytes)?;
+        let models_compatible = target_summary.current_model_id == source_summary.current_model_id;
+        if models_compatible {
+            match super::model_route::identity_pair_present(&source_dir) {
+                Ok(true) => {
+                    super::model_route::copy_route_companion_for_fork(
+                        &source_dir,
+                        &staging.path,
+                        &target_summary,
+                    )?;
+                }
+                Ok(false) => {}
+                Err(error) => return Err(error),
             }
-            Ok(false) => {
-                let summary_bytes = wrap_fork_summary_json(&source_summary_raw, &target_summary)?;
-                super::write_bytes_atomic(
-                    &staging_adapter.summary_file(target_info),
-                    &summary_bytes,
-                )?;
-            }
-            Err(error) => return Err(error),
         }
         let copy_optional_regular =
             |enabled: bool, source: &Path, destination: &Path| -> io::Result<bool> {

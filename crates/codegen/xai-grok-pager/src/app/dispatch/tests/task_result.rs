@@ -3080,6 +3080,120 @@ fn listed_chatgpt_threshold(app: &AppView, id: AgentId) -> Option<u8> {
     }
 }
 
+fn openai_list_snapshot(generation: u64) -> crate::app::actions::ProviderManagementResult {
+    use xai_grok_shell::provider_registry::management::dto::{
+        CredentialPresence, ProviderListRow, ProviderListSnapshot, RegistryGeneration,
+    };
+    crate::app::actions::ProviderManagementResult::List(ProviderListSnapshot {
+        generation: RegistryGeneration(generation),
+        rows: vec![ProviderListRow {
+            id: "openai".into(),
+            display_name: "OpenAI".into(),
+            kind: "openai".into(),
+            enabled: true,
+            is_built_in: true,
+            is_configured: false,
+            base_url: None,
+            credentials: CredentialPresence {
+                has_oauth: true,
+                ..CredentialPresence::default()
+            },
+            status_label: "Connected".into(),
+            status_detail: Some("Connected with ChatGPT OAuth".into()),
+        }],
+        warnings: vec![],
+    })
+}
+
+#[test]
+fn list_snapshot_preserves_chatgpt_fields_and_overlays_catalog_window() {
+    use crate::views::modal::ActiveModal;
+    use crate::views::providers_modal::{
+        ChatgptAccountEmail, ChatgptModel, ProviderKind, ProviderModalState, ProviderStatus,
+    };
+
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    let mut info = acp::ModelInfo::new(
+        acp::ModelId::new(std::sync::Arc::from("chatgpt-gpt-5.6-sol")),
+        "GPT-5.6 Sol".to_string(),
+    );
+    info.meta = serde_json::json!({ "totalContextTokens": 1_000_000 })
+        .as_object()
+        .cloned();
+    app.models.available.insert(
+        acp::ModelId::new(std::sync::Arc::from("chatgpt-gpt-5.6-sol")),
+        info,
+    );
+
+    let mut state = ProviderModalState::new();
+    let mut models = vec![ChatgptModel::from_catalog(
+        "chatgpt-gpt-5.6-sol".into(),
+        "GPT-5.6 Sol".into(),
+        Some(272_000),
+    )];
+    models[0].auto_compact_threshold = Some(60);
+    state.set_status(
+        &ProviderKind::OpenAi,
+        ProviderStatus::Connected {
+            detail: Some("Connected with ChatGPT OAuth".into()),
+            chatgpt_account_email: ChatgptAccountEmail::new("user@example.com"),
+            chatgpt_models: models,
+        },
+    );
+    app.agents.get_mut(&id).unwrap().active_modal = Some(ActiveModal::Providers {
+        state: Box::new(state),
+    });
+
+    let follow_up = dispatch_task_result(
+        TaskResult::ProviderOperationComplete {
+            agent_id: id,
+            provider: ProviderKind::Xai,
+            status: ProviderStatus::Missing,
+            claude_cli_status: None,
+            repair: None,
+            credential_write_receipt: None,
+            management: Some(openai_list_snapshot(9)),
+        },
+        &mut app,
+    );
+    assert!(
+        follow_up.is_empty(),
+        "list snapshot must not enqueue a refresh loop, got {follow_up:?}"
+    );
+
+    let ActiveModal::Providers { state } = app.agents[&id].active_modal.as_ref().unwrap() else {
+        panic!("providers modal must stay open");
+    };
+    assert_eq!(state.list_generation, 9);
+    match state.status(&ProviderKind::OpenAi) {
+        ProviderStatus::Connected {
+            chatgpt_account_email,
+            chatgpt_models,
+            ..
+        } => {
+            assert_eq!(
+                chatgpt_account_email
+                    .as_ref()
+                    .map(ChatgptAccountEmail::as_str),
+                Some("user@example.com")
+            );
+            assert_eq!(chatgpt_models.len(), 1);
+            assert_eq!(
+                chatgpt_models[0].context_window,
+                Some(1_000_000),
+                "catalog window from app.models must overlay after snapshot"
+            );
+            assert_eq!(
+                chatgpt_models[0].auto_compact_threshold,
+                Some(60),
+                "auto-compact override must survive the list snapshot"
+            );
+        }
+        other => panic!("expected connected OpenAI, got {other:?}"),
+    }
+}
+
 #[test]
 fn skill_regress_cancel_keeps_pending_and_does_not_refetch() {
     use crate::views::extensions_modal::{ExtensionsModalState, ExtensionsTab};
