@@ -1,15 +1,129 @@
 //! Modal input handlers: agents/persona modals and the extensions modal
 //! (hooks, plugins, marketplace, skills, MCP servers) with its actions.
 
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
 use super::AgentView;
 #[cfg(test)]
 use super::test_fixtures;
 use crate::app::actions::Action;
 use crate::app::app_view::InputOutcome;
 use crate::views::file_search::line_viewer::LineViewerState;
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+const SKILL_REGRESS_PENDING: &str = "regressing...";
+
+fn extensions_tab_switch_outcome(
+    state: &crate::views::extensions_modal::ExtensionsModalState,
+) -> InputOutcome {
+    if state.tab_data_is_loading() {
+        InputOutcome::Action(Action::RefreshExtensionsTab)
+    } else {
+        InputOutcome::Changed
+    }
+}
+
+fn is_skill_regress_cancel_shortcut(
+    state: &crate::views::extensions_modal::ExtensionsModalState,
+    ch: char,
+) -> bool {
+    // `x` on Skills cancels even when the "regressing..." badge was dropped
+    // (Esc / tab switch / reopen). Idle cancel is a shell no-op.
+    let skills_x = matches!(
+        crate::views::extensions_modal::resolve_key(state.active_tab, ch),
+        Some(crate::views::extensions_modal::ButtonAction::CancelSelectedSkillRegress)
+    );
+    if !skills_x {
+        return false;
+    }
+    match state.pending_action.as_deref() {
+        None | Some(SKILL_REGRESS_PENDING) => true,
+        Some(_) => false,
+    }
+}
+
+/// Drop any cached Smart rank, then dispatch Prime search when the skills
+/// tab is in Smart mode with a non-empty query. Clearing first keeps vector
+/// hits from query A out of the picker for query B until B lands.
+fn skills_smart_search_query_outcome(
+    state: &mut crate::views::extensions_modal::ExtensionsModalState,
+) -> InputOutcome {
+    state.skills_smart_rank = None;
+    if state.skills_smart_search_query().is_some() {
+        InputOutcome::Action(Action::SearchSkillsSmart)
+    } else {
+        InputOutcome::Changed
+    }
+}
+
+fn restore_skill_regress_pending_on(
+    state: &mut crate::views::extensions_modal::ExtensionsModalState,
+    in_flight: Option<&str>,
+) {
+    if in_flight.is_none() {
+        return;
+    }
+    if state.active_tab == crate::views::extensions_modal::ExtensionsTab::Skills
+        && (state.pending_action.is_none()
+            || state.pending_action.as_deref() == Some(SKILL_REGRESS_PENDING))
+    {
+        state.pending_action = Some(SKILL_REGRESS_PENDING.into());
+    }
+}
+
+/// Advance the active tab's status filter. Returns whether a cycle happened.
+fn cycle_extensions_status_filter(
+    state: &mut crate::views::extensions_modal::ExtensionsModalState,
+) -> bool {
+    use crate::views::extensions_modal::ExtensionsTab;
+    match state.active_tab {
+        ExtensionsTab::Hooks => {
+            state.hooks_filter = state.hooks_filter.next();
+            true
+        }
+        ExtensionsTab::Plugins => {
+            state.plugins_filter = state.plugins_filter.next();
+            true
+        }
+        ExtensionsTab::McpServers => {
+            state.mcps_filter = state.mcps_filter.next();
+            true
+        }
+        ExtensionsTab::Skills => {
+            state.skills_status_filter = state.skills_status_filter.next();
+            true
+        }
+        _ => false,
+    }
+}
+
+fn reset_extensions_filter_selection(
+    state: &mut crate::views::extensions_modal::ExtensionsModalState,
+) {
+    state.clear_skills_restore_anchor();
+    state.picker_state.selected = 0;
+    state.picker_state.scroll_offset = None;
+    state.picker_state.tabs_focused = false;
+}
 
 impl AgentView {
+    /// Restore the Skills-tab "regressing..." badge after Esc/reopen or a tab
+    /// switch when a local run is still in flight. Opening the modal does not
+    /// start a run.
+    pub(crate) fn restore_skill_regress_pending(&mut self) {
+        let in_flight = self.skill_regress_in_flight.as_deref();
+        if let Some(state) = self.extensions_modal.as_mut() {
+            restore_skill_regress_pending_on(state, in_flight);
+        }
+    }
+
+    /// Advance the Smart-search generation so in-flight completions cannot
+    /// reinstall a rank after inventory reload or a later fetch. Wrapping
+    /// arithmetic matches other UI generation counters.
+    pub(crate) fn bump_skills_smart_search_gen(&mut self) -> u64 {
+        self.skills_smart_search_gen = self.skills_smart_search_gen.wrapping_add(1);
+        self.skills_smart_search_gen
+    }
+
     // -- Agents modal input handling --
 
     pub(super) fn handle_agents_modal_key(
@@ -270,9 +384,11 @@ impl AgentView {
                 }
             }
             ButtonAction::ToggleSelectedSkill => {
-                if let TabDataState::Loaded(ref skills) = state.skills_data
+                if let TabDataState::Loaded(ref snapshot) = state.skills_data
                     && let Some(idx) = state.selected_data_index()
-                    && let Some(skill) = skills.get(idx)
+                    && let Some(row) = snapshot.rows.get(idx)
+                    && row.enableable
+                    && let Some(skill) = row.skill.as_ref()
                 {
                     (Some(skill.name.clone()), next_enabled)
                 } else {
@@ -380,6 +496,10 @@ impl AgentView {
         // overlay is showing — that case is handled above). Esc closes the
         // modal so a hung list/refresh cannot trap the user; background
         // work (auth, refresh) continues without the UI lock.
+        //
+        // Local skill regression is the exception: `x` must still dispatch
+        // cancel while "regressing..." is showing. Esc is not the only way
+        // out of an in-flight eval.
         if self
             .extensions_modal
             .as_ref()
@@ -389,6 +509,16 @@ impl AgentView {
                 KeyCode::Esc => {
                     self.extensions_modal = None;
                     InputOutcome::Changed
+                }
+                KeyCode::Char(ch)
+                    if self
+                        .extensions_modal
+                        .as_ref()
+                        .is_some_and(|s| is_skill_regress_cancel_shortcut(s, ch)) =>
+                {
+                    self.execute_modal_button_action(
+                        crate::views::extensions_modal::ButtonAction::CancelSelectedSkillRegress,
+                    )
                 }
                 _ => InputOutcome::Changed,
             };
@@ -583,6 +713,7 @@ impl AgentView {
                     return InputOutcome::Changed;
                 }
                 crate::views::modal_window::ModalWindowOutcome::JumpToParent(idx) => {
+                    state.clear_skills_restore_anchor();
                     state.picker_state.selected = idx;
                     state.picker_state.scroll_offset = None;
                     return InputOutcome::Changed;
@@ -612,6 +743,7 @@ impl AgentView {
             crate::views::extensions_modal::ExtensionsTab::Hooks
                 | crate::views::extensions_modal::ExtensionsTab::Plugins
                 | crate::views::extensions_modal::ExtensionsTab::McpServers
+                | crate::views::extensions_modal::ExtensionsTab::Skills
         );
         let filter = match state.active_tab {
             crate::views::extensions_modal::ExtensionsTab::Hooks => state.hooks_filter,
@@ -619,7 +751,12 @@ impl AgentView {
             crate::views::extensions_modal::ExtensionsTab::McpServers => state.mcps_filter,
             _ => crate::views::extensions_modal::StatusFilter::All,
         };
-        let action_keys = crate::views::extensions_modal::extensions_action_keys(state.active_tab);
+        let mut action_keys =
+            crate::views::extensions_modal::extensions_action_keys_for_state(state);
+        // Let the picker emit FilterCycled for `f` instead of Action('f').
+        if has_filter {
+            action_keys.retain(|&(ch, _)| ch != 'f');
+        }
         let entry_count = state.entry_data_indices.len();
         let non_selectable_owned = Self::extensions_modal_non_selectable_mask(state, entry_count);
         let non_selectable = &non_selectable_owned;
@@ -640,12 +777,24 @@ impl AgentView {
             tabs: Some(&labels),
             active_tab: active_idx,
             filter_label: if has_filter {
-                Some(filter.label())
+                Some(
+                    if state.active_tab == crate::views::extensions_modal::ExtensionsTab::Skills {
+                        state.skills_status_filter.label()
+                    } else {
+                        filter.label()
+                    },
+                )
             } else {
                 None
             },
             filter_key_hint: if has_filter { Some("f") } else { None },
-            filter_active: filter != crate::views::extensions_modal::StatusFilter::All,
+            filter_active: if state.active_tab
+                == crate::views::extensions_modal::ExtensionsTab::Skills
+            {
+                !state.skills_status_filter.is_default()
+            } else {
+                filter != crate::views::extensions_modal::StatusFilter::All
+            },
             action_keys: &action_keys,
             disable_search: false,
             compact_bottom_bar: false,
@@ -659,12 +808,16 @@ impl AgentView {
         };
 
         let ev = crossterm::event::Event::Key(*key);
+        let prev_selected = state.picker_state.selected;
         let outcome = crate::views::picker::handle_picker_input(
             &ev,
             &mut state.picker_state,
             entry_count,
             &config,
         );
+        if state.picker_state.selected != prev_selected {
+            state.clear_skills_restore_anchor();
+        }
 
         // Search state now lives directly in picker_state (no sync needed).
 
@@ -681,32 +834,20 @@ impl AgentView {
                     // overlay, and pending [processing] badge so the
                     // new tab opens in a clean browse view.
                     state.switch_tab(tab);
+                    restore_skill_regress_pending_on(
+                        state,
+                        self.skill_regress_in_flight.as_deref(),
+                    );
                     state.window.tabs_focused = state.picker_state.tabs_focused;
+                    return extensions_tab_switch_outcome(state);
                 }
                 InputOutcome::Changed
             }
             crate::views::picker::PickerOutcome::FilterCycled => {
                 let mut cycled = false;
                 if let Some(ref mut state) = self.extensions_modal {
-                    cycled = match state.active_tab {
-                        crate::views::extensions_modal::ExtensionsTab::Hooks => {
-                            state.hooks_filter = state.hooks_filter.next();
-                            true
-                        }
-                        crate::views::extensions_modal::ExtensionsTab::Plugins => {
-                            state.plugins_filter = state.plugins_filter.next();
-                            true
-                        }
-                        crate::views::extensions_modal::ExtensionsTab::McpServers => {
-                            state.mcps_filter = state.mcps_filter.next();
-                            true
-                        }
-                        _ => false,
-                    };
-                    // Reset selection after filter change.
-                    state.picker_state.selected = 0;
-                    state.picker_state.scroll_offset = None;
-                    state.picker_state.tabs_focused = false;
+                    cycled = cycle_extensions_status_filter(state);
+                    reset_extensions_filter_selection(state);
                 }
                 if cycled {
                     self.log_extensions_modal_action(
@@ -752,8 +893,10 @@ impl AgentView {
             }
             crate::views::picker::PickerOutcome::Copy(_) => InputOutcome::Changed,
             crate::views::picker::PickerOutcome::SubmitQuery => InputOutcome::Changed,
-            crate::views::picker::PickerOutcome::Changed
-            | crate::views::picker::PickerOutcome::QueryChanged => InputOutcome::Changed,
+            crate::views::picker::PickerOutcome::Changed => InputOutcome::Changed,
+            crate::views::picker::PickerOutcome::QueryChanged => {
+                skills_smart_search_query_outcome(state)
+            }
             crate::views::picker::PickerOutcome::Unchanged => InputOutcome::Unchanged,
         }
     }
@@ -841,7 +984,7 @@ impl AgentView {
             return InputOutcome::Unchanged;
         }
         if state.apply_paste(text) {
-            InputOutcome::Changed
+            skills_smart_search_query_outcome(state)
         } else {
             InputOutcome::Unchanged
         }
@@ -879,12 +1022,16 @@ impl AgentView {
                         // Clears Add form, error overlay, and pending
                         // badge in addition to resetting picker state.
                         state.switch_tab(tab);
+                        restore_skill_regress_pending_on(
+                            state,
+                            self.skill_regress_in_flight.as_deref(),
+                        );
                         // Clicking a tab implies interaction with the tab list;
                         // show the focused highlight and keep arrow nav on tabs.
                         state.picker_state.tabs_focused = true;
                         state.window.tabs_focused = true;
                     }
-                    return InputOutcome::Changed;
+                    return extensions_tab_switch_outcome(state);
                 }
                 crate::views::modal_window::ModalWindowOutcome::Handled => {
                     return InputOutcome::Changed;
@@ -894,6 +1041,12 @@ impl AgentView {
                     // Resolve the char here; dispatch after the borrow
                     // is released so execute_modal_button_action can
                     // take &mut self.
+                    if id == 97 {
+                        state.picker_state.search_active = true;
+                        state.picker_state.tabs_focused = false;
+                        state.picker_state.selection_hidden = true;
+                        return InputOutcome::Changed;
+                    }
                     if id == 98 {
                         // "Tab/Shift+Tab tabs" hint — cycle to the next
                         // tab, mirroring the Tab keypress flow.
@@ -905,17 +1058,20 @@ impl AgentView {
                             // pending badge in addition to resetting
                             // picker state.
                             state.switch_tab(tab);
+                            restore_skill_regress_pending_on(
+                                state,
+                                self.skill_regress_in_flight.as_deref(),
+                            );
                             state.picker_state.tabs_focused = true;
                             state.window.tabs_focused = true;
                         }
-                        return InputOutcome::Changed;
+                        return extensions_tab_switch_outcome(state);
                     } else if id == 99 {
                         // "Esc close" shortcut — signal close via sentinel.
                         Some('\x00')
                     } else if id >= 100 {
-                        let keys = crate::views::extensions_modal::extensions_action_keys(
-                            state.active_tab,
-                        );
+                        let keys =
+                            crate::views::extensions_modal::extensions_action_keys_for_state(state);
                         keys.get(id - 100).map(|&(ch, _)| ch)
                     } else {
                         None
@@ -932,11 +1088,16 @@ impl AgentView {
                 return InputOutcome::Changed;
             }
             // Block action shortcuts while an action is in-flight
-            // (mirrors the keyboard guard in handle_extensions_modal_key).
+            // (mirrors the keyboard guard in handle_extensions_modal_key),
+            // except `x` during an in-flight skill regression.
             if self
                 .extensions_modal
                 .as_ref()
                 .is_some_and(|s| s.pending_action.is_some())
+                && !self
+                    .extensions_modal
+                    .as_ref()
+                    .is_some_and(|s| is_skill_regress_cancel_shortcut(s, ch))
             {
                 return InputOutcome::Changed;
             }
@@ -994,6 +1155,7 @@ impl AgentView {
             crate::views::extensions_modal::ExtensionsTab::Hooks
                 | crate::views::extensions_modal::ExtensionsTab::Plugins
                 | crate::views::extensions_modal::ExtensionsTab::McpServers
+                | crate::views::extensions_modal::ExtensionsTab::Skills
         );
         let filter = match state.active_tab {
             crate::views::extensions_modal::ExtensionsTab::Hooks => state.hooks_filter,
@@ -1022,12 +1184,24 @@ impl AgentView {
             tabs: Some(&labels),
             active_tab: active_idx,
             filter_label: if has_filter {
-                Some(filter.label())
+                Some(
+                    if state.active_tab == crate::views::extensions_modal::ExtensionsTab::Skills {
+                        state.skills_status_filter.label()
+                    } else {
+                        filter.label()
+                    },
+                )
             } else {
                 None
             },
             filter_key_hint: if has_filter { Some("f") } else { None },
-            filter_active: filter != crate::views::extensions_modal::StatusFilter::All,
+            filter_active: if state.active_tab
+                == crate::views::extensions_modal::ExtensionsTab::Skills
+            {
+                !state.skills_status_filter.is_default()
+            } else {
+                filter != crate::views::extensions_modal::StatusFilter::All
+            },
             action_keys: &action_keys,
             disable_search: false,
             compact_bottom_bar: false,
@@ -1040,12 +1214,16 @@ impl AgentView {
         };
 
         let ev = crossterm::event::Event::Mouse(*mouse);
+        let prev_selected = state.picker_state.selected;
         let outcome = crate::views::picker::handle_picker_input(
             &ev,
             &mut state.picker_state,
             entry_count,
             &config,
         );
+        if state.picker_state.selected != prev_selected {
+            state.clear_skills_restore_anchor();
+        }
 
         // Open the connectors URL on mouse-down (parity with Ctrl+O). A section-row
         // click routes as Selected or NonSelectableClick, so intercept both here.
@@ -1081,32 +1259,22 @@ impl AgentView {
                     // Clears Add form, error overlay, and pending
                     // badge in addition to resetting picker state.
                     state.switch_tab(tab);
+                    restore_skill_regress_pending_on(
+                        state,
+                        self.skill_regress_in_flight.as_deref(),
+                    );
                     // Mouse-driven tab switch via picker hit area → treat tabs as focused.
                     state.picker_state.tabs_focused = true;
                     state.window.tabs_focused = true;
+                    return extensions_tab_switch_outcome(state);
                 }
                 InputOutcome::Changed
             }
             crate::views::picker::PickerOutcome::FilterCycled => {
                 let mut cycled = false;
                 if let Some(ref mut state) = self.extensions_modal {
-                    cycled = match state.active_tab {
-                        crate::views::extensions_modal::ExtensionsTab::Hooks => {
-                            state.hooks_filter = state.hooks_filter.next();
-                            true
-                        }
-                        crate::views::extensions_modal::ExtensionsTab::Plugins => {
-                            state.plugins_filter = state.plugins_filter.next();
-                            true
-                        }
-                        crate::views::extensions_modal::ExtensionsTab::McpServers => {
-                            state.mcps_filter = state.mcps_filter.next();
-                            true
-                        }
-                        _ => false,
-                    };
-                    state.picker_state.selected = 0;
-                    state.picker_state.scroll_offset = None;
+                    cycled = cycle_extensions_status_filter(state);
+                    reset_extensions_filter_selection(state);
                 }
                 if cycled {
                     self.log_extensions_modal_action(
@@ -1128,8 +1296,14 @@ impl AgentView {
                 );
                 InputOutcome::Changed
             }
-            crate::views::picker::PickerOutcome::Changed
-            | crate::views::picker::PickerOutcome::QueryChanged => InputOutcome::Changed,
+            crate::views::picker::PickerOutcome::Changed => InputOutcome::Changed,
+            crate::views::picker::PickerOutcome::QueryChanged => {
+                if let Some(ref mut state) = self.extensions_modal {
+                    skills_smart_search_query_outcome(state)
+                } else {
+                    InputOutcome::Changed
+                }
+            }
             crate::views::picker::PickerOutcome::Unchanged => InputOutcome::Unchanged,
             _ => InputOutcome::Changed,
         }
@@ -1701,17 +1875,137 @@ impl AgentView {
             ButtonAction::ToggleSelectedSkill => {
                 if let Some(ref mut state) = self.extensions_modal {
                     use crate::views::extensions_modal::TabDataState;
-                    if let TabDataState::Loaded(ref skills) = state.skills_data
+                    if let TabDataState::Loaded(ref snapshot) = state.skills_data
                         && let Some(idx) = state.selected_data_index()
-                        && let Some(skill) = skills.get(idx)
+                        && let Some(row) = snapshot.rows.get(idx)
                     {
-                        state.pending_action = Some("toggling...".into());
-                        state.pending_entry_index = Some(state.picker_state.selected);
-                        return InputOutcome::Action(Action::ToggleSkill {
-                            skill_name: skill.name.clone(),
-                            enabled: !skill.enabled,
-                        });
+                        if !row.enableable {
+                            return InputOutcome::Changed;
+                        }
+                        if let Some(skill) = row.skill.as_ref() {
+                            state.pending_action = Some("toggling...".into());
+                            state.pending_entry_index = Some(state.picker_state.selected);
+                            return InputOutcome::Action(Action::ToggleSkill {
+                                skill_name: skill.name.clone(),
+                                enabled: !skill.enabled,
+                            });
+                        }
                     }
+                }
+                InputOutcome::Changed
+            }
+            ButtonAction::StartCreateSkill => {
+                if let Some(ref mut state) = self.extensions_modal {
+                    // Drop leftover search/tab focus so the form owns keys.
+                    // `n` is ignored while search is active; after Esc it must
+                    // open the wizard, not append to a retained query.
+                    state.picker_state.search_active = false;
+                    state.picker_state.tabs_focused = false;
+                    state.window.tabs_focused = false;
+                    state.input = Some(crate::views::extensions_modal::create_skill_wizard_input());
+                }
+                InputOutcome::Changed
+            }
+            ButtonAction::PublishSkill {
+                name,
+                description,
+                scope,
+                body,
+            } => {
+                if let Some(ref mut state) = self.extensions_modal {
+                    state.pending_action = Some("publishing...".into());
+                }
+                InputOutcome::Action(Action::PublishSkill {
+                    name,
+                    description,
+                    scope,
+                    body,
+                })
+            }
+            ButtonAction::CycleSkillSearchMode => {
+                if let Some(ref mut state) = self.extensions_modal {
+                    state.skills_search_mode = state.skills_search_mode.next();
+                    return skills_smart_search_query_outcome(state);
+                }
+                InputOutcome::Changed
+            }
+            ButtonAction::RunSelectedSkillRegress => {
+                let name = self.extensions_modal.as_ref().and_then(|state| {
+                    use crate::views::extensions_modal::TabDataState;
+                    if let TabDataState::Loaded(ref snapshot) = state.skills_data
+                        && let Some(idx) = state.selected_data_index()
+                        && let Some(row) = snapshot.rows.get(idx)
+                        && row.enableable
+                    {
+                        return Some(
+                            row.skill
+                                .as_ref()
+                                .map(|skill| skill.name.clone())
+                                .unwrap_or_else(|| row.identity.parent_dir_name.clone()),
+                        );
+                    }
+                    None
+                });
+                if let Some(name) = name {
+                    if let Some(ref mut state) = self.extensions_modal {
+                        state.pending_action = Some(SKILL_REGRESS_PENDING.into());
+                    }
+                    self.skill_regress_in_flight = Some(name.clone());
+                    return InputOutcome::Action(Action::RunSkillRegress { name });
+                }
+                InputOutcome::Changed
+            }
+            ButtonAction::PrimeIndexBackfill => {
+                return self.prime_index_action("backfill", false);
+            }
+            ButtonAction::PrimeIndexRebuild => {
+                return self.prime_index_action("rebuild", false);
+            }
+            ButtonAction::PrimeIndexCancel => {
+                return InputOutcome::Action(Action::PrimeIndexCancel);
+            }
+            ButtonAction::CancelSelectedSkillRegress => {
+                let index_running = self.extensions_modal.as_ref().is_some_and(|state| {
+                    state.prime_index.as_ref().is_some_and(|s| {
+                        s.job
+                            .as_ref()
+                            .is_some_and(|j| j.state == "running" || j.state == "cancelling")
+                    })
+                });
+                if index_running {
+                    return InputOutcome::Action(Action::PrimeIndexCancel);
+                }
+                if self.extensions_modal.as_ref().is_some_and(|state| {
+                    state
+                        .pending_action
+                        .as_deref()
+                        .is_some_and(|pending| pending != SKILL_REGRESS_PENDING)
+                }) {
+                    return InputOutcome::Changed;
+                }
+                // In-flight identity is authoritative. Reopen starts as
+                // Loading with no selectable row, and the regressing badge
+                // blocks j/k, so the cursor may sit on a different skill.
+                if let Some(name) = self.skill_regress_in_flight.clone() {
+                    return InputOutcome::Action(Action::CancelSkillRegress { name });
+                }
+                let name = self.extensions_modal.as_ref().and_then(|state| {
+                    use crate::views::extensions_modal::TabDataState;
+                    if let TabDataState::Loaded(ref snapshot) = state.skills_data
+                        && let Some(idx) = state.selected_data_index()
+                        && let Some(row) = snapshot.rows.get(idx)
+                    {
+                        return Some(
+                            row.skill
+                                .as_ref()
+                                .map(|skill| skill.name.clone())
+                                .unwrap_or_else(|| row.identity.parent_dir_name.clone()),
+                        );
+                    }
+                    None
+                });
+                if let Some(name) = name {
+                    return InputOutcome::Action(Action::CancelSkillRegress { name });
                 }
                 InputOutcome::Changed
             }
@@ -1881,7 +2175,7 @@ impl AgentView {
                             }
                         }
                         ExtensionsTab::Skills => {
-                            state.skills_filter = state.skills_filter.next();
+                            state.skills_status_filter = state.skills_status_filter.next();
                             state.picker_state.selected = 0;
                         }
                         _ => {}
@@ -1968,6 +2262,52 @@ impl AgentView {
         }
     }
 
+    fn prime_index_action(&mut self, kind: &str, confirm: bool) -> InputOutcome {
+        let Some(state) = self.extensions_modal.as_ref() else {
+            return InputOutcome::Changed;
+        };
+        if !state.prime_index_capable {
+            return InputOutcome::Changed;
+        }
+        let route = crate::views::retrieval_settings_modal::display_configured_route(
+            state
+                .prime_index
+                .as_ref()
+                .and_then(|s| s.configured_route.as_deref()),
+        );
+        if !confirm && route.is_empty() {
+            if let Some(ref mut state) = self.extensions_modal {
+                state.modal_message = Some(crate::views::extensions_modal::ModalMessage::Error(
+                    crate::views::retrieval_settings_modal::PRIME_UNAVAILABLE_PROFILE.to_string(),
+                ));
+            }
+            return InputOutcome::Changed;
+        }
+        if !confirm && !route.is_empty() {
+            let message = format!(
+                "Use configured route `{route}` for {kind}? This contacts the embedding profile."
+            );
+            return self.prompt_extensions_confirm(
+                message,
+                crate::views::extensions_modal::ConfirmationAction::PrimeIndex {
+                    kind: kind.to_owned(),
+                    collection: "skills".into(),
+                },
+            );
+        }
+        if kind == "rebuild" {
+            InputOutcome::Action(Action::PrimeIndexRebuild {
+                collection: "skills".into(),
+                confirm,
+            })
+        } else {
+            InputOutcome::Action(Action::PrimeIndexBackfill {
+                collection: "skills".into(),
+                confirm,
+            })
+        }
+    }
+
     fn prompt_extensions_confirm(
         &mut self,
         message: String,
@@ -2010,6 +2350,19 @@ impl AgentView {
                 }
                 InputOutcome::Action(Action::DeleteMcpServer { server_name })
             }
+            ConfirmationAction::PrimeIndex { kind, collection } => {
+                if kind == "rebuild" {
+                    InputOutcome::Action(Action::PrimeIndexRebuild {
+                        collection,
+                        confirm: true,
+                    })
+                } else {
+                    InputOutcome::Action(Action::PrimeIndexBackfill {
+                        collection,
+                        confirm: true,
+                    })
+                }
+            }
         };
         // Low-level arms stamp picker_state.selected; overwrite with the row
         // captured when the prompt opened (scroll can move selection under the overlay).
@@ -2041,6 +2394,23 @@ impl AgentView {
             }
         }
         InputOutcome::Changed
+    }
+}
+
+#[cfg(test)]
+mod skills_smart_search_gen_tests {
+    #[test]
+    fn bump_skills_smart_search_gen_wraps() {
+        let mut agent = super::test_fixtures::make_agent();
+        assert_eq!(agent.skills_smart_search_gen, 0);
+        assert_eq!(agent.bump_skills_smart_search_gen(), 1);
+        agent.skills_smart_search_gen = u64::MAX;
+        assert_eq!(
+            agent.bump_skills_smart_search_gen(),
+            0,
+            "generation must wrap so a long-lived agent cannot panic"
+        );
+        assert_eq!(agent.skills_smart_search_gen, 0);
     }
 }
 
@@ -2164,6 +2534,685 @@ mod marketplace_modal_action_tests {
             .expect("modal should remain open");
         assert!(matches!(state.marketplace_data, TabDataState::Loading));
         assert_eq!(state.pending_entry_index, None);
+    }
+}
+
+#[cfg(test)]
+mod skills_regress_dispatch_tests {
+    use crate::app::actions::Action;
+    use crate::app::app_view::InputOutcome;
+    use crate::views::extensions_modal::{
+        ButtonAction, ExtensionsModalState, ExtensionsTab, SkillsStatusFilter, SkillsTabSnapshot,
+        TabDataState,
+    };
+    use xai_grok_tools::implementations::skills::strict::{
+        ManagedSkillRow, SkillHealthStatus, SkillIdentity,
+    };
+    use xai_grok_tools::implementations::skills::types::SkillInfo;
+
+    fn plugin_row(name: &str, label: &str) -> ManagedSkillRow {
+        let mut skill = SkillInfo {
+            name: name.to_string(),
+            display_name: Some(label.to_string()),
+            description: "Ship it".into(),
+            path: format!("{name}/SKILL.md"),
+            ..SkillInfo::default()
+        };
+        skill.enabled = true;
+        ManagedSkillRow::from_valid(
+            skill,
+            SkillIdentity::new(name, None),
+            SkillHealthStatus::Untested,
+            None,
+        )
+    }
+
+    #[test]
+    fn run_regress_sends_skill_name_not_display_name() {
+        let mut agent = super::test_fixtures::make_agent();
+        let mut modal = ExtensionsModalState::new(ExtensionsTab::Skills);
+        let row = plugin_row("deploy-prod", "friendly");
+        assert_eq!(row.display_name(), "friendly");
+        modal.skills_data = TabDataState::Loaded(SkillsTabSnapshot {
+            rows: vec![row],
+            ..SkillsTabSnapshot::empty()
+        });
+        modal.entry_data_indices = vec![Some(0)];
+        modal.picker_state.selected = 0;
+        agent.extensions_modal = Some(modal);
+
+        let outcome = agent.execute_modal_button_action(ButtonAction::RunSelectedSkillRegress);
+        match outcome {
+            InputOutcome::Action(Action::RunSkillRegress { name }) => {
+                assert_eq!(name, "deploy-prod");
+            }
+            other => panic!("expected RunSkillRegress deploy-prod, got {other:?}"),
+        }
+        assert_eq!(
+            agent.skill_regress_in_flight.as_deref(),
+            Some("deploy-prod")
+        );
+        assert_eq!(
+            agent
+                .extensions_modal
+                .as_ref()
+                .and_then(|s| s.pending_action.as_deref()),
+            Some("regressing...")
+        );
+    }
+
+    #[test]
+    fn prime_index_rebuild_requires_confirm_and_shows_configured_route() {
+        let (mut agent, mut modal) = skills_modal_with_row();
+        modal.prime_index_capable = true;
+        modal.prime_index = Some(xai_grok_shell::session::prime::PrimeIndexStatus {
+            api_version: 1,
+            generation: 1,
+            fingerprint_short: "abc123def456".into(),
+            skills: xai_grok_shell::session::prime::PrimeIndexCollectionStatus {
+                collection: "skills".into(),
+                generation: 1,
+                fingerprint_short: "abc123def456".into(),
+                item_count: 1,
+                vector_count: 0,
+                missing_vectors: 1,
+                readiness: "pending".into(),
+                route_id: Some("main".into()),
+                dimensions: None,
+            },
+            agents: xai_grok_shell::session::prime::PrimeIndexCollectionStatus {
+                collection: "agents".into(),
+                generation: 0,
+                fingerprint_short: String::new(),
+                item_count: 0,
+                vector_count: 0,
+                missing_vectors: 0,
+                readiness: "ready".into(),
+                route_id: None,
+                dimensions: None,
+            },
+            job: None,
+            configured_route: Some("main".into()),
+            capabilities: xai_grok_shell::session::prime::PrimeIndexCapabilities::SUPPORTED,
+            unchanged: false,
+        });
+        agent.extensions_modal = Some(modal);
+        let outcome = agent.handle_extensions_modal_key(&key(crossterm::event::KeyCode::Char('u')));
+        assert!(
+            matches!(outcome, InputOutcome::Changed),
+            "rebuild must prompt before contacting the configured route, got {outcome:?}"
+        );
+        let msg = agent
+            .extensions_modal
+            .as_ref()
+            .and_then(|s| s.modal_message.as_ref());
+        match msg {
+            Some(crate::views::extensions_modal::ModalMessage::Confirmation {
+                message, ..
+            }) => {
+                assert!(message.contains("`main`"), "{message}");
+                assert!(!message.contains("http"), "{message}");
+                assert!(!message.contains("sk-"), "{message}");
+            }
+            other => panic!("expected route confirmation, got {other:?}"),
+        }
+
+        let (mut agent, mut modal) = skills_modal_with_row();
+        modal.prime_index_capable = false;
+        agent.extensions_modal = Some(modal);
+        let outcome = agent.handle_extensions_modal_key(&key(crossterm::event::KeyCode::Char('u')));
+        assert!(
+            !matches!(
+                outcome,
+                InputOutcome::Action(Action::PrimeIndexRebuild { .. })
+                    | InputOutcome::Action(Action::PrimeIndexBackfill { .. })
+            ),
+            "old shell must not start a prime index job, got {outcome:?}"
+        );
+        assert!(
+            agent
+                .extensions_modal
+                .as_ref()
+                .and_then(|s| s.modal_message.as_ref())
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn prime_index_confirm_never_shows_endpoint_or_secret() {
+        for raw in ["http://127.0.0.1/v1", "sk-live-secret"] {
+            let (mut agent, mut modal) = skills_modal_with_row();
+            modal.prime_index_capable = true;
+            modal.prime_index = Some(xai_grok_shell::session::prime::PrimeIndexStatus {
+                api_version: 1,
+                generation: 1,
+                fingerprint_short: "abc123def456".into(),
+                skills: xai_grok_shell::session::prime::PrimeIndexCollectionStatus {
+                    collection: "skills".into(),
+                    generation: 1,
+                    fingerprint_short: "abc123def456".into(),
+                    item_count: 1,
+                    vector_count: 0,
+                    missing_vectors: 1,
+                    readiness: "pending".into(),
+                    route_id: Some(raw.into()),
+                    dimensions: None,
+                },
+                agents: xai_grok_shell::session::prime::PrimeIndexCollectionStatus {
+                    collection: "agents".into(),
+                    generation: 0,
+                    fingerprint_short: String::new(),
+                    item_count: 0,
+                    vector_count: 0,
+                    missing_vectors: 0,
+                    readiness: "ready".into(),
+                    route_id: None,
+                    dimensions: None,
+                },
+                job: None,
+                configured_route: Some(raw.into()),
+                capabilities: xai_grok_shell::session::prime::PrimeIndexCapabilities::SUPPORTED,
+                unchanged: false,
+            });
+            agent.extensions_modal = Some(modal);
+            let outcome =
+                agent.handle_extensions_modal_key(&key(crossterm::event::KeyCode::Char('u')));
+            assert!(
+                matches!(outcome, InputOutcome::Changed),
+                "unsanitary routes must not dispatch, got {outcome:?}"
+            );
+            match agent
+                .extensions_modal
+                .as_ref()
+                .and_then(|s| s.modal_message.as_ref())
+            {
+                Some(crate::views::extensions_modal::ModalMessage::Error(msg)) => {
+                    assert_eq!(
+                        msg,
+                        crate::views::retrieval_settings_modal::PRIME_UNAVAILABLE_PROFILE
+                    );
+                    assert!(!msg.contains("http"), "{msg}");
+                    assert!(!msg.contains("127.0.0.1"), "{msg}");
+                    assert!(!msg.contains("sk-"), "{msg}");
+                    assert!(!msg.contains(raw), "{msg}");
+                }
+                Some(crate::views::extensions_modal::ModalMessage::Confirmation {
+                    message,
+                    ..
+                }) => {
+                    panic!("must not confirm an unsanitary route {raw:?}: {message}");
+                }
+                None => panic!("expected unavailable overlay for {raw:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn prime_index_confirm_cancel_then_retry() {
+        let (mut agent, mut modal) = skills_modal_with_row();
+        modal.prime_index_capable = true;
+        modal.prime_index = Some(xai_grok_shell::session::prime::PrimeIndexStatus {
+            api_version: 1,
+            generation: 1,
+            fingerprint_short: "abc123def456".into(),
+            skills: xai_grok_shell::session::prime::PrimeIndexCollectionStatus {
+                collection: "skills".into(),
+                generation: 1,
+                fingerprint_short: "abc123def456".into(),
+                item_count: 1,
+                vector_count: 0,
+                missing_vectors: 1,
+                readiness: "pending".into(),
+                route_id: Some("main".into()),
+                dimensions: None,
+            },
+            agents: xai_grok_shell::session::prime::PrimeIndexCollectionStatus {
+                collection: "agents".into(),
+                generation: 0,
+                fingerprint_short: String::new(),
+                item_count: 0,
+                vector_count: 0,
+                missing_vectors: 0,
+                readiness: "ready".into(),
+                route_id: None,
+                dimensions: None,
+            },
+            job: None,
+            configured_route: Some("main".into()),
+            capabilities: xai_grok_shell::session::prime::PrimeIndexCapabilities::SUPPORTED,
+            unchanged: false,
+        });
+        agent.extensions_modal = Some(modal);
+        let outcome = agent.handle_extensions_modal_key(&key(crossterm::event::KeyCode::Char('u')));
+        assert!(matches!(outcome, InputOutcome::Changed));
+        assert!(matches!(
+            agent
+                .extensions_modal
+                .as_ref()
+                .and_then(|s| s.modal_message.as_ref()),
+            Some(crate::views::extensions_modal::ModalMessage::Confirmation { .. })
+        ));
+        let outcome = agent.handle_extensions_modal_key(&key(crossterm::event::KeyCode::Char('n')));
+        assert!(matches!(outcome, InputOutcome::Changed));
+        assert!(
+            agent
+                .extensions_modal
+                .as_ref()
+                .and_then(|s| s.modal_message.as_ref())
+                .is_none(),
+            "n must dismiss confirmation without starting a job"
+        );
+        let outcome = agent.handle_extensions_modal_key(&key(crossterm::event::KeyCode::Char('u')));
+        assert!(matches!(outcome, InputOutcome::Changed));
+        let outcome = agent.handle_extensions_modal_key(&key(crossterm::event::KeyCode::Char('y')));
+        match outcome {
+            InputOutcome::Action(Action::PrimeIndexRebuild { confirm, .. }) => {
+                assert!(confirm, "retry y must confirm the configured route");
+            }
+            other => panic!("expected confirmed rebuild, got {other:?}"),
+        }
+    }
+
+    fn skills_modal_with_row() -> (super::AgentView, ExtensionsModalState) {
+        let agent = super::test_fixtures::make_agent();
+        let mut modal = ExtensionsModalState::new(ExtensionsTab::Skills);
+        modal.skills_data = TabDataState::Loaded(SkillsTabSnapshot {
+            rows: vec![plugin_row("deploy-prod", "friendly")],
+            ..SkillsTabSnapshot::empty()
+        });
+        modal.entry_data_indices = vec![Some(0)];
+        modal.picker_state.selected = 0;
+        (agent, modal)
+    }
+
+    fn key(code: crossterm::event::KeyCode) -> crossterm::event::KeyEvent {
+        crossterm::event::KeyEvent::new(code, crossterm::event::KeyModifiers::NONE)
+    }
+
+    #[test]
+    fn x_cancels_in_flight_skill_regress_while_pending() {
+        let (mut agent, mut modal) = skills_modal_with_row();
+        modal.pending_action = Some("regressing...".into());
+        agent.skill_regress_in_flight = Some("deploy-prod".into());
+        agent.extensions_modal = Some(modal);
+
+        let outcome = agent.handle_extensions_modal_key(&key(crossterm::event::KeyCode::Char('x')));
+        match outcome {
+            InputOutcome::Action(Action::CancelSkillRegress { name }) => {
+                assert_eq!(name, "deploy-prod");
+            }
+            other => panic!("expected CancelSkillRegress deploy-prod, got {other:?}"),
+        }
+        assert!(
+            agent.extensions_modal.is_some(),
+            "cancel must not close the modal"
+        );
+        assert_eq!(
+            agent
+                .extensions_modal
+                .as_ref()
+                .and_then(|s| s.pending_action.as_deref()),
+            Some("regressing..."),
+            "cancel leaves the in-flight badge until the run reports done"
+        );
+    }
+
+    #[test]
+    fn idle_x_dispatches_cancel_without_setting_pending() {
+        let (mut agent, modal) = skills_modal_with_row();
+        assert!(modal.pending_action.is_none());
+        assert!(agent.skill_regress_in_flight.is_none());
+        agent.extensions_modal = Some(modal);
+
+        let outcome = agent.handle_extensions_modal_key(&key(crossterm::event::KeyCode::Char('x')));
+        match outcome {
+            InputOutcome::Action(Action::CancelSkillRegress { name }) => {
+                assert_eq!(name, "deploy-prod");
+            }
+            other => panic!("idle x must dispatch CancelSkillRegress, got {other:?}"),
+        }
+        assert!(agent.extensions_modal.is_some());
+        assert!(
+            agent
+                .extensions_modal
+                .as_ref()
+                .and_then(|s| s.pending_action.as_deref())
+                .is_none(),
+            "idle x must not invent a regressing/cancelled badge"
+        );
+        assert!(agent.skill_regress_in_flight.is_none());
+    }
+
+    #[test]
+    fn esc_reopen_x_cancels_in_flight_skill_regress() {
+        let (mut agent, mut modal) = skills_modal_with_row();
+        modal.pending_action = Some("regressing...".into());
+        agent.skill_regress_in_flight = Some("deploy-prod".into());
+        agent.extensions_modal = Some(modal);
+
+        let outcome = agent.handle_extensions_modal_key(&key(crossterm::event::KeyCode::Esc));
+        assert!(matches!(outcome, InputOutcome::Changed));
+        assert!(agent.extensions_modal.is_none());
+        assert_eq!(
+            agent.skill_regress_in_flight.as_deref(),
+            Some("deploy-prod"),
+            "Esc must not drop the in-flight run; only the modal closes"
+        );
+
+        // Real reopen matches OpenExtensionsModal: Loading, empty picker,
+        // then restore the regressing badge from skill_regress_in_flight.
+        let reopened = ExtensionsModalState::new(ExtensionsTab::Skills);
+        assert!(matches!(reopened.skills_data, TabDataState::Loading));
+        assert!(reopened.entry_data_indices.is_empty());
+        assert!(reopened.pending_action.is_none());
+        agent.extensions_modal = Some(reopened);
+        agent.restore_skill_regress_pending();
+        assert_eq!(
+            agent
+                .extensions_modal
+                .as_ref()
+                .and_then(|s| s.pending_action.as_deref()),
+            Some("regressing...")
+        );
+
+        let outcome = agent.handle_extensions_modal_key(&key(crossterm::event::KeyCode::Char('x')));
+        match outcome {
+            InputOutcome::Action(Action::CancelSkillRegress { name }) => {
+                assert_eq!(name, "deploy-prod");
+            }
+            other => panic!("after Esc/reopen, x must cancel the in-flight run, got {other:?}"),
+        }
+        assert!(agent.extensions_modal.is_some());
+    }
+
+    #[test]
+    fn open_extensions_modal_reopen_x_cancels_stashed_in_flight() {
+        use crate::app::agent::AgentId;
+
+        let mut app = crate::app::app_view::tests::test_app_with_agent();
+        let id = AgentId(0);
+        app.agents.get_mut(&id).unwrap().skill_regress_in_flight = Some("deploy-prod".into());
+        let effects = crate::app::dispatch::dispatch(
+            Action::OpenExtensionsModal {
+                tab: ExtensionsTab::Skills,
+                trigger: xai_grok_telemetry::events::ExtensionsModalTrigger::SlashCommand,
+            },
+            &mut app,
+        );
+        assert!(
+            !effects
+                .iter()
+                .any(|e| matches!(e, crate::app::actions::Effect::RunSkillRegress { .. })),
+            "reopening /skills must not start regression, got {effects:?}"
+        );
+
+        let agent = app.agents.get_mut(&id).unwrap();
+        let modal = agent.extensions_modal.as_ref().expect("modal must open");
+        assert!(
+            matches!(modal.skills_data, TabDataState::Loading),
+            "OpenExtensionsModal must start Loading, not a planted snapshot"
+        );
+        assert!(modal.entry_data_indices.is_empty());
+        assert_eq!(modal.pending_action.as_deref(), Some("regressing..."));
+        assert_eq!(
+            agent.skill_regress_in_flight.as_deref(),
+            Some("deploy-prod")
+        );
+
+        let outcome = agent.handle_extensions_modal_key(&key(crossterm::event::KeyCode::Char('x')));
+        match outcome {
+            InputOutcome::Action(Action::CancelSkillRegress { name }) => {
+                assert_eq!(name, "deploy-prod");
+            }
+            other => {
+                panic!("Loading OpenExtensionsModal x must cancel the stashed run, got {other:?}")
+            }
+        }
+    }
+
+    #[test]
+    fn x_cancels_in_flight_skill_when_cursor_is_on_another_row() {
+        let mut agent = super::test_fixtures::make_agent();
+        let mut modal = ExtensionsModalState::new(ExtensionsTab::Skills);
+        modal.skills_data = TabDataState::Loaded(SkillsTabSnapshot {
+            rows: vec![
+                plugin_row("alpha", "Alpha"),
+                plugin_row("beta", "Beta"),
+                plugin_row("gamma", "Gamma"),
+            ],
+            ..SkillsTabSnapshot::empty()
+        });
+        modal.entry_data_indices = vec![Some(0), Some(1), Some(2)];
+        modal.picker_state.selected = 0;
+        modal.pending_action = Some("regressing...".into());
+        agent.skill_regress_in_flight = Some("gamma".into());
+        agent.extensions_modal = Some(modal);
+
+        let outcome = agent.handle_extensions_modal_key(&key(crossterm::event::KeyCode::Char('x')));
+        match outcome {
+            InputOutcome::Action(Action::CancelSkillRegress { name }) => {
+                assert_eq!(name, "gamma");
+            }
+            other => panic!(
+                "x must cancel the in-flight skill, not the selected first row, got {other:?}"
+            ),
+        }
+        assert!(agent.extensions_modal.is_some());
+    }
+
+    #[test]
+    fn reopen_restores_regressing_badge_from_in_flight() {
+        let (mut agent, modal) = skills_modal_with_row();
+        assert!(modal.pending_action.is_none());
+        agent.skill_regress_in_flight = Some("deploy-prod".into());
+        agent.extensions_modal = Some(modal);
+        agent.restore_skill_regress_pending();
+        assert_eq!(
+            agent
+                .extensions_modal
+                .as_ref()
+                .and_then(|s| s.pending_action.as_deref()),
+            Some("regressing...")
+        );
+    }
+
+    #[test]
+    fn x_is_blocked_when_pending_action_is_not_regress() {
+        let (mut agent, mut modal) = skills_modal_with_row();
+        modal.pending_action = Some("publishing...".into());
+        agent.extensions_modal = Some(modal);
+
+        let outcome = agent.handle_extensions_modal_key(&key(crossterm::event::KeyCode::Char('x')));
+        assert!(
+            matches!(outcome, InputOutcome::Changed),
+            "x must not cancel a non-regression pending action, got {outcome:?}"
+        );
+        assert!(agent.extensions_modal.is_some());
+    }
+
+    #[test]
+    fn g_is_blocked_while_skill_regress_is_pending() {
+        let (mut agent, mut modal) = skills_modal_with_row();
+        modal.pending_action = Some("regressing...".into());
+        agent.extensions_modal = Some(modal);
+
+        let outcome = agent.handle_extensions_modal_key(&key(crossterm::event::KeyCode::Char('g')));
+        assert!(
+            matches!(outcome, InputOutcome::Changed),
+            "g must not start another run while regressing, got {outcome:?}"
+        );
+        assert_eq!(
+            agent
+                .extensions_modal
+                .as_ref()
+                .and_then(|s| s.pending_action.as_deref()),
+            Some("regressing...")
+        );
+    }
+
+    #[test]
+    fn esc_still_closes_modal_during_skill_regress() {
+        let (mut agent, mut modal) = skills_modal_with_row();
+        modal.pending_action = Some("regressing...".into());
+        agent.extensions_modal = Some(modal);
+
+        let outcome = agent.handle_extensions_modal_key(&key(crossterm::event::KeyCode::Esc));
+        assert!(matches!(outcome, InputOutcome::Changed));
+        assert!(
+            agent.extensions_modal.is_none(),
+            "Esc remains an escape hatch and does not trap the user"
+        );
+    }
+
+    fn assert_filter_cycled_without_regress(outcome: InputOutcome) {
+        match outcome {
+            InputOutcome::Changed => {}
+            InputOutcome::Action(Action::RunSkillRegress { name }) => {
+                panic!("FilterCycled must not emit RunSkillRegress, got {name}")
+            }
+            other => panic!("expected Changed from FilterCycled, got {other:?}"),
+        }
+    }
+
+    fn skills_status_cycle() -> [SkillsStatusFilter; 6] {
+        [
+            SkillsStatusFilter::ValidPass,
+            SkillsStatusFilter::Failed,
+            SkillsStatusFilter::Quarantined,
+            SkillsStatusFilter::Stale,
+            SkillsStatusFilter::Untested,
+            SkillsStatusFilter::All,
+        ]
+    }
+
+    #[test]
+    fn filter_cycled_keyboard_traverses_skills_status_cycle_without_run_regress() {
+        let (mut agent, mut modal) = skills_modal_with_row();
+        modal.picker_state.selected = 1;
+        modal.picker_state.tabs_focused = true;
+        agent.extensions_modal = Some(modal);
+
+        for want in skills_status_cycle() {
+            let outcome =
+                agent.handle_extensions_modal_key(&key(crossterm::event::KeyCode::Char('f')));
+            assert_filter_cycled_without_regress(outcome);
+            let state = agent.extensions_modal.as_ref().unwrap();
+            assert_eq!(state.skills_status_filter, want);
+            assert_eq!(state.picker_state.selected, 0);
+            assert!(!state.picker_state.tabs_focused);
+        }
+    }
+}
+
+#[cfg(test)]
+mod skills_filter_cycled_mouse_tests {
+    use crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+    use ratatui::buffer::Buffer;
+    use ratatui::layout::Rect;
+    use xai_grok_tools::implementations::skills::strict::{
+        ManagedSkillRow, SkillHealthStatus, SkillIdentity,
+    };
+    use xai_grok_tools::implementations::skills::types::SkillInfo;
+
+    use super::AgentView;
+    use crate::app::actions::Action;
+    use crate::app::app_view::InputOutcome;
+    use crate::views::extensions_modal::{
+        ExtensionsModalState, ExtensionsTab, SkillsStatusFilter, SkillsTabSnapshot, TabDataState,
+        render_extensions_modal,
+    };
+
+    fn plugin_row(name: &str, label: &str) -> ManagedSkillRow {
+        let mut skill = SkillInfo {
+            name: name.to_string(),
+            display_name: Some(label.to_string()),
+            description: "Ship it".into(),
+            path: format!("{name}/SKILL.md"),
+            ..SkillInfo::default()
+        };
+        skill.enabled = true;
+        ManagedSkillRow::from_valid(
+            skill,
+            SkillIdentity::new(name, None),
+            SkillHealthStatus::Untested,
+            None,
+        )
+    }
+
+    fn left_down(column: u16, row: u16) -> MouseEvent {
+        MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column,
+            row,
+            modifiers: KeyModifiers::NONE,
+        }
+    }
+
+    fn click_filter(agent: &mut AgentView) -> InputOutcome {
+        let filter_rect = {
+            let state = agent.extensions_modal.as_mut().unwrap();
+            let area = Rect::new(0, 0, 80, 24);
+            let mut buf = Buffer::empty(area);
+            render_extensions_modal(&mut buf, area, state, None, false, 0);
+            let hit = state
+                .picker_state
+                .hit_areas
+                .as_ref()
+                .expect("paint must publish hit areas");
+            let filter = hit.filter_rect.expect("paint must publish filter_rect");
+            assert!(filter.width > 0 && filter.height > 0);
+            assert_eq!(
+                hit.search_bar.y, filter.y,
+                "filter shares the Skills search row"
+            );
+            filter
+        };
+        let outcome = agent.handle_extensions_modal_mouse(&left_down(
+            filter_rect
+                .x
+                .saturating_add(filter_rect.width.saturating_sub(1)),
+            filter_rect.y,
+        ));
+        let state = agent.extensions_modal.as_ref().unwrap();
+        assert!(
+            !state.picker_state.search_active,
+            "filter click must not activate search"
+        );
+        outcome
+    }
+
+    #[test]
+    fn filter_cycled_mouse_traverses_skills_status_cycle_without_run_regress() {
+        let mut agent = super::test_fixtures::make_agent();
+        let mut modal = ExtensionsModalState::new(ExtensionsTab::Skills);
+        modal.skills_data = TabDataState::Loaded(SkillsTabSnapshot {
+            rows: vec![plugin_row("deploy-prod", "friendly")],
+            ..SkillsTabSnapshot::empty()
+        });
+        modal.picker_state.selected = 1;
+        agent.extensions_modal = Some(modal);
+
+        let expected = [
+            SkillsStatusFilter::ValidPass,
+            SkillsStatusFilter::Failed,
+            SkillsStatusFilter::Quarantined,
+            SkillsStatusFilter::Stale,
+            SkillsStatusFilter::Untested,
+            SkillsStatusFilter::All,
+        ];
+        for want in expected {
+            let outcome = click_filter(&mut agent);
+            match outcome {
+                InputOutcome::Changed => {}
+                InputOutcome::Action(Action::RunSkillRegress { name }) => {
+                    panic!("FilterCycled must not emit RunSkillRegress, got {name}")
+                }
+                other => panic!("expected Changed from FilterCycled, got {other:?}"),
+            }
+            let state = agent.extensions_modal.as_ref().unwrap();
+            assert_eq!(state.skills_status_filter, want);
+            assert_eq!(state.picker_state.selected, 0);
+        }
     }
 }
 
@@ -2346,7 +3395,9 @@ mod extensions_action_target_tests {
             ..Default::default()
         };
         let mut modal = ExtensionsModalState::new(ExtensionsTab::Skills);
-        modal.skills_data = TabDataState::Loaded(vec![skill]);
+        modal.skills_data = TabDataState::Loaded(
+            crate::views::extensions_modal::SkillsTabSnapshot::from_skill_infos(vec![skill]),
+        );
         modal.entry_data_indices = vec![Some(0)];
         modal.entry_group_keys = vec![None];
         modal.picker_state.selected = 0;
@@ -2519,9 +3570,11 @@ mod extensions_action_target_tests {
 
 #[cfg(test)]
 mod extensions_modal_search_key_tests {
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    use crate::app::actions::Action;
     use crate::app::app_view::InputOutcome;
     use crate::views::extensions_modal::{ExtensionsModalState, ExtensionsTab};
-    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
     fn key(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::NONE)
@@ -2529,6 +3582,94 @@ mod extensions_modal_search_key_tests {
 
     fn shift_key(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::SHIFT)
+    }
+
+    fn assert_create_wizard_open(agent: &super::AgentView) {
+        let state = agent
+            .extensions_modal
+            .as_ref()
+            .expect("skills modal must stay open");
+        let input = state
+            .input
+            .as_ref()
+            .expect("n must open the create-skill wizard");
+        assert_eq!(input.command_prefix, "skills_create");
+        assert_eq!(input.fields()[0].label(), "Name");
+        assert_eq!(input.fields()[1].label(), "Description");
+        assert!(!state.picker_state.search_active);
+        assert!(!state.picker_state.tabs_focused);
+    }
+
+    #[test]
+    fn skills_n_opens_create_wizard_from_idle_list() {
+        crate::appearance::cache::set_vim_mode(false);
+        let mut agent = super::test_fixtures::make_agent();
+        agent.extensions_modal = Some(ExtensionsModalState::new(ExtensionsTab::Skills));
+
+        let outcome = agent.handle_extensions_modal_key(&key(KeyCode::Char('n')));
+        assert!(
+            matches!(outcome, InputOutcome::Changed),
+            "idle n must open the wizard without starting network or regression, got {outcome:?}"
+        );
+        assert_create_wizard_open(&agent);
+    }
+
+    #[test]
+    fn skills_n_during_search_types_into_query_not_wizard() {
+        crate::appearance::cache::set_vim_mode(false);
+        let mut agent = super::test_fixtures::make_agent();
+        let mut modal = ExtensionsModalState::new(ExtensionsTab::Skills);
+        modal.picker_state.search_active = true;
+        agent.extensions_modal = Some(modal);
+
+        let outcome = agent.handle_extensions_modal_key(&key(KeyCode::Char('n')));
+        assert!(
+            matches!(outcome, InputOutcome::Changed | InputOutcome::Action(_)),
+            "search n must stay in the query, got {outcome:?}"
+        );
+        let state = agent.extensions_modal.as_ref().unwrap();
+        assert!(
+            state.input.is_none(),
+            "n during search must not open the create wizard"
+        );
+        assert_eq!(state.picker_state.query(), "n");
+        assert!(state.picker_state.search_active);
+    }
+
+    #[test]
+    fn skills_n_after_search_esc_opens_create_wizard() {
+        crate::appearance::cache::set_vim_mode(false);
+        let mut agent = super::test_fixtures::make_agent();
+        agent.extensions_modal = Some(ExtensionsModalState::new(ExtensionsTab::Skills));
+
+        assert!(matches!(
+            agent.handle_extensions_modal_key(&key(KeyCode::Char('/'))),
+            InputOutcome::Changed
+        ));
+        assert!(matches!(
+            agent.handle_extensions_modal_key(&key(KeyCode::Char('c'))),
+            InputOutcome::Changed | InputOutcome::Action(_)
+        ));
+        assert!(matches!(
+            agent.handle_extensions_modal_key(&key(KeyCode::Esc)),
+            InputOutcome::Changed
+        ));
+        {
+            let state = agent.extensions_modal.as_ref().unwrap();
+            assert!(
+                !state.picker_state.search_active,
+                "Esc must drop search focus before n can open the wizard"
+            );
+            assert_eq!(state.picker_state.query(), "c");
+            assert!(state.input.is_none());
+        }
+
+        let outcome = agent.handle_extensions_modal_key(&key(KeyCode::Char('n')));
+        assert!(
+            matches!(outcome, InputOutcome::Changed),
+            "n after search Esc must open the wizard, got {outcome:?}"
+        );
+        assert_create_wizard_open(&agent);
     }
 
     #[test]
@@ -2638,7 +3779,13 @@ mod extensions_modal_search_key_tests {
         agent.handle_extensions_modal_key(&key(KeyCode::Char('g')));
 
         let outcome = agent.handle_extensions_modal_key(&key(KeyCode::Tab));
-        assert!(matches!(outcome, InputOutcome::Changed));
+        assert!(
+            matches!(
+                outcome,
+                InputOutcome::Changed | InputOutcome::Action(Action::RefreshExtensionsTab)
+            ),
+            "tab switch may fetch the destination tab after a skills-only open, got {outcome:?}"
+        );
         let state = agent
             .extensions_modal
             .as_ref()
@@ -2686,6 +3833,157 @@ mod extensions_modal_search_key_tests {
     }
 
     #[test]
+    fn skills_smart_query_change_dispatches_prime_search() {
+        use crate::views::extensions_modal::SkillSearchMode;
+        crate::appearance::cache::set_vim_mode(false);
+        let mut agent = super::test_fixtures::make_agent();
+        let mut modal = ExtensionsModalState::new(ExtensionsTab::Skills);
+        modal.skills_search_mode = SkillSearchMode::Smart;
+        agent.extensions_modal = Some(modal);
+
+        assert!(matches!(
+            agent.handle_extensions_modal_key(&key(KeyCode::Char('/'))),
+            InputOutcome::Changed
+        ));
+        match agent.handle_extensions_modal_key(&key(KeyCode::Char('d'))) {
+            InputOutcome::Action(Action::SearchSkillsSmart) => {}
+            other => panic!("Smart query change must dispatch Prime search, got {other:?}"),
+        }
+        assert_eq!(
+            agent
+                .extensions_modal
+                .as_ref()
+                .unwrap()
+                .picker_state
+                .query(),
+            "d"
+        );
+    }
+
+    #[test]
+    fn skills_smart_query_edit_drops_previous_rank_before_refetch() {
+        use crate::views::extensions_modal::SkillSearchMode;
+        crate::appearance::cache::set_vim_mode(false);
+        let mut agent = super::test_fixtures::make_agent();
+        let mut modal = ExtensionsModalState::new(ExtensionsTab::Skills);
+        modal.skills_search_mode = SkillSearchMode::Smart;
+        modal.picker_state.search_active = true;
+        modal.picker_state.set_query("commit");
+        modal.skills_smart_rank = Some(vec!["commit".into(), "alpha".into()]);
+        agent.extensions_modal = Some(modal);
+
+        match agent.handle_extensions_modal_key(&key(KeyCode::Char('z'))) {
+            InputOutcome::Action(Action::SearchSkillsSmart) => {}
+            other => panic!("Smart query edit must dispatch Prime search, got {other:?}"),
+        }
+        let state = agent.extensions_modal.as_ref().unwrap();
+        assert!(
+            state.skills_smart_rank.is_none(),
+            "vector hits for the previous query must drop before the new search lands"
+        );
+        assert_eq!(state.picker_state.query(), "commitz");
+    }
+
+    #[test]
+    fn skills_smart_paste_drops_previous_rank_before_refetch() {
+        use crate::views::extensions_modal::SkillSearchMode;
+        let mut agent = super::test_fixtures::make_agent();
+        let mut modal = ExtensionsModalState::new(ExtensionsTab::Skills);
+        modal.skills_search_mode = SkillSearchMode::Smart;
+        modal.picker_state.search_active = true;
+        modal.picker_state.set_query("commit");
+        modal.skills_smart_rank = Some(vec!["commit".into(), "alpha".into()]);
+        agent.extensions_modal = Some(modal);
+
+        match agent.handle_extensions_modal_paste("z") {
+            InputOutcome::Action(Action::SearchSkillsSmart) => {}
+            other => panic!("Smart paste must dispatch Prime search, got {other:?}"),
+        }
+        let state = agent.extensions_modal.as_ref().unwrap();
+        assert!(
+            state.skills_smart_rank.is_none(),
+            "pasting a new Smart query must drop the previous rank immediately"
+        );
+    }
+
+    #[test]
+    fn skills_local_query_change_does_not_dispatch_prime_search() {
+        crate::appearance::cache::set_vim_mode(false);
+        let mut agent = super::test_fixtures::make_agent();
+        agent.extensions_modal = Some(ExtensionsModalState::new(ExtensionsTab::Skills));
+
+        agent.handle_extensions_modal_key(&key(KeyCode::Char('/')));
+        match agent.handle_extensions_modal_key(&key(KeyCode::Char('d'))) {
+            InputOutcome::Changed => {}
+            other => panic!("Local query change must stay local, got {other:?}"),
+        }
+        assert!(
+            agent
+                .extensions_modal
+                .as_ref()
+                .unwrap()
+                .skills_smart_rank
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn cycle_to_smart_with_query_dispatches_prime_search() {
+        use crate::views::extensions_modal::{ButtonAction, SkillSearchMode};
+        let mut agent = super::test_fixtures::make_agent();
+        let mut modal = ExtensionsModalState::new(ExtensionsTab::Skills);
+        modal.picker_state.set_query("commit");
+        agent.extensions_modal = Some(modal);
+
+        match agent.execute_modal_button_action(ButtonAction::CycleSkillSearchMode) {
+            InputOutcome::Action(Action::SearchSkillsSmart) => {}
+            other => panic!("cycling to Smart with a query must search, got {other:?}"),
+        }
+        let state = agent.extensions_modal.as_ref().unwrap();
+        assert_eq!(state.skills_search_mode, SkillSearchMode::Smart);
+    }
+
+    #[test]
+    fn cycle_to_smart_with_query_drops_previous_rank() {
+        use crate::views::extensions_modal::{ButtonAction, SkillSearchMode};
+        let mut agent = super::test_fixtures::make_agent();
+        let mut modal = ExtensionsModalState::new(ExtensionsTab::Skills);
+        modal.picker_state.set_query("commit");
+        modal.skills_smart_rank = Some(vec!["alpha".into()]);
+        agent.extensions_modal = Some(modal);
+
+        match agent.execute_modal_button_action(ButtonAction::CycleSkillSearchMode) {
+            InputOutcome::Action(Action::SearchSkillsSmart) => {}
+            other => panic!("cycling to Smart with a query must search, got {other:?}"),
+        }
+        let state = agent.extensions_modal.as_ref().unwrap();
+        assert_eq!(state.skills_search_mode, SkillSearchMode::Smart);
+        assert!(
+            state.skills_smart_rank.is_none(),
+            "cycling to Smart must not keep a previous rank selectable"
+        );
+    }
+
+    #[test]
+    fn cycle_to_local_clears_smart_rank() {
+        use crate::views::extensions_modal::{ButtonAction, SkillSearchMode};
+        let mut agent = super::test_fixtures::make_agent();
+        let mut modal = ExtensionsModalState::new(ExtensionsTab::Skills);
+        modal.skills_search_mode = SkillSearchMode::Smart;
+        modal.skills_smart_rank = Some(vec!["commit".into()]);
+        modal.picker_state.set_query("commit");
+        agent.extensions_modal = Some(modal);
+
+        match agent.execute_modal_button_action(ButtonAction::CycleSkillSearchMode) {
+            InputOutcome::Changed => {}
+            other => panic!("cycling to Local must not keep a Smart rank, got {other:?}"),
+        }
+        let state = agent.extensions_modal.as_ref().unwrap();
+        assert_eq!(state.skills_search_mode, SkillSearchMode::Local);
+        assert!(state.skills_smart_rank.is_none());
+    }
+
+    #[test]
     fn tab_during_search_wraps_around_tabs() {
         let mut agent = super::test_fixtures::make_agent();
         agent.extensions_modal = Some(ExtensionsModalState::new(ExtensionsTab::McpServers));
@@ -2700,6 +3998,10 @@ mod extensions_modal_search_key_tests {
 
 #[cfg(test)]
 mod connectors_url_click_tests {
+    use crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+    use ratatui::buffer::Buffer;
+    use ratatui::layout::Rect;
+
     use super::AgentView;
     use crate::app::actions::Action;
     use crate::app::app_view::InputOutcome;
@@ -2707,9 +4009,6 @@ mod connectors_url_click_tests {
         ExtensionsModalState, ExtensionsTab, TabDataState, render_extensions_modal,
     };
     use crate::views::mcps_modal::{McpServerDisplayStatus, McpServerInfo, McpWireSource};
-    use crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
-    use ratatui::buffer::Buffer;
-    use ratatui::layout::Rect;
 
     fn managed_server() -> McpServerInfo {
         McpServerInfo {
@@ -2850,6 +4149,8 @@ mod connectors_url_click_tests {
 mod editor_paste_routing_tests {
     use std::collections::HashMap;
 
+    use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+
     use super::test_fixtures::make_agent;
     use crate::actions::ActionRegistry;
     use crate::app::bundle::BundleState;
@@ -2857,7 +4158,6 @@ mod editor_paste_routing_tests {
     use crate::views::extensions_modal::{
         ExtensionsModalState, ExtensionsTab, FieldSpec, ModalInput,
     };
-    use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
 
     #[test]
     fn persona_and_extensions_paste_only_into_active_forms() {
@@ -2920,13 +4220,14 @@ mod editor_paste_routing_tests {
 
 #[cfg(test)]
 mod extensions_modal_confirmation_tests {
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
     use crate::app::actions::Action;
     use crate::app::app_view::InputOutcome;
     use crate::views::extensions_modal::{
         ButtonAction, ConfirmationAction, ExtensionsModalState, ExtensionsTab, ModalMessage,
         TabDataState,
     };
-    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
     fn key(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::NONE)

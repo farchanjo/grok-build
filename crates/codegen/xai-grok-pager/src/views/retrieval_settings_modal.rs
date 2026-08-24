@@ -144,6 +144,15 @@ pub enum RetrievalCommand {
     },
     /// Retry the exact pending draft mutation with confirm_memory_reindex=true.
     ConfirmMemoryReindex,
+    PrimeIndexBackfill {
+        collection: String,
+        confirm: bool,
+    },
+    PrimeIndexRebuild {
+        collection: String,
+        confirm: bool,
+    },
+    PrimeIndexCancel,
     DismissConflictReload,
     DismissConflictKeepDraft,
 }
@@ -413,6 +422,14 @@ pub enum RetrievalEditMode {
     ConfirmMemoryReindex {
         impact: MemoryReindexImpact,
     },
+    ConfirmPrimeRebuild {
+        collection: String,
+        route: String,
+    },
+    ConfirmPrimeBackfill {
+        collection: String,
+        route: String,
+    },
     ClonePrompt {
         kind: String,
         source_id: String,
@@ -443,6 +460,7 @@ pub struct RetrievalSettingsState {
     /// Confirmation is derived solely via `with_reindex_confirm(true)` on this
     /// command — never a sticky global flag that could leak to later mutations.
     pub pending_reindex_command: Option<Box<RetrievalCommand>>,
+    pub prime_index: Option<xai_grok_shell::session::prime::PrimeIndexStatus>,
 }
 
 impl Default for RetrievalSettingsState {
@@ -472,6 +490,47 @@ impl RetrievalSettingsState {
             pending_operation_id: None,
             op_counter: 0,
             pending_reindex_command: None,
+            prime_index: None,
+        }
+    }
+
+    fn configured_route_for_confirm(&self) -> String {
+        let raw = self
+            .prime_index
+            .as_ref()
+            .and_then(|s| s.configured_route.clone())
+            .or_else(|| {
+                if self.selected == 0 {
+                    self.draft_prime.skills.retrieval_profile.clone()
+                } else {
+                    self.draft_prime.agents.retrieval_profile.clone()
+                }
+            });
+        display_configured_route(raw.as_deref())
+    }
+
+    fn set_prime_unavailable(&mut self) {
+        let msg = PRIME_UNAVAILABLE_PROFILE.to_string();
+        self.error = Some(msg.clone());
+        self.status = Some(msg);
+    }
+
+    pub fn apply_prime_index_update(
+        &mut self,
+        update: &xai_grok_shell::session::prime::PrimeIndexUpdate,
+    ) {
+        if let Some(ref mut status) = self.prime_index {
+            if update.generation_is_stale_vs(status.generation) {
+                return;
+            }
+            status.generation = update.generation;
+            if !update.fingerprint_short.is_empty() {
+                status.fingerprint_short = update.fingerprint_short.clone();
+            }
+            if let Some(job) = update.sanitized_job() {
+                status.job = Some(job);
+            }
+            status.sanitize_secrets();
         }
     }
 
@@ -677,6 +736,50 @@ impl RetrievalSettingsState {
                 }
                 _ => None,
             },
+            RetrievalEditMode::ConfirmPrimeRebuild { collection, route } => match key.code {
+                KeyCode::Char('y') | KeyCode::Enter => {
+                    let collection = collection.clone();
+                    let route = display_configured_route(Some(route.as_str()));
+                    self.edit = RetrievalEditMode::Browse;
+                    if route.is_empty() {
+                        self.set_prime_unavailable();
+                        None
+                    } else {
+                        Some(RetrievalCommand::PrimeIndexRebuild {
+                            collection,
+                            confirm: true,
+                        })
+                    }
+                }
+                KeyCode::Char('n') | KeyCode::Esc => {
+                    let _ = route;
+                    self.edit = RetrievalEditMode::Browse;
+                    None
+                }
+                _ => None,
+            },
+            RetrievalEditMode::ConfirmPrimeBackfill { collection, route } => match key.code {
+                KeyCode::Char('y') | KeyCode::Enter => {
+                    let collection = collection.clone();
+                    let route = display_configured_route(Some(route.as_str()));
+                    self.edit = RetrievalEditMode::Browse;
+                    if route.is_empty() {
+                        self.set_prime_unavailable();
+                        None
+                    } else {
+                        Some(RetrievalCommand::PrimeIndexBackfill {
+                            collection,
+                            confirm: true,
+                        })
+                    }
+                }
+                KeyCode::Char('n') | KeyCode::Esc => {
+                    let _ = route;
+                    self.edit = RetrievalEditMode::Browse;
+                    None
+                }
+                _ => None,
+            },
             RetrievalEditMode::ClonePrompt { kind, source_id } => match key.code {
                 KeyCode::Enter => {
                     let new_id = self.line_editor.text().trim().to_owned();
@@ -760,6 +863,45 @@ impl RetrievalSettingsState {
                     self.selected += 1;
                 }
                 None
+            }
+            KeyCode::Char('b') if self.page == RetrievalPage::Prime => {
+                let collection = if self.selected == 0 {
+                    "skills"
+                } else {
+                    "agents"
+                };
+                let route = self.configured_route_for_confirm();
+                if route.is_empty() {
+                    self.set_prime_unavailable();
+                    None
+                } else {
+                    self.edit = RetrievalEditMode::ConfirmPrimeBackfill {
+                        collection: collection.into(),
+                        route,
+                    };
+                    None
+                }
+            }
+            KeyCode::Char('u') if self.page == RetrievalPage::Prime => {
+                let collection = if self.selected == 0 {
+                    "skills"
+                } else {
+                    "agents"
+                };
+                let route = self.configured_route_for_confirm();
+                if route.is_empty() {
+                    self.set_prime_unavailable();
+                    None
+                } else {
+                    self.edit = RetrievalEditMode::ConfirmPrimeRebuild {
+                        collection: collection.into(),
+                        route,
+                    };
+                    None
+                }
+            }
+            KeyCode::Char('x') if self.page == RetrievalPage::Prime => {
+                Some(RetrievalCommand::PrimeIndexCancel)
             }
             KeyCode::Char('r') => Some(RetrievalCommand::Reload),
             // Browse "s" validates/reloads only — no durable rewrite or gen churn.
@@ -1236,6 +1378,7 @@ impl RetrievalSettingsState {
                         max_context_fraction: get("max_context_fraction").parse().unwrap_or(0.05),
                         deadline_ms: get("deadline_ms").parse().unwrap_or(3000),
                         degrade_on_error: get("degrade_on_error") != "false",
+                        min_score: get("min_score").parse().unwrap_or(0.0),
                     };
                 } else {
                     self.draft_prime.agents = AgentPrimeConfig {
@@ -1315,6 +1458,48 @@ impl RetrievalSettingsState {
             ];
         }
         match &self.edit {
+            RetrievalEditMode::ConfirmPrimeRebuild { route, .. } => vec![
+                Shortcut {
+                    label: "y Confirm rebuild",
+                    clickable: false,
+                    id: 1,
+                },
+                Shortcut {
+                    label: "n Cancel",
+                    clickable: false,
+                    id: 2,
+                },
+                Shortcut {
+                    label: if route.is_empty() {
+                        "route (none)"
+                    } else {
+                        "route shown"
+                    },
+                    clickable: false,
+                    id: 3,
+                },
+            ],
+            RetrievalEditMode::ConfirmPrimeBackfill { route, .. } => vec![
+                Shortcut {
+                    label: "y Confirm backfill",
+                    clickable: false,
+                    id: 1,
+                },
+                Shortcut {
+                    label: "n Cancel",
+                    clickable: false,
+                    id: 2,
+                },
+                Shortcut {
+                    label: if route.is_empty() {
+                        "route (none)"
+                    } else {
+                        "route shown"
+                    },
+                    clickable: false,
+                    id: 3,
+                },
+            ],
             RetrievalEditMode::Browse => vec![
                 Shortcut {
                     label: "Tab Page",
@@ -1466,7 +1651,7 @@ impl RetrievalSettingsState {
             )));
         } else if let Some(err) = &self.error {
             lines.push(Line::from(Span::styled(
-                format!("Error: {err}"),
+                bound_prime_status_line(&format!("Error: {err}"), area.width),
                 Style::default().fg(theme.accent_error),
             )));
         }
@@ -1489,13 +1674,13 @@ impl RetrievalSettingsState {
 
         if let Some(status) = &self.status {
             lines.push(Line::from(Span::styled(
-                status.as_str(),
+                bound_prime_status_line(status, area.width),
                 Style::default().fg(theme.accent_user),
             )));
         }
 
         match &self.edit {
-            RetrievalEditMode::Browse => self.render_browse(&mut lines, theme),
+            RetrievalEditMode::Browse => self.render_browse(&mut lines, theme, area.width),
             RetrievalEditMode::EditFields {
                 kind,
                 id,
@@ -1558,6 +1743,42 @@ impl RetrievalSettingsState {
                     self.line_editor.text()
                 )));
             }
+            RetrievalEditMode::ConfirmPrimeRebuild { collection, route } => {
+                lines.push(Line::from(Span::styled(
+                    format!("Rebuild {collection} index?"),
+                    Style::default()
+                        .fg(theme.warning)
+                        .add_modifier(Modifier::BOLD),
+                )));
+                let shown = display_configured_route(Some(route.as_str()));
+                if shown.is_empty() {
+                    lines.push(Line::from(PRIME_UNAVAILABLE_PROFILE));
+                } else {
+                    lines.push(Line::from(format!("Configured route: {shown}")));
+                }
+                lines.push(Line::from(
+                    "This rebuilds vectors. Saving configuration does not rebuild.",
+                ));
+                lines.push(Line::from("[y] confirm  [n] cancel"));
+            }
+            RetrievalEditMode::ConfirmPrimeBackfill { collection, route } => {
+                lines.push(Line::from(Span::styled(
+                    format!("Backfill {collection} index?"),
+                    Style::default()
+                        .fg(theme.warning)
+                        .add_modifier(Modifier::BOLD),
+                )));
+                let shown = display_configured_route(Some(route.as_str()));
+                if shown.is_empty() {
+                    lines.push(Line::from(PRIME_UNAVAILABLE_PROFILE));
+                } else {
+                    lines.push(Line::from(format!("Configured route: {shown}")));
+                }
+                lines.push(Line::from(
+                    "This contacts the embedding profile. Saving configuration does not backfill.",
+                ));
+                lines.push(Line::from("[y] confirm  [n] cancel"));
+            }
         }
 
         if self.page == RetrievalPage::Validate {
@@ -1593,7 +1814,7 @@ impl RetrievalSettingsState {
             .render(area, buf);
     }
 
-    fn render_browse(&self, lines: &mut Vec<Line>, theme: &Theme) {
+    fn render_browse(&self, lines: &mut Vec<Line>, theme: &Theme, width: u16) {
         let Some(snap) = &self.snapshot else {
             lines.push(Line::from("No snapshot loaded."));
             return;
@@ -1686,6 +1907,45 @@ impl RetrievalSettingsState {
                         Style::default().fg(theme.warning),
                     )));
                 }
+                lines.push(Line::from(Span::styled(
+                    "Saving configuration does not rebuild the index.",
+                    Style::default().fg(theme.gray),
+                )));
+                if let Some(idx) = &self.prime_index {
+                    let coll = if self.selected == 0 {
+                        &idx.skills
+                    } else {
+                        &idx.agents
+                    };
+                    lines.push(Line::from(format!(
+                        "  index {}/{} {} · gen {}",
+                        coll.vector_count, coll.item_count, coll.readiness, coll.generation
+                    )));
+                    let shown = display_configured_route(
+                        idx.configured_route.as_deref().or(coll.route_id.as_deref()),
+                    );
+                    if !shown.is_empty() {
+                        lines.push(Line::from(format!("  route {shown}")));
+                    }
+                    if let Some(job) = &idx.job {
+                        let line = format!(
+                            "  job {} {}/{}",
+                            compact_prime_job_label(job),
+                            job.done,
+                            job.total
+                        );
+                        let cap = width as usize;
+                        lines.push(Line::from(if cap == 0 {
+                            line
+                        } else {
+                            crate::render::line_utils::truncate_str(&line, cap)
+                        }));
+                    }
+                }
+                lines.push(Line::from(Span::styled(
+                    "b backfill (confirm route)  ·  u rebuild (confirm route)  ·  s save config",
+                    Style::default().fg(theme.gray),
+                )));
             }
             RetrievalPage::Memory => {
                 let shown = if self.dirty {
@@ -1909,6 +2169,7 @@ fn prime_fields(prime: &PrimeConfig, skills: bool) -> Vec<(String, String)> {
             ),
             ("deadline_ms".into(), s.deadline_ms.to_string()),
             ("degrade_on_error".into(), s.degrade_on_error.to_string()),
+            ("min_score".into(), s.min_score.to_string()),
         ]
     } else {
         let a = &prime.agents;
@@ -1929,6 +2190,74 @@ fn prime_fields(prime: &PrimeConfig, skills: bool) -> Vec<(String, String)> {
             ("deadline_ms".into(), a.deadline_ms.to_string()),
             ("degrade_on_error".into(), a.degrade_on_error.to_string()),
         ]
+    }
+}
+
+/// Compact status when Prime rebuild/backfill has no saved profile route.
+pub(crate) const PRIME_UNAVAILABLE_PROFILE: &str = "unavailable — save a retrieval profile";
+
+/// Profile id only — never show an endpoint, path, or credential.
+pub(crate) fn display_configured_route(raw: Option<&str>) -> String {
+    xai_grok_shell::session::prime::displayable_configured_route(raw)
+        .unwrap_or("")
+        .to_owned()
+}
+
+fn bound_prime_status_line(text: &str, width: u16) -> String {
+    let cap = width as usize;
+    if cap == 0 {
+        text.to_owned()
+    } else {
+        crate::render::line_utils::truncate_str(text, cap)
+    }
+}
+
+/// Shared compact job label for Skills footer and Retrieval Prime browse.
+/// Maps confirm-required to `confirm` / `unavailable`; never returns raw
+/// failure text.
+pub(crate) fn compact_prime_job_label(
+    job: &xai_grok_shell::session::prime::PrimeIndexJobStatus,
+) -> &'static str {
+    let failure = job
+        .failure
+        .as_deref()
+        .map(xai_grok_shell::session::prime::sanitize_prime_job_failure)
+        .unwrap_or_default();
+    if xai_grok_shell::session::prime::prime_failure_is_confirm_required(Some(&failure)) {
+        let suffix = failure.split_once(':').map(|(_, rest)| rest.trim());
+        if display_configured_route(job.configured_route.as_deref()).is_empty()
+            && display_configured_route(suffix).is_empty()
+        {
+            "unavailable"
+        } else {
+            "confirm"
+        }
+    } else if failure == "unavailable" {
+        "unavailable"
+    } else {
+        match job.state.as_str() {
+            "running" => "running",
+            "cancelling" => "cancelling",
+            "completed" => "completed",
+            "failed" => "failed",
+            "cancelled" => "cancelled",
+            _ => "failed",
+        }
+    }
+}
+
+/// Bounded, secret-free error for Retrieval/Skills overlays.
+pub(crate) fn compact_prime_job_error(message: &str) -> String {
+    let code = xai_grok_shell::session::prime::sanitize_prime_job_failure(message);
+    if code.is_empty() {
+        return "failed".into();
+    }
+    if xai_grok_shell::session::prime::prime_failure_is_confirm_required(Some(&code))
+        || code == "unavailable"
+    {
+        PRIME_UNAVAILABLE_PROFILE.into()
+    } else {
+        code
     }
 }
 
@@ -1956,6 +2285,374 @@ mod tests {
             is_valid: true,
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn prime_page_backfill_and_rebuild_are_not_save() {
+        let mut s = RetrievalSettingsState::new();
+        s.apply_snapshot(snap_with_emb());
+        s.page = RetrievalPage::Prime;
+        s.selected = 0;
+        assert!(
+            s.handle_key(key(KeyCode::Char('b'))).is_none(),
+            "no saved profile must not spawn a backfill job"
+        );
+        assert_eq!(s.status.as_deref(), Some(PRIME_UNAVAILABLE_PROFILE));
+        assert_eq!(s.error.as_deref(), Some(PRIME_UNAVAILABLE_PROFILE));
+        s.error = None;
+        s.status = None;
+        s.prime_index = Some(xai_grok_shell::session::prime::PrimeIndexStatus {
+            api_version: 1,
+            generation: 1,
+            fingerprint_short: "abc123def456".into(),
+            skills: xai_grok_shell::session::prime::PrimeIndexCollectionStatus {
+                collection: "skills".into(),
+                generation: 1,
+                fingerprint_short: "abc123def456".into(),
+                item_count: 1,
+                vector_count: 0,
+                missing_vectors: 1,
+                readiness: "pending".into(),
+                route_id: Some("main".into()),
+                dimensions: None,
+            },
+            agents: xai_grok_shell::session::prime::PrimeIndexCollectionStatus {
+                collection: "agents".into(),
+                generation: 0,
+                fingerprint_short: String::new(),
+                item_count: 0,
+                vector_count: 0,
+                missing_vectors: 0,
+                readiness: "ready".into(),
+                route_id: None,
+                dimensions: None,
+            },
+            job: None,
+            configured_route: Some("main".into()),
+            capabilities: xai_grok_shell::session::prime::PrimeIndexCapabilities::SUPPORTED,
+            unchanged: false,
+        });
+        s.handle_key(key(KeyCode::Char('u')));
+        match &s.edit {
+            RetrievalEditMode::ConfirmPrimeRebuild { collection, route } => {
+                assert_eq!(collection, "skills");
+                assert_eq!(route, "main", "confirm must display the configured route");
+            }
+            other => panic!("expected confirm rebuild, got {other:?}"),
+        }
+        match s.handle_key(key(KeyCode::Char('y'))) {
+            Some(RetrievalCommand::PrimeIndexRebuild { confirm, .. }) => {
+                assert!(confirm, "rebuild must confirm the configured route");
+            }
+            other => panic!("expected rebuild confirm, got {other:?}"),
+        }
+        s.edit = RetrievalEditMode::Browse;
+        s.dirty = true;
+        let cmd = s.handle_key(key(KeyCode::Char('s')));
+        assert!(
+            matches!(cmd, Some(RetrievalCommand::ValidateAndReload)),
+            "browse s still refreshes config and does not rebuild, got {cmd:?}"
+        );
+    }
+
+    #[test]
+    fn prime_page_backfill_with_configured_route_requires_confirm() {
+        let mut s = RetrievalSettingsState::new();
+        s.apply_snapshot(snap_with_emb());
+        s.page = RetrievalPage::Prime;
+        s.selected = 0;
+        s.prime_index = Some(xai_grok_shell::session::prime::PrimeIndexStatus {
+            api_version: 1,
+            generation: 1,
+            fingerprint_short: "abc123def456".into(),
+            skills: xai_grok_shell::session::prime::PrimeIndexCollectionStatus {
+                collection: "skills".into(),
+                generation: 1,
+                fingerprint_short: "abc123def456".into(),
+                item_count: 1,
+                vector_count: 0,
+                missing_vectors: 1,
+                readiness: "pending".into(),
+                route_id: Some("main".into()),
+                dimensions: None,
+            },
+            agents: xai_grok_shell::session::prime::PrimeIndexCollectionStatus {
+                collection: "agents".into(),
+                generation: 0,
+                fingerprint_short: String::new(),
+                item_count: 0,
+                vector_count: 0,
+                missing_vectors: 0,
+                readiness: "ready".into(),
+                route_id: None,
+                dimensions: None,
+            },
+            job: None,
+            configured_route: Some("main".into()),
+            capabilities: xai_grok_shell::session::prime::PrimeIndexCapabilities::SUPPORTED,
+            unchanged: false,
+        });
+        assert!(s.handle_key(key(KeyCode::Char('b'))).is_none());
+        match &s.edit {
+            RetrievalEditMode::ConfirmPrimeBackfill { collection, route } => {
+                assert_eq!(collection, "skills");
+                assert_eq!(route, "main");
+            }
+            other => panic!("expected confirm backfill, got {other:?}"),
+        }
+        match s.handle_key(key(KeyCode::Char('y'))) {
+            Some(RetrievalCommand::PrimeIndexBackfill {
+                confirm,
+                collection,
+            }) => {
+                assert_eq!(collection, "skills");
+                assert!(confirm, "backfill must confirm the configured route");
+            }
+            other => panic!("expected backfill confirm, got {other:?}"),
+        }
+        s.edit = RetrievalEditMode::Browse;
+        s.error = None;
+        s.status = None;
+        s.prime_index.as_mut().unwrap().configured_route = Some("sk-live-secret".into());
+        assert!(
+            s.handle_key(key(KeyCode::Char('b'))).is_none(),
+            "credential-like routes must not spawn a job"
+        );
+        assert_eq!(s.status.as_deref(), Some(PRIME_UNAVAILABLE_PROFILE));
+        assert!(matches!(s.edit, RetrievalEditMode::Browse));
+        assert_eq!(display_configured_route(Some("http://127.0.0.1/v1")), "");
+        assert_eq!(display_configured_route(Some("main")), "main");
+        assert_eq!(display_configured_route(Some("sk-live-secret")), "");
+        assert_eq!(display_configured_route(Some("file:///tmp/secret")), "");
+        assert_eq!(display_configured_route(Some("main\nsk-live-secret")), "");
+        assert_eq!(display_configured_route(Some(&"x".repeat(200))), "");
+    }
+
+    #[test]
+    fn prime_page_without_route_u_y_and_b_leave_visible_error() {
+        let mut s = RetrievalSettingsState::new();
+        s.apply_snapshot(snap_with_emb());
+        s.page = RetrievalPage::Prime;
+        s.selected = 0;
+        assert!(s.handle_key(key(KeyCode::Char('u'))).is_none());
+        assert_eq!(s.status.as_deref(), Some(PRIME_UNAVAILABLE_PROFILE));
+        assert_eq!(s.error.as_deref(), Some(PRIME_UNAVAILABLE_PROFILE));
+        assert!(matches!(s.edit, RetrievalEditMode::Browse));
+        assert!(
+            s.handle_key(key(KeyCode::Char('y'))).is_none(),
+            "y must not start a rebuild without a saved profile"
+        );
+        s.error = None;
+        s.status = None;
+        assert!(s.handle_key(key(KeyCode::Char('b'))).is_none());
+        assert_eq!(s.status.as_deref(), Some(PRIME_UNAVAILABLE_PROFILE));
+        assert!(matches!(s.edit, RetrievalEditMode::Browse));
+    }
+
+    fn buffer_text(buf: &Buffer) -> String {
+        let area = *buf.area();
+        let mut out = String::new();
+        for y in area.top()..area.bottom() {
+            for x in area.left()..area.right() {
+                out.push_str(buf[(x, y)].symbol());
+            }
+            out.push('\n');
+        }
+        out
+    }
+
+    fn prime_status_with_failure(
+        route: Option<&str>,
+        failure: &str,
+    ) -> xai_grok_shell::session::prime::PrimeIndexStatus {
+        xai_grok_shell::session::prime::PrimeIndexStatus {
+            api_version: 1,
+            generation: 4,
+            fingerprint_short: "abc123def456".into(),
+            skills: xai_grok_shell::session::prime::PrimeIndexCollectionStatus {
+                collection: "skills".into(),
+                generation: 4,
+                fingerprint_short: "abc123def456".into(),
+                item_count: 3,
+                vector_count: 1,
+                missing_vectors: 2,
+                readiness: "pending".into(),
+                route_id: route.map(str::to_owned),
+                dimensions: None,
+            },
+            agents: xai_grok_shell::session::prime::PrimeIndexCollectionStatus {
+                collection: "agents".into(),
+                generation: 0,
+                fingerprint_short: String::new(),
+                item_count: 0,
+                vector_count: 0,
+                missing_vectors: 0,
+                readiness: "ready".into(),
+                route_id: None,
+                dimensions: None,
+            },
+            job: Some(xai_grok_shell::session::prime::PrimeIndexJobStatus {
+                api_version: 1,
+                job_id: "j1".into(),
+                kind: "backfill".into(),
+                collection: "skills".into(),
+                state: "failed".into(),
+                generation: 4,
+                fingerprint_short: "abc123def456".into(),
+                done: 0,
+                total: 3,
+                confirm_configured_profile: false,
+                configured_route: route.map(str::to_owned),
+                failure: Some(failure.into()),
+            }),
+            configured_route: route.map(str::to_owned),
+            capabilities: xai_grok_shell::session::prime::PrimeIndexCapabilities::SUPPORTED,
+            unchanged: false,
+        }
+    }
+
+    #[test]
+    fn prime_browse_job_line_omits_raw_failure_payloads_at_narrow_width() {
+        let long = "x".repeat(200);
+        let cases: &[(&str, &str)] = &[
+            (
+                "http://127.0.0.1/v1",
+                "confirm_required:http://127.0.0.1/v1",
+            ),
+            ("sk-live-secret", "confirm_required:sk-live-secret"),
+            ("file:///tmp/secret", "confirm_required:file:///tmp/secret"),
+            (
+                "main\nsk-live-secret",
+                "confirm_required:main\nsk-live-secret",
+            ),
+            (long.as_str(), long.as_str()),
+        ];
+        for (raw, failure) in cases {
+            let mut s = RetrievalSettingsState::new();
+            s.apply_snapshot(snap_with_emb());
+            s.page = RetrievalPage::Prime;
+            s.selected = 0;
+            s.prime_index = Some(prime_status_with_failure(Some(raw), failure));
+            let job = s
+                .prime_index
+                .as_ref()
+                .and_then(|st| st.job.as_ref())
+                .unwrap();
+            let label = compact_prime_job_label(job);
+            assert!(
+                matches!(label, "confirm" | "unavailable" | "failed"),
+                "compact label for {raw:?}: {label}"
+            );
+            assert!(!label.contains(raw.trim()), "{label}");
+            // Retrieval Settings uses ModalSizing::large (min 60 cols, 7-row
+            // vertical margin). 80x40 is still a narrow content width.
+            let area = Rect::new(0, 0, 80, 40);
+            let mut buf = Buffer::empty(area);
+            s.render(area, &mut buf, &Theme::current());
+            let text = buffer_text(&buf);
+            assert!(
+                !text.contains(raw.trim()),
+                "browse leaked {raw:?} in:\n{text}"
+            );
+            assert!(
+                !text.contains("127.0.0.1") || !raw.contains("127"),
+                "{text}"
+            );
+            assert!(
+                !text.contains("sk-live-secret") || !raw.contains("sk-"),
+                "{text}"
+            );
+            assert!(!text.contains("file://"), "{text}");
+            assert!(
+                !text.contains('\n') || !raw.contains('\n') || !text.contains("sk-live"),
+                "{text}"
+            );
+            let understandable =
+                text.contains("confirm") || text.contains("unavailable") || text.contains("failed");
+            assert!(
+                understandable,
+                "browse must still show a compact job state:\n{text}"
+            );
+            for row in text.lines() {
+                let cols: usize = row.chars().count();
+                assert!(
+                    cols <= 80,
+                    "job line must clamp to terminal width, got {cols}: {row:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn prime_confirm_cancel_then_retry_dispatches_once() {
+        let mut s = RetrievalSettingsState::new();
+        s.apply_snapshot(snap_with_emb());
+        s.page = RetrievalPage::Prime;
+        s.selected = 0;
+        s.prime_index = Some(prime_status_with_failure(Some("main"), ""));
+        s.prime_index.as_mut().unwrap().job = None;
+        assert!(s.handle_key(key(KeyCode::Char('b'))).is_none());
+        assert!(matches!(
+            s.edit,
+            RetrievalEditMode::ConfirmPrimeBackfill { .. }
+        ));
+        assert!(s.handle_key(key(KeyCode::Char('n'))).is_none());
+        assert!(matches!(s.edit, RetrievalEditMode::Browse));
+        assert!(s.handle_key(key(KeyCode::Char('b'))).is_none());
+        match s.handle_key(key(KeyCode::Char('y'))) {
+            Some(RetrievalCommand::PrimeIndexBackfill { confirm, .. }) => {
+                assert!(confirm);
+            }
+            other => panic!("retry y must dispatch confirmed backfill, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn prime_confirm_render_omits_unsanitary_route_at_narrow_width() {
+        let mut s = RetrievalSettingsState::new();
+        s.apply_snapshot(snap_with_emb());
+        s.page = RetrievalPage::Prime;
+        s.edit = RetrievalEditMode::ConfirmPrimeBackfill {
+            collection: "skills".into(),
+            route: "http://127.0.0.1/v1".into(),
+        };
+        let area = Rect::new(0, 0, 80, 40);
+        let mut buf = Buffer::empty(area);
+        s.render(area, &mut buf, &Theme::current());
+        let text = buffer_text(&buf);
+        assert!(!text.contains("127.0.0.1"), "{text}");
+        assert!(!text.contains("http://"), "{text}");
+        assert!(text.contains("unavailable"), "{text}");
+        assert!(
+            s.handle_key(key(KeyCode::Char('y'))).is_none(),
+            "y on an unsanitary confirm must not start a job"
+        );
+        assert_eq!(s.status.as_deref(), Some(PRIME_UNAVAILABLE_PROFILE));
+    }
+
+    #[test]
+    fn compact_prime_job_error_never_returns_raw_payload() {
+        assert_eq!(
+            compact_prime_job_error("couldn't run prime index: confirm_required:main"),
+            PRIME_UNAVAILABLE_PROFILE
+        );
+        assert_eq!(
+            compact_prime_job_error("confirm_required:http://127.0.0.1/v1"),
+            PRIME_UNAVAILABLE_PROFILE
+        );
+        assert_eq!(compact_prime_job_error("sk-live-secret"), "failed");
+        assert_eq!(compact_prime_job_error(&"x".repeat(200)), "failed");
+        assert_eq!(
+            compact_prime_job_error("already_running"),
+            "already_running"
+        );
+        let job = prime_status_with_failure(
+            Some("http://127.0.0.1/v1"),
+            "confirm_required:http://127.0.0.1/v1",
+        )
+        .job
+        .unwrap();
+        assert_eq!(compact_prime_job_label(&job), "unavailable");
     }
 
     #[test]

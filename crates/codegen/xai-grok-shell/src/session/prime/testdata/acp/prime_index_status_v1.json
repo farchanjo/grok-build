@@ -1,0 +1,34 @@
+{
+  "apiVersion": 1,
+  "generation": 4,
+  "fingerprintShort": "abc123def456",
+  "skills": {
+    "collection": "skills",
+    "generation": 4,
+    "fingerprintShort": "abc123def456",
+    "itemCount": 3,
+    "vectorCount": 2,
+    "missingVectors": 1,
+    "readiness": "pending",
+    "routeId": "main",
+    "dimensions": 8
+  },
+  "agents": {
+    "collection": "agents",
+    "generation": 1,
+    "fingerprintShort": "aa11bb22cc33",
+    "itemCount": 2,
+    "vectorCount": 2,
+    "missingVectors": 0,
+    "readiness": "ready"
+  },
+  "configuredRoute": "main",
+  "capabilities": {
+    "status": true,
+    "backfill": true,
+    "rebuild": true,
+    "cancel": true
+  },
+  "unchanged": false,
+  "futureField": true
+}

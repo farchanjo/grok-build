@@ -3784,6 +3784,7 @@ impl MvpAgent {
                 code_nav: client_code_nav_enabled,
                 git_head_changed,
             });
+            let cli_agents = self.cfg.borrow().cli_agents.clone();
             spawn_session_on_thread(
                     session_info.clone(),
                     self.gateway.clone(),
@@ -3863,6 +3864,7 @@ impl MvpAgent {
                     client_hooks,
                     prompt_display_cwd,
                     subagent_toggle,
+                    cli_agents,
                     Vec::new(),
                     xai_grok_agent::prompt::context::PromptAudience::Primary,
                     None,

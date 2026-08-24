@@ -14,6 +14,8 @@ mod agent_type_mismatch_modal_on_model_switch;
 mod agent_type_mismatch_no_keeps_current_session;
 #[path = "pty_e2e/agent_type_mismatch_yes_starts_new_session.rs"]
 mod agent_type_mismatch_yes_starts_new_session;
+#[path = "pty_e2e/agents_retrieval_context_pty.rs"]
+mod agents_retrieval_context_pty;
 #[path = "pty_e2e/campaign_nudges_default_until_dismissed_by_model_pick.rs"]
 mod campaign_nudges_default_until_dismissed_by_model_pick;
 #[path = "pty_e2e/campaign_remote_settings_nudge_and_dismiss.rs"]
@@ -42,6 +44,8 @@ mod reverse_agent_type_mismatch_cursor_to_default;
 mod same_agent_type_switch_no_modal;
 #[path = "pty_e2e/show_thinking_blocks_toggle_hides_existing_pty.rs"]
 mod show_thinking_blocks_toggle_hides_existing_pty;
+#[path = "pty_e2e/skills_modal_search_create_quarantine_pty.rs"]
+mod skills_modal_search_create_quarantine_pty;
 #[path = "pty_e2e/subscription_watch_and_gate_verify_pty.rs"]
 mod subscription_watch_and_gate_verify_pty;
 #[path = "pty_e2e/undo_tip_resets_each_new_session.rs"]

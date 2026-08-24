@@ -246,6 +246,31 @@ fn internal_reload_request_line(id: &str, method: &str, params: serde_json::Valu
     format!("{}\n", msg)
 }
 
+#[derive(Clone, Copy)]
+struct ReloadIntentFlags {
+    models: bool,
+    providers: bool,
+    retrieval: bool,
+    cache: bool,
+}
+
+async fn deliver_atomic_reload_intent<W>(
+    acp_tx: &Arc<TokioMutex<W>>,
+    line: &str,
+    cancel: &tokio_util::sync::CancellationToken,
+) -> std::io::Result<()>
+where
+    W: tokio::io::AsyncWrite + Unpin,
+{
+    let result = acp_tx.lock().await.write_all(line.as_bytes()).await;
+    if result.is_err() {
+        // The session-admin lane is the sole publisher. Restarting is safer
+        // than applying only one part of the rejected batch here.
+        cancel.cancel();
+    }
+    result
+}
+
 /// Start a skills file watcher and wire it to inject `x.ai/internal/reload_skills`
 /// messages into the shared ACP incoming stream when SKILL.md files change on disk.
 ///
@@ -1513,6 +1538,29 @@ pub async fn run_leader(
             let acp_tx_for_config = acp_incoming_tx.clone();
             tokio::task::spawn_local(async move {
                 use crate::config::reloader::ConfigUpdate;
+                // ACP ordering gives the session-admin reload owner one writer.
+                let inject_model_reload = |id: &str, flags: ReloadIntentFlags| {
+                    let line = internal_reload_request_line(
+                        id,
+                        "x.ai/internal/reload_models",
+                        serde_json::json!({
+                            "models": flags.models,
+                            "providers": flags.providers,
+                            "retrieval": flags.retrieval,
+                            "cache": flags.cache,
+                        }),
+                    );
+                    let acp_tx = acp_tx_for_config.clone();
+                    let cancel = cancel_clone.clone();
+                    async move {
+                        if let Err(e) = deliver_atomic_reload_intent(&acp_tx, &line, &cancel).await {
+                            warn!(
+                                error = %e,
+                                "failed to deliver atomic reload intent; stopping leader"
+                            );
+                        }
+                    }
+                };
                 while let Some(update) = config_update_rx.recv().await {
                     match update {
                         ConfigUpdate::Auth(auth) => {
@@ -1598,56 +1646,71 @@ pub async fn run_leader(
                                 );
                             }
                         }
-                        ConfigUpdate::ModelsChanged => {
-                            info!("Model config change detected — reloading agent model list");
-                            // Provider registry generation change invalidates
-                            // exact retrieval pins; rebuild all home-keyed PR17
-                            // snapshots (LKG retained on invalid candidates).
-                            for (home, outcome) in crate::retrieval::reload_all_registries() {
-                                info!(
-                                    ?home,
-                                    ?outcome,
-                                    "retrieval registry reloaded after models change"
-                                );
-                            }
-                            let line = internal_reload_request_line(
-                                "config-reload-models",
-                                "x.ai/internal/reload_models",
-                                serde_json::json!({}),
+                        ConfigUpdate::ModelReload {
+                            models,
+                            providers,
+                            retrieval,
+                            cache,
+                        } => {
+                            info!(
+                                models,
+                                providers,
+                                retrieval,
+                                cache,
+                                "model/retrieval/cache reload intent received"
                             );
-                            let mut tx = acp_tx_for_config.lock().await;
-                            if let Err(e) = tx.write_all(line.as_bytes()).await {
-                                warn!(error = %e, "failed to inject model reload into ACP stream");
-                            }
+                            // Do not publish here: a second writer would make
+                            // last-known-good warnings nondeterministic.
+                            inject_model_reload(
+                                "config-reload-models",
+                                ReloadIntentFlags {
+                                    models,
+                                    providers,
+                                    retrieval,
+                                    cache,
+                                },
+                            )
+                            .await;
+                        }
+                        // Legacy senders still use the unit variants.
+                        ConfigUpdate::ModelsChanged => {
+                            info!("model config change detected (legacy unit variant)");
+                            inject_model_reload(
+                                "config-reload-models",
+                                ReloadIntentFlags {
+                                    models: true,
+                                    providers: true,
+                                    retrieval: true,
+                                    cache: false,
+                                },
+                            )
+                            .await;
                         }
                         ConfigUpdate::ModelsCacheChanged => {
-                            // External write to ~/.grok/models_cache.json
-                            // (another grok process fetched a fresher /v1/models
-                            // catalog). Injected into the agent's ACP stream —
-                            // NOT applied directly on the manager — so it is
-                            // serialized behind any `reload_models` from the
-                            // same watcher batch: the `ModelsChanged` arm above
-                            // only *injects* a request that completes
-                            // asynchronously, and a direct call here could
-                            // rebuild the catalog and notify clients before
-                            // `apply_config` decided to accept or reject the
-                            // new config. The agent processes stream requests
-                            // in order, eliminating that interleaving.
-                            // `reload_from_disk_cache` still content-dedupes
-                            // the leader's own cache writes.
-                            info!("Models cache change detected — reloading agent model catalog");
-                            let line = internal_reload_request_line(
+                            info!("models cache change detected (legacy unit variant)");
+                            inject_model_reload(
                                 "config-reload-models-cache",
-                                "x.ai/internal/reload_models_cache",
-                                serde_json::json!({}),
-                            );
-                            let mut tx = acp_tx_for_config.lock().await;
-                            if let Err(e) = tx.write_all(line.as_bytes()).await {
-                                warn!(
-                                    error = %e,
-                                    "failed to inject models-cache reload into ACP stream"
-                                );
-                            }
+                                ReloadIntentFlags {
+                                    models: false,
+                                    providers: false,
+                                    retrieval: false,
+                                    cache: true,
+                                },
+                            )
+                            .await;
+                        }
+                        ConfigUpdate::RetrievalGraphChanged => {
+                            info!("retrieval graph change detected (legacy unit variant)");
+                            inject_model_reload(
+                                "config-reload-retrieval",
+                                ReloadIntentFlags {
+                                    models: false,
+                                    providers: false,
+                                    retrieval: true,
+                                    cache: false,
+                                },
+                            )
+                            .await;
                         }
                         ConfigUpdate::Memory(mem) => {
                             info!(
@@ -1686,14 +1749,6 @@ pub async fn run_leader(
                                 }
                             });
                             let _ = ipc_tx_for_config.send(notification.to_string());
-                        }
-                        ConfigUpdate::RetrievalGraphChanged => {
-                            info!(
-                                "Retrieval graph config change detected — rebuilding PR17 registries"
-                            );
-                            for (home, outcome) in crate::retrieval::reload_all_registries() {
-                                info!(?home, ?outcome, "retrieval registry reload outcome");
-                            }
                         }
                         ConfigUpdate::Compaction(compaction) => {
                             info!("Compaction config change detected — updating active sessions");
@@ -2015,6 +2070,22 @@ mod tests {
         );
         let msg: serde_json::Value = serde_json::from_str(line.trim_end()).unwrap();
         assert_eq!(msg["method"], "_x.ai/internal/auth_cleared");
+    }
+
+    #[tokio::test]
+    async fn failed_atomic_reload_delivery_cancels_leader() {
+        let (writer, reader) = tokio::io::duplex(16);
+        drop(reader);
+        let writer = Arc::new(TokioMutex::new(writer));
+        let cancel = CancellationToken::new();
+
+        let result = deliver_atomic_reload_intent(&writer, "reload\n", &cancel).await;
+
+        assert!(result.is_err());
+        assert!(
+            cancel.is_cancelled(),
+            "a broken serialized owner must restart instead of partially reloading"
+        );
     }
 
     #[tokio::test]

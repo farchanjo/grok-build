@@ -1,0 +1,20 @@
+{
+  "apiVersion": 1,
+  "generation": 1,
+  "status": "quarantined",
+  "identity": {
+    "parent_dir_name": "bad",
+    "file_label": "bad/SKILL.md",
+    "scope": "local"
+  },
+  "diagnostics": [
+    {
+      "code": "unexpected-top-level-key",
+      "field": "when-to-use",
+      "message": "Unexpected top-level key.",
+      "remediation": "Move Grok extensions under metadata.grok.",
+      "position": { "line": 4, "column": 1 }
+    }
+  ],
+  "futureField": true
+}

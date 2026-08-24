@@ -438,7 +438,64 @@ pub fn count_detail(count: u64, noun: &str) -> String {
     format!("{count} {noun}{suffix}")
 }
 
-/// Context usage breakdown for session info.
+/// Secret-free prime/retrieval accounting captured for the latest eligible
+/// real native turn; never a fresh config echo or body/description/source/score
+/// content.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct PrimeContextInfo {
+    /// Profile id actually selected for the latest eligible prime turn.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub retrieval_profile: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub retrieval_snapshot_generation: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub graph_generation: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provider_generation: Option<u64>,
+    /// Selected skill names, bounded by config `max_results`.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub primed_skill_names: Vec<String>,
+    /// Final callable advisory agent names, post-revalidation.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub recommended_agent_names: Vec<String>,
+    /// Final injected characters from the skill reminder only (agents are
+    /// never inserted, so never counted). Zero when no skill reminder.
+    #[serde(skip_serializing_if = "is_zero_u64")]
+    pub injected_chars: u64,
+    #[serde(skip_serializing_if = "is_zero_u64")]
+    pub injected_tokens: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_total_chars: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_tokens: Option<u64>,
+    /// Secret-free labels only; omitted when none.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub degradation: Vec<String>,
+    /// `"primed"` | `"degraded"` | `"disabled"`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status: Option<String>,
+    /// `"local"` | `"semantic"` | `"disabled"`. Latest-turn selection mode.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub selection_mode: Option<String>,
+    /// `"ready"` | `"pending"` | `"unavailable"`. Index readiness at the turn.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub readiness: Option<String>,
+}
+
+impl PrimeContextInfo {
+    /// Whether human projections should render this recorded outcome.
+    pub fn should_render(&self) -> bool {
+        self.status.is_some() && self.status.as_deref() != Some("disabled")
+    }
+}
+
+/// Serde skip guard for zeroed injected counters.
+fn is_zero_u64(v: &u64) -> bool {
+    *v == 0
+}
+
+/// Context usage summary for session info.
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct ContextInfo {
@@ -467,6 +524,10 @@ pub struct ContextInfo {
     /// partial snapshots.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub usage_categories: Vec<TokenUsageCategory>,
+    /// Secret-free prime/retrieval accounting for the latest eligible real
+    /// native turn. `None` on partials or when no prime outcome was recorded.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prime: Option<PrimeContextInfo>,
 }
 
 impl ContextInfo {

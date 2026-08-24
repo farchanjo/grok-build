@@ -7,6 +7,25 @@ use super::super::task_result::{
 use super::*;
 use xai_grok_shell::session::unified_list::ListScope;
 
+fn test_session_id() -> acp::SessionId {
+    acp::SessionId::new("test-session")
+}
+
+fn skills_search_loaded(
+    agent_id: AgentId,
+    query: &str,
+    r#gen: u64,
+    result: Result<(Vec<String>, bool), String>,
+) -> Action {
+    Action::TaskComplete(TaskResult::SkillsSearchLoaded {
+        agent_id,
+        session_id: test_session_id(),
+        query: query.into(),
+        r#gen,
+        result,
+    })
+}
+
 fn doctor_target(app: &AppView, id: AgentId) -> crate::app::actions::DoctorFixTarget {
     let agent = &app.agents[&id];
     crate::app::actions::DoctorFixTarget {
@@ -3059,4 +3078,874 @@ fn listed_chatgpt_threshold(app: &AppView, id: AgentId) -> Option<u8> {
             .and_then(|model| model.auto_compact_threshold),
         other => panic!("expected connected OpenAI status, got {other:?}"),
     }
+}
+
+#[test]
+fn skill_regress_cancel_keeps_pending_and_does_not_refetch() {
+    use crate::views::extensions_modal::{ExtensionsModalState, ExtensionsTab};
+
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    {
+        let mut modal = ExtensionsModalState::new(ExtensionsTab::Skills);
+        modal.pending_action = Some("regressing...".into());
+        app.agents.get_mut(&id).unwrap().extensions_modal = Some(modal);
+    }
+
+    let effects = dispatch(
+        Action::TaskComplete(TaskResult::SkillRegressCancelled {
+            agent_id: id,
+            result: Ok("deploy-prod".into()),
+        }),
+        &mut app,
+    );
+    assert!(
+        effects
+            .iter()
+            .all(|effect| !matches!(effect, Effect::FetchSkillsList { .. })),
+        "cancel must not refetch the list as a successful run, got {effects:?}"
+    );
+    let modal = app.agents[&id].extensions_modal.as_ref().unwrap();
+    assert_eq!(
+        modal.pending_action.as_deref(),
+        Some("regressing..."),
+        "cancel leaves the in-flight badge until the original run reports done"
+    );
+}
+
+#[test]
+fn skill_regress_done_clears_pending_and_refetches() {
+    use crate::views::extensions_modal::{ExtensionsModalState, ExtensionsTab, TabDataState};
+
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    {
+        let mut modal = ExtensionsModalState::new(ExtensionsTab::Skills);
+        modal.pending_action = Some("regressing...".into());
+        app.agents.get_mut(&id).unwrap().extensions_modal = Some(modal);
+    }
+
+    let effects = dispatch(
+        Action::TaskComplete(TaskResult::SkillRegressDone {
+            agent_id: id,
+            result: Ok("deploy-prod".into()),
+        }),
+        &mut app,
+    );
+    assert!(
+        effects.iter().any(
+            |effect| matches!(effect, Effect::FetchSkillsList { agent_id, .. } if *agent_id == id)
+        ),
+        "completed run must refresh the skills list, got {effects:?}"
+    );
+    let modal = app.agents[&id].extensions_modal.as_ref().unwrap();
+    assert!(modal.pending_action.is_none());
+    assert!(matches!(modal.skills_data, TabDataState::Loading));
+}
+
+#[test]
+fn skills_list_loaded_does_not_clear_in_flight_regress_badge() {
+    use crate::views::extensions_modal::{
+        ExtensionsModalState, ExtensionsTab, SkillsTabSnapshot, TabDataState,
+    };
+
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    {
+        let mut modal = ExtensionsModalState::new(ExtensionsTab::Skills);
+        modal.pending_action = Some("regressing...".into());
+        app.agents.get_mut(&id).unwrap().extensions_modal = Some(modal);
+    }
+
+    dispatch(
+        Action::TaskComplete(TaskResult::SkillsListLoaded {
+            agent_id: id,
+            result: Ok(SkillsTabSnapshot::empty()),
+        }),
+        &mut app,
+    );
+    let modal = app.agents[&id].extensions_modal.as_ref().unwrap();
+    assert_eq!(modal.pending_action.as_deref(), Some("regressing..."));
+    assert!(matches!(modal.skills_data, TabDataState::Loaded(_)));
+}
+
+#[test]
+fn skills_search_loaded_stores_rank_and_ignores_stale_or_degraded() {
+    use crate::views::extensions_modal::{ExtensionsModalState, ExtensionsTab, SkillSearchMode};
+
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    {
+        let mut modal = ExtensionsModalState::new(ExtensionsTab::Skills);
+        modal.skills_search_mode = SkillSearchMode::Smart;
+        modal.picker_state.set_query("commit");
+        app.agents.get_mut(&id).unwrap().extensions_modal = Some(modal);
+    }
+
+    dispatch(
+        skills_search_loaded(
+            id,
+            "commit",
+            0,
+            Ok((vec!["commit".into(), "alpha".into()], false)),
+        ),
+        &mut app,
+    );
+    assert_eq!(
+        app.agents[&id]
+            .extensions_modal
+            .as_ref()
+            .unwrap()
+            .skills_smart_rank
+            .as_deref(),
+        Some(["commit".to_string(), "alpha".to_string()].as_slice())
+    );
+
+    dispatch(
+        skills_search_loaded(id, "stale", 0, Ok((vec!["stale-hit".into()], false))),
+        &mut app,
+    );
+    assert_eq!(
+        app.agents[&id]
+            .extensions_modal
+            .as_ref()
+            .unwrap()
+            .skills_smart_rank
+            .as_deref(),
+        Some(["commit".to_string(), "alpha".to_string()].as_slice()),
+        "stale completion must not replace the live rank"
+    );
+
+    dispatch(
+        skills_search_loaded(id, "commit", 0, Ok((vec!["local-fallback".into()], true))),
+        &mut app,
+    );
+    assert!(
+        app.agents[&id]
+            .extensions_modal
+            .as_ref()
+            .unwrap()
+            .skills_smart_rank
+            .is_none(),
+        "degraded search must clear the rank so local fallback remains"
+    );
+}
+
+#[test]
+fn skills_search_loaded_does_not_reinstall_rank_after_query_change() {
+    use crate::views::extensions_modal::{ExtensionsModalState, ExtensionsTab, SkillSearchMode};
+
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    {
+        let mut modal = ExtensionsModalState::new(ExtensionsTab::Skills);
+        modal.skills_search_mode = SkillSearchMode::Smart;
+        modal.picker_state.set_query("z");
+        modal.skills_smart_rank = None;
+        app.agents.get_mut(&id).unwrap().extensions_modal = Some(modal);
+    }
+
+    dispatch(
+        skills_search_loaded(
+            id,
+            "commit",
+            0,
+            Ok((vec!["commit".into(), "alpha".into()], false)),
+        ),
+        &mut app,
+    );
+    assert!(
+        app.agents[&id]
+            .extensions_modal
+            .as_ref()
+            .unwrap()
+            .skills_smart_rank
+            .is_none(),
+        "stale completion for the previous query must not reinstall the old rank"
+    );
+}
+
+#[test]
+fn skills_list_loaded_in_smart_mode_refetches_search() {
+    use crate::views::extensions_modal::{
+        ExtensionsModalState, ExtensionsTab, SkillSearchMode, SkillsTabSnapshot, TabDataState,
+    };
+
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    {
+        let mut modal = ExtensionsModalState::new(ExtensionsTab::Skills);
+        modal.skills_search_mode = SkillSearchMode::Smart;
+        modal.picker_state.set_query("commit");
+        modal.skills_smart_rank = Some(vec!["stale".into()]);
+        app.agents.get_mut(&id).unwrap().extensions_modal = Some(modal);
+    }
+
+    let effects = dispatch(
+        Action::TaskComplete(TaskResult::SkillsListLoaded {
+            agent_id: id,
+            result: Ok(SkillsTabSnapshot::empty()),
+        }),
+        &mut app,
+    );
+    let modal = app.agents[&id].extensions_modal.as_ref().unwrap();
+    assert!(matches!(modal.skills_data, TabDataState::Loaded(_)));
+    assert!(
+        modal.skills_smart_rank.is_none(),
+        "reload must drop the stale Smart rank before the fresh search lands"
+    );
+    assert_eq!(app.agents[&id].skills_smart_search_gen, 1);
+    assert!(
+        effects.iter().any(|effect| matches!(
+            effect,
+            Effect::FetchSkillsSearch { agent_id, query, r#gen, .. }
+                if *agent_id == id && query == "commit" && *r#gen == 1
+        )),
+        "Smart reload must re-run search, got {effects:?}"
+    );
+}
+
+#[test]
+fn skills_list_loaded_then_stale_same_query_completion_leaves_rank_none() {
+    use crate::views::extensions_modal::{
+        ExtensionsModalState, ExtensionsTab, SkillSearchMode, SkillsTabSnapshot,
+    };
+
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    {
+        let mut modal = ExtensionsModalState::new(ExtensionsTab::Skills);
+        modal.skills_search_mode = SkillSearchMode::Smart;
+        modal.picker_state.set_query("commit");
+        modal.picker_state.selected = 2;
+        app.agents.get_mut(&id).unwrap().extensions_modal = Some(modal);
+    }
+
+    let first = dispatch(Action::SearchSkillsSmart, &mut app);
+    let first_gen = match first.as_slice() {
+        [Effect::FetchSkillsSearch { r#gen, query, .. }] => {
+            assert_eq!(query, "commit");
+            *r#gen
+        }
+        other => panic!("expected first FetchSkillsSearch, got {other:?}"),
+    };
+    assert_eq!(first_gen, 1);
+
+    let reload = dispatch(
+        Action::TaskComplete(TaskResult::SkillsListLoaded {
+            agent_id: id,
+            result: Ok(SkillsTabSnapshot::empty()),
+        }),
+        &mut app,
+    );
+    match reload.as_slice() {
+        [Effect::FetchSkillsSearch { r#gen, query, .. }] => {
+            assert_eq!(query, "commit");
+            assert_eq!(*r#gen, 2);
+        }
+        other => panic!("expected reload FetchSkillsSearch, got {other:?}"),
+    }
+
+    let selected = app.agents[&id]
+        .extensions_modal
+        .as_ref()
+        .unwrap()
+        .picker_state
+        .selected;
+    let effects = dispatch(
+        skills_search_loaded(
+            id,
+            "commit",
+            first_gen,
+            Ok((vec!["pre-reload".into()], false)),
+        ),
+        &mut app,
+    );
+    assert!(
+        effects.is_empty(),
+        "stale same-query completion must not trigger another side effect, got {effects:?}"
+    );
+    let modal = app.agents[&id].extensions_modal.as_ref().unwrap();
+    assert!(
+        modal.skills_smart_rank.is_none(),
+        "stale pre-reload names must not reinstall after inventory reload"
+    );
+    assert_eq!(app.agents[&id].skills_smart_search_gen, 2);
+    assert_eq!(modal.skills_search_mode, SkillSearchMode::Smart);
+    assert_eq!(modal.picker_state.selected, selected);
+    assert_eq!(modal.picker_state.query(), "commit");
+}
+
+#[test]
+fn skills_search_loaded_current_generation_installs_rank() {
+    use crate::views::extensions_modal::{ExtensionsModalState, ExtensionsTab, SkillSearchMode};
+
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    {
+        let mut modal = ExtensionsModalState::new(ExtensionsTab::Skills);
+        modal.skills_search_mode = SkillSearchMode::Smart;
+        modal.picker_state.set_query("commit");
+        app.agents.get_mut(&id).unwrap().extensions_modal = Some(modal);
+    }
+
+    let effects = dispatch(Action::SearchSkillsSmart, &mut app);
+    let search_gen = match effects.as_slice() {
+        [Effect::FetchSkillsSearch { r#gen, .. }] => *r#gen,
+        other => panic!("expected FetchSkillsSearch, got {other:?}"),
+    };
+
+    let effects = dispatch(
+        skills_search_loaded(
+            id,
+            "commit",
+            search_gen,
+            Ok((vec!["commit".into(), "alpha".into()], false)),
+        ),
+        &mut app,
+    );
+    assert!(effects.is_empty());
+    assert_eq!(
+        app.agents[&id]
+            .extensions_modal
+            .as_ref()
+            .unwrap()
+            .skills_smart_rank
+            .as_deref(),
+        Some(["commit".to_string(), "alpha".to_string()].as_slice())
+    );
+}
+
+#[test]
+fn skills_search_loaded_out_of_order_same_query_keeps_newer_rank() {
+    use crate::views::extensions_modal::{ExtensionsModalState, ExtensionsTab, SkillSearchMode};
+
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    {
+        let mut modal = ExtensionsModalState::new(ExtensionsTab::Skills);
+        modal.skills_search_mode = SkillSearchMode::Smart;
+        modal.picker_state.set_query("commit");
+        modal.picker_state.selected = 1;
+        app.agents.get_mut(&id).unwrap().extensions_modal = Some(modal);
+    }
+
+    let first_gen = match dispatch(Action::SearchSkillsSmart, &mut app).as_slice() {
+        [Effect::FetchSkillsSearch { r#gen, .. }] => *r#gen,
+        other => panic!("expected first FetchSkillsSearch, got {other:?}"),
+    };
+    let second_gen = match dispatch(Action::SearchSkillsSmart, &mut app).as_slice() {
+        [Effect::FetchSkillsSearch { r#gen, query, .. }] => {
+            assert_eq!(query, "commit");
+            *r#gen
+        }
+        other => panic!("expected second FetchSkillsSearch, got {other:?}"),
+    };
+    assert_eq!(first_gen, 1);
+    assert_eq!(second_gen, 2);
+
+    dispatch(
+        skills_search_loaded(id, "commit", second_gen, Ok((vec!["newer".into()], false))),
+        &mut app,
+    );
+    assert_eq!(
+        app.agents[&id]
+            .extensions_modal
+            .as_ref()
+            .unwrap()
+            .skills_smart_rank
+            .as_deref(),
+        Some(["newer".to_string()].as_slice())
+    );
+
+    let selected = app.agents[&id]
+        .extensions_modal
+        .as_ref()
+        .unwrap()
+        .picker_state
+        .selected;
+    let effects = dispatch(
+        skills_search_loaded(id, "commit", first_gen, Ok((vec!["older".into()], false))),
+        &mut app,
+    );
+    assert!(
+        effects.is_empty(),
+        "out-of-order completion must not trigger another side effect, got {effects:?}"
+    );
+    let modal = app.agents[&id].extensions_modal.as_ref().unwrap();
+    assert_eq!(
+        modal.skills_smart_rank.as_deref(),
+        Some(["newer".to_string()].as_slice()),
+        "older same-query completion must not replace the current generation"
+    );
+    assert_eq!(app.agents[&id].skills_smart_search_gen, second_gen);
+    assert_eq!(modal.skills_search_mode, SkillSearchMode::Smart);
+    assert_eq!(modal.picker_state.selected, selected);
+
+    let effects = dispatch(
+        skills_search_loaded(
+            id,
+            "commit",
+            first_gen,
+            Ok((vec!["degraded-older".into()], true)),
+        ),
+        &mut app,
+    );
+    assert!(effects.is_empty());
+    assert_eq!(
+        app.agents[&id]
+            .extensions_modal
+            .as_ref()
+            .unwrap()
+            .skills_smart_rank
+            .as_deref(),
+        Some(["newer".to_string()].as_slice()),
+        "stale degraded completion must not clear the current rank"
+    );
+}
+
+#[test]
+fn skills_search_loaded_query_change_ignores_previous_generation() {
+    use crate::views::extensions_modal::{ExtensionsModalState, ExtensionsTab, SkillSearchMode};
+
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    {
+        let mut modal = ExtensionsModalState::new(ExtensionsTab::Skills);
+        modal.skills_search_mode = SkillSearchMode::Smart;
+        modal.picker_state.set_query("commit");
+        app.agents.get_mut(&id).unwrap().extensions_modal = Some(modal);
+    }
+
+    let first_gen = match dispatch(Action::SearchSkillsSmart, &mut app).as_slice() {
+        [Effect::FetchSkillsSearch { r#gen, .. }] => *r#gen,
+        other => panic!("expected first FetchSkillsSearch, got {other:?}"),
+    };
+    app.agents
+        .get_mut(&id)
+        .unwrap()
+        .extensions_modal
+        .as_mut()
+        .unwrap()
+        .picker_state
+        .set_query("z");
+    let second = dispatch(Action::SearchSkillsSmart, &mut app);
+    match second.as_slice() {
+        [Effect::FetchSkillsSearch { r#gen, query, .. }] => {
+            assert_eq!(query, "z");
+            assert_eq!(*r#gen, 2);
+        }
+        other => panic!("expected second FetchSkillsSearch, got {other:?}"),
+    }
+
+    let effects = dispatch(
+        skills_search_loaded(id, "commit", first_gen, Ok((vec!["commit".into()], false))),
+        &mut app,
+    );
+    assert!(effects.is_empty());
+    let modal = app.agents[&id].extensions_modal.as_ref().unwrap();
+    assert!(
+        modal.skills_smart_rank.is_none(),
+        "query change must keep the previous generation from reinstalling"
+    );
+    assert_eq!(app.agents[&id].skills_smart_search_gen, 2);
+    assert_eq!(modal.picker_state.query(), "z");
+    assert_eq!(modal.skills_search_mode, SkillSearchMode::Smart);
+}
+
+#[test]
+fn skills_search_loaded_local_mode_ignores_completion() {
+    use crate::views::extensions_modal::{ExtensionsModalState, ExtensionsTab, SkillSearchMode};
+
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    {
+        let mut modal = ExtensionsModalState::new(ExtensionsTab::Skills);
+        modal.skills_search_mode = SkillSearchMode::Smart;
+        modal.picker_state.set_query("commit");
+        modal.picker_state.selected = 3;
+        app.agents.get_mut(&id).unwrap().extensions_modal = Some(modal);
+    }
+
+    let search_gen = match dispatch(Action::SearchSkillsSmart, &mut app).as_slice() {
+        [Effect::FetchSkillsSearch { r#gen, .. }] => *r#gen,
+        other => panic!("expected FetchSkillsSearch, got {other:?}"),
+    };
+    {
+        let modal = app
+            .agents
+            .get_mut(&id)
+            .unwrap()
+            .extensions_modal
+            .as_mut()
+            .unwrap();
+        modal.skills_search_mode = SkillSearchMode::Local;
+        modal.skills_smart_rank = None;
+    }
+    let local_effects = dispatch(Action::SearchSkillsSmart, &mut app);
+    assert!(
+        local_effects.is_empty(),
+        "Local mode must not search, got {local_effects:?}"
+    );
+    assert_eq!(
+        app.agents[&id].skills_smart_search_gen, search_gen,
+        "Local mode must not bump generation when no fetch is issued"
+    );
+
+    let selected = app.agents[&id]
+        .extensions_modal
+        .as_ref()
+        .unwrap()
+        .picker_state
+        .selected;
+    let effects = dispatch(
+        skills_search_loaded(id, "commit", search_gen, Ok((vec!["commit".into()], false))),
+        &mut app,
+    );
+    assert!(
+        effects.is_empty(),
+        "Local-mode completion must not trigger another side effect, got {effects:?}"
+    );
+    let modal = app.agents[&id].extensions_modal.as_ref().unwrap();
+    assert!(modal.skills_smart_rank.is_none());
+    assert_eq!(modal.skills_search_mode, SkillSearchMode::Local);
+    assert_eq!(modal.picker_state.selected, selected);
+    assert_eq!(app.agents[&id].skills_smart_search_gen, search_gen);
+}
+
+#[test]
+fn skills_list_loaded_off_skills_tab_bumps_gen_without_refetch() {
+    use crate::views::extensions_modal::{
+        ExtensionsModalState, ExtensionsTab, SkillSearchMode, SkillsTabSnapshot,
+    };
+
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    {
+        let mut modal = ExtensionsModalState::new(ExtensionsTab::Skills);
+        modal.skills_search_mode = SkillSearchMode::Smart;
+        modal.picker_state.set_query("commit");
+        app.agents.get_mut(&id).unwrap().extensions_modal = Some(modal);
+    }
+
+    let first_gen = match dispatch(Action::SearchSkillsSmart, &mut app).as_slice() {
+        [Effect::FetchSkillsSearch { r#gen, .. }] => *r#gen,
+        other => panic!("expected first FetchSkillsSearch, got {other:?}"),
+    };
+    assert_eq!(first_gen, 1);
+
+    app.agents
+        .get_mut(&id)
+        .unwrap()
+        .extensions_modal
+        .as_mut()
+        .unwrap()
+        .switch_tab(ExtensionsTab::Plugins);
+
+    let reload = dispatch(
+        Action::TaskComplete(TaskResult::SkillsListLoaded {
+            agent_id: id,
+            result: Ok(SkillsTabSnapshot::empty()),
+        }),
+        &mut app,
+    );
+    assert!(
+        !reload
+            .iter()
+            .any(|effect| matches!(effect, Effect::FetchSkillsSearch { .. })),
+        "off-tab inventory apply must not search, got {reload:?}"
+    );
+    assert_eq!(app.agents[&id].skills_smart_search_gen, 2);
+    assert!(
+        app.agents[&id]
+            .extensions_modal
+            .as_ref()
+            .unwrap()
+            .skills_smart_rank
+            .is_none()
+    );
+
+    app.agents
+        .get_mut(&id)
+        .unwrap()
+        .extensions_modal
+        .as_mut()
+        .unwrap()
+        .switch_tab(ExtensionsTab::Skills);
+
+    let effects = dispatch(
+        skills_search_loaded(
+            id,
+            "commit",
+            first_gen,
+            Ok((vec!["pre-reload".into()], false)),
+        ),
+        &mut app,
+    );
+    assert!(effects.is_empty());
+    let modal = app.agents[&id].extensions_modal.as_ref().unwrap();
+    assert!(
+        modal.skills_smart_rank.is_none(),
+        "stale same-query completion must not install after off-tab inventory reload"
+    );
+    assert_eq!(modal.picker_state.query(), "commit");
+    assert_eq!(modal.skills_search_mode, SkillSearchMode::Smart);
+}
+
+#[test]
+fn skills_list_loaded_without_session_bumps_gen_without_refetch() {
+    use crate::views::extensions_modal::{
+        ExtensionsModalState, ExtensionsTab, SkillSearchMode, SkillsTabSnapshot,
+    };
+
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    {
+        let mut modal = ExtensionsModalState::new(ExtensionsTab::Skills);
+        modal.skills_search_mode = SkillSearchMode::Smart;
+        modal.picker_state.set_query("commit");
+        app.agents.get_mut(&id).unwrap().extensions_modal = Some(modal);
+    }
+
+    let first_gen = match dispatch(Action::SearchSkillsSmart, &mut app).as_slice() {
+        [Effect::FetchSkillsSearch { r#gen, .. }] => *r#gen,
+        other => panic!("expected FetchSkillsSearch, got {other:?}"),
+    };
+    app.agents.get_mut(&id).unwrap().unbind_session_id();
+
+    let reload = dispatch(
+        Action::TaskComplete(TaskResult::SkillsListLoaded {
+            agent_id: id,
+            result: Ok(SkillsTabSnapshot::empty()),
+        }),
+        &mut app,
+    );
+    assert!(
+        !reload
+            .iter()
+            .any(|effect| matches!(effect, Effect::FetchSkillsSearch { .. })),
+        "missing session_id must not search, got {reload:?}"
+    );
+    assert_eq!(app.agents[&id].skills_smart_search_gen, first_gen + 1);
+
+    app.agents
+        .get_mut(&id)
+        .unwrap()
+        .bind_session_id(test_session_id());
+    let effects = dispatch(
+        skills_search_loaded(
+            id,
+            "commit",
+            first_gen,
+            Ok((vec!["pre-reload".into()], false)),
+        ),
+        &mut app,
+    );
+    assert!(effects.is_empty());
+    assert!(
+        app.agents[&id]
+            .extensions_modal
+            .as_ref()
+            .unwrap()
+            .skills_smart_rank
+            .is_none(),
+        "stale completion must not install after a session-less inventory apply"
+    );
+}
+
+#[test]
+fn skills_search_loaded_ignores_prior_occupancy_after_reopen() {
+    use crate::views::extensions_modal::{ExtensionsModalState, ExtensionsTab, SkillSearchMode};
+
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    {
+        let mut modal = ExtensionsModalState::new(ExtensionsTab::Skills);
+        modal.skills_search_mode = SkillSearchMode::Smart;
+        modal.picker_state.set_query("commit");
+        app.agents.get_mut(&id).unwrap().extensions_modal = Some(modal);
+    }
+
+    let first_gen = match dispatch(Action::SearchSkillsSmart, &mut app).as_slice() {
+        [Effect::FetchSkillsSearch { r#gen, .. }] => *r#gen,
+        other => panic!("expected first FetchSkillsSearch, got {other:?}"),
+    };
+    assert_eq!(first_gen, 1);
+
+    app.agents.get_mut(&id).unwrap().extensions_modal = None;
+    dispatch(
+        Action::OpenExtensionsModal {
+            tab: ExtensionsTab::Skills,
+            trigger: xai_grok_telemetry::events::ExtensionsModalTrigger::SlashCommand,
+        },
+        &mut app,
+    );
+    {
+        let modal = app
+            .agents
+            .get_mut(&id)
+            .unwrap()
+            .extensions_modal
+            .as_mut()
+            .unwrap();
+        modal.skills_search_mode = SkillSearchMode::Smart;
+        modal.picker_state.set_query("commit");
+    }
+
+    let second_gen = match dispatch(Action::SearchSkillsSmart, &mut app).as_slice() {
+        [Effect::FetchSkillsSearch { r#gen, query, .. }] => {
+            assert_eq!(query, "commit");
+            *r#gen
+        }
+        other => panic!("expected second FetchSkillsSearch, got {other:?}"),
+    };
+    assert_ne!(
+        first_gen, second_gen,
+        "reopen must not reuse the previous occupancy's search generation"
+    );
+
+    let effects = dispatch(
+        skills_search_loaded(
+            id,
+            "commit",
+            first_gen,
+            Ok((vec!["pre-close".into()], false)),
+        ),
+        &mut app,
+    );
+    assert!(effects.is_empty());
+    assert!(
+        app.agents[&id]
+            .extensions_modal
+            .as_ref()
+            .unwrap()
+            .skills_smart_rank
+            .is_none(),
+        "prior occupancy completion must not install after reopen"
+    );
+
+    dispatch(
+        skills_search_loaded(
+            id,
+            "commit",
+            second_gen,
+            Ok((vec!["current".into()], false)),
+        ),
+        &mut app,
+    );
+    assert_eq!(
+        app.agents[&id]
+            .extensions_modal
+            .as_ref()
+            .unwrap()
+            .skills_smart_rank
+            .as_deref(),
+        Some(["current".to_string()].as_slice())
+    );
+}
+
+#[test]
+fn skills_search_loaded_ignores_prior_session() {
+    use crate::views::extensions_modal::{ExtensionsModalState, ExtensionsTab, SkillSearchMode};
+
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    {
+        let mut modal = ExtensionsModalState::new(ExtensionsTab::Skills);
+        modal.skills_search_mode = SkillSearchMode::Smart;
+        modal.picker_state.set_query("commit");
+        app.agents.get_mut(&id).unwrap().extensions_modal = Some(modal);
+    }
+
+    let search_gen = match dispatch(Action::SearchSkillsSmart, &mut app).as_slice() {
+        [Effect::FetchSkillsSearch { r#gen, .. }] => *r#gen,
+        other => panic!("expected FetchSkillsSearch, got {other:?}"),
+    };
+    let prior_session = app.agents[&id]
+        .session
+        .session_id
+        .clone()
+        .expect("test agent has a session");
+    app.agents
+        .get_mut(&id)
+        .unwrap()
+        .bind_session_id(acp::SessionId::new("other-session"));
+
+    let effects = dispatch(
+        Action::TaskComplete(TaskResult::SkillsSearchLoaded {
+            agent_id: id,
+            session_id: prior_session,
+            query: "commit".into(),
+            r#gen: search_gen,
+            result: Ok((vec!["old-session".into()], false)),
+        }),
+        &mut app,
+    );
+    assert!(effects.is_empty());
+    assert!(
+        app.agents[&id]
+            .extensions_modal
+            .as_ref()
+            .unwrap()
+            .skills_smart_rank
+            .is_none(),
+        "a prior session's search completion must not install after rebind"
+    );
+}
+
+#[test]
+fn skills_list_loaded_restores_regressing_badge_from_in_flight() {
+    use crate::views::extensions_modal::{
+        ExtensionsModalState, ExtensionsTab, SkillsTabSnapshot, TabDataState,
+    };
+
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    {
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent.skill_regress_in_flight = Some("deploy-prod".into());
+        agent.extensions_modal = Some(ExtensionsModalState::new(ExtensionsTab::Skills));
+    }
+
+    dispatch(
+        Action::TaskComplete(TaskResult::SkillsListLoaded {
+            agent_id: id,
+            result: Ok(SkillsTabSnapshot::empty()),
+        }),
+        &mut app,
+    );
+    let agent = &app.agents[&id];
+    let modal = agent.extensions_modal.as_ref().unwrap();
+    assert_eq!(modal.pending_action.as_deref(), Some("regressing..."));
+    assert!(matches!(modal.skills_data, TabDataState::Loaded(_)));
+    assert_eq!(
+        agent.skill_regress_in_flight.as_deref(),
+        Some("deploy-prod")
+    );
+}
+
+#[test]
+fn skill_regress_done_clears_in_flight_even_when_modal_is_closed() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    app.agents.get_mut(&id).unwrap().skill_regress_in_flight = Some("deploy-prod".into());
+    assert!(app.agents[&id].extensions_modal.is_none());
+
+    let effects = dispatch(
+        Action::TaskComplete(TaskResult::SkillRegressDone {
+            agent_id: id,
+            result: Ok("deploy-prod".into()),
+        }),
+        &mut app,
+    );
+    assert!(
+        effects
+            .iter()
+            .all(|effect| !matches!(effect, Effect::FetchSkillsList { .. })),
+        "closed modal must not refetch, got {effects:?}"
+    );
+    assert!(
+        app.agents[&id].skill_regress_in_flight.is_none(),
+        "done must drop the in-flight stash even if Esc already closed the modal"
+    );
 }

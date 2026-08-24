@@ -101,6 +101,10 @@ pub(crate) struct AgentRebuildSpec {
     pub write_file_enabled: bool,
     pub subagents_enabled: bool,
     pub subagent_toggle: HashMap<String, bool>,
+    /// `[agents.cli]` definitions retained so the session turn path can use the
+    /// same callable-agent authority lane as `MvpAgent` without another
+    /// discovery/reload pass. Spawn-frozen like the rest of this spec.
+    pub cli_agents: Vec<AgentDefinition>,
     pub background_workflows_enabled: bool,
     pub ask_user_question_enabled: bool,
     pub persona_summaries: Vec<String>,
@@ -206,6 +210,7 @@ impl AgentRebuildSpec {
             write_file_enabled,
             subagents_enabled,
             subagent_toggle,
+            cli_agents,
             background_workflows_enabled,
             ask_user_question_enabled,
             persona_summaries,
@@ -239,6 +244,9 @@ impl AgentRebuildSpec {
             parent_scheduler_handle,
         } = self.as_ref();
         let _ = mcp_state;
+        // `cli_agents` feeds the session callability capture lane, not the
+        // Agent builder; the stored spec retains it across rebuilds.
+        let _ = cli_agents;
         #[allow(unused_variables)]
         let is_cursor_template =
             crate::session::is_cursor_system_template(&definition.system_prompt);
@@ -401,6 +409,25 @@ impl AgentRebuildSpec {
 /// literals and focused `build_agent` tests.
 #[cfg(test)]
 pub(crate) fn test_rebuild_spec_default() -> Arc<AgentRebuildSpec> {
+    test_rebuild_spec(Vec::new(), false, HashMap::new())
+}
+
+/// Build a stub spec with subagents enabled and the given CLI agent
+/// definitions so callability tests can exercise the session capture lane
+/// without a real workspace/discovery.
+#[cfg(test)]
+pub(crate) fn test_rebuild_spec_enabled_subagents(
+    cli_agents: Vec<AgentDefinition>,
+) -> Arc<AgentRebuildSpec> {
+    test_rebuild_spec(cli_agents, true, HashMap::new())
+}
+
+#[cfg(test)]
+fn test_rebuild_spec(
+    cli_agents: Vec<AgentDefinition>,
+    subagents_enabled: bool,
+    subagent_toggle: HashMap<String, bool>,
+) -> Arc<AgentRebuildSpec> {
     let (uq_tx, _uq_rx) = tokio::sync::mpsc::unbounded_channel();
     Arc::new(AgentRebuildSpec {
         working_directory: std::env::temp_dir(),
@@ -427,8 +454,9 @@ pub(crate) fn test_rebuild_spec_default() -> Arc<AgentRebuildSpec> {
         video_gen_config: VideoGenConfig::default(),
         app_builder_deployer_config: AppBuilderDeployerConfig::default(),
         write_file_enabled: true,
-        subagents_enabled: false,
-        subagent_toggle: HashMap::new(),
+        subagents_enabled,
+        subagent_toggle,
+        cli_agents,
         background_workflows_enabled: false,
         ask_user_question_enabled: true,
         persona_summaries: vec![],

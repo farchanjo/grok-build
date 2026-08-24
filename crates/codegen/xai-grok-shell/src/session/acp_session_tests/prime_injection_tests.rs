@@ -30,15 +30,31 @@ async fn prime_enabled_actor(
     crate::retrieval::TestRegistryOverride,
     std::sync::Arc<std::sync::Mutex<Vec<crate::session::storage::SessionUpdate>>>,
 ) {
+    prime_enabled_actor_and_agents(enabled, skill_enabled, hard_fail, false).await
+}
+
+/// Same as [`prime_enabled_actor`] but also controls the agents selector.
+async fn prime_enabled_actor_and_agents(
+    enabled: bool,
+    skill_enabled: bool,
+    hard_fail: bool,
+    agents_enabled: bool,
+) -> (
+    SessionActor,
+    tempfile::TempDir,
+    crate::retrieval::TestRegistryOverride,
+    std::sync::Arc<std::sync::Mutex<Vec<crate::session::storage::SessionUpdate>>>,
+) {
     let tmp = tempfile::TempDir::new().unwrap();
     let cwd = tmp.path().canonicalize().unwrap();
-    std::fs::create_dir_all(cwd.join("skills")).unwrap();
+    let skill_dir = cwd.join("skills").join("deploy");
+    std::fs::create_dir_all(&skill_dir).unwrap();
     std::fs::write(
-        cwd.join("skills").join("SKILL.md"),
-        "PRIME-SKILL-BODY deploy steps\n<script>alert(1)</script>\n",
+        skill_dir.join("SKILL.md"),
+        "---\nname: deploy\ndescription: Deploy and release the application.\nmetadata:\n  grok:\n    when-to-use: use this when deploying or releasing\n---\nPRIME-SKILL-BODY deploy steps\n<script>alert(1)</script>\n",
     )
     .unwrap();
-    let skill_path = cwd.join("skills").join("SKILL.md");
+    let skill_path = skill_dir.join("SKILL.md");
 
     let (gateway_tx, _gateway_rx) = tokio::sync::mpsc::unbounded_channel();
     let (persistence_tx, mut persistence_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -91,6 +107,12 @@ async fn prime_enabled_actor(
     let reg = crate::retrieval::RetrievalRegistry::disabled(xai_grok_config::grok_home());
     let mut prime = xai_grok_config_types::PrimeConfig::default();
     prime.skills.enabled = skill_enabled;
+    prime.agents.enabled = agents_enabled;
+    if agents_enabled {
+        // Let every callable candidate be selected for the accounting test
+        // (builtins + any CLI-defined agent), so the recorded names are stable.
+        prime.agents.max_results = 20;
+    }
     if hard_fail {
         // Deterministic hard failure: `degrade_on_error = false` with a
         // retrieval profile that does not exist in the snapshot, so the
@@ -104,6 +126,99 @@ async fn prime_enabled_actor(
         provider_generation: 1,
         fingerprint: "pr19-test".into(),
         enabled,
+        embedding_models: indexmap::IndexMap::new(),
+        reranker_models: indexmap::IndexMap::new(),
+        profiles: indexmap::IndexMap::new(),
+        prime,
+        memory_retrieval_profile: None,
+        warnings: Vec::new(),
+        source_graph: xai_grok_config_types::RetrievalGraphConfig::default(),
+    };
+    reg.force_publish(std::sync::Arc::new(snapshot));
+    let registry_override = crate::retrieval::install_test_registry_override(reg);
+    (actor, tmp, registry_override, persisted_updates)
+}
+
+/// Soft-degrade actor: skills enabled with a retrieval profile that is absent
+/// from the snapshot, under the default `degrade_on_error = true`, so the run
+/// completes with a safe `profile_missing` degradation instead of failing.
+async fn prime_enabled_actor_with_degraded_snapshot(
+    agents_enabled: bool,
+) -> (
+    SessionActor,
+    tempfile::TempDir,
+    crate::retrieval::TestRegistryOverride,
+    std::sync::Arc<std::sync::Mutex<Vec<crate::session::storage::SessionUpdate>>>,
+) {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let cwd = tmp.path().canonicalize().unwrap();
+    let skill_dir = cwd.join("skills").join("deploy");
+    std::fs::create_dir_all(&skill_dir).unwrap();
+    std::fs::write(
+        skill_dir.join("SKILL.md"),
+        "---\nname: deploy\ndescription: Deploy and release the application.\nmetadata:\n  grok:\n    when-to-use: use this when deploying or releasing\n---\nPRIME-SKILL-BODY deploy steps\n",
+    )
+    .unwrap();
+    let skill_path = skill_dir.join("SKILL.md");
+
+    let (gateway_tx, _gateway_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (persistence_tx, mut persistence_rx) = tokio::sync::mpsc::unbounded_channel();
+    let persisted_updates = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let persisted_updates_for_pump = persisted_updates.clone();
+    tokio::task::spawn_local(async move {
+        while let Some(msg) = persistence_rx.recv().await {
+            match msg {
+                PersistenceMsg::FlushAndAck { respond_to } => {
+                    let _ = respond_to.send(());
+                }
+                PersistenceMsg::Update(update) => {
+                    persisted_updates_for_pump.lock().unwrap().push(update);
+                }
+                _ => {}
+            }
+        }
+    });
+
+    let mut actor = create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await;
+    let abs = xai_grok_paths::AbsPathBuf::new(cwd.clone()).unwrap();
+    actor.tool_context.cwd = abs;
+    actor.session_info.cwd = cwd.to_string_lossy().to_string();
+    let skill = SkillInfo {
+        name: "deploy".into(),
+        path: skill_path.to_string_lossy().to_string(),
+        when_to_use: Some("use this when deploying or releasing".into()),
+        body: Some("PRIME-SKILL-BODY deploy steps\n".into()),
+        ..SkillInfo::default()
+    };
+    {
+        let bridge = actor.agent.borrow().tool_bridge().clone();
+        bridge
+            .seed_skill_discovery(
+                Some(cwd.clone()),
+                None,
+                vec![skill],
+                None,
+                Some(256_000),
+                None,
+                xai_grok_tools::types::compat::CompatConfig::default(),
+            )
+            .await;
+    }
+
+    let reg = crate::retrieval::RetrievalRegistry::disabled(xai_grok_config::grok_home());
+    let mut prime = xai_grok_config_types::PrimeConfig::default();
+    prime.skills.enabled = true;
+    prime.skills.retrieval_profile = Some("p-missing".into());
+    prime.agents.enabled = agents_enabled;
+    if agents_enabled {
+        prime.agents.max_results = 20;
+    }
+    let snapshot = crate::retrieval::graph::RetrievalSnapshot {
+        generation: 3,
+        graph_generation: 2,
+        provider_generation: 1,
+        fingerprint: "pr22-degraded".into(),
+        enabled: true,
         embedding_models: indexmap::IndexMap::new(),
         reranker_models: indexmap::IndexMap::new(),
         profiles: indexmap::IndexMap::new(),
@@ -373,7 +488,7 @@ async fn external_backend_user_turn_omits_prime_reminder() {
                     crate::agent::execution_backend::ExternalAgentKind::ClaudeCli,
                 ),
             );
-            let reminder = actor
+            let result = actor
                 .maybe_inject_prime_reminder(
                     &crate::session::PromptOrigin::User,
                     "deploy the release now",
@@ -381,7 +496,14 @@ async fn external_backend_user_turn_omits_prime_reminder() {
                 )
                 .await
                 .unwrap();
-            assert!(reminder.is_none(), "external execution must never prime");
+            assert!(
+                result.reminder.is_none(),
+                "external execution must never prime"
+            );
+            assert!(
+                matches!(result.accounting, PrimeAccounting::Unchanged),
+                "an external backend must not overwrite the last real-turn outcome"
+            );
         })
         .await;
 }
@@ -710,6 +832,317 @@ async fn hard_prime_failure_leaves_monotonic_index_gap_then_success_primes_disti
                 "indices stay monotonic across failure + success"
             );
             prompt_task2.abort();
+        })
+        .await;
+}
+
+/// A successful real native turn records a `primed` outcome with the final
+/// selected skill names and the post-truncation injected budgets, and the
+/// snapshot generations actually used by the run.
+#[tokio::test(flavor = "current_thread")]
+#[serial_test::serial(prime_registry)]
+async fn real_user_turn_records_primed_outcome_with_skill_names_and_injected_budgets() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (actor, _workspace, _registry, _persisted_updates) =
+                prime_enabled_actor(true, true, false).await;
+            let actor = std::sync::Arc::new(actor);
+            let (prompt_task, _conv) = drive_prompt(
+                actor.clone(),
+                "pr22-accounting-1",
+                crate::session::PromptOrigin::User,
+                "deploy the release now",
+            )
+            .await;
+            let outcome = actor
+                .last_prime_outcome
+                .borrow()
+                .clone()
+                .expect("a real user turn must record an outcome");
+            assert_eq!(outcome.status, PrimeOutcomeStatus::Primed);
+            assert!(
+                outcome.primed_skill_names.contains(&"deploy".to_string()),
+                "skill names from the final selection budget: {:?}",
+                outcome.primed_skill_names
+            );
+            assert!(outcome.recommended_agent_names.is_empty());
+            assert!(
+                outcome.injected_chars > 0,
+                "injected chars must be final rendered"
+            );
+            assert!(
+                outcome.injected_tokens > 0,
+                "injected tokens must be final rendered"
+            );
+            // `force_publish` assigns the first published test snapshot
+            // generation 1; accounting must report that loaded value rather
+            // than the pre-publication value in the fixture.
+            assert_eq!(outcome.retrieval_snapshot_generation, Some(1));
+            assert_eq!(outcome.provider_generation, Some(1));
+            assert!(outcome.degradation.is_empty());
+            prompt_task.abort();
+        })
+        .await;
+}
+
+/// Eligible + native + registry with BOTH selectors disabled records a
+/// truthful `disabled` outcome (empty names, zero budgets), not a remap.
+#[tokio::test(flavor = "current_thread")]
+#[serial_test::serial(prime_registry)]
+async fn real_user_turn_skills_disabled_agents_disabled_records_disabled() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (actor, _workspace, _registry, _persisted_updates) =
+                prime_enabled_actor(true, false, false).await;
+            let actor = std::sync::Arc::new(actor);
+            let (prompt_task, _conv) = drive_prompt(
+                actor.clone(),
+                "pr22-disabled-accounting",
+                crate::session::PromptOrigin::User,
+                "deploy the release now",
+            )
+            .await;
+            let outcome = actor
+                .last_prime_outcome
+                .borrow()
+                .clone()
+                .expect("a disabled-but-eligible turn must still record");
+            assert_eq!(outcome.status, PrimeOutcomeStatus::Disabled);
+            assert!(outcome.primed_skill_names.is_empty());
+            assert!(outcome.recommended_agent_names.is_empty());
+            assert_eq!(outcome.injected_chars, 0);
+            assert_eq!(outcome.injected_tokens, 0);
+            prompt_task.abort();
+        })
+        .await;
+}
+
+/// Synthetic origins (scheduler/subagent assignment/unknown) must NOT
+/// overwrite the last real-turn outcome.
+#[tokio::test(flavor = "current_thread")]
+#[serial_test::serial(prime_registry)]
+async fn synthetic_origins_do_not_overwrite_last_prime_outcome() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (actor, _workspace, _registry, _persisted_updates) =
+                prime_enabled_actor(true, true, false).await;
+            let actor = std::sync::Arc::new(actor);
+            let (prompt_task, _conv) = drive_prompt(
+                actor.clone(),
+                "pr22-base-record",
+                crate::session::PromptOrigin::User,
+                "deploy the release now",
+            )
+            .await;
+            let recorded = actor
+                .last_prime_outcome
+                .borrow()
+                .clone()
+                .expect("baseline real turn must record");
+            assert_eq!(recorded.status, PrimeOutcomeStatus::Primed);
+            let skill_names = recorded.primed_skill_names.clone();
+            prompt_task.abort();
+
+            for (id, origin) in [
+                ("pr22-cron", crate::session::PromptOrigin::SchedulerFired),
+                (
+                    "pr22-subagent",
+                    crate::session::PromptOrigin::SubagentAssignment,
+                ),
+                ("pr22-unknown", crate::session::PromptOrigin::Unknown),
+            ] {
+                // A fresh turn-cancel so a previous abort does not leak.
+                let (prompt_task2, _conv2) = drive_prompt(actor.clone(), id, origin, "tick").await;
+                let after = actor
+                    .last_prime_outcome
+                    .borrow()
+                    .clone()
+                    .expect("prior outcome must survive");
+                assert_eq!(after.status, PrimeOutcomeStatus::Primed);
+                assert_eq!(after.primed_skill_names, skill_names.clone());
+                prompt_task2.abort();
+            }
+        })
+        .await;
+}
+
+/// A cancelled prime leaves the previous real-turn outcome unchanged.
+#[tokio::test(flavor = "current_thread")]
+#[serial_test::serial(prime_registry)]
+async fn cancelled_prime_leaves_previous_outcome_unchanged() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (actor, _workspace, _registry, _persisted_updates) =
+                prime_enabled_actor(true, true, false).await;
+            let actor = std::sync::Arc::new(actor);
+            let (prompt_task, _conv) = drive_prompt(
+                actor.clone(),
+                "pr22-before-cancel",
+                crate::session::PromptOrigin::User,
+                "deploy the release now",
+            )
+            .await;
+            let before = actor
+                .last_prime_outcome
+                .borrow()
+                .clone()
+                .expect("baseline turn must record");
+            prompt_task.abort();
+
+            actor.turn_cancel.borrow().clone().cancel();
+            let (prompt_task2, _conv2) = drive_prompt(
+                actor.clone(),
+                "pr22-cancelled",
+                crate::session::PromptOrigin::User,
+                "deploy the release now",
+            )
+            .await;
+            assert!(
+                actor.last_prime_outcome.borrow().is_some(),
+                "the cancelled turn must not erase prior accounting"
+            );
+            assert_eq!(
+                actor.last_prime_outcome.borrow().clone().unwrap().status,
+                before.status,
+                "cancelled prime must preserve the prior real-turn outcome"
+            );
+            prompt_task2.abort();
+        })
+        .await;
+}
+
+/// With agents enabled, final callable advisory names are recorded but no
+/// `<agent_recommendations>` block enters the conversation.
+#[tokio::test(flavor = "current_thread")]
+#[serial_test::serial(prime_registry)]
+async fn agents_enabled_records_names_without_inserting_agent_reminder() {
+    use xai_grok_agent::config::AgentDefinition;
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (mut actor, _workspace, _registry, _persisted_updates) =
+                prime_enabled_actor_and_agents(true, false, false, true).await;
+            // Expose a callable CLI-defined agent through the same capture lane
+            // the session turn path uses.
+            let mut def = AgentDefinition::default_grok_build();
+            def.name = "steve".into();
+            actor.rebuild_spec =
+                crate::session::agent_rebuild::test_rebuild_spec_enabled_subagents(vec![def]);
+            let actor = std::sync::Arc::new(actor);
+            let (prompt_task, conv) = drive_prompt(
+                actor.clone(),
+                "pr22-agents",
+                crate::session::PromptOrigin::User,
+                "deploy the release now",
+            )
+            .await;
+            let outcome = actor
+                .last_prime_outcome
+                .borrow()
+                .clone()
+                .expect("agents-enabled turn must record");
+            assert_eq!(outcome.status, PrimeOutcomeStatus::Primed);
+            assert!(
+                outcome
+                    .recommended_agent_names
+                    .contains(&"steve".to_string()),
+                "agent names from the final callable advisory set: {:?}",
+                outcome.recommended_agent_names
+            );
+            assert!(outcome.primed_skill_names.is_empty());
+            assert!(
+                reminder_items(&conv).is_empty(),
+                "agents are advisory-only: no agent reminder may be inserted"
+            );
+            assert_eq!(conv.len(), 1, "only the real user item is pushed");
+            prompt_task.abort();
+        })
+        .await;
+}
+
+/// A soft (degrade_on_error = true) semantic miss records only the safe
+/// degradation label, never an error string or profile detail.
+#[tokio::test(flavor = "current_thread")]
+#[serial_test::serial(prime_registry)]
+async fn degraded_semantic_records_safe_degradation_labels_only() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (actor, _workspace, _registry, _persisted_updates) =
+                prime_enabled_actor_with_degraded_snapshot(false).await;
+            let actor = std::sync::Arc::new(actor);
+            let (prompt_task, _conv) = drive_prompt(
+                actor.clone(),
+                "pr22-degraded",
+                crate::session::PromptOrigin::User,
+                "deploy the release now",
+            )
+            .await;
+            let outcome = actor
+                .last_prime_outcome
+                .borrow()
+                .clone()
+                .expect("degraded turn must record");
+            assert_eq!(outcome.status, PrimeOutcomeStatus::Degraded);
+            assert!(
+                outcome
+                    .degradation
+                    .iter()
+                    .any(|d| d.as_str() == "profile_missing"),
+                "safe label only: {:?}",
+                outcome.degradation
+            );
+            assert!(
+                outcome.injected_chars > 0,
+                "soft-degrade still renders the selection"
+            );
+            prompt_task.abort();
+        })
+        .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[serial_test::serial(prime_registry)]
+async fn degraded_skill_selection_still_records_callable_agent_recommendations() {
+    use xai_grok_agent::config::AgentDefinition;
+
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (mut actor, _workspace, _registry, _persisted_updates) =
+                prime_enabled_actor_with_degraded_snapshot(true).await;
+            let mut definition = AgentDefinition::default_grok_build();
+            definition.name = "steve".into();
+            actor.rebuild_spec =
+                crate::session::agent_rebuild::test_rebuild_spec_enabled_subagents(vec![
+                    definition,
+                ]);
+            let actor = std::sync::Arc::new(actor);
+            let (prompt_task, _conv) = drive_prompt(
+                actor.clone(),
+                "pr22-degraded-skills-agents",
+                crate::session::PromptOrigin::User,
+                "deploy the release now",
+            )
+            .await;
+            let outcome = actor
+                .last_prime_outcome
+                .borrow()
+                .clone()
+                .expect("degraded turn must record");
+            assert_eq!(outcome.status, PrimeOutcomeStatus::Degraded);
+            assert!(
+                outcome
+                    .recommended_agent_names
+                    .contains(&"steve".to_string()),
+                "skill degradation must not suppress callable agent advice: {:?}",
+                outcome.recommended_agent_names
+            );
+            prompt_task.abort();
         })
         .await;
 }

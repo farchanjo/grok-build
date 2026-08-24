@@ -2321,6 +2321,14 @@ async fn async_main(args: PagerArgs) -> Result<()> {
                 let _otel_guard = xai_grok_telemetry::otel_layer::otel_guard();
                 return xai_grok_pager::plugin_cmd::run(plugin_args).await;
             }
+            Command::Skills(skills_args) => {
+                init_tracing_simple("cli");
+                let code = xai_grok_pager::skills_cmd::run(skills_args)?;
+                if code != 0 {
+                    std::process::exit(code);
+                }
+                return Ok(());
+            }
             Command::Models => {
                 init_tracing_simple("cli");
                 let _otel_guard = xai_grok_telemetry::otel_layer::otel_guard();

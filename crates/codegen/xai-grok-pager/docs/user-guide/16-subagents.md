@@ -257,6 +257,28 @@ cancel token.
 
 ---
 
+## Route Inheritance, Prime, and Recommendations
+
+- **Exact parent route inheritance.** When a subagent omits `model`, it
+  inherits the parent's **exact resolved route**: the canonical
+  account-qualified ID and its full instance configuration (fallbacks,
+  preferences, plugins). The child does not re-resolve the slug to a sibling
+  instance — it reuses the parent's route.
+- **Canonical account-qualified IDs.** OpenRouter children use the qualified
+  `openrouter:<provider>/<model>` form; multi-instance OpenRouter and OpenAI
+  entries are qualified by instance so two accounts do not collide. See
+  [Multi-Account Providers](29-multi-account-providers.md).
+- **Advisory callable-agent recommendations.** Retrieval/prime may produce
+  **advisory recommendations** — agent names only. They are strictly advisory,
+  never a spawn. They carry no spawn implication, descriptions, scores,
+  sources, or bodies; the parent decides whether any are actually spawned.
+  Its CLI-agent, toggle, and global subagent gates use the session's spawn-time
+  policy snapshot; the current agent definition and plugin registry remain
+  live. The live spawn gate still revalidates every requested task. See
+  [Retrieval and Prime](30-retrieval-and-prime.md).
+
+---
+
 ## Isolation: Worktree Mode
 
 For tasks that modify files, run a subagent in an isolated git worktree with `isolation: worktree`. This keeps the child's edits from conflicting with the parent's:

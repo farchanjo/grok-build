@@ -774,6 +774,14 @@ pub struct AppView {
     /// resolved by the shell and advertised on ACP initialize (`sessionRecap`).
     /// When false, the pager must not request recaps (zero `x.ai/recap` traffic).
     pub session_recap_available: bool,
+    /// Prime index ACP operations advertised by the shell. Old shells default off.
+    pub prime_index: xai_grok_shell::session::prime::PrimeIndexCapabilities,
+    /// Last applied Prime index notification generation (stale rejection).
+    pub prime_index_last_generation: u64,
+    /// Last applied Prime index `notifySeq` (job ticks reuse inventory generation).
+    pub prime_index_last_notify_seq: u64,
+    /// File-poll cursor for `$GROK_HOME/state/prime_index_notify.json`.
+    pub prime_index_notify_cursor: u64,
     /// Stateful prompt widget rendered on the welcome screen (persists input across frames).
     pub welcome_prompt: PromptWidget,
     /// The single slash-command MRU/recency store. Owned here and injected
@@ -1552,6 +1560,10 @@ impl AppView {
             session_picker_grouped: false,
             cancel_rewind_enabled: true,
             session_recap_available: false,
+            prime_index: xai_grok_shell::session::prime::PrimeIndexCapabilities::UNSUPPORTED,
+            prime_index_last_generation: 0,
+            prime_index_last_notify_seq: 0,
+            prime_index_notify_cursor: 0,
             dashboard: None,
             dashboard_return: None,
             dashboard_persisted: None,
@@ -5688,6 +5700,10 @@ pub(crate) mod tests {
             session_picker_grouped: false,
             cancel_rewind_enabled: true,
             session_recap_available: false,
+            prime_index: xai_grok_shell::session::prime::PrimeIndexCapabilities::UNSUPPORTED,
+            prime_index_last_generation: 0,
+            prime_index_last_notify_seq: 0,
+            prime_index_notify_cursor: 0,
             dashboard: None,
             dashboard_return: None,
             dashboard_persisted: None,

@@ -134,6 +134,8 @@ pub struct SkillInfo {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plugin_root: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub collection_root: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plugin_data: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub allowed_tools: Option<Vec<String>>,

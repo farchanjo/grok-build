@@ -462,6 +462,78 @@ impl ContextInfoBlock {
         }
         lines.push(Line::from(""));
 
+        // ── Prime accounting (additive; token rows / bar math untouched) ──
+        // The JSON snapshot retains a truthful disabled outcome, but the human
+        // view suppresses that empty default-state section.
+        if let Some(prime) = &snapshot.prime
+            && prime.should_render()
+        {
+            // Display-cap name lists; the full data stays in the JSON snapshot.
+            let capped = |names: &[String]| -> String {
+                const MAX: usize = 4;
+                if names.len() <= MAX {
+                    names.join(", ")
+                } else {
+                    format!("{}… +{} more", names[..MAX].join(", "), names.len() - MAX)
+                }
+            };
+            lines.push(Line::from(Span::styled("Prime", primary)));
+            let mut headline = format!("  {}", prime.status.as_deref().unwrap_or("unknown"));
+            if let Some(p) = xai_grok_shell::session::prime::displayable_configured_route(
+                prime.retrieval_profile.as_deref(),
+            ) {
+                headline.push_str(&format!(" · profile {p}"));
+            }
+            if let Some(g) = prime.retrieval_snapshot_generation {
+                headline.push_str(&format!(" · snapshot {g}"));
+            }
+            if let Some(mode) = &prime.selection_mode {
+                headline.push_str(&format!(" · {mode}"));
+            }
+            if let Some(ready) = &prime.readiness {
+                headline.push_str(&format!(" · {ready}"));
+            }
+            lines.push(Line::from(Span::styled(headline, muted)));
+            let mut detail = String::new();
+            if !prime.primed_skill_names.is_empty() {
+                detail.push_str(&format!(
+                    "skills: {} ({})",
+                    capped(&prime.primed_skill_names),
+                    prime.primed_skill_names.len()
+                ));
+            }
+            if !prime.recommended_agent_names.is_empty() {
+                if !detail.is_empty() {
+                    detail.push_str(" · ");
+                }
+                detail.push_str(&format!(
+                    "agents: {} ({})",
+                    capped(&prime.recommended_agent_names),
+                    prime.recommended_agent_names.len()
+                ));
+            }
+            if prime.injected_chars > 0 || prime.injected_tokens > 0 {
+                if !detail.is_empty() {
+                    detail.push_str(" · ");
+                }
+                detail.push_str(&format!(
+                    "injected {} chars · ~{} tokens",
+                    fmt_tok(prime.injected_chars),
+                    prime.injected_tokens
+                ));
+            }
+            if !detail.is_empty() {
+                lines.push(Line::from(Span::styled(detail, muted)));
+            }
+            if !prime.degradation.is_empty() {
+                lines.push(Line::from(Span::styled(
+                    format!("  degradation: {}", prime.degradation.join(", ")),
+                    muted,
+                )));
+            }
+            lines.push(Line::from(""));
+        }
+
         // Auto-compact estimate: tokens until we hit the auto-compact
         // threshold. Uses the *live* value from the session snapshot
         // (routed from xai-grok-shell's model config resolution). This makes
@@ -657,7 +729,7 @@ impl BlockContent for ContextInfoBlock {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use xai_grok_shell::session::TokenUsageCategory;
+    use xai_grok_shell::session::{PrimeContextInfo, TokenUsageCategory};
 
     fn snapshot() -> ContextInfo {
         ContextInfo {
@@ -675,6 +747,7 @@ mod tests {
             usage_pct: 4,
             auto_compact_threshold_percent: 85,
             usage_categories: vec![],
+            prime: None,
         }
     }
 
@@ -826,6 +899,44 @@ mod tests {
         assert_eq!(fmt_tok_big(1_500_000), "1.5m");
         assert_eq!(fmt_tok_big(2_345_678), "2.3m");
         assert_eq!(fmt_tok_big(10_000_000), "10.0m");
+    }
+
+    #[test]
+    fn prime_section_is_secret_free_and_shows_selection_mode() {
+        let mut snap = snapshot();
+        snap.prime = Some(PrimeContextInfo {
+            retrieval_profile: Some("main".into()),
+            retrieval_snapshot_generation: Some(4),
+            primed_skill_names: vec!["commit".into(), "review".into()],
+            recommended_agent_names: vec!["explore".into()],
+            injected_chars: 120,
+            injected_tokens: 30,
+            degradation: vec!["semantic_unavailable".into()],
+            status: Some("degraded".into()),
+            selection_mode: Some("local".into()),
+            readiness: Some("ready".into()),
+            ..PrimeContextInfo::default()
+        });
+        let block = ContextInfoBlock::new(snap, "grok-4");
+        let all = all_text(&block.build_lines(&test_theme(), BarLayout::WIDE));
+        assert!(all.contains("Prime"), "expected Prime section, got:\n{all}");
+        assert!(all.contains("local"));
+        assert!(all.contains("ready"));
+        assert!(all.contains("commit"));
+        assert!(all.contains("explore"));
+        for leak in [
+            "sk-",
+            "http://",
+            "https://",
+            "/Users/",
+            "/home/",
+            "SECRET-BODY",
+            "0.39215687",
+            "BEGIN PRIVATE",
+            "raw provider error",
+        ] {
+            assert!(!all.contains(leak), "context leaked {leak}:\n{all}");
+        }
     }
 
     #[test]
@@ -1026,6 +1137,7 @@ mod tests {
             usage_pct: 20,
             auto_compact_threshold_percent: 65,
             usage_categories: vec![],
+            prime: None,
         };
         let block = ContextInfoBlock::new(snap, "grok-build");
         let theme = test_theme();
@@ -1380,5 +1492,181 @@ mod tests {
             l14.contains("Free") && l14.contains("963k"),
             "wide legend should keep label + tokens on one line, got: {l14:?}"
         );
+    }
+
+    // ── Prime accounting section ───────────────────────────────────────
+
+    fn with_prime(snap: ContextInfo, names: usize) -> ContextInfo {
+        let mut s = snap;
+        s.prime = Some(PrimeContextInfo {
+            retrieval_profile: Some("my-profile".into()),
+            retrieval_snapshot_generation: Some(42),
+            graph_generation: Some(1),
+            provider_generation: Some(1),
+            primed_skill_names: (0..names).map(|i| format!("skill-{i}")).collect(),
+            recommended_agent_names: (0..names).map(|i| format!("agent-{i}")).collect(),
+            injected_chars: 1200,
+            injected_tokens: 600,
+            degradation: Vec::new(),
+            status: Some("primed".into()),
+            ..Default::default()
+        });
+        s
+    }
+
+    #[test]
+    fn build_lines_omits_prime_section_when_absent() {
+        let block = ContextInfoBlock::new(snapshot(), "grok-4");
+        let theme = test_theme();
+        let lines = block.build_lines(&theme, BarLayout::WIDE);
+        let all = all_text(&lines);
+        assert!(!all.contains("skills: skill-"), "no Prime section:\n{all}");
+        assert!(!all.contains("degradation:"), "no Prime section:\n{all}");
+    }
+
+    #[test]
+    fn build_lines_suppresses_empty_disabled_prime_section() {
+        let mut snap = snapshot();
+        snap.prime = Some(PrimeContextInfo {
+            retrieval_snapshot_generation: Some(42),
+            status: Some("disabled".into()),
+            ..Default::default()
+        });
+        let block = ContextInfoBlock::new(snap, "grok-4");
+        let theme = test_theme();
+        let all = all_text(&block.build_lines(&theme, BarLayout::WIDE));
+        assert!(!all.contains("Prime"), "disabled default is quiet:\n{all}");
+        assert!(
+            !all.contains("snapshot 42"),
+            "disabled default is quiet:\n{all}"
+        );
+    }
+
+    #[test]
+    fn build_lines_renders_primed_prime_section() {
+        let mut snap = snapshot();
+        snap.prime = Some(PrimeContextInfo {
+            retrieval_profile: Some("my-profile".into()),
+            retrieval_snapshot_generation: Some(42),
+            primed_skill_names: vec!["deploy".into(), "release".into()],
+            recommended_agent_names: vec!["explore".into()],
+            injected_chars: 1200,
+            injected_tokens: 620,
+            degradation: Vec::new(),
+            status: Some("primed".into()),
+            selection_mode: Some("semantic".into()),
+            readiness: Some("ready".into()),
+            ..Default::default()
+        });
+        let block = ContextInfoBlock::new(snap, "grok-4");
+        let theme = test_theme();
+        let lines = block.build_lines(&theme, BarLayout::WIDE);
+        let all = all_text(&lines);
+        assert!(all.contains("  primed"), "status:\n{all}");
+        assert!(all.contains("semantic"), "selection mode:\n{all}");
+        assert!(all.contains("ready"), "readiness:\n{all}");
+        assert!(all.contains("profile my-profile"), "profile:\n{all}");
+        assert!(all.contains("snapshot 42"), "generation:\n{all}");
+        assert!(
+            all.contains("skills: deploy, release (2)"),
+            "skills names + count:\n{all}"
+        );
+        assert!(all.contains("agents: explore (1)"), "agents:\n{all}");
+        assert!(
+            all.contains("injected 1.2k chars · ~620 tokens"),
+            "injected budgets:\n{all}"
+        );
+        // Token rows and bar remain intact.
+        assert!(all.contains("System prompt"), "legend intact:\n{all}");
+        assert!(all.contains("Messages"), "legend intact:\n{all}");
+        assert!(all.contains("Free"), "legend intact:\n{all}");
+    }
+
+    #[test]
+    fn build_lines_renders_degraded_prime_section() {
+        let mut snap = snapshot();
+        snap.prime = Some(PrimeContextInfo {
+            primed_skill_names: Vec::new(),
+            recommended_agent_names: Vec::new(),
+            injected_chars: 0,
+            injected_tokens: 0,
+            status: Some("degraded".into()),
+            degradation: vec!["profile_missing".into(), "semantic_unavailable".into()],
+            ..Default::default()
+        });
+        let block = ContextInfoBlock::new(snap, "grok-4");
+        let theme = test_theme();
+        let lines = block.build_lines(&theme, BarLayout::WIDE);
+        let all = all_text(&lines);
+        assert!(all.contains("  degraded"), "status:\n{all}");
+        assert!(
+            all.contains("degradation: profile_missing, semantic_unavailable"),
+            "labels:\n{all}"
+        );
+        assert!(!all.contains("injected 0 chars"), "zeros are not rendered");
+    }
+
+    #[test]
+    fn build_lines_omits_unsanitary_prime_profile() {
+        let mut snap = snapshot();
+        snap.prime = Some(PrimeContextInfo {
+            retrieval_profile: Some("http://127.0.0.1/v1".into()),
+            status: Some("primed".into()),
+            selection_mode: Some("semantic".into()),
+            readiness: Some("ready".into()),
+            ..Default::default()
+        });
+        let block = ContextInfoBlock::new(snap, "grok-4");
+        let theme = test_theme();
+        let all = all_text(&block.build_lines(&theme, BarLayout::WIDE));
+        assert!(all.contains("semantic"), "{all}");
+        assert!(!all.contains("127.0.0.1"), "{all}");
+        assert!(!all.contains("http://"), "{all}");
+        assert!(!all.contains("profile http"), "{all}");
+    }
+
+    #[test]
+    fn build_lines_caps_long_prime_name_lists() {
+        let snap = with_prime(snapshot(), 10);
+        let block = ContextInfoBlock::new(snap, "grok-4");
+        let theme = test_theme();
+        let all = all_text(&block.build_lines(&theme, BarLayout::WIDE));
+        assert!(
+            all.contains("skill-0, skill-1, skill-2, skill-3… +6 more"),
+            "capped skills:\n{all}"
+        );
+        assert!(
+            all.contains("agent-0, agent-1, agent-2, agent-3… +6 more"),
+            "capped agents:\n{all}"
+        );
+    }
+
+    #[test]
+    fn build_lines_renders_prime_section_in_narrow_layout() {
+        let block = ContextInfoBlock::new(with_prime(snapshot(), 3), "grok-4");
+        let theme = test_theme();
+        let all = all_text(&block.build_lines(&theme, BarLayout::NARROW));
+        assert!(all.contains("  primed"), "status:\n{all}");
+        assert!(all.contains("profile my-profile"), "profile:\n{all}");
+        assert!(all.contains("skills: skill-0"), "skills:\n{all}");
+        assert!(
+            all.contains("System prompt"),
+            "narrow legend intact:\n{all}"
+        );
+    }
+
+    /// Existing token rows must remain present when a Prime section is added
+    /// (additive only — no double-counting, no renamed rows).
+    #[test]
+    fn prime_section_keeps_existing_token_rows() {
+        let block = ContextInfoBlock::new(with_prime(snapshot(), 2), "grok-4");
+        let theme = test_theme();
+        let all = all_text(&block.build_lines(&theme, BarLayout::WIDE));
+        assert!(all.contains("Tool definitions"), "tools row intact:\n{all}");
+        assert!(
+            all.contains("Auto-compact at 85%"),
+            "auto-compact intact:\n{all}"
+        );
+        assert!(all.contains("Turns: 5"), "footer intact:\n{all}");
     }
 }

@@ -904,6 +904,11 @@ fn parse_skill_prime(
                 cfg.degrade_on_error = b;
             }
         }
+        "min_score" => {
+            if let Some(n) = as_f32(v) {
+                cfg.min_score = n.clamp(0.0, 1.0);
+            }
+        }
         _ => {}
     });
     cfg

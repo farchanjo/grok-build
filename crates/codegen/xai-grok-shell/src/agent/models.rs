@@ -1,5 +1,6 @@
 //! Model fetching, resolution, and management.
 
+use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
@@ -243,6 +244,23 @@ struct Inner {
     /// Serializes catalog + origins + generation publication so readers never
     /// observe a mismatched generation stamp for the active catalog snapshot.
     catalog_publish: parking_lot::Mutex<()>,
+    /// Invalidates async fetches started before a catalog/config publication.
+    config_reload_epoch: AtomicU64,
+    /// Makes the epoch check and catalog mutation one critical section.
+    reload_apply: parking_lot::Mutex<()>,
+}
+
+/// Typed catalog reload result.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ModelReloadOutcome {
+    /// Catalog rebuilt and published from fresh input (or a real cache reload).
+    Published,
+    /// Async completion dropped: a newer reload won before this one applied.
+    StaleDropped,
+    /// Candidate rejected; prior catalog retained as last-known-good.
+    RetainedLastKnownGood,
+    /// No-op (input matched live catalog / fetch yielded nothing to apply).
+    Unchanged,
 }
 
 impl Default for ModelsManager {
@@ -289,6 +307,8 @@ impl ModelsManager {
                 model_switch_watch: tokio::sync::watch::channel(0u64).0,
                 catalog_generation: AtomicU64::new(1),
                 catalog_publish: parking_lot::Mutex::new(()),
+                config_reload_epoch: AtomicU64::new(0),
+                reload_apply: parking_lot::Mutex::new(()),
             }),
         }
     }
@@ -303,6 +323,19 @@ impl ModelsManager {
     /// with catalog content for notifications or ACP state.
     pub fn catalog_generation(&self) -> u64 {
         self.inner.catalog_generation.load(Ordering::Acquire)
+    }
+
+    /// Current catalog reload epoch. Async fetches capture this at launch and
+    /// compare immediately before applying so a stale completion is dropped
+    /// without mutating catalog/origin/default/etag or notifying clients.
+    pub(crate) fn config_reload_epoch(&self) -> u64 {
+        self.inner.config_reload_epoch.load(Ordering::Acquire)
+    }
+
+    fn bump_config_reload_epoch(&self) {
+        self.inner
+            .config_reload_epoch
+            .fetch_add(1, Ordering::AcqRel);
     }
 
     /// Coherent ACP-visible catalog + current selection + publication generation.
@@ -437,24 +470,43 @@ impl ModelsManager {
         *self.inner.gateway.write() = Some(gateway);
     }
 
-    /// Swap config, rebuild catalog, and reselect the model.
-    ///
-    /// Calls `reselect_default_model` when the preferred model changed
-    /// (and is `Some`); otherwise `reselect_current_model_if_missing`.
+    /// Swap config, rebuild the catalog, and preserve the public unit return.
     pub fn apply_config(&self, new_config: config::Config) {
+        let _ = self.apply_config_with_outcome(new_config);
+    }
+
+    /// Swap config and return whether the catalog was committed.
+    pub(crate) fn apply_config_with_outcome(
+        &self,
+        new_config: config::Config,
+    ) -> ModelReloadOutcome {
+        self.apply_config_with_outcome_gated(new_config, || true)
+    }
+
+    /// Run `before_publish` after catalog validation but before either surface
+    /// mutates, so rejection retains both last-known-good snapshots.
+    pub(crate) fn apply_config_with_outcome_gated(
+        &self,
+        new_config: config::Config,
+        before_publish: impl FnOnce() -> bool,
+    ) -> ModelReloadOutcome {
         // Reject an invalid reload instead of mutating live state: bad globs or
         // (once a real catalog exists) an allowlist that excludes everything.
         if let Err(e) = new_config.validate_model_filters() {
             tracing::error!(error = %e, "ignoring config reload: invalid model filters");
-            return;
+            return ModelReloadOutcome::RetainedLastKnownGood;
         }
+        let _apply = self.inner.reload_apply.lock();
         let prefetched = self.inner.prefetched.read().clone();
         let (new_catalog, new_origins) =
             resolve_model_catalog_with_origins(&new_config, prefetched);
         let has_real_catalog = *self.inner.has_fetched_real_catalog.read();
         if has_real_catalog && let Err(e) = validate_selectable(&new_config, &new_catalog) {
             tracing::error!(error = %e, "ignoring config reload: allowed_models excludes all models");
-            return;
+            return ModelReloadOutcome::RetainedLastKnownGood;
+        }
+        if !before_publish() {
+            return ModelReloadOutcome::RetainedLastKnownGood;
         }
 
         let (old_preferred, old_default_is_campaign) = {
@@ -476,6 +528,7 @@ impl ModelsManager {
                 .allowlist_excludes_all
                 .store(excludes_all, Ordering::Relaxed);
         }
+        self.bump_config_reload_epoch();
         self.publish_catalog(new_catalog, new_origins);
 
         // A preferred-model flip caused only by a campaign overlay appearing or
@@ -516,6 +569,7 @@ impl ModelsManager {
         // until they reconnect. No-op when no gateway is attached (tests,
         // pre-init).
         self.notify_models_updated();
+        ModelReloadOutcome::Published
     }
 
     // ── Accessors ───────────────────────────────────────────────────
@@ -922,8 +976,12 @@ impl ModelsManager {
                 // Deliberate no-fetch state, not a failure: no warn-class log.
                 tracing::debug!("model catalog: bundled defaults in use (remote_fetch disabled)");
             }
-            self.rebuild(&config, None); // first-time only: no fetched catalog, use bundled defaults
-            self.reselect_current_model_if_missing(&config);
+            {
+                let _apply = self.inner.reload_apply.lock();
+                self.bump_config_reload_epoch();
+                self.rebuild(&config, None); // first-time only: no fetched catalog
+                self.reselect_current_model_if_missing(&config);
+            }
 
             // Schedule background retries so we recover once the network is
             // back (e.g. after sleep/resume when the first fetch races DNS).
@@ -1006,6 +1064,7 @@ impl ModelsManager {
     /// `ModelsCacheManager` path is fixed to `grok_home()`, a process-wide
     /// `OnceLock`).
     fn reload_from_cache_manager(&self, cache: &ModelsCacheManager) {
+        let _apply = self.inner.reload_apply.lock();
         let fetch_auth = *self.inner.fetch_auth.read();
         let Some(cached) = cache.load_fresh(&fetch_auth.cache_auth_method(), &self.cache_origin())
         else {
@@ -1045,6 +1104,10 @@ impl ModelsManager {
             was_first
         };
         *self.inner.prefetched.write() = Some(cached.models.clone());
+        // A disk-cache publish also advances the reload epoch so any async
+        // fetch launched against the older catalog is invalidated. The guard
+        // held above keeps the bump and mutation atomic with async apply.
+        self.bump_config_reload_epoch();
         self.rebuild(&cfg, Some(cached.models));
         *self.inner.etag.write() = cached.etag;
         if first_real_catalog {
@@ -1228,6 +1291,8 @@ impl ModelsManager {
 
     /// Wipe in-memory state so a previous identity's catalog doesn't leak.
     fn clear(&self) {
+        let _apply = self.inner.reload_apply.lock();
+        self.bump_config_reload_epoch();
         *self.inner.prefetched.write() = None;
         *self.inner.etag.write() = None;
         *self.inner.has_fetched_real_catalog.write() = false;
@@ -1330,6 +1395,7 @@ impl ModelsManager {
     }
 
     fn try_load_cache(&self) -> bool {
+        let _apply = self.inner.reload_apply.lock();
         let fetch_auth = *self.inner.fetch_auth.read();
         let Some(cached) = self
             .inner
@@ -1341,6 +1407,7 @@ impl ModelsManager {
         let cfg = self.inner.cfg.read().clone();
         *self.inner.has_fetched_real_catalog.write() = true;
         *self.inner.prefetched.write() = Some(cached.models.clone());
+        self.bump_config_reload_epoch();
         self.rebuild(&cfg, Some(cached.models));
         *self.inner.etag.write() = cached.etag;
         true
@@ -1352,6 +1419,9 @@ impl ModelsManager {
             tracing::info!("model catalog refresh skipped: remote_fetch disabled");
             return;
         }
+        // Capture the reload epoch before taking the config/auth snapshot. If
+        // a reload races this snapshot, its epoch bump makes this fetch stale.
+        let epoch_at_launch = self.config_reload_epoch();
         let cfg = self.inner.cfg.read().clone();
         let endpoints = cfg.endpoints.clone();
         let fetch_auth = *self.inner.fetch_auth.read();
@@ -1361,11 +1431,16 @@ impl ModelsManager {
         tokio::task::spawn(async move {
             let auth = auth_manager.auth().await.ok();
             let new_prefetched = fetch_models_async(endpoints, auth, fetch_auth).await;
-            if !mgr.apply_refresh_result(&cfg, new_prefetched, new_etag) {
-                return;
+            match mgr.apply_refresh_result_gated(&cfg, new_prefetched, new_etag, epoch_at_launch) {
+                ModelReloadOutcome::Published => {
+                    tracing::info!("models manager refreshed");
+                    mgr.notify_models_updated();
+                }
+                ModelReloadOutcome::StaleDropped => {
+                    tracing::info!("model catalog completion dropped: a newer reload won");
+                }
+                ModelReloadOutcome::RetainedLastKnownGood | ModelReloadOutcome::Unchanged => {}
             }
-            tracing::info!("models manager refreshed");
-            mgr.notify_models_updated();
         });
     }
 
@@ -1421,6 +1496,9 @@ impl ModelsManager {
             tracing::info!("model catalog refresh skipped: remote_fetch disabled");
             return;
         }
+        // Capture the reload epoch before any await so a config/cache reload
+        // that interleaves during auth or the network fetch is still detected.
+        let epoch_at_start = self.config_reload_epoch();
         let auth = self.inner.auth_manager.auth().await.ok();
         let has_auth = auth.is_some();
         let fetch_auth = *self.inner.fetch_auth.read();
@@ -1434,15 +1512,52 @@ impl ModelsManager {
             })),
         );
         let new_prefetched = fetch_models_async(cfg.endpoints.clone(), auth, fetch_auth).await;
-        let success = self.apply_refresh_result(&cfg, new_prefetched, None);
-        if success {
-            xai_grok_telemetry::unified_log::info(
-                "model catalog: fetch succeeded",
-                None,
-                Some(serde_json::json!({
-                    "model_count": self.available().len(),
-                })),
+        match self.apply_refresh_result_gated(&cfg, new_prefetched, None, epoch_at_start) {
+            ModelReloadOutcome::Published => {
+                xai_grok_telemetry::unified_log::info(
+                    "model catalog: fetch succeeded",
+                    None,
+                    Some(serde_json::json!({
+                        "model_count": self.available().len(),
+                    })),
+                );
+            }
+            ModelReloadOutcome::StaleDropped => {
+                tracing::info!("model catalog fetch result dropped: a newer reload won");
+            }
+            ModelReloadOutcome::RetainedLastKnownGood | ModelReloadOutcome::Unchanged => {}
+        }
+    }
+
+    /// Apply an async model-catalog fetch result only if the reload epoch
+    /// captured at launch still matches live (no config/cache reload
+    /// interleaved while the fetch was in flight).
+    ///
+    /// A stale completion is side-effect free: no catalog/origin/default/etag
+    /// mutation and no client notification. The caller decides what, if
+    /// anything, to notify based on the returned outcome.
+    fn apply_refresh_result_gated(
+        &self,
+        config: &config::Config,
+        new_prefetched: Option<IndexMap<String, ModelEntry>>,
+        new_etag: Option<String>,
+        expected_epoch: u64,
+    ) -> ModelReloadOutcome {
+        let _apply = self.inner.reload_apply.lock();
+        let live = self.config_reload_epoch();
+        if expected_epoch != live {
+            tracing::debug!(
+                expected_epoch,
+                live_epoch = live,
+                "dropping stale async catalog completion"
             );
+            return ModelReloadOutcome::StaleDropped;
+        }
+        if self.apply_refresh_result(config, new_prefetched, new_etag) {
+            self.bump_config_reload_epoch();
+            ModelReloadOutcome::Published
+        } else {
+            ModelReloadOutcome::RetainedLastKnownGood
         }
     }
 
@@ -2351,6 +2466,18 @@ pub(crate) fn resolve_model_catalog_with_origins(
     IndexMap<String, ModelEntry>,
     crate::agent::model_identity::CatalogOrigins,
 ) {
+    let (catalog, origins, _) = resolve_model_catalog_with_origins_and_gated(cfg, prefetched);
+    (catalog, origins)
+}
+
+fn resolve_model_catalog_with_origins_and_gated(
+    cfg: &config::Config,
+    prefetched: Option<IndexMap<String, ModelEntry>>,
+) -> (
+    IndexMap<String, ModelEntry>,
+    crate::agent::model_identity::CatalogOrigins,
+    IndexMap<String, ModelEntry>,
+) {
     let (mut catalog, mut origins) = config::resolve_model_list_with_origins(cfg, prefetched);
 
     if let Ok(Some(disabled)) = ModelGlobSet::compile(cfg.models.disabled_models.as_ref()) {
@@ -2402,6 +2529,17 @@ pub(crate) fn resolve_model_catalog_with_origins(
         &cfg.claude_cli.models,
     );
     crate::agent::external_runtime::capability_matrix::apply_catalog_visibility(&mut catalog);
+    let gated_additional_entries = if crate::provider_registry::multi_account_rollout_enabled() {
+        IndexMap::new()
+    } else {
+        catalog
+            .iter()
+            .filter(|(key, _)| {
+                crate::agent::model_identity::is_additional_account_key(key, &origins)
+            })
+            .map(|(key, entry)| (key.clone(), entry.clone()))
+            .collect()
+    };
     crate::agent::model_identity::apply_multi_account_publication_gate(&mut catalog, &origins);
 
     // Persisted default first; CLI override below wins when set.
@@ -2425,7 +2563,7 @@ pub(crate) fn resolve_model_catalog_with_origins(
         }
     }
 
-    (catalog, origins)
+    (catalog, origins, gated_additional_entries)
 }
 
 /// Whether `effort` is a value this model will accept on the wire.
@@ -2499,6 +2637,127 @@ pub(crate) async fn fetch_models_async(
     })
     .await
     .unwrap_or(None)
+}
+
+/// Read-only catalog inspection result for `grok inspect`.
+///
+/// Represents the settled catalog exactly as the production resolver would
+/// build it from `home` on disk, without constructing an `AuthManager`,
+/// fetching, refreshing, or writing state.
+#[derive(Debug, Clone)]
+pub(crate) struct InspectCatalogResult {
+    /// Canonical catalog (catalog-key order is deterministic).
+    pub catalog: IndexMap<String, ModelEntry>,
+    /// Multi-account publication origins (never serialized in reports).
+    pub origins: crate::agent::model_identity::CatalogOrigins,
+    /// Additional-account rows omitted by the rollout kill switch. Inspect uses
+    /// only their safe IDs to distinguish gated aliases from genuinely missing
+    /// aliases; entries are never serialized wholesale.
+    pub gated_additional_entries: IndexMap<String, ModelEntry>,
+    /// Truthful bounded state of `home/models_cache.json`: `valid`, `absent`,
+    /// `stale`, `mismatch`, `corrupt`, or `unavailable`.
+    pub cache_status: &'static str,
+    /// API-key-auth view: visible, selectable, and credentialed entries.
+    pub total_visible_count: usize,
+}
+
+/// Read-only catalog inspection for `grok inspect`.
+///
+/// Home-parameterized mirror of `ModelsCacheManager::load_fresh`: applies the
+/// same version / capability-schema / auth-method / origin / TTL guards so a
+/// cache written by a different process, backend, or credential shape is
+/// rejected exactly as the production reader rejects it. Prefetched entries
+/// come only from `home/models_cache.json`.
+pub(crate) fn inspect_catalog_for_home(home: &Path, cfg: &config::Config) -> InspectCatalogResult {
+    // Inspect always projects the API-key visibility view (is_session_auth =
+    // false). Visibility checks may read credential presence, but values are
+    // never included in the returned allowlisted result.
+    let fetch_auth = ModelFetchAuth::ApiKey;
+    let expected_auth = fetch_auth.cache_auth_method();
+    let expected_origin = crate::remote::models_list_url(&cfg.endpoints, fetch_auth);
+
+    let cache = read_models_cache_at(
+        &home.join(MODELS_CACHE_FILE),
+        &expected_auth,
+        &expected_origin,
+    );
+    let cache_status = cache.status;
+    let (catalog, origins, gated_additional_entries) =
+        resolve_model_catalog_with_origins_and_gated(cfg, cache.models);
+    let total_visible_count = catalog
+        .values()
+        .filter(|entry| {
+            entry.info.visible_for_auth(false)
+                && entry.info.user_selectable
+                && has_required_provider_credential(entry)
+        })
+        .count();
+    InspectCatalogResult {
+        catalog,
+        origins,
+        gated_additional_entries,
+        cache_status,
+        total_visible_count,
+    }
+}
+
+struct InspectModelsCache {
+    status: &'static str,
+    models: Option<IndexMap<String, ModelEntry>>,
+}
+
+/// Home-parameterized mirror of `ModelsCacheManager::load_fresh`'s guards
+/// (version, schema, auth, origin, TTL). Reads only and keeps rejected states
+/// distinct without exposing cache contents or endpoint/auth details.
+fn read_models_cache_at(
+    path: &Path,
+    expected_auth: &CacheAuthMethod,
+    expected_origin: &str,
+) -> InspectModelsCache {
+    let data = match std::fs::read(path) {
+        Ok(data) => data,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return InspectModelsCache {
+                status: "absent",
+                models: None,
+            };
+        }
+        Err(_) => {
+            return InspectModelsCache {
+                status: "unavailable",
+                models: None,
+            };
+        }
+    };
+    let cache: ModelsCache = match serde_json::from_slice(&data) {
+        Ok(cache) => cache,
+        Err(_) => {
+            return InspectModelsCache {
+                status: "corrupt",
+                models: None,
+            };
+        }
+    };
+    if cache.grok_version.as_deref() != Some(xai_grok_version::VERSION)
+        || cache.capability_schema_version != MODELS_CAPABILITY_SCHEMA_VERSION
+        || cache.auth_method.as_ref() != Some(expected_auth)
+        || cache.origin.as_deref() != Some(expected_origin)
+    {
+        return InspectModelsCache {
+            status: "mismatch",
+            models: None,
+        };
+    }
+    if !cache.is_fresh(CACHE_TTL) {
+        return InspectModelsCache {
+            status: "stale",
+            models: None,
+        };
+    }
+    InspectModelsCache {
+        status: "valid",
+        models: Some(cache.models),
+    }
 }
 
 #[cfg(test)]
@@ -3091,6 +3350,75 @@ mod tests {
             mgr.prefetched().is_none(),
             "prefetched models should stay unchanged"
         );
+    }
+
+    #[test]
+    fn stale_async_completion_is_side_effect_free() {
+        let mgr = test_manager();
+
+        // A valid config apply bumps the reload epoch (captured E1 -> E2).
+        let mut new_cfg = config::Config::default();
+        new_cfg.models.default = Some("grok-3".to_string());
+        let epoch_at_launch = mgr.config_reload_epoch();
+        assert_eq!(
+            mgr.apply_config_with_outcome(new_cfg.clone()),
+            ModelReloadOutcome::Published
+        );
+        assert!(
+            mgr.config_reload_epoch() != epoch_at_launch,
+            "a committed config apply must advance the reload epoch"
+        );
+
+        // The async completion started against the older config now lands.
+        let gen_before = mgr.catalog_generation();
+        let models_before = mgr.models();
+        let outcome = mgr.apply_refresh_result_gated(
+            &new_cfg,
+            Some(make_prefetched(&["grok-3", "grok-4"])),
+            Some("\"new-etag\"".to_string()),
+            epoch_at_launch,
+        );
+        assert!(matches!(outcome, ModelReloadOutcome::StaleDropped));
+        // Side-effect free: no catalog/origin/default/etag mutation, no
+        // generation bump, and no reload-epoch advance.
+        assert_eq!(mgr.catalog_generation(), gen_before);
+        assert_eq!(mgr.models().len(), models_before.len());
+        assert!(mgr.inner.etag.read().is_none());
+        assert_eq!(mgr.config_reload_epoch(), epoch_at_launch + 1);
+    }
+
+    #[test]
+    fn rejected_prepublication_gate_keeps_catalog_and_epoch_unchanged() {
+        let mgr = test_manager();
+        let generation = mgr.catalog_generation();
+        let epoch = mgr.config_reload_epoch();
+        let models = mgr.models();
+        let mut cfg = config::Config::default();
+        cfg.models.default = Some("grok-3".to_owned());
+
+        let outcome = mgr.apply_config_with_outcome_gated(cfg, || false);
+
+        assert_eq!(outcome, ModelReloadOutcome::RetainedLastKnownGood);
+        assert_eq!(mgr.catalog_generation(), generation);
+        assert_eq!(mgr.config_reload_epoch(), epoch);
+        assert_eq!(mgr.models().len(), models.len());
+    }
+
+    #[test]
+    fn fresh_async_completion_publishes() {
+        let mgr = test_manager();
+        let mut cfg = config::Config::default();
+        cfg.models.default = Some("grok-3".to_string());
+        let epoch = mgr.config_reload_epoch();
+        let outcome = mgr.apply_refresh_result_gated(
+            &cfg,
+            Some(make_prefetched(&["grok-3"])),
+            Some("\"etag\"".to_string()),
+            epoch,
+        );
+        assert!(matches!(outcome, ModelReloadOutcome::Published));
+        assert_eq!(mgr.config_reload_epoch(), epoch + 1);
+        assert_eq!(mgr.inner.etag.read().as_deref(), Some("\"etag\""));
     }
 
     fn make_model_entry(model_id: &str) -> ModelEntry {
@@ -4646,5 +4974,122 @@ mod tests {
             !err.contains("grok-model-080"),
             "the soft cap must exclude the 81st and later slugs"
         );
+    }
+
+    #[test]
+    fn inspect_catalog_for_home_loads_only_matching_cache() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path();
+        let cache_path = home.join(MODELS_CACHE_FILE);
+
+        // Resolve the exact origin key the API-key view computes for this
+        // (default-endpoints) config so the guard cannot be caught out by the
+        // auth/origin envelope.
+        let cfg = config_from_toml("");
+        let fetch_auth = ModelFetchAuth::ApiKey;
+        let expected_origin = crate::remote::models_list_url(&cfg.endpoints, fetch_auth);
+
+        // No cache on disk is distinct from a rejected cache, while built-in
+        // defaults still resolve a deterministic catalog.
+        let none = inspect_catalog_for_home(home, &cfg);
+        assert_eq!(none.cache_status, "absent");
+        assert!(!none.catalog.is_empty());
+        assert!(none.total_visible_count > 0);
+
+        // A matching, fresh cache contributes a prefetched model.
+        let entry = build_prefetched_map(
+            vec![make_entry_config_with_id(
+                Some("home-openai:gpt-4o"),
+                "gpt-4o",
+                None,
+            )],
+            None,
+        );
+        let cache = ModelsCache {
+            fetched_at: Utc::now(),
+            capability_schema_version: MODELS_CAPABILITY_SCHEMA_VERSION,
+            grok_version: Some(xai_grok_version::VERSION.to_string()),
+            auth_method: Some(CacheAuthMethod::ApiKey),
+            origin: Some(expected_origin.clone()),
+            etag: None,
+            models: entry,
+        };
+        std::fs::write(
+            &cache_path,
+            serde_json::to_vec_pretty(&cache).expect("serialize test cache"),
+        )
+        .unwrap();
+
+        let loaded = inspect_catalog_for_home(home, &cfg);
+        assert_eq!(loaded.cache_status, "valid");
+        assert!(
+            loaded.catalog.values().any(|e| e.info.model == "gpt-4o"),
+            "prefetched model must appear in the catalog"
+        );
+
+        // An auth-method mismatch is rejected just like the production reader.
+        std::fs::write(
+            &cache_path,
+            serde_json::to_vec_pretty(&ModelsCache {
+                fetched_at: Utc::now(),
+                capability_schema_version: MODELS_CAPABILITY_SCHEMA_VERSION,
+                grok_version: Some(xai_grok_version::VERSION.to_string()),
+                auth_method: Some(CacheAuthMethod::Session),
+                origin: Some(expected_origin),
+                etag: None,
+                models: Default::default(),
+            })
+            .expect("serialize test cache"),
+        )
+        .unwrap();
+        let rejected = inspect_catalog_for_home(home, &cfg);
+        assert_eq!(rejected.cache_status, "mismatch");
+
+        // Rewrite the matching cache so the gating check below exercises the
+        // prefetched additional-account key.
+        let entry_again = build_prefetched_map(
+            vec![make_entry_config_with_id(
+                Some("home-openai:gpt-4o"),
+                "gpt-4o",
+                None,
+            )],
+            None,
+        );
+        let origin = crate::remote::models_list_url(&cfg.endpoints, ModelFetchAuth::ApiKey);
+        std::fs::write(
+            &cache_path,
+            serde_json::to_vec_pretty(&ModelsCache {
+                fetched_at: Utc::now(),
+                capability_schema_version: MODELS_CAPABILITY_SCHEMA_VERSION,
+                grok_version: Some(xai_grok_version::VERSION.to_string()),
+                auth_method: Some(CacheAuthMethod::ApiKey),
+                origin: Some(origin),
+                etag: None,
+                models: entry_again,
+            })
+            .expect("serialize test cache"),
+        )
+        .unwrap();
+
+        // A generated additional-account key (provider-prefixed, not
+        // user-authored) is gated/omitted when the multi-account rollout
+        // kill-switch is explicitly off.
+        use crate::provider_registry::{MULTI_ACCOUNT_ROLLOUT_ENV, with_multi_account_rollout_env};
+        with_multi_account_rollout_env(|| {
+            unsafe {
+                std::env::set_var(MULTI_ACCOUNT_ROLLOUT_ENV, "0");
+            }
+            let gated = inspect_catalog_for_home(home, &cfg);
+            assert!(
+                !gated.catalog.values().any(|e| e.info.model == "gpt-4o"),
+                "rollout-off must prune additional-account catalog keys"
+            );
+            assert!(
+                gated
+                    .gated_additional_entries
+                    .contains_key("home-openai:gpt-4o"),
+                "inspect must retain a private safe source for gated alias classification"
+            );
+        });
     }
 }

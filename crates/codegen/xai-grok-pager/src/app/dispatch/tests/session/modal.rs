@@ -320,6 +320,228 @@ fn marketplace_fetch_coalesces_while_inflight() {
 }
 
 #[test]
+fn open_skills_modal_does_not_fetch_marketplace() {
+    use crate::views::extensions_modal::ExtensionsTab;
+    let mut app = test_app_with_agent();
+    let effects = dispatch(
+        Action::OpenExtensionsModal {
+            tab: ExtensionsTab::Skills,
+            trigger: xai_grok_telemetry::events::ExtensionsModalTrigger::SlashCommand,
+        },
+        &mut app,
+    );
+    assert_eq!(count_marketplace_fetches(&effects), 0);
+    assert_eq!(
+        effects
+            .iter()
+            .filter(|e| matches!(e, Effect::FetchSkillsList { .. }))
+            .count(),
+        1
+    );
+    assert!(
+        !effects.iter().any(|e| matches!(
+            e,
+            Effect::FetchHooksList { .. } | Effect::FetchMcpsList { .. }
+        )),
+        "opening /skills must not fan out other extension fetches, got {effects:?}"
+    );
+    assert!(
+        !effects
+            .iter()
+            .any(|e| matches!(e, Effect::FetchSkillsSearch { .. })),
+        "opening /skills in Local mode must not search, got {effects:?}"
+    );
+}
+
+#[test]
+fn search_skills_smart_dispatches_prime_search_with_query() {
+    use crate::views::extensions_modal::{ExtensionsModalState, ExtensionsTab, SkillSearchMode};
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    {
+        let mut modal = ExtensionsModalState::new(ExtensionsTab::Skills);
+        modal.skills_search_mode = SkillSearchMode::Smart;
+        modal.picker_state.set_query("commit");
+        app.agents.get_mut(&id).unwrap().extensions_modal = Some(modal);
+    }
+    let effects = dispatch(Action::SearchSkillsSmart, &mut app);
+    match effects.as_slice() {
+        [
+            Effect::FetchSkillsSearch {
+                agent_id,
+                query,
+                r#gen,
+                ..
+            },
+        ] => {
+            assert_eq!(*agent_id, id);
+            assert_eq!(query, "commit");
+            assert_eq!(*r#gen, 1);
+        }
+        other => panic!("expected FetchSkillsSearch, got {other:?}"),
+    }
+    assert_eq!(app.agents[&id].skills_smart_search_gen, 1);
+}
+
+#[test]
+fn search_skills_smart_clears_stale_rank_before_refetch() {
+    use crate::views::extensions_modal::{ExtensionsModalState, ExtensionsTab, SkillSearchMode};
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    {
+        let mut modal = ExtensionsModalState::new(ExtensionsTab::Skills);
+        modal.skills_search_mode = SkillSearchMode::Smart;
+        modal.picker_state.set_query("z");
+        modal.skills_smart_rank = Some(vec!["commit".into(), "alpha".into()]);
+        app.agents.get_mut(&id).unwrap().extensions_modal = Some(modal);
+    }
+    let effects = dispatch(Action::SearchSkillsSmart, &mut app);
+    assert!(
+        app.agents[&id]
+            .extensions_modal
+            .as_ref()
+            .unwrap()
+            .skills_smart_rank
+            .is_none(),
+        "SearchSkillsSmart must drop the previous query's rank before refetch"
+    );
+    match effects.as_slice() {
+        [
+            Effect::FetchSkillsSearch {
+                agent_id,
+                query,
+                r#gen,
+                ..
+            },
+        ] => {
+            assert_eq!(*agent_id, id);
+            assert_eq!(query, "z");
+            assert_eq!(*r#gen, 1);
+        }
+        other => panic!("expected FetchSkillsSearch, got {other:?}"),
+    }
+    assert_eq!(app.agents[&id].skills_smart_search_gen, 1);
+}
+
+#[test]
+fn search_skills_smart_clears_rank_when_local_or_empty() {
+    use crate::views::extensions_modal::{ExtensionsModalState, ExtensionsTab, SkillSearchMode};
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    {
+        let mut modal = ExtensionsModalState::new(ExtensionsTab::Skills);
+        modal.skills_search_mode = SkillSearchMode::Local;
+        modal.skills_smart_rank = Some(vec!["stale".into()]);
+        modal.picker_state.set_query("commit");
+        app.agents.get_mut(&id).unwrap().extensions_modal = Some(modal);
+    }
+    let effects = dispatch(Action::SearchSkillsSmart, &mut app);
+    assert!(
+        effects.is_empty(),
+        "Local mode must not search, got {effects:?}"
+    );
+    assert!(
+        app.agents[&id]
+            .extensions_modal
+            .as_ref()
+            .unwrap()
+            .skills_smart_rank
+            .is_none()
+    );
+    assert_eq!(
+        app.agents[&id].skills_smart_search_gen, 0,
+        "Local mode must not bump the search generation when no fetch is issued"
+    );
+}
+
+#[test]
+fn search_skills_smart_twice_bumps_generation() {
+    use crate::views::extensions_modal::{ExtensionsModalState, ExtensionsTab, SkillSearchMode};
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    {
+        let mut modal = ExtensionsModalState::new(ExtensionsTab::Skills);
+        modal.skills_search_mode = SkillSearchMode::Smart;
+        modal.picker_state.set_query("commit");
+        app.agents.get_mut(&id).unwrap().extensions_modal = Some(modal);
+    }
+    let first = dispatch(Action::SearchSkillsSmart, &mut app);
+    let second = dispatch(Action::SearchSkillsSmart, &mut app);
+    match (first.as_slice(), second.as_slice()) {
+        (
+            [
+                Effect::FetchSkillsSearch {
+                    r#gen: first_gen, ..
+                },
+            ],
+            [
+                Effect::FetchSkillsSearch {
+                    r#gen: second_gen,
+                    query,
+                    ..
+                },
+            ],
+        ) => {
+            assert_eq!(query, "commit");
+            assert_eq!(*first_gen, 1);
+            assert_eq!(*second_gen, 2);
+        }
+        other => panic!("expected two FetchSkillsSearch effects, got {other:?}"),
+    }
+    assert_eq!(app.agents[&id].skills_smart_search_gen, 2);
+}
+
+#[test]
+fn reopen_skills_modal_restores_in_flight_regress_badge_without_starting_run() {
+    use crate::views::extensions_modal::ExtensionsTab;
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    app.agents.get_mut(&id).unwrap().skill_regress_in_flight = Some("deploy-prod".into());
+    let effects = dispatch(
+        Action::OpenExtensionsModal {
+            tab: ExtensionsTab::Skills,
+            trigger: xai_grok_telemetry::events::ExtensionsModalTrigger::SlashCommand,
+        },
+        &mut app,
+    );
+    assert!(
+        !effects
+            .iter()
+            .any(|e| matches!(e, Effect::RunSkillRegress { .. })),
+        "reopening /skills must not start regression, got {effects:?}"
+    );
+    assert_eq!(
+        app.agents[&id]
+            .extensions_modal
+            .as_ref()
+            .and_then(|modal| modal.pending_action.as_deref()),
+        Some("regressing...")
+    );
+}
+
+#[test]
+fn open_create_skill_wizard_does_not_fetch_marketplace() {
+    let mut app = test_app_with_agent();
+    let effects = dispatch(
+        Action::OpenCreateSkillWizard {
+            trigger: xai_grok_telemetry::events::ExtensionsModalTrigger::SlashCommand,
+        },
+        &mut app,
+    );
+    assert_eq!(count_marketplace_fetches(&effects), 0);
+    assert!(
+        effects
+            .iter()
+            .any(|e| matches!(e, Effect::FetchSkillsList { .. }))
+    );
+    assert!(
+        !effects
+            .iter()
+            .any(|e| matches!(e, Effect::FetchMarketplaceList { .. }))
+    );
+}
+
+#[test]
 fn marketplace_fetch_fires_immediately_when_idle() {
     use crate::views::extensions_modal::ExtensionsTab;
     let mut app = test_app_with_agent();

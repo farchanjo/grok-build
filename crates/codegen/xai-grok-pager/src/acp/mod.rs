@@ -90,6 +90,9 @@ pub struct AcpConnection {
     /// disabled feature produces zero `x.ai/recap` traffic. Defaults to `false`
     /// when absent (e.g. an older shell that predates the feature).
     pub session_recap_available: bool,
+    /// Prime index ACP operations advertised by the shell. Missing (old shell)
+    /// is all-false so the pager hides backfill/rebuild/cancel.
+    pub prime_index: xai_grok_shell::session::prime::PrimeIndexCapabilities,
     /// `AuthManager` for pager-side authenticated channels (voice STT/TTS).
     ///
     /// In-process mode shares the agent's instance (single token cache); leader
@@ -257,6 +260,7 @@ async fn finish_connection(
         available_commands,
         cancel_rewind_enabled,
         session_recap_available,
+        prime_index,
     ) = initialize(&tx, &flags).await?;
 
     // Determine whether interactive login is needed.
@@ -291,6 +295,7 @@ async fn finish_connection(
         leader_status_rx: None,
         cancel_rewind_enabled,
         session_recap_available,
+        prime_index,
         auth_manager,
     })
 }
@@ -370,6 +375,7 @@ pub async fn connect_via_leader(
         available_commands,
         cancel_rewind_enabled,
         session_recap_available,
+        prime_index,
     ) = initialize(&tx, &flags).await?;
 
     let (needs_login, login_label, login_method_id, auth_start_mode) =
@@ -417,6 +423,7 @@ pub async fn connect_via_leader(
         leader_status_rx: Some(status_rx),
         cancel_rewind_enabled,
         session_recap_available,
+        prime_index,
         auth_manager,
     })
 }
@@ -544,6 +551,7 @@ async fn initialize(
     Vec<acp::AvailableCommand>,
     bool,
     bool,
+    xai_grok_shell::session::prime::PrimeIndexCapabilities,
 )> {
     let req = acp::InitializeRequest::new(acp::ProtocolVersion::V1)
         .client_capabilities(
@@ -586,6 +594,7 @@ async fn initialize(
         .unwrap_or(true);
 
     let session_recap_available = parse_session_recap_available(resp.meta.as_ref());
+    let prime_index = parse_prime_index_capability(resp.meta.as_ref());
     let default_auth_method_id = parse_default_auth_method_id(resp.meta.as_ref());
 
     Ok((
@@ -596,7 +605,25 @@ async fn initialize(
         available_commands,
         cancel_rewind_enabled,
         session_recap_available,
+        prime_index,
     ))
+}
+
+/// Parse `primeIndex` from `InitializeResponse.meta`. Missing or malformed
+/// defaults to unsupported so old shells stay safe.
+pub fn parse_prime_index_capability(
+    meta: Option<&acp::Meta>,
+) -> xai_grok_shell::session::prime::PrimeIndexCapabilities {
+    use xai_grok_shell::session::prime::PrimeIndexCapabilities;
+    let Some(v) = meta.and_then(|m| m.get("primeIndex")) else {
+        return PrimeIndexCapabilities::UNSUPPORTED;
+    };
+    PrimeIndexCapabilities {
+        status: v.get("status").and_then(|x| x.as_bool()).unwrap_or(false),
+        backfill: v.get("backfill").and_then(|x| x.as_bool()).unwrap_or(false),
+        rebuild: v.get("rebuild").and_then(|x| x.as_bool()).unwrap_or(false),
+        cancel: v.get("cancel").and_then(|x| x.as_bool()).unwrap_or(false),
+    }
 }
 
 /// Parse `availableCommands` from an `InitializeResponse.meta` value.
@@ -861,6 +888,24 @@ mod tests {
         });
         let cmds = parse_available_commands(meta.as_object());
         assert!(cmds.is_empty());
+    }
+
+    #[test]
+    fn parse_prime_index_capability_defaults_off_and_reads_meta() {
+        assert!(!parse_prime_index_capability(None).status);
+        let missing = serde_json::json!({ "sessionRecap": true });
+        assert!(!parse_prime_index_capability(missing.as_object()).backfill);
+        let meta = serde_json::json!({
+            "primeIndex": {
+                "apiVersion": 1,
+                "status": true,
+                "backfill": true,
+                "rebuild": true,
+                "cancel": true
+            }
+        });
+        let caps = parse_prime_index_capability(meta.as_object());
+        assert!(caps.status && caps.backfill && caps.rebuild && caps.cancel);
     }
 
     #[test]

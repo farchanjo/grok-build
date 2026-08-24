@@ -292,7 +292,7 @@ pub fn load_build_input_from_home(home: &Path) -> Result<SnapshotBuildInput, Str
     let graph_generation = mgmt.current_generation().get();
     let config_path = home.join("config.toml");
     let (graph, parse_warnings) = match std::fs::read_to_string(&config_path) {
-        Ok(raw) => match raw.parse::<toml::Value>() {
+        Ok(raw) => match toml::from_str::<toml::Value>(&raw) {
             Ok(val) => {
                 let parsed = parse_retrieval_graph(&val);
                 let warns = parsed.warnings.iter().map(|w| w.reason.clone()).collect();

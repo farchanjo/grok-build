@@ -5,6 +5,7 @@ use crate::util::config as cli_config;
 use xai_grok_agent::prompt::skills::{
     CompatConfig, SkillInfo, SkillsConfig, list_skills_with_plugins,
 };
+use xai_grok_tools::implementations::skills::strict::SKILLS_API_VERSION;
 
 use super::ExtResult;
 
@@ -88,6 +89,31 @@ pub struct SkillsToggleRequest {
 pub struct SkillsListRequest {
     /// Working directory for skill discovery context.
     pub cwd: String,
+    /// When `1`, return the versioned inventory including quarantined rows.
+    /// Missing version keeps the historical `{ skills }` payload.
+    #[serde(default)]
+    pub api_version: Option<u32>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SkillsSearchRequest {
+    pub cwd: String,
+    pub query: String,
+    #[serde(default)]
+    pub api_version: Option<u32>,
+    /// `smart` uses the Prime index + fusion; anything else is local-only.
+    #[serde(default)]
+    pub mode: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SkillsSearchResponse {
+    pub api_version: u32,
+    /// Ranked names only. Never bodies, paths, vectors, or scores.
+    pub names: Vec<String>,
+    pub degraded: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -410,8 +436,50 @@ pub async fn handle(
 
         "x.ai/skills/list" => {
             let req: SkillsListRequest = serde_json::from_str(args.params.get())?;
-            let skills = reload_skills(&req.cwd, plugin_registry, compat).await;
-            super::to_ext_response(Ok(SkillsListResponse { skills }))
+            if req.api_version == Some(SKILLS_API_VERSION) {
+                let payload = super::skills_ops::list_v1(&req.cwd, plugin_registry, compat).await;
+                super::to_ext_response(Ok(payload))
+            } else {
+                let skills = reload_skills(&req.cwd, plugin_registry, compat).await;
+                super::to_ext_response(Ok(SkillsListResponse { skills }))
+            }
+        }
+        "x.ai/skills/search" => {
+            let req: SkillsSearchRequest = serde_json::from_str(args.params.get())?;
+            if let Some(err) =
+                super::skills_ops::mixed_version_error("x.ai/skills/search", req.api_version)
+            {
+                return err;
+            }
+            super::skills_ops::search(req, plugin_registry, compat).await
+        }
+        "x.ai/skills/validate" => {
+            let req = serde_json::from_str(args.params.get())?;
+            super::skills_ops::validate(req, plugin_registry, compat).await
+        }
+        "x.ai/skills/publish" => {
+            let req = serde_json::from_str(args.params.get())?;
+            super::skills_ops::publish_or_update(req, false).await
+        }
+        "x.ai/skills/update" => {
+            let req = serde_json::from_str(args.params.get())?;
+            super::skills_ops::publish_or_update(req, true).await
+        }
+        "x.ai/skills/regress/status" => {
+            let req = serde_json::from_str(args.params.get())?;
+            super::skills_ops::regress_status(req, plugin_registry, compat).await
+        }
+        "x.ai/skills/regress/run" => {
+            let req = serde_json::from_str(args.params.get())?;
+            super::skills_ops::regress_run(req, plugin_registry, compat).await
+        }
+        "x.ai/skills/regress/cancel" => {
+            let req = serde_json::from_str(args.params.get())?;
+            super::skills_ops::regress_cancel(req)
+        }
+        "x.ai/skills/regress/update" => {
+            let req = serde_json::from_str(args.params.get())?;
+            super::skills_ops::regress_update(req, plugin_registry, compat).await
         }
 
         "x.ai/workflows/list" => {
@@ -525,19 +593,10 @@ pub async fn handle(
                 )));
             }
 
-            // Re-apply disabled marking against the already-loaded skills
-            // to reflect the config change without a second full discovery.
-            let config = cli_config::load_config().await.skills;
-            let disabled_set: std::collections::HashSet<&str> =
-                config.disabled.iter().map(|s| s.as_str()).collect();
-            let skills: Vec<SkillInfo> = current_skills
-                .into_iter()
-                .map(|mut s| {
-                    s.enabled = !disabled_set.contains(s.name.as_str());
-                    s
-                })
-                .collect();
-            super::to_ext_response(Ok(SkillsListResponse { skills }))
+            // Return the versioned inventory so the TUI keeps quarantined
+            // rows and health tokens instead of a legacy `{ skills }` list.
+            let payload = super::skills_ops::list_v1(cwd, plugin_registry, compat).await;
+            super::to_ext_response(Ok(payload))
         }
 
         _ => Err(acp::Error::method_not_found()),
@@ -577,6 +636,14 @@ mod tests {
         let json = r#"{"cwd": "/project"}"#;
         let req: SkillsListRequest = serde_json::from_str(json).unwrap();
         assert_eq!(req.cwd, "/project");
+        assert_eq!(req.api_version, None);
+    }
+
+    #[test]
+    fn test_list_request_versioned() {
+        let json = r#"{"cwd": "/project", "apiVersion": 1}"#;
+        let req: SkillsListRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(req.api_version, Some(1));
     }
 
     #[test]

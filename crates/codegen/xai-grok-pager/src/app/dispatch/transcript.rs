@@ -388,15 +388,40 @@ pub(super) fn dispatch_open_block_viewer(app: &mut AppView) {
     });
 }
 
-/// Fetch-set that populates every Extensions-modal tab. Shared by the manual
-/// open path, the post-CTA-install auth handoff, and the deferred-fetch
-/// session-ready handlers so they can't drift and leave a tab stuck on its
-/// initial `Loading` state.
+/// Fetch-set for the active Extensions-modal tab. Opening `/skills` (or the
+/// create wizard) must not start marketplace/network work. Other tabs keep
+/// their own fetches, including marketplace, and tab switches use this same
+/// helper so a skills-only open can load hooks/plugins/MCP later.
 pub(super) fn extensions_modal_tab_fetches(
     modal: &mut crate::views::extensions_modal::ExtensionsModalState,
     agent_id: AgentId,
     session_id: acp::SessionId,
 ) -> Vec<Effect> {
+    use crate::views::extensions_modal::ExtensionsTab;
+    if modal.active_tab == ExtensionsTab::Skills {
+        let mut effects = vec![
+            Effect::FetchSkillsList {
+                agent_id,
+                session_id: session_id.clone(),
+            },
+            Effect::FetchWorkflowsList {
+                agent_id,
+                session_id: session_id.clone(),
+            },
+        ];
+        if modal.prime_index_capable {
+            effects.push(Effect::FetchPrimeIndexStatus {
+                agent_id,
+                session_id,
+                expected_generation: modal.prime_index.as_ref().map(|s| s.generation),
+                expected_fingerprint: modal
+                    .prime_index
+                    .as_ref()
+                    .map(|s| s.fingerprint_short.clone()),
+            });
+        }
+        return effects;
+    }
     let mut effects = vec![
         Effect::FetchHooksList {
             agent_id,
@@ -422,6 +447,23 @@ pub(super) fn extensions_modal_tab_fetches(
     ];
     push_marketplace_fetch(modal, &mut effects, agent_id, session_id);
     effects
+}
+
+/// Fetch the active tab after an explicit tab switch from a skills-only open.
+pub(super) fn dispatch_refresh_extensions_tab(app: &mut AppView) -> Vec<Effect> {
+    let ActiveView::Agent(id) = app.active_view else {
+        return vec![];
+    };
+    let Some(agent) = app.agents.get_mut(&id) else {
+        return vec![];
+    };
+    let Some(session_id) = agent.session.session_id.clone() else {
+        return vec![];
+    };
+    let Some(modal) = agent.extensions_modal.as_mut() else {
+        return vec![];
+    };
+    extensions_modal_tab_fetches(modal, id, session_id)
 }
 
 /// Push a marketplace list fetch, coalescing overlapping requests: while one
@@ -457,6 +499,7 @@ pub(super) fn dispatch_open_extensions_modal(
     let ActiveView::Agent(id) = app.active_view else {
         return vec![];
     };
+    let prime_capable = app.prime_index.status;
     let Some(agent) = app.agents.get_mut(&id) else {
         return vec![];
     };
@@ -465,7 +508,9 @@ pub(super) fn dispatch_open_extensions_modal(
     agent.agents_modal = None;
     let mut modal = ExtensionsModalState::new(tab);
     modal.session_team_id = app.team_id.clone();
+    modal.prime_index_capable = prime_capable;
     agent.extensions_modal = Some(modal);
+    agent.restore_skill_regress_pending();
     log_event(xai_grok_telemetry::events::ExtensionsModalOpened {
         trigger,
         tab: tab.telemetry_tab(),
@@ -495,6 +540,7 @@ pub(super) fn dispatch_open_config_agents_modal(
         return vec![];
     };
     let bundle = app.bundle_state.clone();
+    let prime_capable = app.prime_index.status;
     let Some(agent) = app.agents.get_mut(&id) else {
         return vec![];
     };
@@ -523,14 +569,136 @@ pub(super) fn dispatch_open_config_agents_modal(
     if let Some(tab) = initial_tab {
         modal.active_tab = tab;
     }
+    modal.prime_index_capable = prime_capable;
     agent.agents_modal = Some(modal);
+    let mut effects = Vec::new();
     if let Some(session_id) = session_id {
-        return vec![Effect::FetchSessionAgentName {
+        effects.push(Effect::FetchSessionAgentName {
+            agent_id: id,
+            session_id: session_id.clone(),
+        });
+        if prime_capable {
+            effects.push(Effect::FetchPrimeIndexStatus {
+                agent_id: id,
+                session_id,
+                expected_generation: None,
+                expected_fingerprint: None,
+            });
+        }
+    }
+    effects
+}
+
+pub(super) fn dispatch_prime_index_status(app: &mut AppView) -> Vec<Effect> {
+    let ActiveView::Agent(id) = app.active_view else {
+        return vec![];
+    };
+    if !app.prime_index.status {
+        return vec![];
+    }
+    let Some(agent) = app.agents.get(&id) else {
+        return vec![];
+    };
+    let Some(session_id) = agent.session.session_id.clone() else {
+        return vec![];
+    };
+    let (expected_generation, expected_fingerprint) = agent
+        .extensions_modal
+        .as_ref()
+        .and_then(|m| m.prime_index.as_ref())
+        .map(|s| (Some(s.generation), Some(s.fingerprint_short.clone())))
+        .unwrap_or((None, None));
+    vec![Effect::FetchPrimeIndexStatus {
+        agent_id: id,
+        session_id,
+        expected_generation,
+        expected_fingerprint,
+    }]
+}
+
+pub(super) fn dispatch_prime_index_job(
+    app: &mut AppView,
+    kind: &str,
+    collection: String,
+    confirm: bool,
+) -> Vec<Effect> {
+    let ActiveView::Agent(id) = app.active_view else {
+        return vec![];
+    };
+    if !app.prime_index.status {
+        return vec![];
+    }
+    let Some(agent) = app.agents.get_mut(&id) else {
+        return vec![];
+    };
+    let Some(session_id) = agent.session.session_id.clone() else {
+        return vec![];
+    };
+    let (expected_generation, expected_fingerprint) = agent
+        .extensions_modal
+        .as_ref()
+        .and_then(|m| m.prime_index.as_ref())
+        .or(agent
+            .agents_modal
+            .as_ref()
+            .and_then(|m| m.prime_index.as_ref()))
+        .map(|s| (Some(s.generation), Some(s.fingerprint_short.clone())))
+        .unwrap_or((None, None));
+    if let Some(ref mut modal) = agent.extensions_modal {
+        modal.pending_action = Some(format!("{kind}..."));
+    }
+    if kind == "rebuild" {
+        vec![Effect::PrimeIndexRebuild {
             agent_id: id,
             session_id,
-        }];
+            collection,
+            confirm,
+            expected_generation,
+            expected_fingerprint,
+        }]
+    } else {
+        vec![Effect::PrimeIndexBackfill {
+            agent_id: id,
+            session_id,
+            collection,
+            confirm,
+            expected_generation,
+            expected_fingerprint,
+        }]
     }
-    vec![]
+}
+
+pub(super) fn dispatch_prime_index_cancel(app: &mut AppView) -> Vec<Effect> {
+    let ActiveView::Agent(id) = app.active_view else {
+        return vec![];
+    };
+    if !app.prime_index.cancel {
+        return vec![];
+    }
+    let Some(agent) = app.agents.get(&id) else {
+        return vec![];
+    };
+    let Some(session_id) = agent.session.session_id.clone() else {
+        return vec![];
+    };
+    let status = agent
+        .extensions_modal
+        .as_ref()
+        .and_then(|m| m.prime_index.as_ref())
+        .or_else(|| {
+            agent
+                .agents_modal
+                .as_ref()
+                .and_then(|m| m.prime_index.as_ref())
+        });
+    let job = status.and_then(|s| s.job.as_ref());
+    vec![Effect::PrimeIndexCancel {
+        agent_id: id,
+        session_id,
+        expected_generation: status.map(|s| s.generation),
+        expected_fingerprint: status.map(|s| s.fingerprint_short.clone()),
+        job_id: job.map(|j| j.job_id.clone()).filter(|id| !id.is_empty()),
+    }]
 }
 
 /// `agentType` / `agent_type` from a catalog `ModelInfo` meta blob.
@@ -796,7 +964,7 @@ pub(super) fn handle_marketplace_list_loaded(
 pub(super) fn handle_skills_toggle_done(
     app: &mut AppView,
     agent_id: AgentId,
-    result: Result<Vec<xai_grok_tools::implementations::skills::types::SkillInfo>, String>,
+    result: Result<crate::views::extensions_modal::SkillsTabSnapshot, String>,
 ) -> Vec<Effect> {
     use crate::views::extensions_modal::TabDataState;
     if let Some(agent) = app.agents.get_mut(&agent_id)
@@ -805,9 +973,9 @@ pub(super) fn handle_skills_toggle_done(
         modal.pending_action = None;
         modal.pending_entry_index = None;
         match result {
-            Ok(skills) => {
-                let len = skills.len();
-                modal.skills_data = TabDataState::Loaded(skills);
+            Ok(snapshot) => {
+                let len = snapshot.rows.len();
+                modal.skills_data = TabDataState::Loaded(snapshot);
                 if len > 0 && modal.picker_state.selected >= len {
                     modal.picker_state.selected = len.saturating_sub(1);
                 }

@@ -325,6 +325,21 @@ impl ToolBridge {
         );
     }
 
+    /// Publish the strict inventory and command-only rows after seeding skills.
+    pub async fn publish_skill_sources(
+        &self,
+        inventory: crate::implementations::skills::strict::SkillInventory,
+        commands: Vec<crate::implementations::skills::strict::LegacyCommand>,
+    ) {
+        let registry = &*self.registry;
+        let mut res = registry.resources.lock().await;
+        if let Some(tracker) = res.get_mut::<crate::types::skill_discovery_tracker::SkillManager>()
+        {
+            tracker.set_inventory(inventory);
+            tracker.set_legacy_commands(commands);
+        }
+    }
+
     /// Enable XML formatting for mid-session skill announcements.
     ///
     /// When set, `take_pending()` produces `<agent_skill>` XML rows instead of
@@ -393,6 +408,23 @@ impl ToolBridge {
         if let Some(tracker) = res.get_mut::<crate::types::skill_discovery_tracker::SkillManager>()
         {
             tracker.update_startup_baseline(new_skills);
+        }
+    }
+
+    /// Replace the startup baseline together with inventory and commands.
+    pub async fn update_skill_sources(
+        &self,
+        new_skills: Vec<crate::implementations::skills::types::SkillInfo>,
+        inventory: crate::implementations::skills::strict::SkillInventory,
+        commands: Vec<crate::implementations::skills::strict::LegacyCommand>,
+    ) {
+        let registry = &*self.registry;
+        let mut res = registry.resources.lock().await;
+        if let Some(tracker) = res.get_mut::<crate::types::skill_discovery_tracker::SkillManager>()
+        {
+            tracker.update_startup_baseline(new_skills);
+            tracker.set_inventory(inventory);
+            tracker.set_legacy_commands(commands);
         }
     }
 

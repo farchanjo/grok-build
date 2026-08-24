@@ -39,14 +39,16 @@ pub async fn discover_skills(root_cwd: &Path, config: &SkillsConfig) -> Vec<Valu
     let cwd_str = root_cwd.to_string_lossy();
     // Workspace discovery is out of scope for per-vendor compat gating;
     // use the all-on default to preserve prior behavior.
-    let skills = xai_grok_agent::prompt::skills::list_skills(
+    let listing = xai_grok_agent::prompt::skills::list_skill_sources_with_plugins(
         Some(&cwd_str),
         config,
+        None,
         xai_grok_agent::prompt::skills::CompatConfig::default(),
     )
     .await;
 
-    skills
+    let mut values: Vec<Value> = listing
+        .skills
         .into_iter()
         .filter_map(|s| match serde_json::to_value(&s) {
             Ok(v) => Some(v),
@@ -59,7 +61,15 @@ pub async fn discover_skills(root_cwd: &Path, config: &SkillsConfig) -> Vec<Valu
                 None
             }
         })
-        .collect()
+        .collect();
+    for row in listing.inventory.quarantined {
+        values.push(serde_json::json!({
+            "name": row.identity.parent_dir_name,
+            "quarantined": true,
+            "codes": row.diagnostics.iter().map(|d| d.code.as_str()).collect::<Vec<_>>(),
+        }));
+    }
+    values
 }
 
 // ---------------------------------------------------------------------------

@@ -2092,6 +2092,223 @@ fn to_meta_yolo_suppresses_auto_mode() {
             "yolo wins; autoMode must be explicitly false (not omitted)"
         );
 }
+/// Skills ACP effects must send `execute()`'s application cwd, never `"."`.
+#[tokio::test]
+async fn skill_effects_send_application_cwd_not_dot() {
+    use std::sync::{Arc, Mutex};
+    use xai_acp_lib::AcpAgentMessage;
+    let captured: Arc<Mutex<Vec<(String, serde_json::Value)>>> = Arc::default();
+    let captured_for_task = captured.clone();
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    tokio::spawn(async move {
+        while let Some(msg) = rx.recv().await {
+            if let AcpAgentMessage::ExtMethod(args) = msg {
+                let method = args.request.method.as_ref().to_string();
+                let params: serde_json::Value = serde_json::from_str(args.request.params.get())
+                    .unwrap_or_else(|_| serde_json::json!({}));
+                captured_for_task.lock().unwrap().push((method.clone(), params));
+                let body = match method.as_str() {
+                    "x.ai/skills/list" | "x.ai/skills/toggle" => {
+                        serde_json::json!({ "result": { "skills": [] } })
+                    }
+                    "x.ai/skills/search" => {
+                        serde_json::json!({ "result": { "names": ["commit"], "degraded": false } })
+                    }
+                    _ => serde_json::json!({ "result": {} }),
+                };
+                let raw = serde_json::value::RawValue::from_string(body.to_string())
+                    .expect("serialize skills response");
+                let _ = args.response_tx.send(Ok(acp::ExtResponse::new(Arc::from(raw))));
+            }
+        }
+    });
+    let cwd = Path::new("/tmp/skill-effects-non-dot-cwd");
+    let session_id = acp::SessionId::new(Arc::from("skill-cwd-session"));
+    let (progress_tx, _progress_rx) = tokio::sync::mpsc::unbounded_channel();
+    let run = |effect: Effect| {
+        let mut tasks = JoinSet::new();
+        execute(
+            effect,
+            &mut tasks,
+            &tx,
+            cwd,
+            &SessionFlags::default(),
+            &progress_tx,
+        );
+        tasks
+    };
+    match run(Effect::FetchSkillsList {
+        agent_id: AgentId(1),
+        session_id: session_id.clone(),
+    })
+    .join_next()
+    .await
+    .expect("task")
+    .expect("no panic")
+    {
+        TaskResult::SkillsListLoaded { agent_id, result } => {
+            assert_eq!(agent_id, AgentId(1));
+            assert!(result.expect("skills list").rows.is_empty());
+        }
+        other => panic!("expected SkillsListLoaded, got {other:?}"),
+    }
+    match run(Effect::ToggleSkill {
+        agent_id: AgentId(1),
+        session_id: session_id.clone(),
+        skill_name: "deploy".into(),
+        enabled: true,
+    })
+    .join_next()
+    .await
+    .expect("task")
+    .expect("no panic")
+    {
+        TaskResult::SkillsToggleDone { agent_id, result } => {
+            assert_eq!(agent_id, AgentId(1));
+            assert!(result.expect("toggle").rows.is_empty());
+        }
+        other => panic!("expected SkillsToggleDone, got {other:?}"),
+    }
+    match run(Effect::PublishSkill {
+        agent_id: AgentId(1),
+        session_id: session_id.clone(),
+        name: "deploy".into(),
+        description: "Ship it".into(),
+        scope: "user".into(),
+        body: "# deploy".into(),
+    })
+    .join_next()
+    .await
+    .expect("task")
+    .expect("no panic")
+    {
+        TaskResult::SkillPublishDone { agent_id, result } => {
+            assert_eq!(agent_id, AgentId(1));
+            assert_eq!(result.expect("publish"), "deploy");
+        }
+        other => panic!("expected SkillPublishDone, got {other:?}"),
+    }
+    match run(Effect::RunSkillRegress {
+        agent_id: AgentId(1),
+        session_id: session_id.clone(),
+        name: "deploy".into(),
+    })
+    .join_next()
+    .await
+    .expect("task")
+    .expect("no panic")
+    {
+        TaskResult::SkillRegressDone { agent_id, result } => {
+            assert_eq!(agent_id, AgentId(1));
+            assert_eq!(result.expect("regress"), "deploy");
+        }
+        other => panic!("expected SkillRegressDone, got {other:?}"),
+    }
+    match run(Effect::CancelSkillRegress {
+        agent_id: AgentId(1),
+        session_id: session_id.clone(),
+        name: "deploy".into(),
+    })
+    .join_next()
+    .await
+    .expect("task")
+    .expect("no panic")
+    {
+        TaskResult::SkillRegressCancelled { agent_id, result } => {
+            assert_eq!(agent_id, AgentId(1));
+            assert_eq!(result.expect("cancel"), "deploy");
+        }
+        other => panic!("expected SkillRegressCancelled, got {other:?}"),
+    }
+    match run(Effect::FetchSkillsSearch {
+        agent_id: AgentId(1),
+        session_id: session_id.clone(),
+        query: "commit".into(),
+        r#gen: 7,
+    })
+    .join_next()
+    .await
+    .expect("task")
+    .expect("no panic")
+    {
+        TaskResult::SkillsSearchLoaded {
+            agent_id,
+            session_id: loaded_session_id,
+            query,
+            r#gen,
+            result,
+        } => {
+            assert_eq!(agent_id, AgentId(1));
+            assert_eq!(loaded_session_id, session_id);
+            assert_eq!(query, "commit");
+            assert_eq!(r#gen, 7);
+            let (names, degraded) = result.expect("skills search");
+            assert_eq!(names, vec!["commit"]);
+            assert!(!degraded);
+        }
+        other => panic!("expected SkillsSearchLoaded, got {other:?}"),
+    }
+    let captured = captured.lock().unwrap();
+    let expected_cwd = cwd.to_string_lossy().into_owned();
+    let methods: Vec<&str> = captured.iter().map(|(m, _)| m.as_str()).collect();
+    assert_eq!(
+            methods.iter().filter(|m| **m == "x.ai/skills/list").count(),
+            1
+        );
+    assert_eq!(
+            methods.iter().filter(|m| **m == "x.ai/skills/toggle").count(),
+            1
+        );
+    assert_eq!(
+            methods
+                .iter()
+                .filter(|m| **m == "x.ai/skills/refresh-baseline")
+                .count(),
+            1,
+            "toggle still refreshes the baseline"
+        );
+    assert_eq!(
+            methods.iter().filter(|m| **m == "x.ai/skills/publish").count(),
+            1
+        );
+    assert_eq!(
+            methods
+                .iter()
+                .filter(|m| **m == "x.ai/skills/regress/run")
+                .count(),
+            1
+        );
+    assert_eq!(
+            methods
+                .iter()
+                .filter(|m| **m == "x.ai/skills/regress/cancel")
+                .count(),
+            1
+        );
+    assert_eq!(
+            methods.iter().filter(|m| **m == "x.ai/skills/search").count(),
+            1
+        );
+    let search = captured
+        .iter()
+        .find(|(m, _)| m == "x.ai/skills/search")
+        .map(|(_, p)| p)
+        .expect("skills search params");
+    assert_eq!(search.get("mode").and_then(|v| v.as_str()), Some("smart"));
+    assert_eq!(search.get("query").and_then(|v| v.as_str()), Some("commit"));
+    assert_eq!(search.get("apiVersion").and_then(|v| v.as_u64()), Some(1));
+    for (method, params) in captured.iter() {
+        if method == "x.ai/skills/refresh-baseline" {
+            continue;
+        }
+        let sent = params.get("cwd").and_then(|v| v.as_str()).unwrap_or("");
+        assert_ne!(sent, ".", "{method} must not send cwd=\".\": {params}");
+        assert_eq!(
+                sent, expected_cwd,
+                "{method} must send execute() cwd: {params}"
+            );
+    }
+}
 /// Verify that each resolved profile name produces a valid
 /// `AgentDefinition` whose name matches the expected kebab-case string.
 #[test]
@@ -2140,6 +2357,23 @@ fn make_session_info(
             },
         },
     }
+}
+#[test]
+fn format_session_info_includes_compact_prime_fields_without_secrets() {
+    let mut info = make_session_info("auto", None, 1000, 10000);
+    info.data.context.prime = Some(xai_grok_shell::session::acp_types::PrimeContextInfo {
+        status: Some("degraded".into()),
+        selection_mode: Some("local".into()),
+        readiness: Some("pending".into()),
+        degradation: vec!["profile_missing".into(), "semantic_unavailable".into()],
+        retrieval_profile: Some("http://127.0.0.1/v1".into()),
+        ..Default::default()
+    });
+    let text = format_session_info(&info, None, false, false, true);
+    assert!(text.contains("Prime: local · pending · profile_missing,semantic_unavailable"), "{text}");
+    assert!(!text.contains("127.0.0.1"), "{text}");
+    assert!(!text.contains("http://"), "{text}");
+    assert!(!text.contains("sk-"), "{text}");
 }
 #[test]
 fn format_session_info_session_auth_ignores_api_key_env() {

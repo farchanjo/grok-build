@@ -837,9 +837,8 @@ mod tests {
         assert!(text.contains("noise"));
     }
 
-    /// End-to-end regression for the original bug: a description-less skill whose
-    /// body starts with a table/list must not flatten that structure into the
-    /// listing. Exercises the real pipeline (`parse_skill_files` → announce).
+    /// Description-less SKILL.md files are quarantined and never listed. Authored
+    /// descriptions must not flatten table/list bodies into the listing.
     #[test]
     fn smoke_table_first_skills_do_not_flatten_into_listing() {
         use crate::implementations::skills::discovery::parse_skill_files;
@@ -853,68 +852,27 @@ mod tests {
             std::fs::write(&path, content).unwrap();
             (path, scope)
         };
-        let fm = |name: &str, body: &str| format!("---\nname: {name}\n---\n\n{body}");
+        let missing = |name: &str, body: &str| format!("---\nname: {name}\n---\n\n{body}");
 
         let skills = parse_skill_files(vec![
-            // No heading/prose → name fallback (native, shown).
             write(
                 "table-only",
-                fm("table-only", "| Col | Lines |\n|---|---|\n| a | 1 |\n"),
+                missing("table-only", "| Col | Lines |\n|---|---|\n| a | 1 |\n"),
                 SkillScope::Local,
             ),
-            // Leading heading → heading (the table is never reached).
-            write(
-                "heading-table",
-                fm(
-                    "heading-table",
-                    "# Reference Guide\n\n| Col |\n|---|\n| a |\n",
-                ),
-                SkillScope::Local,
-            ),
-            // First prose paragraph wins over the leading H1 title; the list is skipped.
-            write(
-                "heading-list",
-                fm(
-                    "heading-list",
-                    "# Quarterly Report\n\n- **Authors:** Unknown\n\nSummary prose here.\n",
-                ),
-                SkillScope::Local,
-            ),
-            // Plugin without an authored description → hidden.
-            write(
-                "plugin-no-desc",
-                fm("plugin-no-desc", "| Col |\n|---|\n| a |\n"),
-                SkillScope::Plugin,
-            ),
-            // Authored description → shown verbatim.
             write(
                 "authored",
-                "---\nname: authored\ndescription: A real authored description.\n---\n\n# body\n"
+                "---\nname: authored\ndescription: A real authored description.\n---\n\n| Col |\n|---|\n| a |\n"
                     .to_string(),
                 SkillScope::Local,
             ),
         ]);
 
+        assert_eq!(skills.len(), 1, "missing description is quarantined");
         let text = announce(&skills, 100_000).expect("listing renders");
-
-        // No structural markdown reaches the listing.
         assert!(!text.contains("| Col"), "table leaked:\n{text}");
-        assert!(!text.contains("**Authors:**"), "list leaked:\n{text}");
-        // Clean derived descriptions: first prose paragraph wins, else heading,
-        // else name; authored shown.
-        assert!(text.contains("Reference Guide")); // heading-table: no prose -> heading
-        assert!(text.contains("Summary prose here.")); // heading-list: prose beats the H1 title
-        assert!(
-            !text.contains("Quarterly Report"),
-            "H1 title leaked as desc:\n{text}"
-        );
         assert!(text.contains("A real authored description."));
-        assert!(text.contains("table-only"));
-        // Plugin without a description is hidden.
-        assert!(
-            !text.contains("plugin-no-desc"),
-            "plugin without description leaked:\n{text}"
-        );
+        assert!(!text.contains("table-only"));
     }
 
     // ── verbatim mode ─────────────────────────

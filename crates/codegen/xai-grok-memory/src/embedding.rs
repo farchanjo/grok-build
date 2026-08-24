@@ -13,6 +13,14 @@ const MAX_RETRIES: usize = 3;
 /// Initial backoff delay in milliseconds (doubles on each retry: 1s, 2s, 4s).
 const INITIAL_BACKOFF_MS: u64 = 1000;
 
+fn embedding_http_retry_class(status: reqwest::StatusCode) -> String {
+    format!("HTTP {status}")
+}
+
+fn embedding_http_status_error(status: reqwest::StatusCode) -> String {
+    format!("embedding API error {status}")
+}
+
 /// Trait for generating text embeddings.
 ///
 /// Implementations must be `Send + Sync` so they can be used in `Send`
@@ -33,16 +41,80 @@ pub trait EmbeddingProvider: Send + Sync {
     fn dimensions(&self) -> usize;
 }
 
+/// Version label for the local unit-L2 implementation used by Prime.
+///
+/// Distinct from [`crate::fingerprint::NORMALIZATION_NONE`]: memory vectors
+/// may be provider-normalized, while Prime always applies this local step
+/// and pins `"l2_v1"` in the collection fingerprint.
+pub const L2_NORMALIZATION_VERSION: &str = "l2_v1";
+
+/// Why local L2 normalization rejected a vector. Messages are secret-free
+/// and never include the raw values.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NormalizeError {
+    /// Zero-length vector.
+    Empty,
+    /// NaN or Inf component.
+    NonFinite,
+    /// L2 norm is zero (or not finite after summing squares).
+    ZeroNorm,
+}
+
+impl std::fmt::Display for NormalizeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Empty => f.write_str("embedding vector is empty"),
+            Self::NonFinite => f.write_str("embedding vector contains non-finite values"),
+            Self::ZeroNorm => f.write_str("embedding vector has zero L2 norm"),
+        }
+    }
+}
+
+impl std::error::Error for NormalizeError {}
+
+/// In-place unit-L2 normalize (`l2_v1`).
+///
+/// Uses f64 accumulation so a high-dimensional finite vector cannot overflow
+/// the norm. Rejects empty, non-finite, and zero-norm inputs so they never
+/// reach sqlite-vec.
+pub fn l2_normalize_v1(values: &mut [f32]) -> Result<(), NormalizeError> {
+    if values.is_empty() {
+        return Err(NormalizeError::Empty);
+    }
+    let mut sum_sq = 0.0f64;
+    for &x in values.iter() {
+        if !x.is_finite() {
+            return Err(NormalizeError::NonFinite);
+        }
+        let xf = f64::from(x);
+        sum_sq += xf * xf;
+    }
+    let norm = sum_sq.sqrt();
+    if !norm.is_finite() || norm <= 0.0 {
+        return Err(NormalizeError::ZeroNorm);
+    }
+    for x in values.iter_mut() {
+        *x = (f64::from(*x) / norm) as f32;
+    }
+    Ok(())
+}
+
 /// Validate an embedding batch **before any SQLite write**: exact result count
 /// (`embeddings.len() == texts_len`), exact per-vector dimension, and finite
 /// values only. A short response must never be zipped onto the first N inputs —
 /// that would permanently mis-associate vectors to wrong chunks — and NaN/Inf
 /// must never reach the vec table (the validation surface).
-pub(crate) fn validate_embedding_batch(
+pub fn validate_embedding_batch(
     texts_len: usize,
     dimensions: usize,
     embeddings: &[Vec<f32>],
 ) -> Result<(), String> {
+    if embeddings.is_empty() && texts_len > 0 {
+        return Err(
+            "embedding provider returned no vectors for a non-empty input; refusing mis-association"
+                .into(),
+        );
+    }
     if embeddings.len() != texts_len {
         return Err(format!(
             "embedding provider returned {} vectors for {} inputs; refusing mis-association",
@@ -51,6 +123,9 @@ pub(crate) fn validate_embedding_batch(
         ));
     }
     for (i, v) in embeddings.iter().enumerate() {
+        if v.is_empty() {
+            return Err(format!("embedding {i} is empty; refusing to write"));
+        }
         if v.len() != dimensions {
             return Err(format!(
                 "embedding {i} has dimension {} (expected {dimensions}); refusing mixed spaces",
@@ -183,8 +258,8 @@ impl EmbeddingProvider for ApiEmbeddingProvider {
                 };
                 let response = match self.client.execute(req).await {
                     Ok(r) => r,
-                    Err(e) => {
-                        last_err = format!("request failed: {e}");
+                    Err(_) => {
+                        last_err = "request failed".to_string();
                         continue;
                     }
                 };
@@ -213,16 +288,14 @@ impl EmbeddingProvider for ApiEmbeddingProvider {
 
                 // Retry on 429 (rate limit) or 5xx (server error)
                 if status == reqwest::StatusCode::TOO_MANY_REQUESTS || status.is_server_error() {
-                    last_err = format!(
-                        "HTTP {status}: {}",
-                        response.text().await.unwrap_or_default()
-                    );
+                    last_err = embedding_http_retry_class(status);
+                    let _ = response.bytes().await;
                     continue;
                 }
 
-                // Non-retryable error (4xx other than 429)
-                let body = response.text().await.unwrap_or_default();
-                return Err(format!("embedding API error {status}: {body}").into());
+                // Non-retryable error (4xx other than 429): status class only.
+                let _ = response.bytes().await;
+                return Err(embedding_http_status_error(status).into());
             }
 
             if !success {
@@ -506,5 +579,47 @@ mod tests {
         let neg_inf = vec![vec![f32::NEG_INFINITY, 1.0, 2.0, 3.0]];
         assert!(validate_embedding_batch(1, 4, &inf).is_err());
         assert!(validate_embedding_batch(1, 4, &neg_inf).is_err());
+    }
+
+    #[test]
+    fn validate_embedding_batch_rejects_empty_vector() {
+        let empty = vec![Vec::<f32>::new()];
+        assert!(validate_embedding_batch(1, 4, &empty).is_err());
+        assert!(validate_embedding_batch(2, 4, &[]).is_err());
+    }
+
+    #[test]
+    fn embedding_http_errors_are_status_class_only() {
+        let status = reqwest::StatusCode::UNAUTHORIZED;
+        let err = embedding_http_status_error(status);
+        let retry = embedding_http_retry_class(reqwest::StatusCode::TOO_MANY_REQUESTS);
+        for s in [&err, &retry] {
+            assert!(!s.contains("://"), "{s}");
+            assert!(!s.contains("sk-"), "{s}");
+            assert!(!s.contains("body"), "{s}");
+            assert!(!s.contains("token"), "{s}");
+        }
+        assert!(err.contains("401"), "{err}");
+        assert!(retry.contains("429"), "{retry}");
+    }
+
+    #[test]
+    fn l2_normalize_v1_unit_norm_and_rejects() {
+        let mut v = vec![3.0, 4.0];
+        l2_normalize_v1(&mut v).unwrap();
+        let n = v
+            .iter()
+            .map(|x| f64::from(*x) * f64::from(*x))
+            .sum::<f64>()
+            .sqrt();
+        assert!((n - 1.0).abs() < 1e-6);
+        assert_eq!(L2_NORMALIZATION_VERSION, "l2_v1");
+
+        let mut empty: Vec<f32> = Vec::new();
+        assert_eq!(l2_normalize_v1(&mut empty), Err(NormalizeError::Empty));
+        let mut nan = vec![f32::NAN, 1.0];
+        assert_eq!(l2_normalize_v1(&mut nan), Err(NormalizeError::NonFinite));
+        let mut zero = vec![0.0, 0.0];
+        assert_eq!(l2_normalize_v1(&mut zero), Err(NormalizeError::ZeroNorm));
     }
 }

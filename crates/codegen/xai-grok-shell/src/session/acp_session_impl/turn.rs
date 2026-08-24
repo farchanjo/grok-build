@@ -734,13 +734,17 @@ impl SessionActor {
         origin: &crate::session::PromptOrigin,
         user_query: &str,
         turn_cancel: &tokio_util::sync::CancellationToken,
-    ) -> Result<Option<xai_grok_inference_types::ConversationItem>, acp::Error> {
+    ) -> Result<PrimeInjectResult, acp::Error> {
         // ── Prime gate: ONLY an explicit real `User` + native backend. ─────
+        let unchanged = || PrimeInjectResult {
+            reminder: None,
+            accounting: PrimeAccounting::Unchanged,
+        };
         if !origin.prime_eligible() {
-            return Ok(None);
+            return Ok(unchanged());
         }
         if self.execution_backend.get().is_external() {
-            return Ok(None);
+            return Ok(unchanged());
         }
         // Per-home retrieval registry supplies the prime config and the
         // semantic service (child sessions share the registry but build their
@@ -748,102 +752,295 @@ impl SessionActor {
         let Some(registry) =
             crate::retrieval::registry_for_prime_home(xai_grok_config::grok_home())
         else {
-            return Ok(None);
+            return Ok(unchanged());
         };
+        // Turn-time truth: this is the snapshot the selectors run against, and
+        // (on `Record`) the snapshot the accounting reports — not a later reload.
         let snapshot = registry.load();
-        let cfg = &snapshot.prime.skills;
-        if !cfg.enabled {
-            return Ok(None);
-        }
+        let skills_cfg = &snapshot.prime.skills;
+        let agents_cfg = &snapshot.prime.agents;
+        let skills_enabled = skills_cfg.enabled;
+        let agents_enabled = agents_cfg.enabled;
 
-        // Authoritative eligible native skill snapshot + fresh revalidation
-        // source (closes the rank-vs-load TOCTOU).
-        let bridge = self.tool_bridge_handle();
-        let eligible = bridge.eligible_native_skills().await;
-        let refresh_bridge = Arc::clone(&bridge);
-        let refresh = move || {
-            let b = Arc::clone(&refresh_bridge);
-            async move { b.eligible_native_skills().await }
-        };
+        // Eligible + native + registry with both selectors disabled: record a
+        // truthful `disabled` outcome with the loaded snapshot's generations.
+        if !skills_enabled && !agents_enabled {
+            return Ok(PrimeInjectResult {
+                reminder: None,
+                accounting: PrimeAccounting::Record(LastPrimeOutcome {
+                    retrieval_snapshot_generation: Some(snapshot.generation),
+                    graph_generation: Some(snapshot.graph_generation),
+                    provider_generation: Some(snapshot.provider_generation),
+                    status: PrimeOutcomeStatus::Disabled,
+                    selection_mode: Some("disabled".into()),
+                    readiness: Some("ready".into()),
+                    ..LastPrimeOutcome::default()
+                }),
+            });
+        }
 
         // Select skills from the raw user query so assembled context stays local.
         let prompt = user_query.to_string();
-
-        // Workspace + trusted containment roots (canonicalized upstream).
-        let cwd: std::path::PathBuf = self.tool_context.cwd.to_path_buf();
-        let mut trusted_roots: Vec<std::path::PathBuf> = vec![cwd.clone()];
-        if let xai_grok_workspace::session::git::GitDiscoveryResult::Found(root) =
-            xai_grok_workspace::session::git::discover_git_root(&cwd)
-        {
-            trusted_roots.push(root);
-        }
-
         let context_window = self
             .chat_state_handle
             .get_inference_settings()
             .await
             .map(|s| s.context_window.get());
-        let semantic_profile = cfg.retrieval_profile.clone();
-        let explicit_skill = self.active_skill.lock().clone();
-        let owned_inventory = self.prime_inventory().await;
-        let semantic_service = registry.service();
 
-        let input = crate::session::prime::PrimeInput {
-            eligible_skills: &eligible,
-            refresh_skills: &refresh,
-            workspace_root: &cwd,
-            trusted_roots: &trusted_roots,
-            prompt: &prompt,
-            explicit_skill: explicit_skill.as_deref(),
-            config: cfg.clone(),
-            context_window,
-            semantic_profile: semantic_profile.as_deref(),
-            semantic_service: if semantic_profile.is_some() && snapshot.enabled {
-                Some(&semantic_service)
-            } else {
-                None
-            },
-            inventory: Some(&owned_inventory),
-        };
+        let mut primed_skill_names: Vec<String> = Vec::new();
+        let mut recommended_agent_names: Vec<String> = Vec::new();
+        let mut skill_injected_chars: u64 = 0;
+        let mut skill_injected_tokens: u64 = 0;
+        let mut degradation_kinds: Vec<crate::retrieval::DegradationKind> = Vec::new();
+        let mut prime_skill_reminder: Option<ConversationItem> = None;
+        let cwd: std::path::PathBuf = self.tool_context.cwd.to_path_buf();
+        let grok_home = xai_grok_config::grok_home();
 
-        let result = crate::session::prime::run_prime_selection(&input, turn_cancel.clone()).await;
+        // ── Skills selector (may produce the injected reminder) ─────────────
+        if skills_enabled {
+            // Authoritative eligible native skill snapshot + fresh revalidation
+            // source (closes the rank-vs-load TOCTOU).
+            let bridge = self.tool_bridge_handle();
+            let eligible = bridge.eligible_native_skills().await;
+            let refresh_bridge = Arc::clone(&bridge);
+            let refresh = move || {
+                let b = Arc::clone(&refresh_bridge);
+                async move { b.eligible_native_skills().await }
+            };
 
-        match result {
-            Ok(sel) if sel.cancelled => Ok(None),
-            Ok(sel) => {
-                tracing::debug!(
-                    session_id = %self.session_info.id.0,
-                    selected_names = ?sel.budget_state.selected_names,
-                    rendered_chars = sel.rendered.as_ref().map(|r| r.chars),
-                    cancelled = sel.cancelled,
-                    "skill prime run complete (secret-free; bodies omitted)"
-                );
-                match sel.rendered {
-                    Some(rendered) if !rendered.text.is_empty() => {
+            // Workspace + trusted containment roots (canonicalized upstream).
+            let mut trusted_roots: Vec<std::path::PathBuf> = vec![cwd.clone()];
+            if let xai_grok_workspace::session::git::GitDiscoveryResult::Found(root) =
+                xai_grok_workspace::session::git::discover_git_root(&cwd)
+            {
+                trusted_roots.push(root);
+            }
+
+            let semantic_profile = skills_cfg.retrieval_profile.clone();
+            let explicit_skill = self.active_skill.lock().clone();
+            let owned_inventory = self.prime_inventory().await;
+            let semantic_service = registry.service();
+
+            let input = crate::session::prime::PrimeInput {
+                eligible_skills: &eligible,
+                refresh_skills: &refresh,
+                workspace_root: &cwd,
+                trusted_roots: &trusted_roots,
+                prompt: &prompt,
+                explicit_skill: explicit_skill.as_deref(),
+                config: skills_cfg.clone(),
+                context_window,
+                semantic_profile: semantic_profile.as_deref(),
+                semantic_service: if semantic_profile.is_some() && snapshot.enabled {
+                    Some(&semantic_service)
+                } else {
+                    None
+                },
+                inventory: Some(&owned_inventory),
+                grok_home: Some(&grok_home),
+                snapshot_generation: Some(snapshot.generation),
+            };
+
+            match crate::session::prime::run_prime_selection(&input, turn_cancel.clone()).await {
+                Ok(sel) if sel.cancelled => return Ok(unchanged()),
+                Ok(sel) => {
+                    tracing::debug!(
+                        session_id = %self.session_info.id.0,
+                        selected_names = ?sel.budget_state.selected_names,
+                        rendered_chars = sel.rendered.as_ref().map(|r| r.chars),
+                        cancelled = sel.cancelled,
+                        "skill prime run complete (secret-free; bodies omitted)"
+                    );
+                    primed_skill_names = sel.budget_state.selected_names.clone();
+                    degradation_kinds.extend(sel.degradation_kinds());
+                    if let Some(rendered) = sel.rendered
+                        && !rendered.text.is_empty()
+                    {
                         // PR18 rendered block, used literally (already single-pass
                         // escaped). Auto/empty/degraded omit the reminder.
-                        Ok(Some(
-                            xai_grok_inference_types::ConversationItem::system_reminder(
+                        prime_skill_reminder =
+                            Some(xai_grok_inference_types::ConversationItem::system_reminder(
                                 rendered.text,
-                            ),
-                        ))
+                            ));
+                        skill_injected_chars = rendered.chars as u64;
+                        skill_injected_tokens = rendered.tokens_est as u64;
                     }
-                    _ => Ok(None),
                 }
-            }
-            Err(crate::session::prime::PrimeError::SemanticRetrievalFailed) => {
-                if cfg.degrade_on_error {
-                    Ok(None)
-                } else {
-                    // Hard failure: return the typed error BEFORE user
-                    // insertion / inference.
-                    Err(acp::Error::internal_error().data(
-                        "skill prime failed and degrade_on_error is disabled; \
-                         refusing to continue without priming",
-                    ))
+                Err(crate::session::prime::PrimeError::SemanticRetrievalFailed) => {
+                    if !skills_cfg.degrade_on_error {
+                        return Err(acp::Error::internal_error().data(
+                            "skill prime failed and degrade_on_error is disabled; \
+                             refusing to continue without priming",
+                        ));
+                    }
+                    degradation_kinds.push(crate::retrieval::DegradationKind::SemanticUnavailable);
                 }
             }
         }
+
+        // ── Agents selector (names-only accounting; never inserted) ─────────
+        if agents_enabled {
+            let authority = self.session_callable_agent_authority(Some(snapshot.generation));
+            let plugin_handle = self.plugin_registry_handle.clone();
+            let spec = std::sync::Arc::clone(&self.rebuild_spec);
+            let cwd_for_refresh = std::path::PathBuf::from(&self.session_info.cwd);
+            let parent_depth = self.tool_context.subagent_depth;
+            let (current_agent, allowed_subagent_types) = {
+                let agent_borrow = self.agent.borrow();
+                let def = agent_borrow.definition();
+                (def.name.clone(), def.allowed_subagent_types.clone())
+            };
+            let generation = snapshot.generation;
+            let fallback_plugins = spec.plugin_registry.clone();
+            let refresh = move || {
+                let plugins = plugin_handle
+                    .as_ref()
+                    .and_then(|handle| handle.snapshot())
+                    .or_else(|| fallback_plugins.clone());
+                let spec = std::sync::Arc::clone(&spec);
+                let cwd_for_refresh = cwd_for_refresh.clone();
+                let current_agent = current_agent.clone();
+                let allowed_subagent_types = allowed_subagent_types.clone();
+                async move {
+                    crate::session::prime::agents::capture_callable_agent_authority(
+                        crate::session::prime::agents::CaptureCallableArgs {
+                            parent_cwd: &cwd_for_refresh,
+                            parent_depth,
+                            current_agent: Some(current_agent),
+                            plugin_registry: plugins,
+                            subagent_toggle: &spec.subagent_toggle,
+                            cli_agents: &spec.cli_agents,
+                            allowed_subagent_types,
+                            global_subagents_enabled: spec.subagents_enabled,
+                            generation: Some(generation),
+                        },
+                    )
+                }
+            };
+            let semantic_service = if agents_cfg.retrieval_profile.is_some() && snapshot.enabled {
+                Some(registry.service())
+            } else {
+                None
+            };
+            let input = crate::session::prime::agents::AgentInput {
+                agents: &authority.agents,
+                refresh: &refresh,
+                selected_skills: &primed_skill_names,
+                prompt: &prompt,
+                explicit_agent: None,
+                config: agents_cfg.clone(),
+                context_window,
+                semantic_profile: agents_cfg.retrieval_profile.as_deref(),
+                // The owned service stays alive for the whole run; the input
+                // borrows it.
+                semantic_service: semantic_service.as_ref(),
+                grok_home: Some(&grok_home),
+                workspace_root: &cwd,
+            };
+            let selection = match crate::session::prime::agents::run_prime_agent_selection(
+                &input,
+                turn_cancel.clone(),
+            )
+            .await
+            {
+                Ok(sel) => Some(sel),
+                Err(crate::session::prime::PrimeError::SemanticRetrievalFailed) => {
+                    if !agents_cfg.degrade_on_error {
+                        // Fail-closed before user insertion, even if skills
+                        // already produced a reminder; no partial accounting.
+                        return Err(acp::Error::internal_error().data(
+                            "agent prime failed; degrade_on_error is disabled; \
+                                 refusing to continue without priming",
+                        ));
+                    }
+                    degradation_kinds.push(crate::retrieval::DegradationKind::SemanticUnavailable);
+                    None
+                }
+            };
+            if let Some(selection) = selection {
+                if selection.cancelled {
+                    return Ok(unchanged());
+                }
+                tracing::debug!(
+                    session_id = %self.session_info.id.0,
+                    selected_names = ?selection.budget_state.selected_names,
+                    cancelled = selection.cancelled,
+                    "agent prime run complete (names-only; advisory; never inserted)"
+                );
+                recommended_agent_names = selection.budget_state.selected_names.clone();
+                degradation_kinds.extend(selection.degradation_kinds());
+            }
+        }
+
+        // ── Assemble the single `Record` outcome (secret-free). ─────────────
+        let profile_used = if skills_enabled {
+            skills_cfg.retrieval_profile.clone()
+        } else {
+            agents_cfg.retrieval_profile.clone()
+        };
+        let mut degradation: Vec<PrimeDegradationLabel> = Vec::new();
+        for kind in degradation_kinds {
+            let label = PrimeDegradationLabel::from_kind(kind);
+            if !degradation.contains(&label) {
+                degradation.push(label);
+            }
+        }
+        let status = if degradation.is_empty() {
+            PrimeOutcomeStatus::Primed
+        } else {
+            PrimeOutcomeStatus::Degraded
+        };
+        let selection_mode = if profile_used.is_some()
+            && !degradation
+                .iter()
+                .any(|d| matches!(d, PrimeDegradationLabel::SemanticUnavailable))
+        {
+            Some("semantic".to_string())
+        } else {
+            Some("local".to_string())
+        };
+        let readiness = if degradation.iter().any(|d| {
+            matches!(
+                d,
+                PrimeDegradationLabel::SemanticUnavailable
+                    | PrimeDegradationLabel::ServiceDisabled
+                    | PrimeDegradationLabel::ProfileMissing
+            )
+        }) {
+            Some("unavailable".to_string())
+        } else {
+            Some("ready".to_string())
+        };
+        // Caps are reported only when the skills selector actually ran; the
+        // agents selector is never injected, so it contributes no cap.
+        let (max_total_chars, max_tokens) = if skills_enabled {
+            (
+                Some(skills_cfg.max_total_chars as u64),
+                Some(skills_cfg.max_tokens as u64),
+            )
+        } else {
+            (None, None)
+        };
+
+        Ok(PrimeInjectResult {
+            reminder: prime_skill_reminder,
+            accounting: PrimeAccounting::Record(LastPrimeOutcome {
+                retrieval_profile: profile_used,
+                retrieval_snapshot_generation: Some(snapshot.generation),
+                graph_generation: Some(snapshot.graph_generation),
+                provider_generation: Some(snapshot.provider_generation),
+                primed_skill_names,
+                recommended_agent_names,
+                injected_chars: skill_injected_chars,
+                injected_tokens: skill_injected_tokens,
+                max_total_chars,
+                max_tokens,
+                degradation,
+                status,
+                selection_mode,
+                readiness,
+            }),
+        })
     }
     #[tracing::instrument(
         name = "session.handle_prompt",
@@ -1489,11 +1686,14 @@ impl SessionActor {
             // cancel/abort stops semantic work and discards partial prime
             // without breaking the real user item lifecycle.
             let turn_cancel = self.turn_cancel.borrow().clone();
-            let prime_reminder = match self
+            let PrimeInjectResult {
+                reminder: prime_reminder,
+                accounting,
+            } = match self
                 .maybe_inject_prime_reminder(&origin, &prime_query, &turn_cancel)
                 .await
             {
-                Ok(reminder) => reminder,
+                Ok(result) => result,
                 Err(error) => {
                     let message = error.to_string();
                     let input = xai_agent_lifecycle::TurnErrorInput { message: &message };
@@ -1502,6 +1702,14 @@ impl SessionActor {
                     }
                     return Err(error);
                 }
+            };
+            // Hold finalized accounting until the user/reminder pair has been
+            // accepted (and, when requested, crossed the persistence barrier).
+            // Synthetic/external/cancelled/ineligible turns keep `None` and do
+            // not overwrite the last eligible real-turn snapshot.
+            let finalized_prime_outcome = match accounting {
+                PrimeAccounting::Record(outcome) => Some(outcome),
+                PrimeAccounting::Unchanged => None,
             };
             let mut items: Vec<ConversationItem> = prime_reminder.into_iter().collect();
             for item in &mut items {
@@ -1559,6 +1767,9 @@ impl SessionActor {
                 }
             } else {
                 self.chat_state_handle.push_message_batch(items);
+            }
+            if let Some(outcome) = finalized_prime_outcome {
+                *self.last_prime_outcome.borrow_mut() = Some(outcome);
             }
         }
         self.dispatch_hook(

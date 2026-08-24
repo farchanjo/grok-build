@@ -84,6 +84,9 @@ struct ReinitOutcome {
     /// attempted and `loads` is empty (every window finalizes as failed).
     init_ok: bool,
     loads: Vec<AgentLoadOutcome>,
+    /// `primeIndex` from the re-initialize response. `None` when init failed
+    /// so the previous capability bits stay until a successful handshake.
+    prime_index: Option<xai_grok_shell::session::prime::PrimeIndexCapabilities>,
 }
 
 /// Per-agent `session/load` outcome from the re-init task.
@@ -912,6 +915,7 @@ pub(crate) async fn run(
         .unwrap_or(true);
     app.cancel_rewind_enabled = connection.cancel_rewind_enabled;
     apply_session_recap_available(&mut app, connection.session_recap_available);
+    app.prime_index = connection.prime_index;
 
     // Preserve auth methods so logout→re-login works without restarting.
     app.auth_methods = connection.auth_methods.clone();
@@ -2124,6 +2128,14 @@ pub(crate) async fn run(
                                 break;
                             }
                         }
+                        if poll_prime_index_notify_file(&mut app)
+                            && !app.pending_effects.is_empty()
+                        {
+                            let more = std::mem::take(&mut app.pending_effects);
+                            if process_effects(more, &mut tasks, &mut app, &progress_tx) {
+                                break;
+                            }
+                        }
                         schedule_tick(&mut animation_tick_at, &app, tick_interval);
                         resize_debounce_at = None;
 
@@ -2282,6 +2294,15 @@ pub(crate) async fn run(
                     presenter.request(false);
                 }
                 if poll_retrieval_notify_file(&mut app) {
+                    if !app.pending_effects.is_empty() {
+                        let effs = std::mem::take(&mut app.pending_effects);
+                        if process_effects(effs, &mut tasks, &mut app, &progress_tx) {
+                            break;
+                        }
+                    }
+                    presenter.request(false);
+                }
+                if poll_prime_index_notify_file(&mut app) {
                     if !app.pending_effects.is_empty() {
                         let effs = std::mem::take(&mut app.pending_effects);
                         if process_effects(effs, &mut tasks, &mut app, &progress_tx) {
@@ -2495,6 +2516,16 @@ pub(crate) async fn run(
                         // Connection-scoped: a re-elected shell reseeds its push gen from wall clock,
                         // so a surviving higher watermark would silently drop its fresh pushes.
                         app.announcements_last_gen = 0;
+                        // Drop generation/notifySeq watermarks and the file-poll
+                        // cursor so a new shell's first `x.ai/prime/index/update`
+                        // is not rejected as stale, including a same-generation
+                        // on-disk snapshot after --no-leader reconnect.
+                        app.prime_index_last_generation = 0;
+                        app.prime_index_last_notify_seq = 0;
+                        app.prime_index_notify_cursor = 0;
+                        xai_grok_shell::session::prime::notify::reset_poll_cursor(
+                            &xai_grok_tools::util::grok_home::grok_home(),
+                        );
 
                         // Cancel any in-flight re-init from a previous reconnect
                         // cycle and restore those agents' stashed transcripts —
@@ -2585,10 +2616,15 @@ pub(crate) async fn run(
                                         "clientType": PAGER_CLIENT_TYPE,
                                         "clientVersion": PAGER_CLIENT_VERSION,
                                     }).as_object().cloned());
-                                if let Err(e) = acp_send(init_req, &acp_tx).await {
-                                    tracing::error!(error = %e, "reconnect: re-initialize failed");
-                                    return None;
-                                }
+                                let prime_caps = match acp_send(init_req, &acp_tx).await {
+                                    Ok(resp) => crate::acp::parse_prime_index_capability(
+                                        resp.meta.as_ref(),
+                                    ),
+                                    Err(e) => {
+                                        tracing::error!(error = %e, "reconnect: re-initialize failed");
+                                        return None;
+                                    }
+                                };
 
                                 let auth_req = acp::AuthenticateRequest::new(acp::AuthMethodId::new(crate::obf::auth::CACHED_TOKEN!()));
                                 if let Err(e) = acp_send(auth_req, &acp_tx).await {
@@ -2627,24 +2663,27 @@ pub(crate) async fn run(
                                         }
                                     }
                                 }
-                                Some(loads)
+                                Some((loads, prime_caps))
                             })
                             .await;
 
                             let outcome = match ok {
-                                Ok(Some(loads)) => ReinitOutcome {
+                                Ok(Some((loads, prime_index))) => ReinitOutcome {
                                     init_ok: true,
                                     loads,
+                                    prime_index: Some(prime_index),
                                 },
                                 Ok(None) => ReinitOutcome {
                                     init_ok: false,
                                     loads: Vec::new(),
+                                    prime_index: None,
                                 },
                                 Err(_) => {
                                     tracing::error!("reconnect re-initialization timed out");
                                     ReinitOutcome {
                                         init_ok: false,
                                         loads: Vec::new(),
+                                        prime_index: None,
                                     }
                                 }
                             };
@@ -2684,7 +2723,11 @@ pub(crate) async fn run(
                     Ok(outcome) => outcome,
                     Err(_) => {
                         tracing::error!("reconnect re-init task failed (sender dropped)");
-                        ReinitOutcome { init_ok: false, loads: Vec::new() }
+                        ReinitOutcome {
+                            init_ok: false,
+                            loads: Vec::new(),
+                            prime_index: None,
+                        }
                     }
                 };
 
@@ -2706,6 +2749,15 @@ pub(crate) async fn run(
                     ActiveView::Agent(id) => Some(id),
                     _ => None,
                 };
+                if let Some(caps) = outcome.prime_index {
+                    apply_reconnected_prime_index(&mut app, caps);
+                    if !app.pending_effects.is_empty() {
+                        let more = std::mem::take(&mut app.pending_effects);
+                        if process_effects(more, &mut tasks, &mut app, &progress_tx) {
+                            break;
+                        }
+                    }
+                }
                 let (restored, active_restored) = reconnect_restore_outcome(
                     outcome.init_ok,
                     &pending.agent_ids,
@@ -2941,6 +2993,85 @@ fn poll_retrieval_notify_file(app: &mut AppView) -> bool {
     };
     let notif = acp::ExtNotification::new("x.ai/retrieval/update", raw.into());
     acp_handler::deliver_retrieval_update_notification(&notif, app)
+}
+
+/// Poll `$GROK_HOME/state/prime_index_notify.json` and deliver a synthetic
+/// `x.ai/prime/index/update` when notifySeq (or generation) advanced
+/// (local/`--no-leader`).
+fn apply_reconnected_prime_index(
+    app: &mut AppView,
+    caps: xai_grok_shell::session::prime::PrimeIndexCapabilities,
+) {
+    let home = xai_grok_tools::util::grok_home::grok_home();
+    apply_reconnected_prime_index_in(app, caps, &home);
+}
+
+fn apply_reconnected_prime_index_in(
+    app: &mut AppView,
+    caps: xai_grok_shell::session::prime::PrimeIndexCapabilities,
+    home: &std::path::Path,
+) {
+    app.prime_index = caps;
+    app.prime_index_last_generation = 0;
+    app.prime_index_last_notify_seq = 0;
+    app.prime_index_notify_cursor = 0;
+    xai_grok_shell::session::prime::notify::reset_poll_cursor(home);
+    for agent in app.agents.values_mut() {
+        if let Some(modal) = agent.extensions_modal.as_mut() {
+            modal.prime_index_capable = caps.status;
+        }
+        if let Some(modal) = agent.agents_modal.as_mut() {
+            modal.prime_index_capable = caps.status;
+        }
+    }
+    if !caps.status {
+        return;
+    }
+    let _ = poll_prime_index_notify_file_in(app, home);
+    let mut effects = Vec::new();
+    for (agent_id, agent) in &app.agents {
+        let open = agent.extensions_modal.is_some()
+            || agent.agents_modal.is_some()
+            || matches!(
+                agent.active_modal,
+                Some(crate::views::modal::ActiveModal::RetrievalSettings { .. })
+            );
+        if !open {
+            continue;
+        }
+        let Some(session_id) = agent.session.session_id.clone() else {
+            continue;
+        };
+        effects.push(Effect::FetchPrimeIndexStatus {
+            agent_id: *agent_id,
+            session_id,
+            expected_generation: None,
+            expected_fingerprint: None,
+        });
+    }
+    app.pending_effects.extend(effects);
+}
+
+fn poll_prime_index_notify_file(app: &mut AppView) -> bool {
+    let home = xai_grok_tools::util::grok_home::grok_home();
+    poll_prime_index_notify_file_in(app, &home)
+}
+
+fn poll_prime_index_notify_file_in(app: &mut AppView, home: &std::path::Path) -> bool {
+    if !app.prime_index.status {
+        return false;
+    }
+    let Some(params) = xai_grok_shell::session::prime::notify::poll_notify_file_with_cursor(
+        home,
+        &mut app.prime_index_notify_cursor,
+    ) else {
+        return false;
+    };
+    let Ok(raw) = serde_json::value::to_raw_value(&params) else {
+        return false;
+    };
+    let notif = acp::ExtNotification::new("x.ai/prime/index/update", raw.into());
+    acp_handler::deliver_prime_index_update_notification(&notif, app)
 }
 
 /// Schedule the next animation tick when demanded and none is pending.
@@ -4015,6 +4146,83 @@ mod tests {
             reconnect_restore_outcome(false, &pending, &loads, Some(active));
         assert!(!all_restored);
         assert!(!active_restored);
+    }
+
+    #[test]
+    fn apply_reconnected_prime_index_updates_caps_and_resets_watermark() {
+        use xai_grok_shell::session::prime::notify::publish_prime_index_update;
+        use xai_grok_shell::session::prime::{
+            PRIME_INDEX_API_VERSION, PRIME_INDEX_SCHEMA_VERSION, PrimeIndexCapabilities,
+            PrimeIndexUpdate,
+        };
+        let tmp = tempfile::TempDir::new().expect("temp grok home");
+        let home = tmp.path();
+        publish_prime_index_update(
+            home,
+            &PrimeIndexUpdate {
+                schema_version: PRIME_INDEX_SCHEMA_VERSION,
+                api_version: Some(PRIME_INDEX_API_VERSION),
+                generation: 7,
+                notify_seq: 3,
+                fingerprint_short: "abc123def456".into(),
+                job: None,
+                changed_fields: vec!["job".into()],
+            },
+        );
+        let mut app = crate::app::app_view::tests::test_app_with_agent();
+        app.prime_index = PrimeIndexCapabilities::SUPPORTED;
+        app.prime_index_last_generation = 7;
+        app.prime_index_last_notify_seq = 3;
+        if let Some(agent) = app.agents.values_mut().next() {
+            let mut modal = crate::views::extensions_modal::ExtensionsModalState::new(
+                crate::views::extensions_modal::ExtensionsTab::Skills,
+            );
+            modal.prime_index_capable = true;
+            agent.extensions_modal = Some(modal);
+        }
+        assert!(
+            poll_prime_index_notify_file_in(&mut app, home),
+            "pre-disconnect poll must consume the on-disk snapshot"
+        );
+        assert!(
+            !poll_prime_index_notify_file_in(&mut app, home),
+            "cursor must suppress the same-generation file"
+        );
+        apply_reconnected_prime_index_in(&mut app, PrimeIndexCapabilities::UNSUPPORTED, home);
+        assert!(
+            !app.prime_index.status,
+            "old shell after reconnect must hide prime index ops"
+        );
+        assert_eq!(app.prime_index_last_generation, 0);
+        assert_eq!(app.prime_index_notify_cursor, 0);
+        let capable = app
+            .agents
+            .values()
+            .next()
+            .and_then(|a| a.extensions_modal.as_ref())
+            .map(|m| m.prime_index_capable);
+        assert_eq!(capable, Some(false));
+        app.pending_effects.clear();
+        apply_reconnected_prime_index_in(&mut app, PrimeIndexCapabilities::SUPPORTED, home);
+        assert!(app.prime_index.status && app.prime_index.backfill);
+        let capable = app
+            .agents
+            .values()
+            .next()
+            .and_then(|a| a.extensions_modal.as_ref())
+            .map(|m| m.prime_index_capable);
+        assert_eq!(capable, Some(true));
+        assert!(
+            app.prime_index_notify_cursor > 0,
+            "same-generation on-disk notify must be re-delivered after reconnect"
+        );
+        assert!(
+            app.pending_effects
+                .iter()
+                .any(|e| matches!(e, Effect::FetchPrimeIndexStatus { .. })),
+            "open Skills modal must refresh status after reconnect, got {:?}",
+            app.pending_effects
+        );
     }
 
     /// No active agent (dashboard/welcome view): nothing to drain, even when

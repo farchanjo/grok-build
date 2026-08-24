@@ -955,5 +955,102 @@ Look for log entries containing `model` or `sampling` to trace model selection a
 ## Namespaced model IDs
 
 Discovered catalog models use `{provider_id}:{upstream_slug}` so identical
-upstream IDs from different providers can coexist. Un-namespaced legacy aliases
-remain valid only when exactly one configured provider advertises that slug.
+upstream IDs from different providers can coexist. With multiple **instances**
+of the same kind, the instance is part of the canonical ID, for example
+`openai-platform-primary:<upstream-id>` or `openrouter-team-a:<upstream-id>`.
+Un-namespaced legacy aliases remain valid only when exactly one configured
+instance advertises that slug — otherwise the picker qualifies the choice
+rather than guessing.
+
+Credential resolution is **configured-instance scoped**. A model resolves its
+credential from its own instance; a missing credential fails closed and never
+borrows a sibling instance's account or an xAI session token. See
+[Multi-Account Providers](29-multi-account-providers.md).
+
+### Embedding and reranker models with placeholder credentials
+
+A typed **OpenAI-compatible embeddings** endpoint needs authenticated
+credentials; a typed reranker uses a typed rerank protocol and is distinct
+from an arbitrary OpenAI-compatible endpoint (which is not assumed to be a
+reranker). Placeholder-only, no values:
+
+```toml
+[model_providers.embeddings-openai]
+kind = "openai_compatible"
+base_url = "https://api.example.com/v1"
+env_key = "<EMBEDDING_KEY_ENV>"
+catalog_enabled = false
+capability_mode = "manual"
+
+[model_providers.embeddings-openai.capabilities]
+embeddings = true
+
+[embedding_models.example-embedding]
+provider = "embeddings-openai"
+model = "<EMBEDDING_MODEL>"
+protocol = "openai_compatible"
+
+[model_providers.reranker-service]
+kind = "openai_compatible"
+base_url = "https://rerank.example.com/v1"
+env_key = "<RERANKER_KEY_ENV>"
+catalog_enabled = false
+capability_mode = "manual"
+
+[model_providers.reranker-service.capabilities]
+rerank = true
+
+[reranker_models.example-reranker]
+provider = "reranker-service"
+model = "<RERANKER_MODEL>"
+protocol = "cohere_compatible"
+endpoint = "rerank"
+
+[retrieval_profiles.example]
+embedding_models = ["example-embedding"]
+reranker_models = ["example-reranker"]
+deadline_ms = 30000
+```
+
+### Solaris no-auth embedding/reranker evidence (configuration only)
+
+Solaris references here are **configuration evidence only**. Grok Build does
+not start, configure, or administer Solaris services.
+
+```toml
+[model_providers.solaris-retrieval]
+kind = "openai_compatible"
+base_url = "https://solaris-embedding.example.test/v1"
+auth_scheme = "none"
+catalog_enabled = false
+capability_mode = "manual"
+
+[model_providers.solaris-retrieval.capabilities]
+embeddings = true
+rerank = true
+
+[embedding_models.solaris-embedding]
+provider = "solaris-retrieval"
+model = "<EMBEDDING_MODEL>"
+protocol = "openai_compatible"
+
+[reranker_models.solaris-reranker]
+provider = "solaris-retrieval"
+model = "<RERANKER_MODEL>"
+protocol = "cohere_compatible"
+endpoint = "rerank"
+
+[retrieval_profiles.solaris]
+embedding_models = ["solaris-embedding"]
+reranker_models = ["solaris-reranker"]
+```
+
+The `solaris-embedding.example.test` hostname is illustrative. It is contacted
+only if a user deliberately installs and selects this placeholder-derived
+configuration; Grok Build does not contact it by default.
+
+For retrieval profile wiring, budgets, and degradation, see
+[Retrieval and Prime](30-retrieval-and-prime.md). Provider instance boundaries:
+[Multi-Account Providers](29-multi-account-providers.md). Short references:
+[OpenAI Platform](../providers/openai-platform.md) and
+[OpenRouter](../providers/openrouter.md).

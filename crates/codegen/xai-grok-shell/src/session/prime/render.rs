@@ -146,6 +146,15 @@ fn footer() -> &'static str {
     "</skill_prime>"
 }
 
+fn provenance_label(path: &str) -> String {
+    std::path::Path::new(path)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.is_empty())
+        .unwrap_or("skill")
+        .to_string()
+}
+
 fn scope_str(scope: &SkillScope) -> &'static str {
     use SkillScope::*;
     match scope {
@@ -198,7 +207,7 @@ pub fn render_skills(loaded: &[LoadedSkill], budgets: &RenderBudgets) -> Rendere
             }
         }
         let name = escape_attr(&skill.name);
-        let source = escape_attr(&skill.source_path);
+        let source = escape_attr(&provenance_label(&skill.source_path));
         let scope = scope_str(&skill.scope);
         rows.push(format!(
             "<skill_source name=\"{name}\" scope=\"{scope}\" source=\"{source}\">{snippet}</skill_source>\n"
@@ -398,7 +407,7 @@ mod tests {
         // markup (`<skill_source ...>...</skill_source>`); the wrapper header
         // and footer are constant and excluded.
         let expected_row = format!(
-            "<skill_source name=\"a\" scope=\"repo\" source=\"/r/x\">hello world</skill_source>\n"
+            "<skill_source name=\"a\" scope=\"repo\" source=\"x\">hello world</skill_source>\n"
         );
         let row_tokens = estimate_tokens(expected_row.len());
         let tight = RenderBudgets {
@@ -473,5 +482,21 @@ mod tests {
         assert!(!d.contains("/Users/alice"), "abs home path leaked: {d}");
         assert!(!d.contains(".grok/skills"), "abs path leaked: {d}");
         assert!(d.contains("SKILL.md"), "basename provenance expected");
+    }
+
+    #[test]
+    fn rendered_text_omits_home_like_absolute_paths() {
+        let out = render_skills(
+            &[lm(
+                "snoop",
+                SkillScope::User,
+                "/Users/alice/.grok/skills/x/SKILL.md",
+                "body",
+            )],
+            &budgets(),
+        );
+        assert!(!out.text.contains("/Users/alice"));
+        assert!(!out.text.contains(".grok/skills"));
+        assert!(out.text.contains("source=\"SKILL.md\""));
     }
 }

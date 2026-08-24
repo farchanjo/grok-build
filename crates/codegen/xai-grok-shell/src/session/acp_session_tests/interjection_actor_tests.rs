@@ -142,8 +142,14 @@ async fn drain_interjection_expands_skill_slash_reference() {
             let (actor, _rx) = build_actor().await;
 
             let dir = tempfile::tempdir().unwrap();
-            let path = dir.path().join("SKILL.md");
-            std::fs::write(&path, "Find sessions matching $ARGUMENTS").unwrap();
+            let skill_dir = dir.path().join("find-session");
+            std::fs::create_dir_all(&skill_dir).unwrap();
+            let path = skill_dir.join("SKILL.md");
+            std::fs::write(
+                &path,
+                "---\nname: find-session\ndescription: Find past sessions matching a query.\n---\nFind sessions matching $ARGUMENTS\n",
+            )
+            .unwrap();
             let skill = xai_grok_tools::implementations::skills::types::SkillInfo {
                 name: "find-session".to_owned(),
                 description: "Find past sessions".to_owned(),

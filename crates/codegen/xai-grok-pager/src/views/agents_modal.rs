@@ -267,6 +267,9 @@ pub struct AgentsModalState {
     pub persona_scroll: usize,
     /// Indices of expanded personas (showing description + capability tags).
     pub persona_expanded: std::collections::HashSet<usize>,
+    /// Compact callable-agent index state (not a diagnostics dashboard).
+    pub prime_index: Option<xai_grok_shell::session::prime::PrimeIndexStatus>,
+    pub prime_index_capable: bool,
 }
 /// Built-in agent names that should be shown to the user.
 /// Skips internal variants (GrokBuildConcise, GrokBuildPlan,
@@ -316,7 +319,37 @@ impl AgentsModalState {
             persona_selected: 0,
             persona_scroll: 0,
             persona_expanded: std::collections::HashSet::new(),
+            prime_index: None,
+            prime_index_capable: false,
         }
+    }
+
+    pub fn apply_prime_index_update(
+        &mut self,
+        update: &xai_grok_shell::session::prime::PrimeIndexUpdate,
+    ) {
+        if let Some(ref mut status) = self.prime_index {
+            if update.generation_is_stale_vs(status.generation) {
+                return;
+            }
+            status.generation = update.generation;
+            if !update.fingerprint_short.is_empty() {
+                status.fingerprint_short = update.fingerprint_short.clone();
+            }
+            if let Some(job) = update.sanitized_job() {
+                status.job = Some(job);
+            }
+            status.sanitize_secrets();
+        }
+    }
+
+    pub fn compact_index_line(&self) -> Option<String> {
+        let status = self.prime_index.as_ref()?;
+        let a = &status.agents;
+        Some(format!(
+            "index {}/{} {}",
+            a.vector_count, a.item_count, a.readiness
+        ))
     }
     /// Rebuild agent list from disk after a mutation.
     fn rebuild_agents(&mut self) {
@@ -1243,6 +1276,10 @@ fn render_agents_tab(
 ) {
     let mut y = content_area.y;
     let w = content_area.width as usize;
+    if let Some(line) = state.compact_index_line() {
+        buf.set_stringn(content_area.x, y, &line, w, Style::default().fg(theme.gray));
+        y = y.saturating_add(1);
+    }
     if let Some(ref msg) = state.message {
         y = render_modal_message_line(buf, content_area.x, y, w, msg, theme);
     }
@@ -2754,6 +2791,8 @@ mod tests {
                 persona_selected: 0,
                 persona_scroll: 0,
                 persona_expanded: std::collections::HashSet::new(),
+                prime_index: None,
+                prime_index_capable: false,
             };
             state.set_search_query(query);
             state
@@ -2795,6 +2834,8 @@ mod tests {
             persona_selected: selected,
             persona_scroll: 0,
             persona_expanded: std::collections::HashSet::new(),
+            prime_index: None,
+            prime_index_capable: false,
         };
         state.set_search_query(query);
         state

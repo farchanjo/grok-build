@@ -396,29 +396,22 @@ impl RetrievalErrorCategory {
 impl fmt::Debug for RetrievalError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::InvalidRequest(m) => f.debug_tuple("InvalidRequest").field(m).finish(),
-            Self::InvalidUrl(m) => f.debug_tuple("InvalidUrl").field(m).finish(),
+            Self::InvalidRequest(_) => f.write_str("InvalidRequest"),
+            Self::InvalidUrl(_) => f.write_str("InvalidUrl"),
             Self::MissingCredential => f.write_str("MissingCredential"),
-            Self::CapabilityDenied(m) => f.debug_tuple("CapabilityDenied").field(m).finish(),
-            Self::SurfaceMismatch(m) => f.debug_tuple("SurfaceMismatch").field(m).finish(),
-            Self::ProtocolMismatch(m) => f.debug_tuple("ProtocolMismatch").field(m).finish(),
-            Self::RedirectPolicy(m) => f.debug_tuple("RedirectPolicy").field(m).finish(),
+            Self::CapabilityDenied(_) => f.write_str("CapabilityDenied"),
+            Self::SurfaceMismatch(_) => f.write_str("SurfaceMismatch"),
+            Self::ProtocolMismatch(_) => f.write_str("ProtocolMismatch"),
+            Self::RedirectPolicy(_) => f.write_str("RedirectPolicy"),
             Self::Http {
-                status,
-                category,
-                message,
-                request_id,
-                provider_id,
+                status, category, ..
             } => f
                 .debug_struct("Http")
                 .field("status", status)
                 .field("category", category)
-                .field("message", message)
-                .field("request_id", request_id)
-                .field("provider_id", provider_id)
                 .finish(),
-            Self::Decode(m) => f.debug_tuple("Decode").field(m).finish(),
-            Self::MalformedResponse(m) => f.debug_tuple("MalformedResponse").field(m).finish(),
+            Self::Decode(_) => f.write_str("Decode"),
+            Self::MalformedResponse(_) => f.write_str("MalformedResponse"),
             Self::Timeout => f.write_str("Timeout"),
             Self::Cancelled => f.write_str("Cancelled"),
             Self::RateLimited { retry_after_ms } => f
@@ -429,7 +422,7 @@ impl fmt::Debug for RetrievalError {
                 .debug_struct("OversizedResponse")
                 .field("limit_bytes", limit_bytes)
                 .finish(),
-            Self::Transport(m) => f.debug_tuple("Transport").field(m).finish(),
+            Self::Transport(_) => f.write_str("Transport"),
             Self::DeadlineExceeded => f.write_str("DeadlineExceeded"),
         }
     }
@@ -438,35 +431,30 @@ impl fmt::Debug for RetrievalError {
 impl fmt::Display for RetrievalError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::InvalidRequest(m) => write!(f, "invalid retrieval request: {m}"),
-            Self::InvalidUrl(m) => write!(f, "invalid retrieval URL: {m}"),
+            Self::InvalidRequest(_) => write!(f, "invalid retrieval request"),
+            Self::InvalidUrl(_) => write!(f, "invalid retrieval URL"),
             Self::MissingCredential => write!(
                 f,
                 "application credential missing for exact retrieval route (never borrows siblings or admin)"
             ),
-            Self::CapabilityDenied(m) => write!(f, "retrieval capability denied: {m}"),
-            Self::SurfaceMismatch(m) => write!(f, "retrieval API surface mismatch: {m}"),
-            Self::ProtocolMismatch(m) => write!(f, "retrieval protocol mismatch: {m}"),
-            Self::RedirectPolicy(m) => write!(f, "retrieval redirect refused: {m}"),
+            Self::CapabilityDenied(_) => write!(f, "retrieval capability denied"),
+            Self::SurfaceMismatch(_) => write!(f, "retrieval API surface mismatch"),
+            Self::ProtocolMismatch(_) => write!(f, "retrieval protocol mismatch"),
+            Self::RedirectPolicy(_) => write!(f, "retrieval redirect refused"),
             Self::Http {
-                status,
-                category,
-                message,
-                ..
-            } => write!(
-                f,
-                "retrieval HTTP {status} ({}): {message}",
-                category.as_str()
-            ),
-            Self::Decode(m) => write!(f, "retrieval decode error: {m}"),
-            Self::MalformedResponse(m) => write!(f, "malformed retrieval response: {m}"),
+                status, category, ..
+            } => {
+                write!(f, "retrieval HTTP {status} ({})", category.as_str())
+            }
+            Self::Decode(_) => write!(f, "retrieval decode error"),
+            Self::MalformedResponse(_) => write!(f, "malformed retrieval response"),
             Self::Timeout => write!(f, "retrieval request timed out"),
             Self::Cancelled => write!(f, "retrieval request cancelled"),
             Self::RateLimited { .. } => write!(f, "retrieval rate limited"),
             Self::OversizedResponse { limit_bytes } => {
                 write!(f, "retrieval response exceeded {limit_bytes} bytes")
             }
-            Self::Transport(m) => write!(f, "retrieval transport error: {m}"),
+            Self::Transport(_) => write!(f, "retrieval transport error"),
             Self::DeadlineExceeded => write!(f, "retrieval total deadline exceeded"),
         }
     }
@@ -475,6 +463,23 @@ impl fmt::Display for RetrievalError {
 impl std::error::Error for RetrievalError {}
 
 impl RetrievalError {
+    /// Internal diagnostic payload. Never used on user-facing Display paths.
+    pub fn internal_message(&self) -> Option<&str> {
+        match self {
+            Self::InvalidRequest(m)
+            | Self::InvalidUrl(m)
+            | Self::CapabilityDenied(m)
+            | Self::SurfaceMismatch(m)
+            | Self::ProtocolMismatch(m)
+            | Self::RedirectPolicy(m)
+            | Self::Decode(m)
+            | Self::MalformedResponse(m)
+            | Self::Transport(m) => Some(m),
+            Self::Http { message, .. } => Some(message),
+            _ => None,
+        }
+    }
+
     /// Whether a failed POST may be retried (request construction is retry-safe).
     ///
     /// `DeadlineExceeded` is **not** retryable: the total call budget is already
@@ -789,5 +794,27 @@ mod redact_tests {
             );
             assert!(r.contains("[redacted]"), "expected marker in `{r}`");
         }
+    }
+
+    #[test]
+    fn retrieval_error_display_and_debug_are_classification_only() {
+        let err = RetrievalError::Http {
+            status: 401,
+            category: RetrievalErrorCategory::Authentication,
+            message: "https://embed.example/v1 leaked-token sk-secret".into(),
+            request_id: None,
+            provider_id: Some("prov".into()),
+        };
+        let display = err.to_string();
+        let debug = format!("{err:?}");
+        assert!(!display.contains("sk-secret"));
+        assert!(!display.contains("https://"));
+        assert!(!debug.contains("sk-secret"));
+        assert!(!debug.contains("https://"));
+        assert!(display.contains("401"));
+        let url = RetrievalError::InvalidUrl("https://embed.example/v1".into());
+        assert!(!url.to_string().contains("https://"));
+        assert!(!format!("{url:?}").contains("https://"));
+        assert_eq!(err.internal_message().unwrap().contains("sk-secret"), true);
     }
 }

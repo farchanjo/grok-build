@@ -1,0 +1,15 @@
+{
+  "apiVersion": 1,
+  "generation": 4,
+  "running": false,
+  "summary": {
+    "status": "stale",
+    "generation": 3,
+    "casesFingerprint": "2222bbbb",
+    "passed": 4,
+    "failed": 1,
+    "cancelled": false,
+    "stable": true
+  },
+  "futureField": true
+}

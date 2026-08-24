@@ -16,7 +16,10 @@ pub use xai_grok_tools::types::compat::CompatConfig;
 
 use xai_grok_tools::implementations::skills::discovery::{
     find_command_paths, find_skill_md_paths, find_skill_paths, is_valid_skill_name,
-    normalize_skill_name, parse_skill_files, scan_md_files, walk_for_skill_md,
+    normalize_skill_name, parse_skill_sources, scan_md_files, walk_for_skill_md,
+};
+use xai_grok_tools::implementations::skills::strict::{
+    LegacyCommand, SkillInventory, SkillSourceReport, skill_matches_toggle,
 };
 
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize, PartialEq)]
@@ -69,6 +72,14 @@ pub async fn list_skills(
     list_skills_with_plugins(working_directory, config, None, compat).await
 }
 
+/// Complete listing: strictly valid skills, command-only rows, and inventory.
+#[derive(Debug, Clone)]
+pub struct SkillListing {
+    pub skills: Vec<SkillInfo>,
+    pub commands: Vec<LegacyCommand>,
+    pub inventory: SkillInventory,
+}
+
 /// List all discovered skills including plugin-provided skills.
 ///
 /// When `plugins` is `Some`, skills from enabled plugins are appended with
@@ -82,10 +93,22 @@ pub async fn list_skills_with_plugins(
     plugins: Option<&crate::plugins::PluginRegistry>,
     compat: CompatConfig,
 ) -> Vec<SkillInfo> {
+    list_skill_sources_with_plugins(working_directory, config, plugins, compat)
+        .await
+        .skills
+}
+
+/// List strictly valid skills, command-only rows, and the quarantined inventory.
+pub async fn list_skill_sources_with_plugins(
+    working_directory: Option<&str>,
+    config: &SkillsConfig,
+    plugins: Option<&crate::plugins::PluginRegistry>,
+    compat: CompatConfig,
+) -> SkillListing {
     let _skill_discovery_timer = crate::timing::timer("skill_discovery");
     let workspace_user_dir = crate::prompt::workspace_user::optional_workspace_user_dir();
 
-    let mut skills = list_skills_with_options(
+    let native = list_sources_with_options(
         working_directory,
         workspace_user_dir.as_deref(),
         &xai_grok_tools::util::grok_home::grok_home(),
@@ -98,41 +121,60 @@ pub async fn list_skills_with_plugins(
             .ok()
             .and_then(|repo| repo.workdir().map(|p| p.to_path_buf()))
     });
-    skills.extend(collect_config_skills(&config.paths, git_root.as_deref()));
-
-    skills.extend(collect_injected_skills(
-        &config.server_skill_dirs,
-        SkillScope::Server,
-    ));
-    skills.extend(collect_injected_skills(
-        &config.bundled_skill_dirs,
-        SkillScope::Bundled,
-    ));
-
-    let mut skills = filter_skills(skills, &config.ignore);
-    skills.sort_by_key(|s| s.scope);
-
-    let plugin_skills = if let Some(registry) = plugins {
-        collect_plugin_skills(registry)
+    let config_report = collect_config_sources(&config.paths, git_root.as_deref());
+    let server_report = collect_injected_sources(&config.server_skill_dirs, SkillScope::Server);
+    let bundled_report = collect_injected_sources(&config.bundled_skill_dirs, SkillScope::Bundled);
+    let plugin_report = if let Some(registry) = plugins {
+        collect_plugin_sources(registry)
     } else {
-        vec![]
+        SkillSourceReport::empty(0)
     };
 
-    let mut merged = merge_skills_with_plugins(skills, plugin_skills);
+    let mut merged_report = SkillSourceReport::merge(
+        1,
+        [
+            native,
+            config_report,
+            server_report,
+            bundled_report,
+            plugin_report,
+        ],
+    );
 
-    // Mark disabled skills. Disabled skills remain in the list (unlike
-    // `ignore` which hides them) but are excluded from the system prompt
-    // and skill tool invocation.
+    merged_report.skills = filter_skills(merged_report.skills, &config.ignore);
+    merged_report
+        .commands
+        .retain(|command| filter_skills(vec![command.to_slash_skill()], &config.ignore).len() == 1);
+    merged_report.skills.sort_by_key(|s| s.scope);
+
+    let plugin_skills: Vec<SkillInfo> = merged_report
+        .skills
+        .iter()
+        .filter(|s| s.plugin_name.is_some())
+        .cloned()
+        .collect();
+    let native_skills: Vec<SkillInfo> = merged_report
+        .skills
+        .iter()
+        .filter(|s| s.plugin_name.is_none())
+        .cloned()
+        .collect();
+    let mut merged = merge_skills_with_plugins(native_skills, plugin_skills);
+
     if !config.disabled.is_empty() {
         let disabled_set: HashSet<&str> = config.disabled.iter().map(|s| s.as_str()).collect();
         for skill in &mut merged {
-            if disabled_set.contains(skill.name.as_str()) {
+            if skill_matches_toggle(skill, &disabled_set) {
                 skill.enabled = false;
             }
         }
     }
 
-    merged
+    SkillListing {
+        inventory: merged_report.inventory,
+        commands: merged_report.commands,
+        skills: merged,
+    }
 }
 
 /// Canonical source of all config directories that may contain skills.
@@ -283,12 +325,24 @@ fn collect_discovered_paths(
 /// Skills are collected before commands so they win name collisions via
 /// first-seen-wins dedup. Returns only global skills when `working_directory`
 /// is `None`.
+#[cfg(test)]
 async fn list_skills_with_options(
     working_directory: Option<&str>,
     workspace_user_dir: Option<&Path>,
     global_dir: &Path,
     compat: CompatConfig,
 ) -> Vec<SkillInfo> {
+    list_sources_with_options(working_directory, workspace_user_dir, global_dir, compat)
+        .await
+        .skills
+}
+
+async fn list_sources_with_options(
+    working_directory: Option<&str>,
+    workspace_user_dir: Option<&Path>,
+    global_dir: &Path,
+    compat: CompatConfig,
+) -> SkillSourceReport {
     let cwd = working_directory.map(PathBuf::from);
 
     let git_root = cwd.as_ref().and_then(|c| {
@@ -329,7 +383,18 @@ async fn list_skills_with_options(
         &mut skill_files,
     );
 
-    parse_skill_files(skill_files)
+    let mut report = parse_skill_sources(skill_files, 0);
+    for config_dir in &config_dirs {
+        xai_grok_tools::implementations::skills::strict::stamp_collection_root(
+            &mut report.skills,
+            config_dir,
+        );
+    }
+    xai_grok_tools::implementations::skills::strict::stamp_collection_root(
+        &mut report.skills,
+        &bundled_dir,
+    );
+    report
 }
 
 /// Expand a `~`-prefixed path string to an absolute `PathBuf`.
@@ -347,7 +412,12 @@ fn expand_tilde(raw: &str) -> PathBuf {
 /// Each entry is either a direct SKILL.md file or a directory to walk recursively.
 /// `~` is expanded. Scope is `Repo` if the resolved path falls inside `git_root`,
 /// otherwise `User`.
+#[cfg(test)]
 fn collect_config_skills(config_paths: &[String], git_root: Option<&Path>) -> Vec<SkillInfo> {
+    collect_config_sources(config_paths, git_root).skills
+}
+
+fn collect_config_sources(config_paths: &[String], git_root: Option<&Path>) -> SkillSourceReport {
     let mut skill_files: Vec<(PathBuf, SkillScope)> = Vec::new();
     let mut seen = HashSet::new();
 
@@ -358,7 +428,9 @@ fn collect_config_skills(config_paths: &[String], git_root: Option<&Path>) -> Ve
             _ => SkillScope::User,
         };
 
-        if expanded.is_file() && expanded.file_name().is_some_and(|n| n == "SKILL.md") {
+        if xai_grok_tools::implementations::skills::strict::is_regular_file(&expanded)
+            && expanded.file_name().is_some_and(|n| n == "SKILL.md")
+        {
             collect_discovered_paths(
                 std::iter::once(expanded),
                 scope,
@@ -376,34 +448,54 @@ fn collect_config_skills(config_paths: &[String], git_root: Option<&Path>) -> Ve
         }
     }
 
-    let mut skills = parse_skill_files(skill_files);
+    let mut report = parse_skill_sources(skill_files, 0);
     // Provenance metadata only (scope still drives precedence): lets inspect
     // and UIs distinguish `[skills].paths` entries from plain user/repo skills.
-    for skill in &mut skills {
+    for skill in &mut report.skills {
         skill.config_source = Some(
             xai_grok_tools::types::config_source::ConfigSource::ConfigToml {
                 path: PathBuf::from(&skill.path),
             },
         );
     }
-    skills
+    for raw in config_paths {
+        let expanded = expand_tilde(raw);
+        let stamp_root =
+            if xai_grok_tools::implementations::skills::strict::is_regular_file(&expanded) {
+                expanded.parent().map(Path::to_path_buf).unwrap_or(expanded)
+            } else {
+                expanded
+            };
+        xai_grok_tools::implementations::skills::strict::stamp_collection_root(
+            &mut report.skills,
+            &stamp_root,
+        );
+    }
+    report
 }
 
-fn collect_injected_skills(dirs: &[String], scope: SkillScope) -> Vec<SkillInfo> {
-    let mut skill_files: Vec<(PathBuf, SkillScope)> = Vec::new();
-    let mut seen = HashSet::new();
+fn collect_injected_sources(dirs: &[String], scope: SkillScope) -> SkillSourceReport {
+    let mut reports = Vec::new();
 
     for raw in dirs {
         let expanded = expand_tilde(raw);
-        if !expanded.is_dir() {
+        if !xai_grok_tools::implementations::skills::strict::is_real_directory(&expanded) {
             continue;
         }
+        let mut skill_files: Vec<(PathBuf, SkillScope)> = Vec::new();
+        let mut seen = HashSet::new();
         let mut dir_paths = Vec::new();
         walk_for_skill_md(&expanded, &mut dir_paths, 0);
         collect_discovered_paths(dir_paths, scope, &mut seen, &mut skill_files);
+        let mut report = parse_skill_sources(skill_files, 0);
+        xai_grok_tools::implementations::skills::strict::stamp_collection_root(
+            &mut report.skills,
+            &expanded,
+        );
+        reports.push(report);
     }
 
-    parse_skill_files(skill_files)
+    SkillSourceReport::merge(0, reports)
 }
 
 /// Deduplicate skills while preserving first-seen priority order.
@@ -544,6 +636,7 @@ fn stamp_plugin_fields(skills: &mut [SkillInfo], plugin: &crate::plugins::Loaded
         skill.plugin_name = Some(plugin.name.clone());
         skill.plugin_version = plugin.version.clone();
         skill.plugin_root = Some(plugin.root_str());
+        skill.collection_root = Some(plugin.root_str());
         skill.plugin_data = Some(plugin.data_dir_str());
         // Identity is the directory basename (`plugin:<dir>`), keeping sibling
         // skills collision-free; frontmatter `name` becomes the display label.
@@ -562,15 +655,20 @@ fn stamp_plugin_fields(skills: &mut [SkillInfo], plugin: &crate::plugins::Loaded
     }
 }
 
+#[cfg(test)]
 fn collect_plugin_skills(registry: &crate::plugins::PluginRegistry) -> Vec<SkillInfo> {
-    let mut skills = Vec::new();
+    collect_plugin_sources(registry).skills
+}
+
+fn collect_plugin_sources(registry: &crate::plugins::PluginRegistry) -> SkillSourceReport {
+    let mut reports = Vec::new();
 
     for plugin in registry.enabled_plugins() {
         let mut paths: Vec<(PathBuf, SkillScope)> = Vec::new();
 
         // Skills: shared discovery primitive (see `find_skill_md_paths`).
         for skill_dir in &plugin.skill_dirs {
-            if !skill_dir.is_dir() {
+            if !xai_grok_tools::implementations::skills::strict::is_real_directory(skill_dir) {
                 continue;
             }
             paths.extend(
@@ -580,7 +678,8 @@ fn collect_plugin_skills(registry: &crate::plugins::PluginRegistry) -> Vec<Skill
             );
         }
 
-        // Commands (.md files in command directories)
+        // Commands stay on the command-only path; invalid plugin skills are
+        // quarantined without dropping the rest of the plugin.
         for cmd_dir in &plugin.command_dirs {
             paths.extend(
                 scan_md_files(cmd_dir)
@@ -589,12 +688,18 @@ fn collect_plugin_skills(registry: &crate::plugins::PluginRegistry) -> Vec<Skill
             );
         }
 
-        let mut parsed = parse_skill_files(paths);
-        stamp_plugin_fields(&mut parsed, plugin);
-        skills.extend(parsed);
+        let mut parsed = parse_skill_sources(paths, 0);
+        stamp_plugin_fields(&mut parsed.skills, plugin);
+        for command in &mut parsed.commands {
+            command.plugin_name = Some(plugin.name.clone());
+            command.plugin_version = plugin.version.clone();
+            command.plugin_root = Some(plugin.root_str());
+            command.plugin_data = Some(plugin.data_dir_str());
+        }
+        reports.push(parsed);
     }
 
-    skills
+    SkillSourceReport::merge(0, reports)
 }
 
 /// Plugin-aware skill merge (native first, then plugin skills appended with qualified-name dedup).
@@ -714,7 +819,8 @@ mod tests {
     use std::fs;
     use xai_grok_tools::implementations::skills::discovery::{
         MAX_BODY_PEEK_BYTES, MAX_SKILL_WALK_DEPTH, SkillParseError, extract_first_paragraph,
-        is_valid_skill_name, normalize_skill_name, parse_skill_frontmatter,
+        is_valid_skill_name, normalize_skill_name, parse_skill_files, parse_skill_frontmatter,
+        parse_skill_sources,
     };
 
     /// Helper: create a minimal valid SKILL.md with the given name.
@@ -767,7 +873,7 @@ mod tests {
     #[tokio::test]
     async fn bundled_skills_injected_and_shadowed_by_local() {
         let bundled = tempfile::tempdir().unwrap();
-        write_skill_md(&bundled.path().join("bundled__helper"), "helper");
+        write_skill_md(&bundled.path().join("helper"), "helper");
         write_skill_md(&bundled.path().join("dup"), "dup");
 
         let cwd = tempfile::tempdir().unwrap();
@@ -1047,11 +1153,9 @@ mod tests {
 
         let skills = parse_skill_files(vec![(skill_dir.join("SKILL.md"), SkillScope::Local)]);
 
-        // Must not panic and should produce a description.
-        assert_eq!(skills.len(), 1);
         assert!(
-            !skills[0].description.is_empty(),
-            "description should be filled from body"
+            skills.is_empty(),
+            "missing description is quarantined, not repaired from the body"
         );
     }
 
@@ -1222,11 +1326,9 @@ mod tests {
         .unwrap();
 
         let skills = parse_skill_files(vec![(skill_dir.join("SKILL.md"), SkillScope::Local)]);
-        assert_eq!(skills.len(), 1);
-        assert_eq!(skills[0].name, "my-skill");
         assert!(
-            skills[0].user_invocable,
-            "no-frontmatter skills must be user-invocable"
+            skills.is_empty(),
+            "missing frontmatter is quarantined at runtime"
         );
     }
 
@@ -1484,9 +1586,10 @@ mod tests {
         // When the config path itself is a skill directory (contains SKILL.md),
         // it should be discovered even though walk_for_skill_md only walks children.
         let tmp = tempfile::tempdir().unwrap();
-        write_skill_md(tmp.path(), "root-skill");
+        let skill_dir = tmp.path().join("root-skill");
+        write_skill_md(&skill_dir, "root-skill");
 
-        let paths = vec![tmp.path().to_str().unwrap().to_string()];
+        let paths = vec![skill_dir.to_str().unwrap().to_string()];
         let skills = collect_config_skills(&paths, None);
 
         assert_eq!(skills.len(), 1);
@@ -1528,6 +1631,215 @@ mod tests {
             }
             other => panic!("expected ConfigToml source, got {other:?}"),
         }
+        assert_eq!(
+            skills[0].collection_root.as_deref(),
+            tmp.path().to_str(),
+            "config path must be stamped as the load-time walk root"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn nested_config_path_collection_root_symlink_cannot_preload() {
+        let tmp = tempfile::tempdir().unwrap();
+        let pack = tmp.path().join("pack");
+        write_skill_md(
+            &pack.join("team").join("cfg-nested-infra"),
+            "cfg-nested-infra",
+        );
+        let paths = vec![pack.to_string_lossy().into_owned()];
+        let skills = collect_config_skills(&paths, None);
+        assert_eq!(skills.len(), 1);
+        assert_eq!(skills[0].name, "cfg-nested-infra");
+        assert_eq!(skills[0].collection_root.as_deref(), pack.to_str());
+        let loaded =
+            xai_grok_tools::implementations::skills::skill::load_skill_with_body(&skills[0])
+                .await
+                .expect("nested config-path skill must load from the stamped root");
+        assert!(
+            loaded
+                .body
+                .as_deref()
+                .is_some_and(|body| body.contains("Skill body here")),
+            "trusted body must load before the swap"
+        );
+
+        let real = tmp.path().join("pack.real");
+        fs::rename(&pack, &real).unwrap();
+        let evil_root = tempfile::tempdir().unwrap();
+        write_skill_md(
+            &evil_root.path().join("team").join("cfg-nested-infra"),
+            "cfg-nested-infra",
+        );
+        fs::write(
+            evil_root
+                .path()
+                .join("team")
+                .join("cfg-nested-infra")
+                .join("SKILL.md"),
+            "---\nname: cfg-nested-infra\ndescription: A test skill called cfg-nested-infra\n---\n\nEVIL_SECRET_BODY\n",
+        )
+        .unwrap();
+        std::os::unix::fs::symlink(evil_root.path(), &pack).unwrap();
+
+        let err = xai_grok_tools::implementations::skills::skill::load_skill_with_body(&skills[0])
+            .await
+            .expect_err("swapped collection root must not preload");
+        assert!(
+            err.contains("symlink"),
+            "expected symlink failure, got {err}"
+        );
+        assert!(!err.contains("EVIL_SECRET_BODY"));
+        let dump = format!("{err:?}");
+        assert!(!dump.contains("EVIL_SECRET_BODY"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn stamped_skill_dir_config_path_grandparent_symlink_cannot_preload() {
+        let tmp = tempfile::tempdir().unwrap();
+        let pack = tmp.path().join("pack");
+        let skill_dir = pack.join("team").join("infra");
+        write_skill_md(&skill_dir, "infra");
+        let paths = vec![skill_dir.to_string_lossy().into_owned()];
+        let skills = collect_config_skills(&paths, None);
+        assert_eq!(skills.len(), 1);
+        assert_eq!(skills[0].name, "infra");
+        assert_eq!(skills[0].collection_root.as_deref(), skill_dir.to_str());
+        let loaded =
+            xai_grok_tools::implementations::skills::skill::load_skill_with_body(&skills[0])
+                .await
+                .expect("stamped skill-dir config path must load before the swap");
+        assert!(
+            loaded
+                .body
+                .as_deref()
+                .is_some_and(|body| body.contains("Skill body here")),
+            "trusted body must load before the swap"
+        );
+
+        let real = tmp.path().join("pack.real");
+        fs::rename(&pack, &real).unwrap();
+        let evil_root = tempfile::tempdir().unwrap();
+        write_skill_md(&evil_root.path().join("team").join("infra"), "infra");
+        fs::write(
+            evil_root.path().join("team").join("infra").join("SKILL.md"),
+            "---\nname: infra\ndescription: A test skill called infra\n---\n\nEVIL_SECRET_BODY\n",
+        )
+        .unwrap();
+        std::os::unix::fs::symlink(evil_root.path(), &pack).unwrap();
+
+        let err = xai_grok_tools::implementations::skills::skill::load_skill_with_body(&skills[0])
+            .await
+            .expect_err("swapped grandparent of stamped skill dir must not preload");
+        assert!(
+            err.contains("symlink"),
+            "expected symlink failure, got {err}"
+        );
+        assert!(!err.contains("EVIL_SECRET_BODY"));
+        let dump = format!("{err:?}");
+        assert!(!dump.contains("EVIL_SECRET_BODY"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn stamped_skill_md_file_config_path_grandparent_symlink_cannot_preload() {
+        let tmp = tempfile::tempdir().unwrap();
+        let pack = tmp.path().join("pack");
+        let skill_dir = pack.join("team").join("infra");
+        write_skill_md(&skill_dir, "infra");
+        let paths = vec![skill_dir.join("SKILL.md").to_string_lossy().into_owned()];
+        let skills = collect_config_skills(&paths, None);
+        assert_eq!(skills.len(), 1);
+        assert_eq!(skills[0].name, "infra");
+        assert_eq!(
+            skills[0].collection_root.as_deref(),
+            skill_dir.to_str(),
+            "SKILL.md config path must stamp the skill directory"
+        );
+        let loaded =
+            xai_grok_tools::implementations::skills::skill::load_skill_with_body(&skills[0])
+                .await
+                .expect("stamped SKILL.md config path must load before the swap");
+        assert!(
+            loaded
+                .body
+                .as_deref()
+                .is_some_and(|body| body.contains("Skill body here")),
+            "trusted body must load before the swap"
+        );
+
+        let real = tmp.path().join("pack.real");
+        fs::rename(&pack, &real).unwrap();
+        let evil_root = tempfile::tempdir().unwrap();
+        write_skill_md(&evil_root.path().join("team").join("infra"), "infra");
+        fs::write(
+            evil_root.path().join("team").join("infra").join("SKILL.md"),
+            "---\nname: infra\ndescription: A test skill called infra\n---\n\nEVIL_SECRET_BODY\n",
+        )
+        .unwrap();
+        std::os::unix::fs::symlink(evil_root.path(), &pack).unwrap();
+
+        let err = xai_grok_tools::implementations::skills::skill::load_skill_with_body(&skills[0])
+            .await
+            .expect_err("swapped grandparent of SKILL.md-stamped skill dir must not preload");
+        assert!(
+            err.contains("symlink"),
+            "expected symlink failure, got {err}"
+        );
+        assert!(!err.contains("EVIL_SECRET_BODY"));
+        let dump = format!("{err:?}");
+        assert!(!dump.contains("EVIL_SECRET_BODY"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn injected_nested_collection_root_symlink_cannot_preload() {
+        let tmp = tempfile::tempdir().unwrap();
+        let injected = tmp.path().join("injected");
+        write_skill_md(
+            &injected.join("team").join("nested-infra-prime"),
+            "nested-infra-prime",
+        );
+        let config = SkillsConfig {
+            server_skill_dirs: vec![injected.to_string_lossy().into_owned()],
+            ..Default::default()
+        };
+        let skills = list_skills_with_plugins(None, &config, None, CompatConfig::default()).await;
+        let skill = skills
+            .iter()
+            .find(|s| s.name == "nested-infra-prime")
+            .expect("injected nested skill should be discovered");
+        assert_eq!(skill.collection_root.as_deref(), injected.to_str());
+
+        let real = tmp.path().join("injected.real");
+        fs::rename(&injected, &real).unwrap();
+        let evil_root = tempfile::tempdir().unwrap();
+        write_skill_md(
+            &evil_root.path().join("team").join("nested-infra-prime"),
+            "nested-infra-prime",
+        );
+        fs::write(
+            evil_root
+                .path()
+                .join("team")
+                .join("nested-infra-prime")
+                .join("SKILL.md"),
+            "---\nname: nested-infra-prime\ndescription: A test skill called nested-infra-prime\n---\n\nEVIL_SECRET_BODY\n",
+        )
+        .unwrap();
+        std::os::unix::fs::symlink(evil_root.path(), &injected).unwrap();
+
+        let err = xai_grok_tools::implementations::skills::skill::load_skill_with_body(skill)
+            .await
+            .expect_err("swapped injected collection root must not preload");
+        assert!(
+            err.contains("symlink"),
+            "expected symlink failure, got {err}"
+        );
+        assert!(!err.contains("EVIL_SECRET_BODY"));
+        let dump = format!("{err:?}");
+        assert!(!dump.contains("EVIL_SECRET_BODY"));
     }
 
     // ── filter_skills ────────────────────────────────────────────────
@@ -1547,6 +1859,7 @@ mod tests {
             plugin_name: None,
             plugin_version: None,
             plugin_root: None,
+            collection_root: None,
             plugin_data: None,
             allowed_tools: None,
             license: None,
@@ -1613,6 +1926,10 @@ mod tests {
         let expected_data = plugin.data_dir_str();
         assert_eq!(
             skills[0].plugin_root.as_deref(),
+            Some(expected_root.as_str())
+        );
+        assert_eq!(
+            skills[0].collection_root.as_deref(),
             Some(expected_root.as_str())
         );
         assert_eq!(
@@ -1708,6 +2025,29 @@ mod tests {
 
         let ones: Vec<_> = merged.iter().filter(|s| s.name == "one").collect();
         assert_eq!(ones.len(), 1, "skill must appear exactly once: {merged:?}");
+    }
+
+    #[test]
+    fn invalid_plugin_skill_is_quarantined_without_dropping_valid_plugin_skills() {
+        let tmp = tempfile::tempdir().unwrap();
+        let good = tmp.path().join("skills").join("one");
+        let bad = tmp.path().join("skills").join("broken");
+        write_skill_md(&good, "one");
+        fs::create_dir_all(&bad).unwrap();
+        fs::write(
+            bad.join("SKILL.md"),
+            "---\nname: broken\nwhen-to-use: secret-token\n---\n",
+        )
+        .unwrap();
+
+        let registry =
+            make_registry_with_skill_dirs("listed", tmp.path(), vec![good.clone(), bad.clone()]);
+        let report = collect_plugin_sources(&registry);
+        assert_eq!(report.skills.len(), 1);
+        assert_eq!(report.skills[0].name, "one");
+        assert_eq!(report.inventory.quarantined.len(), 1);
+        let dump = format!("{:?}", report.inventory);
+        assert!(!dump.contains("secret-token"));
     }
 
     #[test]
@@ -2217,24 +2557,30 @@ mod tests {
         );
 
         let repo_str = repo_root.to_str().unwrap_or_default();
-        let skills =
-            list_skills_with_options(Some(repo_str), None, tmp.path(), CompatConfig::default())
+        let sources =
+            list_sources_with_options(Some(repo_str), None, tmp.path(), CompatConfig::default())
                 .await;
-        let names: Vec<&str> = skills.iter().map(|s| s.name.as_str()).collect();
+        let skill_names: Vec<&str> = sources.skills.iter().map(|s| s.name.as_str()).collect();
+        let command_names: Vec<&str> = sources.commands.iter().map(|c| c.name.as_str()).collect();
 
         assert!(
-            names.contains(&"frontend"),
-            "gitignored project .claude/commands/frontend.md must load as a slash skill, got: {names:?}"
+            command_names.contains(&"frontend"),
+            "gitignored project .claude/commands/frontend.md must load as a command, got: {command_names:?}"
         );
         assert!(
-            names.contains(&"bp-deltas"),
-            "project .claude/skills still loads, got: {names:?}"
+            skill_names.contains(&"bp-deltas"),
+            "project .claude/skills still loads, got: {skill_names:?}"
+        );
+        assert!(
+            !skill_names.contains(&"frontend"),
+            "legacy commands must not enter the skill inventory: {skill_names:?}"
         );
 
-        let frontend = skills
+        let frontend = sources
+            .commands
             .iter()
-            .find(|s| s.name == "frontend")
-            .expect("frontend skill");
+            .find(|c| c.name == "frontend")
+            .expect("frontend command");
         assert!(
             frontend.path.contains("commands"),
             "frontend should come from commands/, path={}",
@@ -2260,19 +2606,22 @@ mod tests {
             (commands.join("deploy.md"), SkillScope::Repo),
             (commands.join("rollback.md"), SkillScope::Repo),
         ];
-        let skills = parse_skill_files(files);
+        let report = parse_skill_sources(files, 0);
 
-        assert_eq!(skills.len(), 2);
-        let deploy = skills
+        assert!(report.skills.is_empty(), "commands are not skills");
+        assert_eq!(report.commands.len(), 2);
+        let deploy = report
+            .commands
             .iter()
             .find(|s| s.name == "deploy")
-            .expect("deploy skill not found");
+            .expect("deploy command not found");
         assert_eq!(deploy.description, "Ship it");
 
-        let rollback = skills
+        let rollback = report
+            .commands
             .iter()
             .find(|s| s.name == "rollback")
-            .expect("rollback skill not found");
+            .expect("rollback command not found");
         assert_eq!(rollback.description, "Just rollback instructions.");
     }
 
@@ -2295,18 +2644,26 @@ mod tests {
 
         let repo_str = repo_root.to_str().unwrap_or_default();
         let raw =
-            list_skills_with_options(Some(repo_str), None, tmp.path(), CompatConfig::default())
+            list_sources_with_options(Some(repo_str), None, tmp.path(), CompatConfig::default())
                 .await;
 
-        let deploy_entries: Vec<_> = raw.iter().filter(|s| s.name == "deploy").collect();
-        assert_eq!(deploy_entries.len(), 2);
-        assert!(
-            deploy_entries[0].path.contains("SKILL.md"),
-            "skill should appear before command"
+        assert_eq!(raw.skills.iter().filter(|s| s.name == "deploy").count(), 1);
+        assert!(raw.skills[0].path.contains("SKILL.md"));
+        assert_eq!(
+            raw.commands.iter().filter(|c| c.name == "deploy").count(),
+            1
         );
 
-        let deduped = dedupe_skills(raw);
-        let deploy = deduped
+        let mut slash = raw.skills.clone();
+        let claimed: HashSet<String> = slash.iter().map(|s| s.dedup_key()).collect();
+        for command in &raw.commands {
+            let projected = command.to_slash_skill();
+            if claimed.contains(&projected.dedup_key()) {
+                continue;
+            }
+            slash.push(projected);
+        }
+        let deploy = slash
             .iter()
             .filter(|s| s.name == "deploy")
             .collect::<Vec<_>>();
@@ -2675,14 +3032,79 @@ mod tests {
             "missing original in {names:?}"
         );
         assert!(
-            names.contains(&"zz-copyfix-japandi2"),
-            "missing rekeyed copy in {names:?}"
+            !names.contains(&"zz-copyfix-japandi2"),
+            "stale frontmatter name is quarantined, not repaired: {names:?}"
         );
-        let rekeyed = skills
-            .iter()
-            .find(|s| s.name == "zz-copyfix-japandi2")
-            .unwrap();
-        assert_eq!(rekeyed.display_name.as_deref(), Some("zz-copyfix-japandi"));
-        assert!(rekeyed.path.ends_with("zz-copyfix-japandi2/SKILL.md"));
+    }
+
+    /// Routing-quality fixture: the listing payload that Prime may index.
+    fn routing_quality_index_payload(skill: &SkillInfo) -> String {
+        let mut parts = vec![skill.name.clone()];
+        if skill.has_user_specified_description {
+            parts.push(skill.description.clone());
+        }
+        if let Some(wtu) = &skill.when_to_use {
+            parts.push(wtu.clone());
+        }
+        if let Some(paths) = &skill.paths {
+            parts.extend(paths.iter().cloned());
+        }
+        parts.push(format!("{:?}", skill.scope).to_lowercase());
+        parts.join(" ")
+    }
+
+    #[test]
+    fn routing_quality_fixtures_never_include_bodies_or_paths() {
+        let mut skill = SkillInfo {
+            name: "deploy".into(),
+            description: "Deploy the service".into(),
+            has_user_specified_description: true,
+            when_to_use: Some("when releasing".into()),
+            paths: Some(vec!["src/**".into()]),
+            body: Some("SECRET-BODY /Users/me/secret".into()),
+            path: "/Users/me/project/skills/deploy/SKILL.md".into(),
+            ..SkillInfo::default()
+        };
+        let payload = routing_quality_index_payload(&skill);
+        assert!(payload.contains("deploy"));
+        assert!(payload.contains("Deploy the service"));
+        assert!(payload.contains("when releasing"));
+        assert!(payload.contains("src/**"));
+        assert!(!payload.contains("SECRET-BODY"));
+        assert!(!payload.contains("/Users/me"));
+        skill.has_user_specified_description = false;
+        skill.description = "derived from body".into();
+        let payload = routing_quality_index_payload(&skill);
+        assert!(!payload.contains("derived from body"));
+        assert!(!payload.contains("SECRET-BODY"));
+    }
+
+    #[test]
+    fn routing_quality_payload_recall_is_metadata_local() {
+        let commit = SkillInfo {
+            name: "commit".into(),
+            description: "Create well-formatted git commits".into(),
+            has_user_specified_description: true,
+            when_to_use: Some("commit changes".into()),
+            body: Some("SECRET-BODY".into()),
+            path: "/Users/me/project/skills/commit/SKILL.md".into(),
+            ..SkillInfo::default()
+        };
+        let review = SkillInfo {
+            name: "review".into(),
+            description: "Review a pull request".into(),
+            has_user_specified_description: true,
+            when_to_use: Some("review a pull request".into()),
+            body: Some("SECRET-BODY".into()),
+            ..SkillInfo::default()
+        };
+        let payload = routing_quality_index_payload(&commit);
+        assert!(payload.contains("commit changes"));
+        assert!(!payload.contains("SECRET-BODY"));
+        assert!(!payload.contains("/Users/me"));
+        assert!(
+            !routing_quality_index_payload(&review).contains("commit changes"),
+            "unrelated skill payload must not include another skill's trigger"
+        );
     }
 }

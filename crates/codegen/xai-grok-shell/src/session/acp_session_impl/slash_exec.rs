@@ -364,12 +364,53 @@ impl SessionActor {
                     None => String::new(),
                 };
 
+                // Actual-session prime/retrieval accounting paragraph. The
+                // JSON snapshot retains disabled outcomes, but the human view
+                // suppresses the empty default state.
+                let prime_line = match &info.context.prime {
+                    Some(p) if p.should_render() => {
+                        let snapshot_gen = p
+                            .retrieval_snapshot_generation
+                            .map(|g| g.to_string())
+                            .unwrap_or_else(|| "—".to_string());
+                        let profile = p.retrieval_profile.as_deref().unwrap_or("—");
+                        let skills = if p.primed_skill_names.is_empty() {
+                            "none".to_string()
+                        } else {
+                            p.primed_skill_names.join(",")
+                        };
+                        let agents = if p.recommended_agent_names.is_empty() {
+                            "none".to_string()
+                        } else {
+                            p.recommended_agent_names.join(",")
+                        };
+                        let degradation = if p.degradation.is_empty() {
+                            "none".to_string()
+                        } else {
+                            p.degradation.join(",")
+                        };
+                        format!(
+                            "\n\n**Retrieval/prime:** status={}; snapshot_gen={}; profile={}; \
+                             skills={}; agents={}; injected={} chars / {} tokens; degradation={}",
+                            p.status.as_deref().unwrap_or("not_run"),
+                            snapshot_gen,
+                            profile,
+                            skills,
+                            agents,
+                            p.injected_chars,
+                            p.injected_tokens,
+                            degradation,
+                        )
+                    }
+                    _ => String::new(),
+                };
+
                 let text = format!(
                     "{}**Session ID:** {}\n\n\
                      **Working directory:** {}\n\n\
                      {}{}\n\n\
                      **Turn:** {}\n\n\
-                     **Context:** {} / {} tokens ({:.0}%)",
+                     **Context:** {} / {} tokens ({:.0}%){}",
                     title_line,
                     self.session_info.id.0,
                     self.session_info.cwd,
@@ -379,6 +420,7 @@ impl SessionActor {
                     ctx.used,
                     ctx.total,
                     context_pct,
+                    prime_line,
                 );
                 self.send_host_turn_slash_command_output(&text).await;
                 ok_end_turn(0, None)

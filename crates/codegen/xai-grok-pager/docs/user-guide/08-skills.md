@@ -32,6 +32,10 @@ Flat `*.md` files under a `commands/` directory become user-invocable slash comm
 
 Skill and command discovery does **not** use `.gitignore`. Paths under known skill roots (`.grok/`, `.agents/`, `.claude/`, `.cursor/`) always load when present on disk — teams often ignore `.claude/**` as local-only config while still expecting `/frontend`-style project commands to work. To hide a skill, use `[skills] ignore` in config (not repo ignore rules).
 
+Prime path-evidence scoring (workspace inventory used to rank skills) **does** honor repository ignore rules, but it does not read the developer global git excludes file, so ranking evidence stays host-stable. Discovery and path-evidence are therefore different: a gitignored `SKILL.md` still loads; a gitignored `src/` tree does not contribute path matches.
+
+The Skills tab in the TUI is one list with one Local/Smart field. See [04-slash-commands.md](04-slash-commands.md#skills) for `/`, `m`, `f`, `n`, and `g`.
+
 Grok scans the Claude and Cursor skill directories by default. To stop scanning a vendor, set its `skills` cell to `false` under `[compat.cursor]` or `[compat.claude]` in `~/.grok/config.toml`, or set the `GROK_CURSOR_SKILLS_ENABLED` or `GROK_CLAUDE_SKILLS_ENABLED` environment variable to `false`. See [Configuration](05-configuration.md#harness-compatibility) for details. Grok always filters out known vendor-shipped default skills (such as Cursor's `shell`, `canvas`, and `statusline`), regardless of these settings.
 
 ### Additional Skill Directories
@@ -89,29 +93,40 @@ Review staged changes and create a commit with a clear, conventional message.
 
 ### Core Frontmatter Fields
 
+Official Agent Skills keys live at the top level. Invalid `SKILL.md` files are quarantined and are not advertised, invoked, preloaded, or primed.
+
 | Field | Description |
 |-------|-------------|
-| `name` | Skill identifier. Use lowercase letters, digits, and hyphens, up to 64 characters. Grok normalizes spaces and underscores to hyphens. If you omit `name`, Grok uses the skill's directory name. |
-| `description` | What the skill does and when to use it. Grok reads this to decide whether to invoke the skill. If you omit it, Grok uses the first paragraph of the body. |
+| `name` | Skill identifier. Must match the parent directory name. Use lowercase letters, digits, and hyphens, up to 64 characters. Repair and fallback are not applied. |
+| `description` | What the skill does and when to use it. Required, nonempty, up to 1024 characters. Body-derived fallback is not applied. |
 
 Write a specific `description`. It determines when Grok invokes the skill automatically. Name the trigger phrases and use cases.
 
-### Optional Frontmatter Fields
-
-Multi-word frontmatter keys use kebab-case (single-word keys like `model` are written as-is).
+### Optional Official Fields
 
 | Field | Description |
 |-------|-------------|
-| `when-to-use` | Trigger phrases for automatic invocation, kept separate from `description`. |
-| `allowed-tools` | Tools the skill uses, as a YAML list or a comma- or space-separated string. |
-| `argument-hint` | Hint text shown in the slash-command autocomplete (for example, `commit message`). |
-| `user-invocable` | Whether you can run the skill as a slash command. Defaults to `true`; set `false` to hide it from slash commands. (To stop the model from invoking a skill, set `disable-model-invocation` instead.) |
-| `disable-model-invocation` | When `true`, only your slash command runs the skill -- the model cannot invoke it automatically. Defaults to `false`. |
-| `model` | Model override for running the skill. |
-| `effort` | Reasoning-effort override. |
 | `license` | License identifier (for example, `Apache-2.0`). |
-| `compatibility` | Environment requirements (for example, `Requires git, docker, jq`). |
-| `metadata` | Arbitrary string key-value pairs. Grok promotes `metadata.author` and `metadata.short-description` for display. |
+| `compatibility` | Environment requirements (for example, `Requires git, docker, jq`), up to 500 characters. |
+| `allowed-tools` | Space-separated tool list as a string. YAML lists are rejected. |
+| `metadata` | String-to-string map. Nested Grok extensions live under `metadata.grok` or dotted `metadata.grok.*` keys. |
+
+### Grok Extensions (`metadata.grok.*`)
+
+| Field | Description |
+|-------|-------------|
+| `metadata.grok.when-to-use` | Trigger phrases for automatic invocation, kept separate from `description`. |
+| `metadata.grok.argument-hint` | Hint text shown in the slash-command autocomplete (for example, `commit message`). |
+| `metadata.grok.user-invocable` | Whether you can run the skill as a slash command. Defaults to `true` when omitted; set `false` to hide it from slash commands. |
+| `metadata.grok.disable-model-invocation` | When `true`, only your slash command runs the skill -- the model cannot invoke it automatically. |
+| `metadata.grok.model` | Model override for running the skill. |
+| `metadata.grok.effort` | Reasoning-effort override. |
+| `metadata.grok.paths` | Glob patterns that gate when the skill is listed. |
+| `metadata.grok.short-description` | Compact UI description. |
+
+Top-level Grok keys such as `when-to-use` or `user-invocable` are rejected. Move them under `metadata.grok`. Disabled skills use a stable qualified identity (`local:commit`, `plugin:name`) in `[skills].disabled`. Flat `commands/*.md` files remain slash commands only and cannot bypass skill gates.
+
+Grok never repairs a quarantined skill. See [Strict Skills Migration](31-strict-skills-migration.md) for the field map, `evals/cases.yaml`, index operations, local-only fallback, rollback, and privacy rules.
 
 ---
 
@@ -174,9 +189,9 @@ When a skill's name collides with another skill or a built-in command, Grok adve
 
 ### Automatic Invocation
 
-Grok can invoke a skill on its own when it recognizes a relevant task. Grok matches your prompt against the skill's `description` and `when-to-use` fields, so write both to describe the triggering situation.
+Grok can invoke a skill on its own when it recognizes a relevant task. Grok matches your prompt against the skill's `description` and `metadata.grok.when-to-use` fields, so write both to describe the triggering situation.
 
-For example, if a skill's description says "Use when the user wants to commit changes," then saying "commit my changes" can trigger that skill automatically. To require an explicit slash command and prevent automatic invocation, set `disable-model-invocation: true` in the frontmatter.
+For example, if a skill's description says "Use when the user wants to commit changes," then saying "commit my changes" can trigger that skill automatically. To require an explicit slash command and prevent automatic invocation, set `metadata.grok.disable-model-invocation: true`.
 
 ---
 
@@ -203,7 +218,34 @@ Grok distributes platform skills separately from your personal skills. Bundled s
 
 Skills can also come from plugins. When you install a plugin that includes skills, they appear alongside your user and project skills. `grok inspect` labels each plugin-provided skill with its source as `plugin: <name>`.
 
-See the [Plugins guide](09-plugins.md) for more on installing plugins that provide skills.
+Bundled and plugin authors must pass the same strict validator. A quarantined bundled candidate cannot replace last-known-good. See [Strict Skills Migration](31-strict-skills-migration.md#bundled-and-plugin-authors) and the [Plugins guide](09-plugins.md).
+
+---
+
+## Skills, retrieval, and prime
+
+Skills participate in **prime** — the bounded injection of retrieved context
+before an eligible turn — under strict privacy rules:
+
+- **Native-only and real-user-turn gating.** Prime runs only for an eligible
+  real native user turn. Synthetic or external turns do not prime.
+- **Metadata-only remote selection.** Skill selection over remote/retrieved
+  sources uses metadata (name and description) only. Skill **bodies** are
+  loaded only after a bounded selection and are never exposed through
+  `grok inspect` or `/context`.
+- **Hidden bounded reminder.** When a skill is selected by prime, Grok may
+  send the model a hidden reminder containing bounded, budget-truncated
+  snippets from the selected skill bodies. Unselected bodies are not included.
+  The wrapper adds no credentials, but sensitive text stored inside a selected
+  skill becomes model-visible; do not put secrets in skill bodies.
+- **Explicit slash pin.** Pinning a skill explicitly via `/<skill>` (or
+  `/<scope>:<skill>`) overrides automatic selection for that turn; the pinned
+  skill is the one used.
+
+Safe inspect/context disclosure covers profile/generation/status/name/count
+categories only — never skill bodies or prompt content. See
+[Retrieval and Prime](30-retrieval-and-prime.md) and
+[Configuration](05-configuration.md).
 
 ---
 

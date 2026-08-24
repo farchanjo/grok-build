@@ -198,7 +198,7 @@ const SEARCH_BAR_TRAILING_GAP: u16 = 1;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SearchBarLayout {
-    render_width: u16,
+    pub render_width: u16,
     input_width: usize,
     trailing_width: u16,
 }
@@ -762,6 +762,16 @@ pub fn render_popup_frame(
 /// the label renders in `gray_dim`; when `true` (filter active), in `gray`;
 /// when `hovered`, in `text_primary + BOLD`.
 #[allow(clippy::too_many_arguments)]
+pub fn filter_indicator_reserved_width(label: &str, key_hint: &str) -> u16 {
+    let label_w = label.width() as u16;
+    let hint_w = key_hint.width() as u16;
+    let total_w = label_w
+        .saturating_add(1)
+        .saturating_add(hint_w)
+        .saturating_add(1);
+    total_w.saturating_add(1)
+}
+
 pub fn render_filter_indicator(
     buf: &mut Buffer,
     x: u16,
@@ -1573,6 +1583,8 @@ pub struct PickerState {
     pub filter_area: Option<Rect>,
     /// Whether the mouse is hovering over the filter indicator.
     pub filter_hovered: bool,
+    /// Width of a clickable Local/Smart prompt on the search row. `0` disables.
+    pub search_mode_label_width: u16,
     /// Whether the tab bar region has keyboard focus. When true, Left/Right cycle tabs.
     pub tabs_focused: bool,
     /// Suppress the list selection highlight while keyboard focus is on the search bar (via edge navigation); cleared once the selection is meaningful again (typing, navigating back into the list, mouse click/hover). Session-picker rows gate their `selected` flag on `!selection_hidden`.
@@ -1595,6 +1607,7 @@ impl Default for PickerState {
             tab_hit_areas: None,
             filter_area: None,
             filter_hovered: false,
+            search_mode_label_width: 0,
             tabs_focused: false,
             selection_hidden: false,
         }
@@ -2482,7 +2495,10 @@ pub fn render_picker(
                     'd' => "d",
                     'e' => "e",
                     'f' => "f",
+                    'g' => "g",
                     'i' => "i",
+                    'm' => "m",
+                    'n' => "n",
                     'r' => "r",
                     'u' => "u",
                     'x' => "x",
@@ -2592,7 +2608,23 @@ pub fn handle_picker_input(
                 if hit.close_button.contains(pos) {
                     return PickerOutcome::Closed;
                 }
+                // Filter click first: the Skills search row also contains the
+                // filter, and a full-row search_bar must not steal that hit.
+                if let Some(filter_rect) = hit.filter_rect
+                    && filter_rect.contains(pos)
+                {
+                    return PickerOutcome::FilterCycled;
+                }
                 if hit.search_bar.contains(pos) {
+                    if state.search_mode_label_width > 0
+                        && pos.x
+                            < hit
+                                .search_bar
+                                .x
+                                .saturating_add(state.search_mode_label_width)
+                    {
+                        return PickerOutcome::Action('m');
+                    }
                     state.search_active = true;
                     state.tabs_focused = false;
                     state.selection_hidden = true;
@@ -2606,12 +2638,6 @@ pub fn handle_picker_input(
                     {
                         return PickerOutcome::TabChanged(i);
                     }
-                }
-                // Filter click.
-                if let Some(filter_rect) = hit.filter_rect
-                    && filter_rect.contains(pos)
-                {
-                    return PickerOutcome::FilterCycled;
                 }
                 for (i, rect) in hit.item_rects.iter().enumerate() {
                     if rect.contains(pos)

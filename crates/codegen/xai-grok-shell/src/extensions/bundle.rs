@@ -454,12 +454,16 @@ mod tests {
     }
     fn sample_bundle_with_skills() -> SubagentBundle {
         let mut bundle = sample_bundle();
-        bundle
-            .skills
-            .insert("commit".to_string(), "# Commit skill\n".to_string());
-        bundle
-            .skills
-            .insert("review".to_string(), "# Review skill\n".to_string());
+        bundle.skills.insert(
+            "commit".to_string(),
+            "---\nname: commit\ndescription: Create well-formatted git commits.\n---\nCommit skill body.\n"
+                .to_string(),
+        );
+        bundle.skills.insert(
+            "review".to_string(),
+            "---\nname: review\ndescription: Review a change for correctness.\n---\nReview skill body.\n"
+                .to_string(),
+        );
         bundle
     }
     fn test_auth() -> crate::auth::GrokAuth {
@@ -951,7 +955,10 @@ mod tests {
                 b"instructions = \"hello\"",
             ),
             ("subagents/roles/reviewer.toml", b"description = \"review\""),
-            ("skills/commit/SKILL.md", b"# Commit skill"),
+            (
+                "skills/commit/SKILL.md",
+                b"---\nname: commit\ndescription: Create well-formatted git commits.\n---\nCommit skill body.\n",
+            ),
         ]);
         let (proxy_base_url, server) = start_archive_bundle_server(archive).await;
         let result = sync_bundle_to_root(

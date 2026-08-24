@@ -845,3 +845,93 @@ administration keys live in the owner-only `auth.json` vault under
 `openai_compatible::<id>::api_key` / `::admin_key`, never in `config.toml`.
 
 Hot reload watches `[model_providers]` as well as `[model]` / `[models]`.
+
+### Provider and retrieval ownership
+
+Provider (`[model_providers.*]`), retrieval (`[embedding_models.*]`,
+`[reranker_models.*]`, and `[retrieval_profiles.*]`), `[prime.*]`, and
+`memory.retrieval_profile` settings are **trusted global (user) or
+managed-only** configuration. Project-scoped `.grok/config.toml` may contribute
+`[mcp_servers]`, `[plugins]`, and `[permission]` rules, but it **may not**
+define provider or retrieval ownership. Keep these route-bearing blocks in the
+user `config.toml` or a managed `managed_config.toml` /
+`requirements.toml`.
+
+Complete placeholder-only examples for two accounts, a named retrieval profile,
+and prime settings:
+
+```toml
+# Two provider instances (placeholder IDs and env-key names only).
+[model_providers.openai-a]
+kind = "openai"
+base_url = "https://api.example.com/v1"
+env_key = "<OPENAI_PLATFORM_KEY_ENV>"
+api_backend = "responses"
+
+[model_providers.openrouter-b]
+kind = "openrouter"
+base_url = "https://api.example.com/v1"
+env_key = "<OPENROUTER_KEY_ENV>"
+api_backend = "chat_completions"
+
+# Named typed routes refer to exact provider instances.
+[embedding_models.example-embedding]
+provider = "openai-a"
+model = "<EMBEDDING_MODEL>"
+protocol = "openai_compatible"
+
+[reranker_models.example-reranker]
+provider = "openrouter-b"
+model = "<RERANKER_MODEL>"
+protocol = "cohere_compatible"
+endpoint = "rerank"
+
+# Route order and budgets are profile-wide. Deadlines are milliseconds.
+[retrieval_profiles.example]
+embedding_models = ["example-embedding"]
+reranker_models = ["example-reranker"]
+fallback_strategy = "deterministic"
+max_candidates = 12
+max_results = 6
+deadline_ms = 10000 # optional override; default is 10000
+max_attempts = 2
+max_input_tokens = 8192
+max_output_tokens = 4096
+
+[prime.skills]
+enabled = true
+retrieval_profile = "example"
+max_results = 3
+max_body_chars = 2000
+max_total_chars = 6000
+max_tokens = 1500
+max_context_fraction = 0.05
+deadline_ms = 3000
+degrade_on_error = true
+
+[prime.agents]
+enabled = true
+retrieval_profile = "example"
+max_results = 3
+max_total_chars = 6000
+max_tokens = 1500
+deadline_ms = 3000
+degrade_on_error = true
+
+[memory]
+retrieval_profile = "example"
+```
+
+Non-secret headers only; never put credentials in `extra_headers`:
+
+```toml
+[model.my-model.extra_headers]
+X-Request-Tags = "team=example"
+```
+
+For provider instances and accounts, see
+[Multi-Account Providers](29-multi-account-providers.md). For retrieval, prime,
+and memory boundaries, see [Retrieval and Prime](30-retrieval-and-prime.md) and
+[Memory](13-memory.md). Short references:
+[OpenAI Platform](../providers/openai-platform.md) and
+[OpenRouter](../providers/openrouter.md).

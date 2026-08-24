@@ -92,6 +92,14 @@ The user guide ships with the pager crate:
 — getting started, keyboard shortcuts, slash commands, configuration, theming,
 MCP servers, skills, plugins, hooks, headless mode, sandboxing, and more.
 
+Provider instances, account-qualified models, and safe lifecycle operations:
+[Multi-Account Providers](crates/codegen/xai-grok-pager/docs/user-guide/29-multi-account-providers.md).
+Named retrieval profiles, prime selection, degradation, and memory boundaries:
+[Retrieval and Prime](crates/codegen/xai-grok-pager/docs/user-guide/30-retrieval-and-prime.md).
+Provider references:
+[OpenAI Platform](crates/codegen/xai-grok-pager/docs/providers/openai-platform.md) and
+[OpenRouter](crates/codegen/xai-grok-pager/docs/providers/openrouter.md).
+
 ## Repository layout
 
 | Path | Contents |

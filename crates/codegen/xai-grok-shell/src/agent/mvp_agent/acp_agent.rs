@@ -611,6 +611,7 @@ impl acp::Agent for MvpAgent {
                     "x.ai/capabilities": {
                         "toolOverrides": tool_overrides_capability(),
                     },
+                    "x.ai/primeIndex": crate::session::prime::initialize_capability_value(),
                 })
                                 .as_object()
                                 .cloned(),
@@ -659,6 +660,7 @@ impl acp::Agent for MvpAgent {
                     // disabled feature produces zero `x.ai/recap` traffic.
                     "sessionRecap": self.cfg.borrow().is_session_recap_enabled(),
                     "voiceMode": self.cfg.borrow().is_voice_mode_enabled(),
+                    "primeIndex": crate::session::prime::initialize_capability_value(),
                 })
                         .as_object()
                         .cloned()
@@ -4071,6 +4073,9 @@ impl acp::Agent for MvpAgent {
             s if s.starts_with("x.ai/code/") => {
                 let ops = self.resolve_workspace_ops()?;
                 crate::extensions::code_nav::handle(self, &ops, &args).await
+            }
+            s if s.starts_with("x.ai/prime/index/") => {
+                crate::extensions::prime_index::handle(&args).await
             }
             s if s.starts_with("x.ai/skills/") || s == "x.ai/workflows/list" => {
                 let compat = self.cfg.borrow().compat_resolved;

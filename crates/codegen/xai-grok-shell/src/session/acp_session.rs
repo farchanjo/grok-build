@@ -24,6 +24,7 @@ use crate::inference::{
     SyntheticReason, ToolSpec, conversation_truncate_for_prompt,
 };
 use crate::session::ClientFsConfig;
+use crate::session::acp_types::PrimeContextInfo;
 use crate::session::feedback_manager::{FeedbackManager, FeedbackManagerConfig};
 use crate::session::fs_watch::{self, git_head_dedup_key};
 use crate::session::info::Info as SessionInfo;
@@ -666,6 +667,122 @@ pub(crate) struct ModelAuthMemo {
     pub(crate) facts: crate::agent::config::ModelAuthFacts,
     pub(crate) provider: Option<crate::auth::AuthProviderRef>,
 }
+/// Secret-free prime degradation labels owned by the session actor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PrimeDegradationLabel {
+    SemanticUnavailable,
+    RerankUnavailable,
+    ServiceDisabled,
+    ProfileMissing,
+    BudgetExhausted,
+}
+
+impl PrimeDegradationLabel {
+    pub(crate) fn from_kind(kind: crate::retrieval::DegradationKind) -> Self {
+        use crate::retrieval::DegradationKind::*;
+        match kind {
+            SemanticUnavailable => Self::SemanticUnavailable,
+            RerankUnavailable => Self::RerankUnavailable,
+            ServiceDisabled => Self::ServiceDisabled,
+            ProfileMissing => Self::ProfileMissing,
+            BudgetExhausted => Self::BudgetExhausted,
+        }
+    }
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::SemanticUnavailable => "semantic_unavailable",
+            Self::RerankUnavailable => "rerank_unavailable",
+            Self::ServiceDisabled => "service_disabled",
+            Self::ProfileMissing => "profile_missing",
+            Self::BudgetExhausted => "budget_exhausted",
+        }
+    }
+}
+
+/// Whether the latest eligible real native turn finalized a prime snapshot.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) enum PrimeOutcomeStatus {
+    /// No prime ran (or nothing recorded yet); omitted on the wire.
+    #[default]
+    NotRun,
+    Primed,
+    Degraded,
+    Disabled,
+}
+
+impl PrimeOutcomeStatus {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::NotRun => "not_run",
+            Self::Primed => "primed",
+            Self::Degraded => "degraded",
+            Self::Disabled => "disabled",
+        }
+    }
+}
+
+/// Actor-local accounting for the last eligible real turn.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct LastPrimeOutcome {
+    pub retrieval_profile: Option<String>,
+    pub retrieval_snapshot_generation: Option<u64>,
+    pub graph_generation: Option<u64>,
+    pub provider_generation: Option<u64>,
+    pub primed_skill_names: Vec<String>,
+    pub recommended_agent_names: Vec<String>,
+    pub injected_chars: u64,
+    pub injected_tokens: u64,
+    pub max_total_chars: Option<u64>,
+    pub max_tokens: Option<u64>,
+    pub degradation: Vec<PrimeDegradationLabel>,
+    pub status: PrimeOutcomeStatus,
+    pub selection_mode: Option<String>,
+    pub readiness: Option<String>,
+}
+
+impl LastPrimeOutcome {
+    /// Project only bounded names, counts, and enums to the wire.
+    pub(crate) fn to_projection(&self) -> PrimeContextInfo {
+        PrimeContextInfo {
+            retrieval_profile: crate::session::prime::displayable_configured_route(
+                self.retrieval_profile.as_deref(),
+            )
+            .map(str::to_owned),
+            retrieval_snapshot_generation: self.retrieval_snapshot_generation,
+            graph_generation: self.graph_generation,
+            provider_generation: self.provider_generation,
+            primed_skill_names: self.primed_skill_names.clone(),
+            recommended_agent_names: self.recommended_agent_names.clone(),
+            injected_chars: self.injected_chars,
+            injected_tokens: self.injected_tokens,
+            max_total_chars: self.max_total_chars,
+            max_tokens: self.max_tokens,
+            degradation: self
+                .degradation
+                .iter()
+                .map(|d| d.as_str().to_string())
+                .collect(),
+            status: Some(self.status.as_str().to_string()),
+            selection_mode: self.selection_mode.clone(),
+            readiness: self.readiness.clone(),
+        }
+    }
+}
+
+/// Whether this attempt finalized new real-turn accounting.
+#[derive(Debug)]
+pub(crate) enum PrimeAccounting {
+    Unchanged,
+    Record(LastPrimeOutcome),
+}
+
+/// Result of [`SessionActor::maybe_inject_prime_reminder`].
+#[derive(Debug)]
+pub(crate) struct PrimeInjectResult {
+    pub reminder: Option<ConversationItem>,
+    pub accounting: PrimeAccounting,
+}
+
 /// Phase 3: Post-flight handling after dispatch (inline in execute_tool_calls for now).
 pub(crate) struct SessionActor {
     pub(crate) session_info: SessionInfo,
@@ -885,6 +1002,8 @@ pub(crate) struct SessionActor {
     /// build their own workspace inventory, so prime bodies never leak across
     /// sessions/workspaces.
     pub(crate) prime_cache: crate::session::prime::inventory::InventoryCache,
+    /// Last eligible real-turn Prime outcome used by session diagnostics.
+    pub(crate) last_prime_outcome: std::cell::RefCell<Option<LastPrimeOutcome>>,
     /// Canonical session mode last set via ACP `session/set_mode`.
     /// Used as the fallback start prompt mode when prompt request metadata
     /// does not explicitly provide one.
@@ -1251,6 +1370,41 @@ pub(crate) struct TraceConfigTemplate {
     pub(crate) upload_method: crate::session::repo_changes::UploadMethod,
 }
 impl SessionActor {
+    /// Build the session's callable-agent authority through the same capture
+    /// lane used by `MvpAgent`, without recomputing callability from raw
+    /// discovery. Gates come from the frozen rebuild spec plus the live plugin
+    /// registry. Mid-session policy edits apply to new sessions; every actual
+    /// spawn still passes the MvpAgent's live validation gate.
+    fn session_callable_agent_authority(
+        &self,
+        generation: Option<u64>,
+    ) -> crate::session::prime::agents::CallableAgentAuthority {
+        let spec = &self.rebuild_spec;
+        let plugins = self
+            .plugin_registry_handle
+            .as_ref()
+            .and_then(|handle| handle.snapshot())
+            .or_else(|| self.plugin_registry.borrow().clone());
+        // Clone the two definition fields used by the capture lane inside the
+        // borrow scope so the agent `RefCell` guard is not dropped early.
+        let agent_borrow = self.agent.borrow();
+        let def = agent_borrow.definition();
+        let current_agent = Some(def.name.clone());
+        let allowed_subagent_types = def.allowed_subagent_types.clone();
+        crate::session::prime::agents::capture_callable_agent_authority(
+            crate::session::prime::agents::CaptureCallableArgs {
+                parent_cwd: std::path::Path::new(&self.session_info.cwd),
+                parent_depth: self.tool_context.subagent_depth,
+                current_agent,
+                plugin_registry: plugins,
+                subagent_toggle: &spec.subagent_toggle,
+                cli_agents: &spec.cli_agents,
+                allowed_subagent_types,
+                global_subagents_enabled: spec.subagents_enabled,
+                generation,
+            },
+        )
+    }
     /// Get the signals handle for tracking session events.
     fn signals_handle(&self) -> SessionSignalsHandle {
         self.feedback_manager.signals_handle()

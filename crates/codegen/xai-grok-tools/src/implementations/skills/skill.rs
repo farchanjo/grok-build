@@ -504,10 +504,27 @@ pub fn extract_skill_body(content: &str) -> String {
 ///
 /// Public entrypoint for the shell crate to load skill content at
 /// prompt-assembly time (the new zero-round-trip path). The private
-/// `load_skill_content` in `grok_build/skill/mod.rs` is a duplicate
-/// of this.
+/// `load_skill_content` in `opencode/skill/mod.rs` is a duplicate
+/// of this. SKILL.md bodies come from the no-follow revalidation fd;
+/// the path string is never re-opened.
 pub async fn load_skill_content(skill: &SkillInfo) -> Result<String, String> {
     let path = std::path::Path::new(&skill.path);
+    if crate::implementations::skills::strict::is_skill_md_path(path) {
+        let loaded = crate::implementations::skills::strict::revalidate_skill_file_at_load(skill)
+            .map_err(|e| e.to_string())?;
+        let body = extract_skill_body(&loaded.content);
+        return Ok(match path.parent() {
+            Some(skill_dir) => resolve_skill_internal_links(&body, skill_dir),
+            None => body,
+        });
+    }
+    if crate::implementations::skills::strict::is_legacy_command_path(path) {
+        if !crate::implementations::skills::strict::is_regular_file(path) {
+            return Err("command file is not a regular file".to_string());
+        }
+    } else {
+        return Err("not a SKILL.md skill file".to_string());
+    }
     match tokio::fs::read_to_string(path).await {
         Ok(content) => {
             let body = extract_skill_body(&content);
@@ -516,24 +533,25 @@ pub async fn load_skill_content(skill: &SkillInfo) -> Result<String, String> {
                 None => body,
             })
         }
-        Err(e) => Err(format!("Failed to read skill file '{}': {}", skill.path, e)),
+        Err(_) => Err("skill file could not be read".to_string()),
     }
 }
 
-/// Load skill body into SkillInfo.
+/// Load skill body into SkillInfo. Skills are revalidated strictly; legacy
+/// command markdown cannot enter this preload path. The body is the bytes
+/// already read from the no-follow fd during revalidation.
 pub async fn load_skill_with_body(skill: &SkillInfo) -> Result<SkillInfo, String> {
+    let loaded = crate::implementations::skills::strict::revalidate_skill_file_at_load(skill)
+        .map_err(|e| e.to_string())?;
     let path = std::path::Path::new(&skill.path);
-    let content = tokio::fs::read_to_string(path)
-        .await
-        .map_err(|e| format!("Failed to read {}: {}", skill.path, e))?;
-    let body = extract_skill_body(&content);
+    let body = extract_skill_body(&loaded.content);
     let body = match path.parent() {
         Some(skill_dir) => resolve_skill_internal_links(&body, skill_dir),
         None => body,
     };
-    let mut loaded = skill.clone();
-    loaded.body = if body.is_empty() { None } else { Some(body) };
-    Ok(loaded)
+    let mut out = skill.clone();
+    out.body = if body.is_empty() { None } else { Some(body) };
+    Ok(out)
 }
 
 #[cfg(test)]
@@ -585,6 +603,7 @@ It has multiple lines."#;
             plugin_name: None,
             plugin_version: None,
             plugin_root: None,
+            collection_root: None,
             plugin_data: None,
             allowed_tools: None,
             license: None,
@@ -615,6 +634,7 @@ It has multiple lines."#;
             plugin_name: None,
             plugin_version: None,
             plugin_root: None,
+            collection_root: None,
             plugin_data: None,
             allowed_tools: None,
             license: None,
@@ -648,6 +668,7 @@ It has multiple lines."#;
             plugin_name: Some("my-plugin".to_string()),
             plugin_version: None,
             plugin_root: None,
+            collection_root: None,
             plugin_data: None,
             allowed_tools: None,
             license: None,
@@ -687,6 +708,7 @@ It has multiple lines."#;
             plugin_name: None,
             plugin_version: None,
             plugin_root: None,
+            collection_root: None,
             plugin_data: None,
             allowed_tools: None,
             license: None,
@@ -1341,5 +1363,331 @@ Review code.
             result.contains(&format!("]({abs} \"see guide.md\")")),
             "dest/title corrupted: {result}"
         );
+    }
+
+    fn official_skill_md(name: &str, description: &str, body: &str) -> String {
+        format!("---\nname: {name}\ndescription: {description}\n---\n{body}")
+    }
+
+    fn write_slash_skill(root: &std::path::Path, name: &str, body: &str) -> std::path::PathBuf {
+        let dir = root.join("skills").join(name);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("SKILL.md");
+        std::fs::write(
+            &path,
+            official_skill_md(name, &format!("A test skill called {name}."), body),
+        )
+        .unwrap();
+        path
+    }
+
+    fn skill_info_for(name: &str, path: &std::path::Path) -> SkillInfo {
+        SkillInfo {
+            name: name.to_string(),
+            description: format!("A test skill called {name}."),
+            path: path.to_string_lossy().into_owned(),
+            scope: SkillScope::Local,
+            user_invocable: true,
+            enabled: true,
+            ..SkillInfo::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn load_skill_content_happy_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = write_slash_skill(tmp.path(), "commit", "Trusted body.\n");
+        let skill = skill_info_for("commit", &path);
+        let body = load_skill_content(&skill).await.expect("valid skill loads");
+        assert!(body.contains("Trusted body."));
+        assert!(!body.contains("name: commit"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn load_skill_content_rejects_ancestor_dir_symlink() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = write_slash_skill(tmp.path(), "commit", "Trusted body.\n");
+        let skill = skill_info_for("commit", &path);
+
+        let skills_dir = tmp.path().join("skills");
+        let real = tmp.path().join("skills.real");
+        std::fs::rename(&skills_dir, &real).unwrap();
+        let evil_root = tempfile::tempdir().unwrap();
+        write_slash_skill(evil_root.path(), "commit", "EVIL_SECRET_BODY\n");
+        std::os::unix::fs::symlink(evil_root.path().join("skills"), &skills_dir).unwrap();
+
+        let err = load_skill_content(&skill)
+            .await
+            .expect_err("ancestor symlink must not load");
+        assert!(
+            err.contains("symlink"),
+            "expected symlink failure, got {err}"
+        );
+        assert!(!err.contains("EVIL_SECRET_BODY"));
+        let loaded = load_skill_with_body(&skill).await;
+        assert!(loaded.is_err());
+        let dump = format!("{loaded:?}");
+        assert!(!dump.contains("EVIL_SECRET_BODY"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn load_skill_content_rejects_leaf_symlink() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = write_slash_skill(tmp.path(), "commit", "Trusted body.\n");
+        let skill = skill_info_for("commit", &path);
+        let evil = tmp.path().join("evil.md");
+        std::fs::write(
+            &evil,
+            official_skill_md(
+                "commit",
+                "A test skill called commit.",
+                "EVIL_SECRET_BODY\n",
+            ),
+        )
+        .unwrap();
+        std::fs::remove_file(&path).unwrap();
+        std::os::unix::fs::symlink(&evil, &path).unwrap();
+
+        let err = load_skill_content(&skill)
+            .await
+            .expect_err("leaf symlink must not load");
+        assert!(
+            err.contains("symlink"),
+            "expected symlink failure, got {err}"
+        );
+        assert!(!err.contains("EVIL_SECRET_BODY"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn load_skill_content_rejects_leaf_swap_between_revalidate_and_body() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = write_slash_skill(tmp.path(), "commit", "Trusted body.\n");
+        let skill = skill_info_for("commit", &path);
+        let evil = tmp.path().join("evil.md");
+        std::fs::write(
+            &evil,
+            official_skill_md(
+                "commit",
+                "A test skill called commit.",
+                "EVIL_SECRET_BODY\n",
+            ),
+        )
+        .unwrap();
+        let swap_path = path.clone();
+        crate::implementations::skills::strict::set_after_nofollow_read_hook(move || {
+            std::fs::remove_file(&swap_path).unwrap();
+            std::os::unix::fs::symlink(&evil, &swap_path).unwrap();
+        });
+        let err = load_skill_content(&skill)
+            .await
+            .expect_err("post-read leaf symlink must not load");
+        assert!(
+            err.contains("symlink"),
+            "expected symlink failure, got {err}"
+        );
+        assert!(!err.contains("EVIL_SECRET_BODY"));
+        let dump = format!("{err:?}");
+        assert!(!dump.contains("EVIL_SECRET_BODY"));
+    }
+
+    fn write_deep_nested_slash_skill(
+        root: &std::path::Path,
+        name: &str,
+        body: &str,
+    ) -> std::path::PathBuf {
+        let dir = root.join("skills").join("team").join(name);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("SKILL.md");
+        std::fs::write(
+            &path,
+            official_skill_md(name, &format!("A test skill called {name}."), body),
+        )
+        .unwrap();
+        path
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn load_skill_content_rejects_nested_ancestor_dir_symlink() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = write_deep_nested_slash_skill(tmp.path(), "infra", "Trusted body.\n");
+        let skill = skill_info_for("infra", &path);
+
+        let skills_dir = tmp.path().join("skills");
+        let real = tmp.path().join("skills.real");
+        std::fs::rename(&skills_dir, &real).unwrap();
+        let evil_root = tempfile::tempdir().unwrap();
+        write_deep_nested_slash_skill(evil_root.path(), "infra", "EVIL_SECRET_BODY\n");
+        std::os::unix::fs::symlink(evil_root.path().join("skills"), &skills_dir).unwrap();
+
+        let err = load_skill_content(&skill)
+            .await
+            .expect_err("nested ancestor symlink must not load");
+        assert!(
+            err.contains("symlink"),
+            "expected symlink failure, got {err}"
+        );
+        assert!(!err.contains("EVIL_SECRET_BODY"));
+        let loaded = load_skill_with_body(&skill).await;
+        assert!(loaded.is_err());
+        let dump = format!("{loaded:?}");
+        assert!(!dump.contains("EVIL_SECRET_BODY"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn load_skill_content_rejects_parent_of_skills_dir_symlink() {
+        let tmp = tempfile::tempdir().unwrap();
+        let grok = tmp.path().join(".grok");
+        let path = write_slash_skill(&grok, "commit", "Trusted body.\n");
+        let skill = skill_info_for("commit", &path);
+
+        let real = tmp.path().join(".grok.real");
+        std::fs::rename(&grok, &real).unwrap();
+        let evil_root = tempfile::tempdir().unwrap();
+        write_slash_skill(evil_root.path(), "commit", "EVIL_SECRET_BODY\n");
+        std::os::unix::fs::symlink(evil_root.path(), &grok).unwrap();
+
+        let err = load_skill_content(&skill)
+            .await
+            .expect_err("parent-of-skills symlink must not load");
+        assert!(
+            err.contains("symlink"),
+            "expected symlink failure, got {err}"
+        );
+        assert!(!err.contains("EVIL_SECRET_BODY"));
+        let loaded = load_skill_with_body(&skill).await;
+        assert!(loaded.is_err());
+        let dump = format!("{loaded:?}");
+        assert!(!dump.contains("EVIL_SECRET_BODY"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn load_skill_content_rejects_project_dir_symlink() {
+        let tmp = tempfile::tempdir().unwrap();
+        let proj = tmp.path().join("proj");
+        std::fs::create_dir_all(&proj).unwrap();
+        let grok = proj.join(".grok");
+        let path = write_slash_skill(&grok, "commit", "Trusted body.\n");
+        let skill = skill_info_for("commit", &path);
+
+        let real = tmp.path().join("proj.real");
+        std::fs::rename(&proj, &real).unwrap();
+        let evil_root = tempfile::tempdir().unwrap();
+        write_slash_skill(
+            &evil_root.path().join(".grok"),
+            "commit",
+            "EVIL_SECRET_BODY\n",
+        );
+        std::os::unix::fs::symlink(evil_root.path(), &proj).unwrap();
+
+        let err = load_skill_content(&skill)
+            .await
+            .expect_err("project-dir symlink must not load");
+        assert!(
+            err.contains("symlink"),
+            "expected symlink failure, got {err}"
+        );
+        assert!(!err.contains("EVIL_SECRET_BODY"));
+        let loaded = load_skill_with_body(&skill).await;
+        assert!(loaded.is_err());
+        let dump = format!("{loaded:?}");
+        assert!(!dump.contains("EVIL_SECRET_BODY"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn load_skill_content_rejects_nested_collection_root_symlink() {
+        let tmp = tempfile::tempdir().unwrap();
+        let pack = tmp.path().join("pack");
+        let dir = pack.join("team").join("infra");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("SKILL.md");
+        std::fs::write(
+            &path,
+            official_skill_md("infra", "A test skill called infra.", "Trusted body.\n"),
+        )
+        .unwrap();
+        let mut skill = skill_info_for("infra", &path);
+        skill.collection_root = Some(pack.to_string_lossy().into_owned());
+        assert!(
+            load_skill_content(&skill).await.is_ok(),
+            "nested collection must load from the stamped root"
+        );
+
+        let real = tmp.path().join("pack.real");
+        std::fs::rename(&pack, &real).unwrap();
+        let evil_root = tempfile::tempdir().unwrap();
+        let evil_dir = evil_root.path().join("team").join("infra");
+        std::fs::create_dir_all(&evil_dir).unwrap();
+        std::fs::write(
+            evil_dir.join("SKILL.md"),
+            official_skill_md("infra", "A test skill called infra.", "EVIL_SECRET_BODY\n"),
+        )
+        .unwrap();
+        std::os::unix::fs::symlink(evil_root.path(), &pack).unwrap();
+
+        let err = load_skill_content(&skill)
+            .await
+            .expect_err("collection-root symlink must not load");
+        assert!(
+            err.contains("symlink"),
+            "expected symlink failure, got {err}"
+        );
+        assert!(!err.contains("EVIL_SECRET_BODY"));
+        let loaded = load_skill_with_body(&skill).await;
+        assert!(loaded.is_err());
+        let dump = format!("{loaded:?}");
+        assert!(!dump.contains("EVIL_SECRET_BODY"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn load_skill_content_rejects_stamped_skill_dir_grandparent_symlink() {
+        let tmp = tempfile::tempdir().unwrap();
+        let pack = tmp.path().join("pack");
+        let dir = pack.join("team").join("infra");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("SKILL.md");
+        std::fs::write(
+            &path,
+            official_skill_md("infra", "A test skill called infra.", "Trusted body.\n"),
+        )
+        .unwrap();
+        let mut skill = skill_info_for("infra", &path);
+        skill.collection_root = Some(dir.to_string_lossy().into_owned());
+        assert!(
+            load_skill_content(&skill).await.is_ok(),
+            "stamped skill dir must load before the grandparent swap"
+        );
+
+        let real = tmp.path().join("pack.real");
+        std::fs::rename(&pack, &real).unwrap();
+        let evil_root = tempfile::tempdir().unwrap();
+        let evil_dir = evil_root.path().join("team").join("infra");
+        std::fs::create_dir_all(&evil_dir).unwrap();
+        std::fs::write(
+            evil_dir.join("SKILL.md"),
+            official_skill_md("infra", "A test skill called infra.", "EVIL_SECRET_BODY\n"),
+        )
+        .unwrap();
+        std::os::unix::fs::symlink(evil_root.path(), &pack).unwrap();
+
+        let err = load_skill_content(&skill)
+            .await
+            .expect_err("grandparent symlink of stamped skill dir must not load");
+        assert!(
+            err.contains("symlink"),
+            "expected symlink failure, got {err}"
+        );
+        assert!(!err.contains("EVIL_SECRET_BODY"));
+        let loaded = load_skill_with_body(&skill).await;
+        assert!(loaded.is_err());
+        let dump = format!("{loaded:?}");
+        assert!(!dump.contains("EVIL_SECRET_BODY"));
     }
 }

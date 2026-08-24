@@ -181,6 +181,26 @@ pub static USER_GUIDE: &[Doc] = &[
         "Migrating to Anthropic Peer",
         "Non-destructive migration from custom Messages and env keys"
     ),
+    guide!(
+        "28-media-understanding.md",
+        "Media Understanding",
+        "Capability-aware image, audio, and video routing"
+    ),
+    guide!(
+        "29-multi-account-providers.md",
+        "Multi-Account Providers",
+        "Provider instances, account-qualified models, and lifecycle operations"
+    ),
+    guide!(
+        "30-retrieval-and-prime.md",
+        "Retrieval and Prime",
+        "Retrieval profiles, prime selection, degradation, and memory boundaries"
+    ),
+    guide!(
+        "31-strict-skills-migration.md",
+        "Strict Skills Migration",
+        "metadata.grok.* moves, quarantine repair, evals, indexes, and rollback"
+    ),
 ];
 
 /// Non-user-guide reference docs. Separate from USER_GUIDE because they
@@ -320,6 +340,21 @@ mod tests {
         assert_eq!(entries.len(), USER_GUIDE.len() + REFERENCE_DOCS.len());
         for (i, doc) in USER_GUIDE.iter().enumerate() {
             assert_eq!(entries[i].title, doc.title, "Entry {} title mismatch", i);
+        }
+    }
+
+    #[test]
+    fn latest_user_guides_are_registered() {
+        for filename in [
+            "28-media-understanding.md",
+            "29-multi-account-providers.md",
+            "30-retrieval-and-prime.md",
+            "31-strict-skills-migration.md",
+        ] {
+            assert!(
+                USER_GUIDE.iter().any(|doc| doc.filename == filename),
+                "{filename} must be available to the in-app browser and managed-doc extraction"
+            );
         }
     }
 

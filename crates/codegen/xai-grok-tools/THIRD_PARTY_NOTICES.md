@@ -34,6 +34,31 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 
+### agentskills/agentskills
+
+The strict Agent Skills validator in `src/implementations/skills/strict/`
+reimplements the published Agent Skills specification and `skills-ref`
+reference behavior from the
+[agentskills/agentskills](https://github.com/agentskills/agentskills)
+project, pinned to revision
+`69ef37e9424c0a7ea9dd2293b559e43ec8176379`. The runtime never fetches
+that repository. This is an independent Rust implementation, not a copy
+of the Python `skills-ref` sources.
+
+Copyright 2025 Anthropic, PBC
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+
 ### sst/opencode
 
 The tool implementations under `src/implementations/opencode/` (`bash`,

@@ -56,6 +56,9 @@ Automate, script, and integrate Grok Build with other systems.
 | 26 | [Anthropic Provider](26-anthropic-provider.md) | Anthropic API peer, native client, Files library-only, experimental Claude Agent CLI |
 | 27 | [Migrating to Anthropic Peer](27-anthropic-migration.md) | Non-destructive migration from custom Messages / env keys |
 | 28 | [Media Understanding](28-media-understanding.md) | Capability-aware image, audio, and video routing for text-only models |
+| 29 | [Multi-Account Providers](29-multi-account-providers.md) | Provider instances, account-qualified models, and safe lifecycle operations |
+| 30 | [Retrieval and Prime](30-retrieval-and-prime.md) | Named retrieval profiles, prime selection, degradation, and memory boundaries |
+| 31 | [Strict Skills Migration](31-strict-skills-migration.md) | metadata.grok.* moves, quarantine repair, evals, indexes, rollback, and privacy |
 
 ---
 
@@ -71,3 +74,14 @@ Short provider-specific pages (also under `docs/providers/`):
 | [Z.ai](../providers/zai.md) | Z.ai Model API |
 | [Local gateways](../providers/local-gateways.md) | Local OpenAI-compatible gateways |
 | [Compatibility reports](../providers/compatibility-reports.md) | Baseline inventories |
+
+---
+
+## Related guides
+
+- [Multi-Account Providers](29-multi-account-providers.md) — linked from
+  [OpenAI Platform](../providers/openai-platform.md) and
+  [OpenRouter](../providers/openrouter.md)
+- [Retrieval and Prime](30-retrieval-and-prime.md) — linked from
+  [OpenRouter](../providers/openrouter.md) and
+  [OpenAI Platform](../providers/openai-platform.md)

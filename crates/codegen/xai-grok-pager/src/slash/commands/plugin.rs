@@ -104,3 +104,26 @@ impl SlashCommand for SkillsCommand {
         })
     }
 }
+
+/// Open `/skills` on the create wizard (native publish, not the bundled skill).
+pub struct CreateSkillCommand;
+
+impl SlashCommand for CreateSkillCommand {
+    fn name(&self) -> &str {
+        "create-skill"
+    }
+
+    fn description(&self) -> &str {
+        "Create a skill"
+    }
+
+    fn usage(&self) -> &str {
+        "/create-skill"
+    }
+
+    fn run(&self, _ctx: &mut CommandExecCtx, _args: &str) -> CommandResult {
+        CommandResult::Action(Action::OpenCreateSkillWizard {
+            trigger: ExtensionsModalTrigger::SlashCommand,
+        })
+    }
+}

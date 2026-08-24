@@ -347,6 +347,13 @@ pub enum Action {
         tab: crate::views::extensions_modal::ExtensionsTab,
         trigger: xai_grok_telemetry::events::ExtensionsModalTrigger,
     },
+    /// Open `/skills` and start the create-skill wizard.
+    OpenCreateSkillWizard {
+        trigger: xai_grok_telemetry::events::ExtensionsModalTrigger,
+    },
+    /// Fetch the active Extensions tab after an explicit tab switch.
+    /// Opening `/skills` does not prefetch marketplace or other tabs.
+    RefreshExtensionsTab,
     /// Open the agents modal (listing all agent definitions).
     /// Optionally opens directly on a specific tab.
     OpenConfigAgentsModal(Option<crate::views::agents_modal::AgentsTab>),
@@ -360,6 +367,8 @@ pub enum Action {
     },
     /// Reload skills list from the modal.
     ReloadSkills,
+    /// Run `/skills` Smart search against the Prime index (`x.ai/skills/search`).
+    SearchSkillsSmart,
     /// Refresh MCP server list from the modal.
     RefreshMcpList,
     /// Execute a hooks management action from the modal.
@@ -387,6 +396,35 @@ pub enum Action {
         skill_name: String,
         enabled: bool,
     },
+    /// Atomically publish a skill through x.ai/skills/publish.
+    PublishSkill {
+        name: String,
+        description: String,
+        scope: String,
+        body: String,
+    },
+    /// Explicit local regression run (never started by open/search).
+    RunSkillRegress {
+        name: String,
+    },
+    /// Cancel an in-flight local regression.
+    CancelSkillRegress {
+        name: String,
+    },
+    /// Refresh compact Prime index status (generation/fingerprint preconditioned).
+    FetchPrimeIndexStatus,
+    /// Missing-only vector backfill. `confirm` is required for a configured route.
+    PrimeIndexBackfill {
+        collection: String,
+        confirm: bool,
+    },
+    /// Full vector rebuild. Always confirms the configured route in the UI first.
+    PrimeIndexRebuild {
+        collection: String,
+        confirm: bool,
+    },
+    /// Cancel an in-flight Prime index job.
+    PrimeIndexCancel,
     /// Toggle a single MCP tool within a server (enable/disable).
     ToggleMcpTool {
         server_name: String,
@@ -2012,6 +2050,15 @@ pub enum Effect {
         agent_id: AgentId,
         session_id: acp::SessionId,
     },
+    /// Fetch `/skills` Smart rank from the shell (x.ai/skills/search).
+    FetchSkillsSearch {
+        agent_id: AgentId,
+        session_id: acp::SessionId,
+        query: String,
+        /// Agent-scoped search generation at fetch issue. Completions with a
+        /// different generation must not install a rank.
+        r#gen: u64,
+    },
     FetchWorkflowsList {
         agent_id: AgentId,
         session_id: acp::SessionId,
@@ -2022,6 +2069,53 @@ pub enum Effect {
         session_id: acp::SessionId,
         skill_name: String,
         enabled: bool,
+    },
+    PublishSkill {
+        agent_id: AgentId,
+        session_id: acp::SessionId,
+        name: String,
+        description: String,
+        scope: String,
+        body: String,
+    },
+    RunSkillRegress {
+        agent_id: AgentId,
+        session_id: acp::SessionId,
+        name: String,
+    },
+    CancelSkillRegress {
+        agent_id: AgentId,
+        session_id: acp::SessionId,
+        name: String,
+    },
+    FetchPrimeIndexStatus {
+        agent_id: AgentId,
+        session_id: acp::SessionId,
+        expected_generation: Option<u64>,
+        expected_fingerprint: Option<String>,
+    },
+    PrimeIndexBackfill {
+        agent_id: AgentId,
+        session_id: acp::SessionId,
+        collection: String,
+        confirm: bool,
+        expected_generation: Option<u64>,
+        expected_fingerprint: Option<String>,
+    },
+    PrimeIndexRebuild {
+        agent_id: AgentId,
+        session_id: acp::SessionId,
+        collection: String,
+        confirm: bool,
+        expected_generation: Option<u64>,
+        expected_fingerprint: Option<String>,
+    },
+    PrimeIndexCancel {
+        agent_id: AgentId,
+        session_id: acp::SessionId,
+        expected_generation: Option<u64>,
+        expected_fingerprint: Option<String>,
+        job_id: Option<String>,
     },
     /// Execute a marketplace action (install/uninstall/refresh) via ACP.
     MarketplaceAction {
@@ -2742,7 +2836,20 @@ pub enum TaskResult {
     /// Skills list loaded.
     SkillsListLoaded {
         agent_id: AgentId,
-        result: Result<Vec<xai_grok_tools::implementations::skills::types::SkillInfo>, String>,
+        result: Result<crate::views::extensions_modal::SkillsTabSnapshot, String>,
+    },
+    /// Skills Smart search loaded. `query`, `gen`, and `session_id` identify
+    /// the request that produced the result so a stale completion cannot
+    /// overwrite a newer rank after inventory reload, session rebind, or a
+    /// later same-query fetch.
+    SkillsSearchLoaded {
+        agent_id: AgentId,
+        session_id: acp::SessionId,
+        query: String,
+        /// Search generation captured when the fetch was issued. `0` is the
+        /// unversioned default (no fetch issued yet).
+        r#gen: u64,
+        result: Result<(Vec<String>, bool), String>,
     },
     WorkflowsListLoaded {
         agent_id: AgentId,
@@ -2752,7 +2859,33 @@ pub enum TaskResult {
     /// Skill toggle completed (enable/disable).
     SkillsToggleDone {
         agent_id: AgentId,
-        result: Result<Vec<xai_grok_tools::implementations::skills::types::SkillInfo>, String>,
+        result: Result<crate::views::extensions_modal::SkillsTabSnapshot, String>,
+    },
+    SkillPublishDone {
+        agent_id: AgentId,
+        result: Result<String, String>,
+    },
+    SkillRegressDone {
+        agent_id: AgentId,
+        result: Result<String, String>,
+    },
+    /// Cancel was accepted; the original run is still in flight.
+    SkillRegressCancelled {
+        agent_id: AgentId,
+        result: Result<String, String>,
+    },
+    PrimeIndexStatusLoaded {
+        agent_id: AgentId,
+        result: Result<xai_grok_shell::session::prime::PrimeIndexStatus, String>,
+    },
+    PrimeIndexJobLoaded {
+        agent_id: AgentId,
+        result: Result<xai_grok_shell::session::prime::PrimeIndexJobStatus, String>,
+        /// In-flight ACP kind (`backfill` / `rebuild` / `cancel`) so mixed-version
+        /// `confirm_required` errors retry the original op instead of a hardcoded
+        /// skills backfill.
+        kind: String,
+        collection: String,
     },
     /// Background marketplace auto-update completed.
     MarketplaceUpdatesAvailable {

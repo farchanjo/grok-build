@@ -16,6 +16,9 @@ use crate::views::modal_window::{
     self, ModalContentArea, ModalSizing, ModalWindowConfig, ModalWindowState, Shortcut,
 };
 use crate::views::picker;
+use xai_grok_tools::implementations::skills::strict::{
+    ManagedSkillRow, SkillHealthStatus, SkillIdentity, SkillsHealthHeader, SkillsListV1Response,
+};
 use xai_grok_tools::implementations::skills::types::SkillInfo;
 
 /// Check if a name fuzzy-matches the search query.
@@ -591,6 +594,175 @@ impl StatusFilter {
             Self::Disabled => !enabled,
         }
     }
+
+    pub fn matches_skill(self, row: &ManagedSkillRow) -> bool {
+        match self {
+            Self::All => true,
+            Self::Enabled => {
+                row.enableable
+                    && row.skill.as_ref().is_some_and(|s| s.enabled)
+                    && row.status != SkillHealthStatus::Quarantined
+            }
+            Self::Disabled => {
+                !row.enableable
+                    || row.skill.as_ref().is_some_and(|s| !s.enabled)
+                    || row.status == SkillHealthStatus::Quarantined
+            }
+        }
+    }
+}
+
+/// Local vs Smart search. Smart uses the Prime index/fusion path and
+/// falls back to local description matching when that rank is absent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SkillSearchMode {
+    #[default]
+    Local,
+    Smart,
+}
+
+impl SkillSearchMode {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Local => " Local: ",
+            Self::Smart => " Smart: ",
+        }
+    }
+
+    pub fn next(self) -> Self {
+        match self {
+            Self::Local => Self::Smart,
+            Self::Smart => Self::Local,
+        }
+    }
+}
+
+/// Single skills filter menu. Vocabulary matches inventory/regression status.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SkillsStatusFilter {
+    #[default]
+    All,
+    ValidPass,
+    Failed,
+    Quarantined,
+    Stale,
+    Untested,
+}
+
+impl SkillsStatusFilter {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::All => "All",
+            Self::ValidPass => "valid-pass",
+            Self::Failed => "failed",
+            Self::Quarantined => "quarantined",
+            Self::Stale => "stale",
+            Self::Untested => "untested",
+        }
+    }
+
+    pub fn next(self) -> Self {
+        match self {
+            Self::All => Self::ValidPass,
+            Self::ValidPass => Self::Failed,
+            Self::Failed => Self::Quarantined,
+            Self::Quarantined => Self::Stale,
+            Self::Stale => Self::Untested,
+            Self::Untested => Self::All,
+        }
+    }
+
+    pub fn matches(self, status: SkillHealthStatus) -> bool {
+        match self {
+            Self::All => true,
+            Self::ValidPass => status == SkillHealthStatus::ValidPass,
+            Self::Failed => status == SkillHealthStatus::Failed,
+            Self::Quarantined => status == SkillHealthStatus::Quarantined,
+            Self::Stale => status == SkillHealthStatus::Stale,
+            Self::Untested => status == SkillHealthStatus::Untested,
+        }
+    }
+
+    pub fn is_default(self) -> bool {
+        matches!(self, Self::All)
+    }
+}
+
+/// Versioned skills tab payload. Opening the modal never starts regression.
+#[derive(Debug, Clone, Default)]
+pub struct SkillsTabSnapshot {
+    pub generation: u64,
+    pub fingerprint: String,
+    pub health: SkillsHealthHeader,
+    pub rows: Vec<ManagedSkillRow>,
+}
+
+impl SkillsTabSnapshot {
+    pub fn empty() -> Self {
+        Self::default()
+    }
+
+    pub fn from_skill_infos(skills: Vec<SkillInfo>) -> Self {
+        let rows: Vec<ManagedSkillRow> = skills
+            .into_iter()
+            .map(|skill| {
+                let identity = SkillIdentity::new(&skill.name, Some(skill.scope));
+                ManagedSkillRow::from_valid(skill, identity, SkillHealthStatus::Untested, None)
+            })
+            .collect();
+        let health = SkillsHealthHeader::tally(rows.iter().map(|r| r.status));
+        Self {
+            generation: 0,
+            fingerprint: String::new(),
+            health,
+            rows,
+        }
+    }
+
+    pub fn from_v1(response: SkillsListV1Response) -> Self {
+        Self {
+            generation: response.generation,
+            fingerprint: response.fingerprint,
+            health: response.health,
+            rows: response.skills,
+        }
+    }
+}
+
+/// Parse `x.ai/skills/search` ranked names. Missing `degraded` defaults to
+/// a successful rank; missing `names` is an error so the caller clears to
+/// local-only fallback.
+pub fn parse_skills_search_payload(
+    inner: &serde_json::Value,
+) -> Result<(Vec<String>, bool), String> {
+    let names = inner
+        .get("names")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(str::to_owned))
+                .collect::<Vec<String>>()
+        })
+        .ok_or_else(|| "couldn't search skills".to_string())?;
+    let degraded = inner
+        .get("degraded")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    Ok((names, degraded))
+}
+
+/// Parse a versioned or legacy `x.ai/skills/list` payload. Missing version
+/// falls back to the historical `{ skills: [...] }` shape.
+pub fn parse_skills_list_payload(inner: &serde_json::Value) -> Result<SkillsTabSnapshot, String> {
+    if inner.get("apiVersion").and_then(|v| v.as_u64()) == Some(1) {
+        serde_json::from_value::<SkillsListV1Response>(inner.clone())
+            .map(SkillsTabSnapshot::from_v1)
+            .map_err(|_| "couldn't load skills".to_string())
+    } else {
+        serde_json::from_value::<Vec<SkillInfo>>(inner.get("skills").cloned().unwrap_or_default())
+            .map(SkillsTabSnapshot::from_skill_infos)
+            .map_err(|_| "couldn't load skills".to_string())
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -623,8 +795,29 @@ pub enum ButtonAction {
     },
     /// Remove the selected MCP server from config.toml.
     RemoveSelectedMcpServer,
-    /// Reload the skills list (re-fetch from shell).
+    /// Reload the skills list (re-fetch from shell). Never starts regression.
     ReloadSkills,
+    /// Open the create-skill wizard. Never starts regression or network work.
+    StartCreateSkill,
+    /// Publish a skill from the create wizard.
+    PublishSkill {
+        name: String,
+        description: String,
+        scope: String,
+        body: String,
+    },
+    /// Cycle Local/Smart search. Smart dispatches Prime index search.
+    CycleSkillSearchMode,
+    /// Explicit local regression for the selected skill.
+    RunSelectedSkillRegress,
+    /// Cancel an in-flight local regression.
+    CancelSelectedSkillRegress,
+    /// Missing-only Prime index backfill for the skills collection.
+    PrimeIndexBackfill,
+    /// Full Prime index rebuild for the skills collection.
+    PrimeIndexRebuild,
+    /// Cancel an in-flight Prime index job.
+    PrimeIndexCancel,
     /// Refresh MCP server list (re-fetch from shell).
     RefreshMcpList,
     /// Open grok.com connectors page (MCP tab: press `o`).
@@ -909,6 +1102,35 @@ impl ModalInput {
     }
 }
 
+/// Inline form shown by Skills `n` / `/create-skill`. One wizard, four fields.
+pub fn create_skill_wizard_input() -> ModalInput {
+    ModalInput::from_specs(
+        "skills_create".into(),
+        vec![
+            FieldSpec {
+                label: "Name".into(),
+                required: true,
+                placeholder: Some("lowercase-hyphen-name".into()),
+            },
+            FieldSpec {
+                label: "Description".into(),
+                required: true,
+                placeholder: Some("What it does and when to use it".into()),
+            },
+            FieldSpec {
+                label: "Scope".into(),
+                required: false,
+                placeholder: Some("project or user".into()),
+            },
+            FieldSpec {
+                label: "Body".into(),
+                required: false,
+                placeholder: Some("Markdown instructions".into()),
+            },
+        ],
+    )
+}
+
 /// Result of processing a key event on the modal input form.
 #[derive(Debug)]
 pub enum ModalInputOutcome {
@@ -1032,6 +1254,8 @@ pub enum ConfirmationAction {
     Marketplace(xai_hooks_plugins_types::MarketplaceAction),
     /// Delete a removable (local) MCP server by name.
     DeleteMcpServer { server_name: String },
+    /// Confirm configured-profile Prime index backfill/rebuild.
+    PrimeIndex { kind: String, collection: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1092,6 +1316,7 @@ pub fn action_key_display(ch: char) -> &'static str {
     match ch {
         ' ' => "space",
         'a' => "a",
+        'b' => "b",
         'd' => "d",
         'e' => "e",
         'f' => "f",
@@ -1100,7 +1325,44 @@ pub fn action_key_display(ch: char) -> &'static str {
         'r' => "r",
         'u' => "u",
         'x' => "x",
+        'm' => "m",
+        'n' => "n",
+        'g' => "g",
         _ => "",
+    }
+}
+
+fn overlay_payload_leak(text: &str) -> bool {
+    text.contains("://")
+        || text.contains("sk-")
+        || text.contains('\n')
+        || text.chars().any(|c| c.is_control())
+        || text.chars().count() > 160
+}
+
+fn overlay_prime_safe_text(msg: &ModalMessage) -> String {
+    match msg {
+        ModalMessage::Error(e) => {
+            if xai_grok_shell::session::prime::prime_failure_is_confirm_required(Some(e))
+                || e.contains("confirm_required")
+                || e.to_ascii_lowercase().contains("prime index")
+            {
+                crate::views::retrieval_settings_modal::compact_prime_job_error(e)
+            } else {
+                e.clone()
+            }
+        }
+        ModalMessage::Confirmation {
+            message, action, ..
+        } => {
+            if matches!(action, ConfirmationAction::PrimeIndex { .. })
+                && overlay_payload_leak(message)
+            {
+                crate::views::retrieval_settings_modal::PRIME_UNAVAILABLE_PROFILE.to_owned()
+            } else {
+                message.clone()
+            }
+        }
     }
 }
 
@@ -1109,6 +1371,16 @@ pub fn action_key_display(ch: char) -> &'static str {
 /// Space stays labeled `"toggle"` on the wire for telemetry / picker identity;
 /// user-facing copy remaps via [`action_key_footer_desc`] /
 /// [`action_key_cheatsheet_desc`].
+/// Footer/picker keys for the current modal. Prime index keys are hidden when
+/// the connected shell does not advertise `primeIndex` (new pager / old shell).
+pub fn extensions_action_keys_for_state(state: &ExtensionsModalState) -> Vec<(char, &'static str)> {
+    let mut keys = extensions_action_keys(state.active_tab);
+    if state.active_tab == ExtensionsTab::Skills && !state.prime_index_capable {
+        keys.retain(|(ch, _)| *ch != 'b' && *ch != 'u');
+    }
+    keys
+}
+
 pub fn extensions_action_keys(tab: ExtensionsTab) -> Vec<(char, &'static str)> {
     match tab {
         ExtensionsTab::Hooks => vec![
@@ -1132,7 +1404,17 @@ pub fn extensions_action_keys(tab: ExtensionsTab) -> Vec<(char, &'static str)> {
             ('d', "uninstall"),
             ('x', "remove source"),
         ],
-        ExtensionsTab::Skills => vec![(' ', "toggle"), ('f', "filter"), ('r', "reload")],
+        ExtensionsTab::Skills => vec![
+            (' ', "toggle"),
+            ('f', "filter"),
+            ('m', "mode"),
+            ('n', "new"),
+            ('g', "regress"),
+            ('b', "backfill"),
+            ('u', "rebuild"),
+            ('x', "cancel"),
+            ('r', "reload"),
+        ],
         ExtensionsTab::McpServers => MCP_SERVERS_ACTION_KEYS.to_vec(),
     }
 }
@@ -1247,7 +1529,12 @@ fn selected_item_enabled_at(
         ExtensionsTab::Skills => {
             let idx = data_index_at(entry_data_indices, selected)?;
             match &state.skills_data {
-                TabDataState::Loaded(skills) => skills.get(idx).map(|s| s.enabled),
+                TabDataState::Loaded(snapshot) => snapshot.rows.get(idx).and_then(|row| {
+                    if !row.enableable {
+                        return None;
+                    }
+                    row.skill.as_ref().map(|s| s.enabled)
+                }),
                 _ => None,
             }
         }
@@ -1358,6 +1645,12 @@ pub fn resolve_key(tab: ExtensionsTab, ch: char) -> Option<ButtonAction> {
         (ExtensionsTab::Skills, ' ') => Some(ButtonAction::ToggleSelectedSkill),
         (ExtensionsTab::Skills, 'r') => Some(ButtonAction::ReloadSkills),
         (ExtensionsTab::Skills, 'f') => Some(ButtonAction::CycleFilter),
+        (ExtensionsTab::Skills, 'n') => Some(ButtonAction::StartCreateSkill),
+        (ExtensionsTab::Skills, 'm') => Some(ButtonAction::CycleSkillSearchMode),
+        (ExtensionsTab::Skills, 'g') => Some(ButtonAction::RunSelectedSkillRegress),
+        (ExtensionsTab::Skills, 'b') => Some(ButtonAction::PrimeIndexBackfill),
+        (ExtensionsTab::Skills, 'u') => Some(ButtonAction::PrimeIndexRebuild),
+        (ExtensionsTab::Skills, 'x') => Some(ButtonAction::CancelSelectedSkillRegress),
         (ExtensionsTab::McpServers, 'a') => Some(ButtonAction::StartInput {
             command_prefix: "mcp_add".into(),
             // URL is required, Name is optional (auto-derived from URL),
@@ -1563,6 +1856,25 @@ pub fn build_action_from_input(
             }
             parse_mcp_add_fields(&name, &url_or_cmd)
         }
+        "skills_create" => {
+            let name = first.to_string();
+            let description = field_texts.get(1).map(|s| s.trim()).unwrap_or_default();
+            let scope = field_texts
+                .get(2)
+                .map(|s| s.trim())
+                .filter(|s| !s.is_empty())
+                .unwrap_or("project");
+            let body = field_texts.get(3).cloned().unwrap_or_default();
+            if name.is_empty() || description.is_empty() {
+                return None;
+            }
+            Some(ButtonAction::PublishSkill {
+                name,
+                description: description.to_string(),
+                scope: scope.to_string(),
+                body,
+            })
+        }
         _ => None,
     }
 }
@@ -1667,6 +1979,7 @@ pub struct WorkflowInfo {
 }
 
 impl WorkflowInfo {
+    #[allow(dead_code)] // Skills tab no longer lists workflows; `/workflows` still uses this type.
     fn has_usable_command_name(&self) -> bool {
         let name = self.name.as_str();
         !name.is_empty()
@@ -1740,9 +2053,20 @@ pub struct ExtensionsModalState {
     pub marketplace_selected: usize,
     pub marketplace_scroll: usize,
     /// Skills tab state.
-    pub skills_data: TabDataState<Vec<SkillInfo>>,
+    pub skills_data: TabDataState<SkillsTabSnapshot>,
+    pub skills_search_mode: SkillSearchMode,
+    /// Ranked names from `/skills` Smart search (Prime index). `None` means
+    /// immediate local-only fallback. Exact name hits still sort first.
+    pub skills_smart_rank: Option<Vec<String>>,
+    pub skills_status_filter: SkillsStatusFilter,
     pub skills_selected: usize,
     pub skills_scroll: usize,
+    /// Compact Prime index status (skills collection). Never a second dashboard.
+    pub prime_index: Option<xai_grok_shell::session::prime::PrimeIndexStatus>,
+    /// Identity to restore once after a generation refresh so selection survives.
+    /// Taken on the next `/skills` paint and cleared on user navigation.
+    pub skills_anchor_identity: Option<SkillIdentity>,
+    pub prime_index_capable: bool,
     pub workflows_data: TabDataState<Vec<WorkflowInfo>>,
     /// MCP servers tab state.
     pub mcps_data: TabDataState<Vec<crate::views::mcps_modal::McpServerInfo>>,
@@ -1775,8 +2099,7 @@ pub struct ExtensionsModalState {
     pub mcps_filter: StatusFilter,
     /// Status filter for the hooks tab.
     pub hooks_filter: StatusFilter,
-    /// Status filter for the skills tab.
-    pub skills_filter: StatusFilter,
+
     /// Unified picker state for tabs managed by `render_picker_content`.
     /// Search query and search_active live here (previously duplicated).
     pub picker_state: picker::PickerState,
@@ -1830,8 +2153,14 @@ impl ExtensionsModalState {
             marketplace_selected: 0,
             marketplace_scroll: 0,
             skills_data: TabDataState::Loading,
+            skills_search_mode: SkillSearchMode::Local,
+            skills_smart_rank: None,
+            skills_status_filter: SkillsStatusFilter::All,
             skills_selected: 0,
             skills_scroll: 0,
+            prime_index: None,
+            skills_anchor_identity: None,
+            prime_index_capable: false,
             workflows_data: TabDataState::Loading,
             mcps_data: TabDataState::Loading,
             mcps_scroll_pinned_selection: None,
@@ -1853,7 +2182,6 @@ impl ExtensionsModalState {
             plugins_filter: StatusFilter::default(),
             mcps_filter: StatusFilter::default(),
             hooks_filter: StatusFilter::default(),
-            skills_filter: StatusFilter::default(),
             // PickerState mode is vestigial — ModalWindow handles framing.
             picker_state: picker::PickerState::default(),
             entry_data_indices: Vec::new(),
@@ -1903,12 +2231,21 @@ impl ExtensionsModalState {
         self.picker_state.expanded.clear();
         self.mcps_tools_expanded.clear();
         self.picker_state.hovered = None;
+        self.skills_anchor_identity = None;
     }
 
-    /// Whether a group header at picker index `sel` with the given
-    /// `group_key` is currently expanded (children visible).
-    ///
-    /// The answer depends on the active tab: Hooks use
+    /// True when the active tab still has no data. Used to fetch on tab
+    /// switch after a skills-only open that skipped marketplace/network work.
+    pub fn tab_data_is_loading(&self) -> bool {
+        match self.active_tab {
+            ExtensionsTab::Hooks => matches!(self.hooks_data, TabDataState::Loading),
+            ExtensionsTab::Plugins => matches!(self.plugins_data, TabDataState::Loading),
+            ExtensionsTab::Marketplace => matches!(self.marketplace_data, TabDataState::Loading),
+            ExtensionsTab::Skills => matches!(self.skills_data, TabDataState::Loading),
+            ExtensionsTab::McpServers => matches!(self.mcps_data, TabDataState::Loading),
+        }
+    }
+
     /// Seed the all-collapsed default for plugin source groups exactly once.
     ///
     /// Called from both plugin-data delivery channels (list fetch and the
@@ -1922,6 +2259,10 @@ impl ExtensionsModalState {
         self.plugins_groups_seeded = true;
     }
 
+    /// Whether a group header at picker index `sel` with the given
+    /// `group_key` is currently expanded (children visible).
+    ///
+    /// The answer depends on the active tab: Hooks use
     /// `hooks_collapsed_groups`, Marketplace uses
     /// `marketplace_collapsed_sources` (or `picker_state.expanded` for
     /// error-source headers), and other tabs use `picker_state.expanded`.
@@ -1987,6 +2328,118 @@ impl ExtensionsModalState {
         } else {
             false
         }
+    }
+
+    /// Query to send to `x.ai/skills/search` in Smart mode. `None` means the
+    /// local description fallback should be used (and any cached rank cleared).
+    /// Apply a version-tolerant Prime index notification without resetting
+    /// search, filter, or selection.
+    pub fn apply_prime_index_update(
+        &mut self,
+        update: &xai_grok_shell::session::prime::PrimeIndexUpdate,
+    ) {
+        if let Some(ref mut status) = self.prime_index {
+            if update.generation_is_stale_vs(status.generation) {
+                return;
+            }
+            status.generation = update.generation;
+            if !update.fingerprint_short.is_empty() {
+                status.fingerprint_short = update.fingerprint_short.clone();
+            }
+            if let Some(job) = update.sanitized_job() {
+                status.job = Some(job);
+            }
+            status.sanitize_secrets();
+        } else if let Some(job) = update.sanitized_job() {
+            // Keep a stub so the compact footer can show progress.
+            self.prime_index = Some(xai_grok_shell::session::prime::PrimeIndexStatus {
+                api_version: 1,
+                generation: update.generation,
+                fingerprint_short: update.fingerprint_short.clone(),
+                skills: xai_grok_shell::session::prime::PrimeIndexCollectionStatus {
+                    collection: "skills".into(),
+                    generation: update.generation,
+                    fingerprint_short: update.fingerprint_short.clone(),
+                    item_count: 0,
+                    vector_count: 0,
+                    missing_vectors: 0,
+                    readiness: "pending".into(),
+                    route_id: None,
+                    dimensions: None,
+                },
+                agents: xai_grok_shell::session::prime::PrimeIndexCollectionStatus {
+                    collection: "agents".into(),
+                    generation: 0,
+                    fingerprint_short: String::new(),
+                    item_count: 0,
+                    vector_count: 0,
+                    missing_vectors: 0,
+                    readiness: "ready".into(),
+                    route_id: None,
+                    dimensions: None,
+                },
+                job: Some(job.clone()),
+                configured_route: job.configured_route.clone(),
+                capabilities: xai_grok_shell::session::prime::PrimeIndexCapabilities::SUPPORTED,
+                unchanged: false,
+            });
+            if let Some(status) = self.prime_index.as_mut() {
+                status.sanitize_secrets();
+            }
+        }
+    }
+
+    pub fn prime_index_footer_line(&self, narrow: bool) -> Option<String> {
+        let status = self.prime_index.as_ref()?;
+        let skills = &status.skills;
+        let mut line = if narrow {
+            format!(
+                "idx {}/{} {}",
+                skills.vector_count, skills.item_count, skills.readiness
+            )
+        } else {
+            format!(
+                "index {}/{} {} · gen {}",
+                skills.vector_count, skills.item_count, skills.readiness, skills.generation
+            )
+        };
+        if let Some(job) = &status.job
+            && matches!(job.state.as_str(), "running" | "cancelling" | "failed")
+        {
+            // Never splice the bounded raw failure into the compact footer.
+            line.push_str(&format!(
+                " · {} {}/{}",
+                crate::views::retrieval_settings_modal::compact_prime_job_label(job),
+                job.done,
+                job.total
+            ));
+        }
+        Some(line)
+    }
+
+    /// Drop a one-shot selection restore so j/k/mouse can leave the row.
+    pub fn clear_skills_restore_anchor(&mut self) {
+        self.skills_anchor_identity = None;
+    }
+
+    pub fn skills_smart_search_query(&self) -> Option<&str> {
+        if self.active_tab != ExtensionsTab::Skills {
+            return None;
+        }
+        if self.skills_search_mode != SkillSearchMode::Smart {
+            return None;
+        }
+        let q = self.picker_state.query().trim();
+        if q.is_empty() { None } else { Some(q) }
+    }
+
+    /// Drop the cached Smart rank. Returns the query if a Prime search should
+    /// run. Does not bump generation: the agent owns the monotonic counter so
+    /// inventory reload can invalidate in-flight completions even when no
+    /// fetch is issued.
+    pub fn prepare_skills_smart_search_fetch(&mut self) -> Option<String> {
+        self.skills_smart_rank = None;
+        self.skills_smart_search_query().map(str::to_owned)
     }
 
     /// Resolve the current picker selection to the original data index.
@@ -2313,38 +2766,97 @@ struct SkillsEntryData {
 }
 
 fn filter_and_sort_skills(
-    skills: &[SkillInfo],
+    rows: &[ManagedSkillRow],
     query: &str,
-    filter: StatusFilter,
+    filter: SkillsStatusFilter,
+    mode: SkillSearchMode,
+    ranked: Option<&[String]>,
 ) -> SkillsEntryData {
     let mut matches: Vec<(usize, bool)> = Vec::new();
     let query_lower = query.to_lowercase();
-    for (si, skill) in skills.iter().enumerate() {
-        if !filter.matches(skill.enabled) {
+    for (si, row) in rows.iter().enumerate() {
+        if !filter.matches(row.status) {
             continue;
         }
         if query.is_empty() {
             matches.push((si, true));
-        } else {
-            let desc_text = skill
-                .short_description
-                .as_deref()
-                .unwrap_or(&skill.description);
-            let desc_lower = desc_text.to_lowercase();
-            let author_lower = skill.author.as_deref().unwrap_or("").to_lowercase();
-            // Plugin skills differ in label (shown) vs name (slash id); match either.
-            let name_hit = skill.label().to_lowercase().contains(&query_lower)
-                || skill.name.to_lowercase().contains(&query_lower);
-            let desc_hit = desc_lower.contains(&query_lower);
+            continue;
+        }
+        let name = row.display_name().to_lowercase();
+        let slash = row
+            .skill
+            .as_ref()
+            .map(|s| s.name.to_lowercase())
+            .unwrap_or_default();
+        let exact = name == query_lower || slash == query_lower;
+        let name_hit = exact || name.contains(&query_lower) || slash.contains(&query_lower);
+        if name_hit {
+            matches.push((si, true));
+            continue;
+        }
+        if mode == SkillSearchMode::Smart {
+            if let Some(rank) = ranked {
+                let id = row
+                    .skill
+                    .as_ref()
+                    .map(|s| s.name.as_str())
+                    .unwrap_or(row.identity.parent_dir_name.as_str());
+                if rank.iter().any(|n| n == id) {
+                    matches.push((si, false));
+                    continue;
+                }
+            }
+            // Immediate local-only fallback when the index rank is absent.
+            let desc_text = row
+                .skill
+                .as_ref()
+                .map(|s| {
+                    s.short_description
+                        .as_deref()
+                        .unwrap_or(&s.description)
+                        .to_string()
+                })
+                .unwrap_or_default();
+            let author_lower = row
+                .skill
+                .as_ref()
+                .and_then(|s| s.author.as_deref())
+                .unwrap_or("")
+                .to_lowercase();
+            let when_lower = row
+                .skill
+                .as_ref()
+                .and_then(|s| s.when_to_use.as_deref())
+                .unwrap_or("")
+                .to_lowercase();
+            let desc_hit = desc_text.to_lowercase().contains(&query_lower);
             let author_hit = !author_lower.is_empty() && author_lower.contains(&query_lower);
-            if name_hit || author_hit {
+            let when_hit = !when_lower.is_empty() && when_lower.contains(&query_lower);
+            if author_hit {
                 matches.push((si, true));
-            } else if desc_hit {
+            } else if desc_hit || when_hit {
                 matches.push((si, false));
             }
         }
     }
-    matches.sort_by_key(|&(_, is_name)| !is_name);
+    matches.sort_by(|&(a, a_name), &(b, b_name)| {
+        b_name.cmp(&a_name).then_with(|| {
+            let rank_pos = |si: usize| {
+                let id = rows[si]
+                    .skill
+                    .as_ref()
+                    .map(|s| s.name.as_str())
+                    .unwrap_or(rows[si].identity.parent_dir_name.as_str());
+                ranked.and_then(|r| r.iter().position(|n| n == id))
+            };
+            match (rank_pos(a), rank_pos(b)) {
+                (Some(x), Some(y)) => x.cmp(&y),
+                (Some(_), None) => std::cmp::Ordering::Less,
+                (None, Some(_)) => std::cmp::Ordering::Greater,
+                (None, None) => a.cmp(&b),
+            }
+        })
+    });
     SkillsEntryData { matches }
 }
 
@@ -2526,7 +3038,6 @@ pub fn render_extensions_modal(
         ExtensionsTab::Hooks => state.hooks_filter,
         ExtensionsTab::Plugins => state.plugins_filter,
         ExtensionsTab::McpServers => state.mcps_filter,
-        ExtensionsTab::Skills => state.skills_filter,
         _ => StatusFilter::All,
     };
 
@@ -2565,53 +3076,125 @@ pub fn render_extensions_modal(
     if !in_input_mode && !loading {
         match state.active_tab {
             ExtensionsTab::Skills => {
-                if let TabDataState::Loaded(ref skills) = state.skills_data {
-                    let filtered =
-                        filter_and_sort_skills(skills, state.picker_state.query(), filter);
+                if let TabDataState::Loaded(ref snapshot) = state.skills_data {
+                    let mut health = snapshot.health.compact_line();
+                    if let Some(idx) = state.prime_index_footer_line(compact) {
+                        health = format!("{health} · {idx}");
+                    }
+                    let cap = (full_area.width as usize).min(80);
+                    if cap > 0 {
+                        health = crate::render::line_utils::truncate_str(&health, cap);
+                    }
+                    entry_labels.push(health);
+                    entry_right_labels.push(String::new());
+                    entry_desc_lines.push(vec![]);
+                    entry_summary_lines.push(vec![]);
+                    entry_fields.push(vec![]);
+                    entry_is_header.push(true);
+                    entry_dimmed.push(false);
+                    entry_indent.push(0);
+                    entry_data_indices.push(None);
+                    entry_group_keys.push(None);
+                    entry_badge_text.push(String::new());
+                    entry_badge_color.push(None);
+                    let filtered = filter_and_sort_skills(
+                        &snapshot.rows,
+                        state.picker_state.query(),
+                        state.skills_status_filter,
+                        state.skills_search_mode,
+                        if state.skills_search_mode == SkillSearchMode::Smart {
+                            state.skills_smart_rank.as_deref()
+                        } else {
+                            None
+                        },
+                    );
                     for &(si, _) in &filtered.matches {
-                        let skill = &skills[si];
-                        let source = skill_source_str(skill);
-                        entry_labels.push(skill.label().to_string());
-                        let right = match &skill.author {
+                        let row = &snapshot.rows[si];
+                        let skill = row.skill.as_ref();
+                        let source = skill
+                            .map(skill_source_str)
+                            .unwrap_or_else(|| format!("{:?}", row.identity.scope));
+                        entry_labels.push(row.display_name().to_string());
+                        let right = match skill.and_then(|s| s.author.as_deref()) {
                             Some(a) if !a.is_empty() => format!("({} · {})", source, a),
                             _ => format!("({})", source),
                         };
                         entry_right_labels.push(right);
-                        // Short description as description_lines.
                         let desc = skill
-                            .short_description
-                            .as_deref()
-                            .unwrap_or(&skill.description);
+                            .map(|s| {
+                                s.short_description
+                                    .as_deref()
+                                    .unwrap_or(&s.description)
+                                    .to_string()
+                            })
+                            .unwrap_or_default();
                         if desc.is_empty() {
                             entry_desc_lines.push(vec![]);
                         } else {
-                            entry_desc_lines.push(vec![desc.to_string()]);
+                            entry_desc_lines.push(vec![desc]);
                         }
                         entry_summary_lines.push(vec![]);
-                        // Fields for expanded view.
-                        let mut fields = vec![("path".to_string(), skill.path.clone())];
-                        if let Some(ref a) = skill.author
-                            && !a.is_empty()
-                        {
-                            fields.push(("author".to_string(), a.clone()));
+                        let mut fields =
+                            vec![("status".to_string(), row.status.as_str().to_string())];
+                        fields.push(("file".to_string(), row.identity.file_label.clone()));
+                        if let Some(skill) = skill {
+                            if let Some(ref a) = skill.author
+                                && !a.is_empty()
+                            {
+                                fields.push(("author".to_string(), a.clone()));
+                            }
+                            if let Some(ref tools) = skill.allowed_tools
+                                && !tools.is_empty()
+                            {
+                                fields.push(("tools".to_string(), tools.join(", ")));
+                            }
                         }
-                        if let Some(ref tools) = skill.allowed_tools
-                            && !tools.is_empty()
-                        {
-                            fields.push(("tools".to_string(), tools.join(", ")));
+                        for diag in row.diagnostics.iter().take(8) {
+                            fields.push((diag.code.as_str().to_string(), diag.message.clone()));
+                        }
+                        if let Some(reg) = &row.regression {
+                            fields.push((
+                                "regress".to_string(),
+                                format!(
+                                    "{} {}/{} {}",
+                                    reg.status.as_str(),
+                                    reg.passed,
+                                    reg.passed + reg.failed,
+                                    if reg.stable { "stable" } else { "unstable" }
+                                ),
+                            ));
                         }
                         entry_fields.push(fields);
                         entry_is_header.push(false);
-                        entry_dimmed.push(!skill.enabled);
+                        entry_dimmed.push(!row.enableable || skill.is_some_and(|s| !s.enabled));
                         entry_indent.push(0);
                         entry_data_indices.push(Some(si));
                         entry_group_keys.push(None);
-                        if !skill.enabled {
-                            entry_badge_text.push("[disabled]".into());
-                            entry_badge_color.push(Some(theme.accent_error));
+                        let badge = if row.status == SkillHealthStatus::Quarantined {
+                            "[quarantined]"
+                        } else if skill.is_some_and(|s| !s.enabled) {
+                            "[disabled]"
                         } else {
+                            row.status.as_str()
+                        };
+                        if badge.is_empty() {
                             entry_badge_text.push(String::new());
                             entry_badge_color.push(None);
+                        } else {
+                            entry_badge_text.push(badge.into());
+                            entry_badge_color.push(Some(if row.enableable {
+                                theme.accent_success
+                            } else {
+                                theme.accent_error
+                            }));
+                        }
+                    }
+                    if let Some(anchor) = state.skills_anchor_identity.take() {
+                        if let Some(pos) = entry_data_indices.iter().position(|idx| {
+                            idx.and_then(|si| snapshot.rows.get(si))
+                                .is_some_and(|row| row.identity == anchor)
+                        }) {
+                            state.picker_state.selected = pos;
                         }
                     }
                 } else if let TabDataState::Error(ref msg) = state.skills_data {
@@ -2628,74 +3211,7 @@ pub fn render_extensions_modal(
                     entry_badge_text.push(String::new());
                     entry_badge_color.push(None);
                 }
-                match state.workflows_data {
-                    TabDataState::Loaded(ref workflows) => {
-                        let query_lower = state.picker_state.query().to_lowercase();
-                        let visible: Vec<&WorkflowInfo> = workflows
-                            .iter()
-                            .filter(|workflow| workflow.has_usable_command_name())
-                            .filter(|w| {
-                                query_lower.is_empty()
-                                    || w.name.to_lowercase().contains(&query_lower)
-                                    || w.description.to_lowercase().contains(&query_lower)
-                            })
-                            .collect();
-                        if !visible.is_empty() {
-                            entry_labels.push("Workflows".to_string());
-                            entry_right_labels.push(String::new());
-                            entry_desc_lines.push(vec![]);
-                            entry_summary_lines.push(vec![]);
-                            entry_fields.push(vec![]);
-                            entry_is_header.push(true);
-                            entry_dimmed.push(false);
-                            entry_indent.push(0);
-                            entry_data_indices.push(None);
-                            entry_group_keys.push(None);
-                            entry_badge_text.push(String::new());
-                            entry_badge_color.push(None);
-                            for wf in visible {
-                                entry_labels.push(wf.name.clone());
-                                entry_right_labels.push(format!("({})", wf.source));
-                                if wf.description.is_empty() {
-                                    entry_desc_lines.push(vec![]);
-                                } else {
-                                    entry_desc_lines.push(vec![wf.description.clone()]);
-                                }
-                                entry_summary_lines.push(vec![]);
-                                let mut fields = Vec::new();
-                                if let Some(ref p) = wf.path {
-                                    fields.push(("path".to_string(), p.clone()));
-                                }
-                                if let Some(ref w) = wf.when_to_use {
-                                    fields.push(("when to use".to_string(), w.clone()));
-                                }
-                                entry_fields.push(fields);
-                                entry_is_header.push(false);
-                                entry_dimmed.push(false);
-                                entry_indent.push(0);
-                                entry_data_indices.push(None);
-                                entry_group_keys.push(None);
-                                entry_badge_text.push(String::new());
-                                entry_badge_color.push(None);
-                            }
-                        }
-                    }
-                    TabDataState::Error(ref msg) => {
-                        entry_labels.push(format!("workflows: {}", msg));
-                        entry_right_labels.push(String::new());
-                        entry_desc_lines.push(vec![]);
-                        entry_summary_lines.push(vec![]);
-                        entry_fields.push(vec![]);
-                        entry_is_header.push(false);
-                        entry_dimmed.push(true);
-                        entry_indent.push(0);
-                        entry_data_indices.push(None);
-                        entry_group_keys.push(None);
-                        entry_badge_text.push(String::new());
-                        entry_badge_color.push(None);
-                    }
-                    TabDataState::Loading => {}
-                }
+                // Workflows stay on `/workflows` / Tasks. Skills is one list.
             }
             ExtensionsTab::Plugins => {
                 if let TabDataState::Loaded(ref response) = state.plugins_data {
@@ -3233,7 +3749,7 @@ pub fn render_extensions_modal(
     // Build per-tab action keys for the footer shortcuts.
     // Space enable/disable uses the freshly built entry-mapping locals
     // (not `state.entry_*`, which are published once after paint below).
-    let action_keys = extensions_action_keys(state.active_tab);
+    let action_keys = extensions_action_keys_for_state(state);
 
     // Build owned labels for dynamic action-key shortcuts so we can
     // borrow from them without leaking memory. Each entry is
@@ -3339,6 +3855,13 @@ pub fn render_extensions_modal(
             clickable: true,
             id: 98,
         });
+        if state.active_tab == ExtensionsTab::Skills {
+            shortcuts.push(Shortcut {
+                label: "/ search",
+                clickable: true,
+                id: 97,
+            });
+        }
         for &(orig_idx, ref label) in &action_labels {
             shortcuts.push(Shortcut {
                 label: label.as_str(),
@@ -3419,33 +3942,72 @@ pub fn render_extensions_modal(
     // a form, and the divider would float above the form awkwardly.
 
     let search_width = content_area.width;
+    let skills_filter_label = state.skills_status_filter.label();
+    let filter_label = if state.active_tab == ExtensionsTab::Skills {
+        skills_filter_label
+    } else {
+        filter.label()
+    };
+    let trailing = if has_filter && !in_input_mode {
+        picker::filter_indicator_reserved_width(filter_label, "f")
+    } else {
+        0
+    };
+    let layout = picker::search_bar_layout(search_width, trailing);
     if !in_input_mode {
-        // Search bar at top of content area.
+        // Search bar at top of content area. Skills uses one Local/Smart field.
         let search_active_render = state.picker_state.search_active;
-        picker::render_picker_search_bar(
-            buf,
-            content_area.x,
-            content_area.y,
-            search_width,
-            &theme,
-            &state.picker_state,
-            search_active_render,
-            true, // show_search_hint
-            Some(theme.bg_base),
-        );
+        if state.active_tab == ExtensionsTab::Skills {
+            // Always paint the Local/Smart prompt (never "/ to search") so
+            // compact/narrow widths still have exactly one labeled field.
+            let mode_label = state.skills_search_mode.label();
+            state.picker_state.search_mode_label_width = mode_label.len() as u16;
+            picker::render_picker_search_bar_with_label(
+                buf,
+                content_area.x,
+                content_area.y,
+                layout.render_width,
+                &theme,
+                mode_label,
+                &state.picker_state,
+                search_active_render,
+                false,
+                Some(theme.bg_base),
+            );
+        } else {
+            state.picker_state.search_mode_label_width = 0;
+            picker::render_picker_search_bar(
+                buf,
+                content_area.x,
+                content_area.y,
+                layout.render_width,
+                &theme,
+                &state.picker_state,
+                search_active_render,
+                true, // show_search_hint
+                Some(theme.bg_base),
+            );
+        }
+    } else {
+        state.picker_state.search_mode_label_width = 0;
     }
 
     // Filter indicator (optional, right-aligned on search row).
     if has_filter && !in_input_mode {
+        let active = if state.active_tab == ExtensionsTab::Skills {
+            !state.skills_status_filter.is_default()
+        } else {
+            filter != StatusFilter::All
+        };
         let rect = picker::render_filter_indicator(
             buf,
             content_area.x,
             content_area.y,
             search_width,
             &theme,
-            filter.label(),
+            filter_label,
             "f",
-            filter != StatusFilter::All,
+            active,
             state.picker_state.filter_hovered,
         );
         state.picker_state.filter_area = Some(rect);
@@ -3478,6 +4040,13 @@ pub fn render_extensions_modal(
     // (now empty) row doesn't accidentally activate search underneath.
     let search_bar_rect = if in_input_mode {
         Rect::default()
+    } else if let Some(filter) = state.picker_state.filter_area {
+        Rect::new(
+            content_area.x,
+            content_area.y,
+            filter.x.saturating_sub(content_area.x),
+            1,
+        )
     } else {
         Rect::new(content_area.x, content_area.y, content_area.width, 1)
     };
@@ -3650,9 +4219,10 @@ pub fn render_extensions_modal(
 
     // Render modal message overlay.
     if let Some(ref msg) = state.modal_message {
+        let safe_overlay = overlay_prime_safe_text(msg);
         let (text, fg) = match msg {
-            ModalMessage::Error(e) => (e.as_str(), theme.accent_error),
-            ModalMessage::Confirmation { message, .. } => (message.as_str(), theme.accent_tool),
+            ModalMessage::Error(_) => (safe_overlay.as_str(), theme.accent_error),
+            ModalMessage::Confirmation { .. } => (safe_overlay.as_str(), theme.accent_tool),
         };
         if let Some(popup_rect) = state.window.popup_area {
             let msg_content_y = popup_rect.y + 2;
@@ -4110,7 +4680,17 @@ mod tests {
             ),
             (
                 ExtensionsTab::Skills,
-                &[(' ', "toggle"), ('f', "filter"), ('r', "reload")],
+                &[
+                    (' ', "toggle"),
+                    ('f', "filter"),
+                    ('m', "mode"),
+                    ('n', "new"),
+                    ('g', "regress"),
+                    ('b', "backfill"),
+                    ('u', "rebuild"),
+                    ('x', "cancel"),
+                    ('r', "reload"),
+                ],
             ),
             (
                 ExtensionsTab::McpServers,
@@ -4634,6 +5214,7 @@ mod tests {
             plugin_name: None,
             plugin_version: None,
             plugin_root: None,
+            collection_root: None,
             plugin_data: None,
             allowed_tools: None,
             model: None,
@@ -4751,52 +5332,71 @@ mod tests {
         skill
     }
 
+    fn rows_from(
+        skills: Vec<xai_grok_tools::implementations::skills::types::SkillInfo>,
+    ) -> Vec<ManagedSkillRow> {
+        SkillsTabSnapshot::from_skill_infos(skills).rows
+    }
+
     #[test]
     fn plugin_skills_appear_in_filter_results() {
-        let skills = vec![
+        let skills = rows_from(vec![
             make_skill("rust-check", "Run Rust checks"),
             make_plugin_skill("hello", "A greeting skill", "example-plugin"),
             make_plugin_skill("lint", "Run lint checks", "linter"),
-        ];
-        let result = filter_and_sort_skills(&skills, "", StatusFilter::All);
+        ]);
+        let result = filter_and_sort_skills(
+            &skills,
+            "",
+            SkillsStatusFilter::All,
+            SkillSearchMode::Local,
+            None,
+        );
         // All three skills (native + plugin) should appear.
         assert_eq!(result.matches.len(), 3);
     }
 
     #[test]
-    fn plugin_skills_appear_with_enabled_filter() {
-        let mut plugin_skill = make_plugin_skill("hello", "A greeting", "example-plugin");
-        plugin_skill.enabled = true;
-        let mut disabled_skill = make_plugin_skill("lint", "Lint checks", "linter");
-        disabled_skill.enabled = false;
-        let skills = vec![
-            make_skill("native", "A native skill"),
-            plugin_skill,
-            disabled_skill,
-        ];
-        let result = filter_and_sort_skills(&skills, "", StatusFilter::Enabled);
-        // Only enabled skills: native + hello (lint is disabled).
-        assert_eq!(result.matches.len(), 2);
-        // Verify the correct skills are returned: native (index 0) and hello (index 1).
-        let indices: Vec<usize> = result.matches.iter().map(|m| m.0).collect();
-        assert!(indices.contains(&0), "native skill should be present");
-        assert!(
-            indices.contains(&1),
-            "plugin skill 'hello' should be present"
+    fn quarantined_rows_filter_and_are_never_enableable() {
+        let mut rows = rows_from(vec![make_skill("native", "A native skill")]);
+        rows.push(ManagedSkillRow::from_quarantined(
+            &xai_grok_tools::implementations::skills::strict::QuarantinedSkill {
+                identity: SkillIdentity::new("bad", None),
+                diagnostics: vec![],
+            },
+        ));
+        let all = filter_and_sort_skills(
+            &rows,
+            "",
+            SkillsStatusFilter::All,
+            SkillSearchMode::Local,
+            None,
         );
-        assert!(
-            !indices.contains(&2),
-            "disabled plugin skill 'lint' should be excluded"
+        assert_eq!(all.matches.len(), 2);
+        let quarantined = filter_and_sort_skills(
+            &rows,
+            "",
+            SkillsStatusFilter::Quarantined,
+            SkillSearchMode::Local,
+            None,
         );
+        assert_eq!(quarantined.matches.len(), 1);
+        assert!(!rows[1].enableable);
     }
 
     #[test]
     fn plugin_skills_searchable_by_name() {
-        let skills = vec![
+        let skills = rows_from(vec![
             make_skill("rust-check", "Run Rust checks"),
             make_plugin_skill("hello", "A greeting skill", "example-plugin"),
-        ];
-        let result = filter_and_sort_skills(&skills, "hello", StatusFilter::All);
+        ]);
+        let result = filter_and_sort_skills(
+            &skills,
+            "hello",
+            SkillsStatusFilter::All,
+            SkillSearchMode::Local,
+            None,
+        );
         assert_eq!(result.matches.len(), 1);
         assert_eq!(result.matches[0].0, 1); // index of hello
     }
@@ -4805,12 +5405,151 @@ mod tests {
     fn plugin_skill_searchable_by_label_and_slash_identity() {
         let mut skill = make_plugin_skill("deploy-prod", "Ship it", "example-plugin");
         skill.display_name = Some("friendly".to_string());
-        let skills = vec![skill];
+        let skills = rows_from(vec![skill]);
         // "friendly" hits only the label; "prod" hits only the slash name.
-        let by_label = filter_and_sort_skills(&skills, "friendly", StatusFilter::All);
-        let by_name = filter_and_sort_skills(&skills, "prod", StatusFilter::All);
+        let by_label = filter_and_sort_skills(
+            &skills,
+            "friendly",
+            SkillsStatusFilter::All,
+            SkillSearchMode::Local,
+            None,
+        );
+        let by_name = filter_and_sort_skills(
+            &skills,
+            "prod",
+            SkillsStatusFilter::All,
+            SkillSearchMode::Local,
+            None,
+        );
         assert_eq!(by_label.matches.len(), 1);
         assert_eq!(by_name.matches.len(), 1);
+    }
+
+    #[test]
+    fn local_search_is_name_only_smart_includes_description() {
+        let skills = rows_from(vec![make_skill(
+            "commit",
+            "Create well-formatted git commits.",
+        )]);
+        let local = filter_and_sort_skills(
+            &skills,
+            "formatted",
+            SkillsStatusFilter::All,
+            SkillSearchMode::Local,
+            None,
+        );
+        let smart = filter_and_sort_skills(
+            &skills,
+            "formatted",
+            SkillsStatusFilter::All,
+            SkillSearchMode::Smart,
+            None,
+        );
+        assert!(local.matches.is_empty());
+        assert_eq!(smart.matches.len(), 1);
+    }
+
+    #[test]
+    fn smart_search_exact_names_first_then_ranked_or_local_fallback() {
+        let skills = rows_from(vec![
+            make_skill("alpha", "unrelated"),
+            make_skill("commit", "Create well-formatted git commits."),
+            make_skill("query", "exact name row"),
+        ]);
+        let ranked = vec!["commit".to_string(), "alpha".to_string()];
+        let smart = filter_and_sort_skills(
+            &skills,
+            "query",
+            SkillsStatusFilter::All,
+            SkillSearchMode::Smart,
+            Some(&ranked),
+        );
+        assert_eq!(skills[smart.matches[0].0].display_name(), "query");
+        assert!(smart.matches[0].1, "exact name match must sort first");
+
+        let fallback = filter_and_sort_skills(
+            &skills,
+            "formatted",
+            SkillsStatusFilter::All,
+            SkillSearchMode::Smart,
+            None,
+        );
+        assert_eq!(fallback.matches.len(), 1);
+        assert_eq!(skills[fallback.matches[0].0].display_name(), "commit");
+    }
+
+    #[test]
+    fn smart_rank_without_name_match_is_included_only_while_rank_is_installed() {
+        let skills = rows_from(vec![
+            make_skill("alpha", "unrelated"),
+            make_skill("commit", "Create well-formatted git commits."),
+        ]);
+        let ranked = vec!["commit".to_string(), "alpha".to_string()];
+        let with_rank = filter_and_sort_skills(
+            &skills,
+            "z",
+            SkillsStatusFilter::All,
+            SkillSearchMode::Smart,
+            Some(&ranked),
+        );
+        assert_eq!(
+            with_rank.matches.len(),
+            2,
+            "an installed rank still admits non-name vector hits"
+        );
+
+        let without_rank = filter_and_sort_skills(
+            &skills,
+            "z",
+            SkillsStatusFilter::All,
+            SkillSearchMode::Smart,
+            None,
+        );
+        assert!(
+            without_rank.matches.is_empty(),
+            "clearing the rank must run local-only fallback, not keep previous vector hits"
+        );
+    }
+
+    #[test]
+    fn parse_skills_search_payload_reads_names_and_degraded() {
+        let ok = serde_json::json!({ "names": ["commit", "alpha"], "degraded": false });
+        let (names, degraded) = parse_skills_search_payload(&ok).expect("ok payload");
+        assert_eq!(names, vec!["commit", "alpha"]);
+        assert!(!degraded);
+
+        let degraded_payload = serde_json::json!({ "names": ["commit"], "degraded": true });
+        let (names, degraded) =
+            parse_skills_search_payload(&degraded_payload).expect("degraded payload");
+        assert_eq!(names, vec!["commit"]);
+        assert!(degraded);
+
+        assert!(parse_skills_search_payload(&serde_json::json!({})).is_err());
+    }
+
+    #[test]
+    fn prepare_skills_smart_search_fetch_clears_rank_without_bumping_gen() {
+        let mut state = ExtensionsModalState::new(ExtensionsTab::Skills);
+        state.skills_search_mode = SkillSearchMode::Smart;
+        state.skills_smart_rank = Some(vec!["stale".into()]);
+        assert!(
+            state.prepare_skills_smart_search_fetch().is_none(),
+            "empty query must not search"
+        );
+        assert!(state.skills_smart_rank.is_none());
+
+        state.picker_state.set_query("commit");
+        state.skills_smart_rank = Some(vec!["stale".into()]);
+        assert_eq!(
+            state.prepare_skills_smart_search_fetch().as_deref(),
+            Some("commit")
+        );
+        assert!(state.skills_smart_rank.is_none());
+
+        state.skills_search_mode = SkillSearchMode::Local;
+        state.skills_smart_rank = Some(vec!["stale".into()]);
+        assert!(state.prepare_skills_smart_search_fetch().is_none());
+        assert!(state.skills_smart_rank.is_none());
     }
 
     // ── Skills: selection clamping after filter ──────────────────────
@@ -4839,9 +5578,9 @@ mod tests {
     }
 
     #[test]
-    fn skills_tab_renders_workflows_group() {
+    fn skills_tab_does_not_render_workflows_group() {
         let mut state = ExtensionsModalState::new(ExtensionsTab::Skills);
-        state.skills_data = TabDataState::Loaded(vec![]);
+        state.skills_data = TabDataState::Loaded(SkillsTabSnapshot::empty());
         state.workflows_data = TabDataState::Loaded(vec![WorkflowInfo {
             name: "fix-ci".to_string(),
             description: "Fix failing CI on the current PR".to_string(),
@@ -4853,51 +5592,575 @@ mod tests {
         let mut buf = Buffer::empty(area);
         render_extensions_modal(&mut buf, area, &mut state, None, false, 0);
 
-        assert!(
-            buffer_count(&buf, "Workflows") >= 1,
-            "the Workflows group header must render on the Skills tab"
+        assert_eq!(
+            buffer_count(&buf, "Workflows"),
+            0,
+            "Skills is one list; workflows stay on /workflows"
         );
+        assert_eq!(buffer_count(&buf, "fix-ci"), 0);
+    }
+
+    #[test]
+    fn skills_tab_local_query_does_not_surface_description_only_workflows() {
+        let mut state = ExtensionsModalState::new(ExtensionsTab::Skills);
+        state.skills_data = TabDataState::Loaded(SkillsTabSnapshot::empty());
+        state.workflows_data = TabDataState::Loaded(vec![WorkflowInfo {
+            name: "fix-ci".into(),
+            description: "unique-workflow-token".into(),
+            when_to_use: None,
+            source: "project".into(),
+            path: None,
+        }]);
+        state.picker_state.set_query("unique-workflow-token");
+        let area = Rect::new(0, 0, 100, 40);
+        let mut buf = Buffer::empty(area);
+        render_extensions_modal(&mut buf, area, &mut state, None, false, 0);
+        let text = buffer_text(&buf);
+        assert!(!text.contains("Workflows"), "{text}");
         assert_eq!(
             buffer_count(&buf, "fix-ci"),
-            1,
-            "the workflow name must render as a row"
-        );
-        assert_eq!(
-            buffer_count(&buf, "(builtin)"),
-            1,
-            "the workflow source must render as the right label"
-        );
-        assert!(
-            state.entry_data_indices.iter().all(|d| d.is_none()),
-            "workflow rows (and the header) must not map to skill data indices"
+            0,
+            "Local query must not surface a description-only workflow row"
         );
     }
 
     #[test]
-    fn skills_tab_hides_unusable_workflow_names() {
+    fn mixed_version_list_payload_falls_back_to_legacy_skills() {
+        let legacy = serde_json::json!({
+            "skills": [{
+                "name": "commit",
+                "description": "Create commits",
+                "path": "commit/SKILL.md",
+                "scope": "local"
+            }]
+        });
+        let snapshot = parse_skills_list_payload(&legacy).unwrap();
+        assert_eq!(snapshot.rows.len(), 1);
+        assert_eq!(snapshot.rows[0].status, SkillHealthStatus::Untested);
+        let v1 = serde_json::json!({
+            "apiVersion": 1,
+            "generation": 4,
+            "fingerprint": "abcd",
+            "health": {
+                "validPass": 0,
+                "failed": 0,
+                "quarantined": 1,
+                "stale": 0,
+                "untested": 0
+            },
+            "skills": [{
+                "identity": {"parent_dir_name": "bad", "file_label": "bad/SKILL.md", "scope": null},
+                "status": "quarantined",
+                "enableable": false,
+                "skill": null
+            }]
+        });
+        let snapshot = parse_skills_list_payload(&v1).unwrap();
+        assert_eq!(snapshot.generation, 4);
+        assert_eq!(snapshot.rows.len(), 1);
+        assert!(!snapshot.rows[0].enableable);
+        assert_eq!(snapshot.rows[0].status, SkillHealthStatus::Quarantined);
+    }
+
+    #[test]
+    fn skills_tab_health_header_and_one_search_field_at_narrow_width() {
         let mut state = ExtensionsModalState::new(ExtensionsTab::Skills);
-        state.skills_data = TabDataState::Loaded(vec![]);
-        state.workflows_data = TabDataState::Loaded(vec![
-            WorkflowInfo {
-                name: "valid-workflow".into(),
-                description: "Valid".into(),
-                when_to_use: None,
-                source: "project".into(),
-                path: None,
+        let mut snapshot = SkillsTabSnapshot::from_skill_infos(vec![make_skill(
+            "commit",
+            "Create well-formatted git commits.",
+        )]);
+        snapshot.rows.push(ManagedSkillRow::from_quarantined(
+            &xai_grok_tools::implementations::skills::strict::QuarantinedSkill {
+                identity: SkillIdentity::new("bad", None),
+                diagnostics: vec![],
             },
-            WorkflowInfo {
-                name: "Not Launchable".into(),
-                description: "Invalid".into(),
-                when_to_use: None,
-                source: "project".into(),
-                path: None,
-            },
-        ]);
-        let area = Rect::new(0, 0, 100, 40);
+        ));
+        snapshot.health = SkillsHealthHeader::tally(snapshot.rows.iter().map(|r| r.status));
+        state.skills_data = TabDataState::Loaded(snapshot);
+        let area = Rect::new(0, 0, 60, 18);
+        let mut buf = Buffer::empty(area);
+        render_extensions_modal(&mut buf, area, &mut state, None, true, 0);
+        assert!(
+            buffer_count(&buf, "untested") >= 1 || buffer_count(&buf, "quarantined") >= 1,
+            "health header must render status vocabulary"
+        );
+        let search_hits = buffer_count(&buf, "Local:") + buffer_count(&buf, "Smart:");
+        assert_eq!(search_hits, 1, "exactly one search field at narrow width");
+        assert_eq!(buffer_count(&buf, "commit"), 1);
+    }
+
+    #[test]
+    fn skills_tab_footer_advertises_mode_new_regress_and_search() {
+        let mut state = ExtensionsModalState::new(ExtensionsTab::Skills);
+        state.skills_data = TabDataState::Loaded(SkillsTabSnapshot::empty());
+        let area = Rect::new(0, 0, 100, 24);
         let mut buf = Buffer::empty(area);
         render_extensions_modal(&mut buf, area, &mut state, None, false, 0);
-        assert_eq!(buffer_count(&buf, "valid-workflow"), 1);
-        assert_eq!(buffer_count(&buf, "Not Launchable"), 0);
+        let text = buffer_text(&buf);
+        assert!(text.contains("m mode"), "{text}");
+        assert!(text.contains("n new"), "{text}");
+        assert!(text.contains("g regress"), "{text}");
+        assert!(text.contains("/ search"), "{text}");
+    }
+
+    #[test]
+    fn skills_create_wizard_renders_name_description_and_hides_list_search() {
+        let mut state = ExtensionsModalState::new(ExtensionsTab::Skills);
+        state.skills_data = TabDataState::Loaded(SkillsTabSnapshot::empty());
+        state.input = Some(create_skill_wizard_input());
+        let area = Rect::new(0, 0, 100, 30);
+        let mut buf = Buffer::empty(area);
+        render_extensions_modal(&mut buf, area, &mut state, None, false, 0);
+        let text = buffer_text(&buf);
+        assert!(text.contains("Name"), "{text}");
+        assert!(text.contains("Description"), "{text}");
+        assert!(text.contains("Enter submit"), "{text}");
+        assert!(text.contains("Esc cancel"), "{text}");
+        assert!(
+            !text.contains("n new"),
+            "wizard footer must not advertise the list n shortcut\n{text}"
+        );
+        assert_eq!(
+            buffer_count(&buf, "Local:") + buffer_count(&buf, "Smart:"),
+            0,
+            "wizard must keep the single Skills search field hidden, not paint a second one\n{text}"
+        );
+    }
+
+    #[test]
+    fn skills_tab_compact_width_keeps_local_and_filter_from_sharing_cells() {
+        let mut state = ExtensionsModalState::new(ExtensionsTab::Skills);
+        state.skills_data =
+            TabDataState::Loaded(SkillsTabSnapshot::from_skill_infos(vec![make_skill(
+                "commit",
+                "Create well-formatted git commits.",
+            )]));
+        state.picker_state.set_query("abc");
+        let area = Rect::new(0, 0, 40, 18);
+        let mut buf = Buffer::empty(area);
+        render_extensions_modal(&mut buf, area, &mut state, None, true, 0);
+        let filter = state.skills_status_filter.label();
+        let search_y = state
+            .picker_state
+            .hit_areas
+            .as_ref()
+            .map(|h| h.search_bar.y)
+            .unwrap_or(0);
+        let row: String = (0..buf.area.width)
+            .map(|x| buf[(x, search_y)].symbol().to_string())
+            .collect();
+        if let (Some(local), Some(filt)) = (row.find("Local:"), row.find(filter)) {
+            assert!(
+                local + "Local:".len() <= filt,
+                "Local: and filter must not share cells: {row}"
+            );
+        }
+        assert!(row.contains("Local:"), "{row}");
+    }
+
+    #[test]
+    fn skills_search_filter_selection_survive_generation_update() {
+        let mut state = ExtensionsModalState::new(ExtensionsTab::Skills);
+        let mut snapshot = SkillsTabSnapshot::from_skill_infos(vec![
+            make_skill("alpha", "A"),
+            make_skill("commit", "Format git history."),
+            make_skill("zeta", "Z"),
+        ]);
+        snapshot.generation = 3;
+        state.skills_data = TabDataState::Loaded(snapshot);
+        state.picker_state.set_query("commit");
+        state.skills_status_filter = SkillsStatusFilter::Untested;
+        state.skills_anchor_identity = Some(SkillIdentity::new(
+            "commit",
+            Some(xai_grok_tools::implementations::skills::types::SkillScope::User),
+        ));
+        state.prime_index = Some(xai_grok_shell::session::prime::PrimeIndexStatus {
+            api_version: 1,
+            generation: 3,
+            fingerprint_short: "oldfp".into(),
+            skills: xai_grok_shell::session::prime::PrimeIndexCollectionStatus {
+                collection: "skills".into(),
+                generation: 3,
+                fingerprint_short: "oldfp".into(),
+                item_count: 3,
+                vector_count: 1,
+                missing_vectors: 2,
+                readiness: "pending".into(),
+                route_id: None,
+                dimensions: None,
+            },
+            agents: xai_grok_shell::session::prime::PrimeIndexCollectionStatus {
+                collection: "agents".into(),
+                generation: 0,
+                fingerprint_short: String::new(),
+                item_count: 0,
+                vector_count: 0,
+                missing_vectors: 0,
+                readiness: "ready".into(),
+                route_id: None,
+                dimensions: None,
+            },
+            job: None,
+            configured_route: None,
+            capabilities: xai_grok_shell::session::prime::PrimeIndexCapabilities::SUPPORTED,
+            unchanged: false,
+        });
+        state.apply_prime_index_update(&xai_grok_shell::session::prime::PrimeIndexUpdate {
+            schema_version: 1,
+            api_version: Some(1),
+            generation: 9,
+            notify_seq: 1,
+            fingerprint_short: "abc123def456".into(),
+            job: Some(xai_grok_shell::session::prime::PrimeIndexJobStatus {
+                api_version: 1,
+                job_id: "j2".into(),
+                kind: "backfill".into(),
+                collection: "skills".into(),
+                state: "running".into(),
+                generation: 9,
+                fingerprint_short: "abc123def456".into(),
+                done: 1,
+                total: 3,
+                confirm_configured_profile: false,
+                configured_route: None,
+                failure: None,
+            }),
+            changed_fields: vec!["job".into()],
+        });
+        assert_eq!(state.picker_state.query(), "commit");
+        assert_eq!(state.skills_status_filter, SkillsStatusFilter::Untested);
+        assert_eq!(
+            state
+                .skills_anchor_identity
+                .as_ref()
+                .map(|i| i.parent_dir_name.as_str()),
+            Some("commit")
+        );
+        assert_eq!(
+            state.prime_index.as_ref().map(|s| s.generation),
+            Some(9),
+            "generation update must apply without resetting search/filter/selection"
+        );
+        let area = Rect::new(0, 0, 72, 18);
+        let mut buf = Buffer::empty(area);
+        render_extensions_modal(&mut buf, area, &mut state, None, true, 0);
+        assert_eq!(
+            state.picker_state.query(),
+            "commit",
+            "search query must survive render after generation update"
+        );
+        assert_eq!(buffer_count(&buf, "alpha"), 0);
+        assert_eq!(buffer_count(&buf, "zeta"), 0);
+        assert!(
+            buffer_count(&buf, "commit") >= 1,
+            "filtered selection must still show the anchored skill"
+        );
+        assert!(
+            state.picker_state.selected >= 1,
+            "anchor restore must leave the header and land on the commit row, got {}",
+            state.picker_state.selected
+        );
+        let footer = state.prime_index_footer_line(true).expect("compact footer");
+        assert!(footer.contains("running"), "{footer}");
+        assert!(
+            footer.len() < 80,
+            "compact footer must fit a narrow terminal: {footer}"
+        );
+        assert!(!footer.contains("/Users/"), "{footer}");
+        assert!(!footer.contains("http"), "{footer}");
+    }
+
+    #[test]
+    fn skills_anchor_restore_is_one_shot_and_down_key_moves_selection() {
+        let mut state = ExtensionsModalState::new(ExtensionsTab::Skills);
+        let snapshot = SkillsTabSnapshot::from_skill_infos(vec![
+            make_skill("alpha", "A"),
+            make_skill("commit", "Format git history."),
+            make_skill("zeta", "Z"),
+        ]);
+        state.skills_data = TabDataState::Loaded(snapshot);
+        state.skills_status_filter = SkillsStatusFilter::All;
+        state.skills_anchor_identity = Some(SkillIdentity::new(
+            "commit",
+            Some(xai_grok_tools::implementations::skills::types::SkillScope::User),
+        ));
+        let area = Rect::new(0, 0, 72, 18);
+        let mut buf = Buffer::empty(area);
+        render_extensions_modal(&mut buf, area, &mut state, None, true, 0);
+        let restored = state.picker_state.selected;
+        assert!(
+            restored >= 1,
+            "anchor restore must land on the commit row, got {restored}"
+        );
+        assert!(
+            state.skills_anchor_identity.is_none(),
+            "restore anchor must be taken after one paint"
+        );
+        let query = state.picker_state.query().to_owned();
+        let filter = state.skills_status_filter;
+        let non_sel = state.entry_non_selectable.clone();
+        let entry_count = state.entry_data_indices.len();
+        let config = picker::PickerConfig {
+            title: None,
+            show_search_hint: true,
+            expandable: true,
+            esc_clears_query: true,
+            shortcuts: None,
+            pending_hint: None,
+            shortcuts_area: None,
+            non_selectable: &non_sel,
+            non_selectable_clickable: &[],
+            tabs: None,
+            active_tab: 0,
+            filter_label: None,
+            filter_key_hint: None,
+            filter_active: false,
+            action_keys: &[],
+            disable_search: false,
+            compact_bottom_bar: false,
+            search_only_on_slash: true,
+            vim_normal_first: false,
+        };
+        let down = crossterm::event::Event::Key(crossterm::event::KeyEvent::new(
+            KeyCode::Down,
+            KeyModifiers::NONE,
+        ));
+        let _ = picker::handle_picker_input(&down, &mut state.picker_state, entry_count, &config);
+        state.clear_skills_restore_anchor();
+        let after_down = state.picker_state.selected;
+        assert_ne!(
+            after_down, restored,
+            "down-key must leave the restored commit row"
+        );
+        let mut buf = Buffer::empty(area);
+        render_extensions_modal(&mut buf, area, &mut state, None, true, 0);
+        assert_eq!(
+            state.picker_state.selected, after_down,
+            "second paint must not snap back to the commit row"
+        );
+        assert_eq!(state.picker_state.query(), query);
+        assert_eq!(state.skills_status_filter, filter);
+    }
+
+    #[test]
+    fn compact_footer_does_not_splice_raw_failure() {
+        let mut state = ExtensionsModalState::new(ExtensionsTab::Skills);
+        let long_fail = "x".repeat(80);
+        state.prime_index = Some(xai_grok_shell::session::prime::PrimeIndexStatus {
+            api_version: 1,
+            generation: 4,
+            fingerprint_short: "abc123def456".into(),
+            skills: xai_grok_shell::session::prime::PrimeIndexCollectionStatus {
+                collection: "skills".into(),
+                generation: 4,
+                fingerprint_short: "abc123def456".into(),
+                item_count: 3,
+                vector_count: 1,
+                missing_vectors: 2,
+                readiness: "pending".into(),
+                route_id: None,
+                dimensions: None,
+            },
+            agents: xai_grok_shell::session::prime::PrimeIndexCollectionStatus {
+                collection: "agents".into(),
+                generation: 0,
+                fingerprint_short: String::new(),
+                item_count: 0,
+                vector_count: 0,
+                missing_vectors: 0,
+                readiness: "ready".into(),
+                route_id: None,
+                dimensions: None,
+            },
+            job: Some(xai_grok_shell::session::prime::PrimeIndexJobStatus {
+                api_version: 1,
+                job_id: "j1".into(),
+                kind: "backfill".into(),
+                collection: "skills".into(),
+                state: "failed".into(),
+                generation: 4,
+                fingerprint_short: "abc123def456".into(),
+                done: 2,
+                total: 3,
+                confirm_configured_profile: false,
+                configured_route: None,
+                failure: Some(long_fail.clone()),
+            }),
+            configured_route: None,
+            capabilities: xai_grok_shell::session::prime::PrimeIndexCapabilities::SUPPORTED,
+            unchanged: false,
+        });
+        let footer = state.prime_index_footer_line(true).expect("footer");
+        assert!(
+            footer.contains("failed") && footer.contains("2/3"),
+            "{footer}"
+        );
+        assert!(
+            !footer.contains(&long_fail),
+            "raw bounded failure must not appear in the compact footer: {footer}"
+        );
+        assert!(
+            footer.len() < 80,
+            "compact footer must fit a narrow terminal: {footer}"
+        );
+    }
+
+    fn buffer_text(buf: &Buffer) -> String {
+        let area = *buf.area();
+        let mut out = String::new();
+        for y in area.top()..area.bottom() {
+            for x in area.left()..area.right() {
+                out.push_str(buf[(x, y)].symbol());
+            }
+            out.push('\n');
+        }
+        out
+    }
+
+    #[test]
+    fn skills_footer_and_overlay_omit_malicious_confirm_payloads_at_narrow_width() {
+        let long = "x".repeat(200);
+        let cases = [
+            "http://127.0.0.1/v1",
+            "sk-live-secret",
+            "file:///tmp/secret",
+            "main\nsk-live-secret",
+            long.as_str(),
+        ];
+        for raw in cases {
+            let mut state = ExtensionsModalState::new(ExtensionsTab::Skills);
+            state.skills_data =
+                TabDataState::Loaded(SkillsTabSnapshot::from_skill_infos(vec![make_skill(
+                    "commit",
+                    "Create well-formatted git commits.",
+                )]));
+            state.prime_index_capable = true;
+            let mut status = state.prime_index.clone().unwrap_or_else(|| {
+                xai_grok_shell::session::prime::PrimeIndexStatus {
+                    api_version: 1,
+                    generation: 4,
+                    fingerprint_short: "abc123def456".into(),
+                    skills: xai_grok_shell::session::prime::PrimeIndexCollectionStatus {
+                        collection: "skills".into(),
+                        generation: 4,
+                        fingerprint_short: "abc123def456".into(),
+                        item_count: 3,
+                        vector_count: 1,
+                        missing_vectors: 2,
+                        readiness: "pending".into(),
+                        route_id: Some(raw.into()),
+                        dimensions: None,
+                    },
+                    agents: xai_grok_shell::session::prime::PrimeIndexCollectionStatus {
+                        collection: "agents".into(),
+                        generation: 0,
+                        fingerprint_short: String::new(),
+                        item_count: 0,
+                        vector_count: 0,
+                        missing_vectors: 0,
+                        readiness: "ready".into(),
+                        route_id: None,
+                        dimensions: None,
+                    },
+                    job: None,
+                    configured_route: Some(raw.into()),
+                    capabilities: xai_grok_shell::session::prime::PrimeIndexCapabilities::SUPPORTED,
+                    unchanged: false,
+                }
+            });
+            status.job = Some(xai_grok_shell::session::prime::PrimeIndexJobStatus {
+                api_version: 1,
+                job_id: "j1".into(),
+                kind: "backfill".into(),
+                collection: "skills".into(),
+                state: "failed".into(),
+                generation: 4,
+                fingerprint_short: "abc123def456".into(),
+                done: 0,
+                total: 3,
+                confirm_configured_profile: false,
+                configured_route: Some(raw.into()),
+                failure: Some(format!("confirm_required:{raw}")),
+            });
+            state.prime_index = Some(status);
+            state.modal_message = Some(ModalMessage::Confirmation {
+                message: format!(
+                    "Use configured route `{raw}`? This contacts the embedding profile."
+                ),
+                action: ConfirmationAction::PrimeIndex {
+                    kind: "backfill".into(),
+                    collection: "skills".into(),
+                },
+                pending_entry_index: None,
+            });
+            let area = Rect::new(0, 0, 40, 18);
+            let mut buf = Buffer::empty(area);
+            render_extensions_modal(&mut buf, area, &mut state, None, true, 0);
+            let text = buffer_text(&buf);
+            assert!(
+                !text.contains(raw.trim()),
+                "skills leaked {raw:?} in:\n{text}"
+            );
+            assert!(
+                !text.contains("127.0.0.1") || !raw.contains("127"),
+                "{text}"
+            );
+            assert!(
+                !text.contains("sk-live-secret") || !raw.contains("sk-"),
+                "{text}"
+            );
+            assert!(!text.contains("file://"), "{text}");
+            let footer = state.prime_index_footer_line(true).expect("footer");
+            assert!(
+                footer.contains("unavailable")
+                    || footer.contains("confirm")
+                    || footer.contains("failed"),
+                "{footer}"
+            );
+            assert!(!footer.contains(raw.trim()), "{footer}");
+            for row in text.lines() {
+                assert!(
+                    row.chars().count() <= 40,
+                    "narrow skills overlay must clamp, got {}: {row:?}",
+                    row.chars().count()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn prime_index_keys_hidden_when_shell_lacks_capability() {
+        let mut state = ExtensionsModalState::new(ExtensionsTab::Skills);
+        state.prime_index_capable = false;
+        let keys = extensions_action_keys_for_state(&state);
+        assert!(!keys.iter().any(|(ch, _)| *ch == 'b' || *ch == 'u'));
+        state.prime_index_capable = true;
+        let keys = extensions_action_keys_for_state(&state);
+        assert!(
+            keys.iter()
+                .any(|(ch, label)| *ch == 'b' && *label == "backfill")
+        );
+        assert!(
+            keys.iter()
+                .any(|(ch, label)| *ch == 'u' && *label == "rebuild")
+        );
+    }
+
+    #[test]
+    fn skills_search_render_does_not_start_regression() {
+        let mut state = ExtensionsModalState::new(ExtensionsTab::Skills);
+        state.skills_data =
+            TabDataState::Loaded(SkillsTabSnapshot::from_skill_infos(vec![make_skill(
+                "commit",
+                "Create well-formatted git commits.",
+            )]));
+        state.picker_state.set_query("commit");
+        let area = Rect::new(0, 0, 60, 18);
+        let mut buf = Buffer::empty(area);
+        render_extensions_modal(&mut buf, area, &mut state, None, true, 0);
+        assert!(state.pending_action.is_none());
+        assert_eq!(buffer_count(&buf, "regressing"), 0);
+        assert!(buffer_count(&buf, "commit") >= 1);
     }
 
     // ── Plugin fixtures ─────────────────────────────────────────────

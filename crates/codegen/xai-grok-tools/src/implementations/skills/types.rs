@@ -8,6 +8,7 @@ use strum::AsRefStr;
     Copy,
     PartialEq,
     Eq,
+    Hash,
     PartialOrd,
     Ord,
     serde::Serialize,
@@ -92,6 +93,14 @@ pub struct SkillInfo {
     /// Plugin root dir for plugin-backed skills, used for ${CLAUDE_PLUGIN_ROOT} expansion.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub plugin_root: Option<String>,
+    /// Directory searched at discovery (config path, injected dir, plugin
+    /// root, or config dir). Load-time `openat` walks every original
+    /// component from `/` (or a platform prefix alias such as
+    /// `/private/var`) through this root so a swapped ancestor cannot
+    /// redirect the SKILL.md body. Missing on rows that still have a
+    /// `skills/` path component, which uses that parent as the walk root.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub collection_root: Option<String>,
     /// Plugin data dir for plugin-backed skills, used for ${CLAUDE_PLUGIN_DATA} expansion.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub plugin_data: Option<String>,
@@ -185,6 +194,7 @@ impl Default for SkillInfo {
             plugin_name: None,
             plugin_version: None,
             plugin_root: None,
+            collection_root: None,
             plugin_data: None,
             allowed_tools: None,
             model: None,

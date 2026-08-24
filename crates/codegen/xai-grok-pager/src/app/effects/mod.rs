@@ -2584,10 +2584,12 @@ pub(crate) fn execute(
         }
         Effect::FetchSkillsList { agent_id, session_id: _ } => {
             let tx = acp_tx.clone();
+            let cwd = cwd.to_path_buf();
             tasks
                 .spawn(async move {
                     let params = serde_json::json!({
-                    "cwd": "."
+                    "cwd": cwd.to_string_lossy(),
+                    "apiVersion": 1
                 });
                     let req = acp::ExtRequest::new(
                         "x.ai/skills/list",
@@ -2602,12 +2604,7 @@ pub(crate) fn execute(
                                 )
                                 .unwrap_or_default();
                             let inner = wrapper.get("result").unwrap_or(&wrapper);
-                            serde_json::from_value::<
-                                Vec<
-                                    xai_grok_tools::implementations::skills::types::SkillInfo,
-                                >,
-                            >(inner.get("skills").cloned().unwrap_or_default())
-                                .map_err(|_| "couldn't load skills".to_string())
+                            crate::views::extensions_modal::parse_skills_list_payload(inner)
                         }
                         Err(e) => {
                             Err(
@@ -2617,6 +2614,47 @@ pub(crate) fn execute(
                     };
                     TaskResult::SkillsListLoaded {
                         agent_id,
+                        result,
+                    }
+                });
+        }
+        Effect::FetchSkillsSearch { agent_id, session_id, query, r#gen } => {
+            let tx = acp_tx.clone();
+            let cwd = cwd.to_path_buf();
+            tasks
+                .spawn(async move {
+                    let params = serde_json::json!({
+                    "cwd": cwd.to_string_lossy(),
+                    "query": query,
+                    "apiVersion": 1,
+                    "mode": "smart"
+                });
+                    let req = acp::ExtRequest::new(
+                        "x.ai/skills/search",
+                        serde_json::value::to_raw_value(&params)
+                            .expect("serialize skills/search params")
+                            .into(),
+                    );
+                    let result = match acp_send(req, &tx).await {
+                        Ok(resp) => {
+                            let wrapper: serde_json::Value = serde_json::from_str(
+                                    resp.0.get(),
+                                )
+                                .unwrap_or_default();
+                            let inner = wrapper.get("result").unwrap_or(&wrapper);
+                            crate::views::extensions_modal::parse_skills_search_payload(inner)
+                        }
+                        Err(e) => {
+                            Err(
+                                sanitize_user_error(&format!("couldn't search skills: {e}")),
+                            )
+                        }
+                    };
+                    TaskResult::SkillsSearchLoaded {
+                        agent_id,
+                        session_id,
+                        query,
+                        r#gen,
                         result,
                     }
                 });
@@ -2665,12 +2703,13 @@ pub(crate) fn execute(
         }
         Effect::ToggleSkill { agent_id, session_id: _, skill_name, enabled } => {
             let tx = acp_tx.clone();
+            let cwd = cwd.to_path_buf();
             tasks
                 .spawn(async move {
                     let params = serde_json::json!({
                     "name": skill_name,
                     "enabled": enabled,
-                    "cwd": ".",
+                    "cwd": cwd.to_string_lossy(),
                 });
                     let req = acp::ExtRequest::new(
                         "x.ai/skills/toggle",
@@ -2685,12 +2724,9 @@ pub(crate) fn execute(
                                 )
                                 .unwrap_or_default();
                             let inner = wrapper.get("result").unwrap_or(&wrapper);
-                            let parsed = serde_json::from_value::<
-                                Vec<
-                                    xai_grok_tools::implementations::skills::types::SkillInfo,
-                                >,
-                            >(inner.get("skills").cloned().unwrap_or_default())
-                                .map_err(|_| "couldn't toggle skill".to_string());
+                            let parsed =
+                                crate::views::extensions_modal::parse_skills_list_payload(inner)
+                                    .map_err(|_| "couldn't toggle skill".to_string());
                             if parsed.is_ok() {
                                 let refresh = acp::ExtRequest::new(
                                     "x.ai/skills/refresh-baseline",
@@ -2713,6 +2749,206 @@ pub(crate) fn execute(
                         result,
                     }
                 });
+        }
+        Effect::PublishSkill {
+            agent_id,
+            session_id: _,
+            name,
+            description,
+            scope,
+            body,
+        } => {
+            let tx = acp_tx.clone();
+            let cwd = cwd.to_path_buf();
+            tasks.spawn(async move {
+                let params = serde_json::json!({
+                    "apiVersion": 1,
+                    "cwd": cwd.to_string_lossy(),
+                    "name": name,
+                    "description": description,
+                    "scope": scope,
+                    "body": body,
+                });
+                let req = acp::ExtRequest::new(
+                    "x.ai/skills/publish",
+                    serde_json::value::to_raw_value(&params)
+                        .expect("serialize skills/publish params")
+                        .into(),
+                );
+                let result = match acp_send(req, &tx).await {
+                    Ok(_) => Ok(name),
+                    Err(e) => Err(sanitize_user_error(&format!("couldn't publish skill: {e}"))),
+                };
+                TaskResult::SkillPublishDone { agent_id, result }
+            });
+        }
+        Effect::RunSkillRegress {
+            agent_id,
+            session_id: _,
+            name,
+        } => {
+            let tx = acp_tx.clone();
+            let cwd = cwd.to_path_buf();
+            tasks.spawn(async move {
+                let params = serde_json::json!({
+                    "apiVersion": 1,
+                    "cwd": cwd.to_string_lossy(),
+                    "name": name,
+                });
+                let req = acp::ExtRequest::new(
+                    "x.ai/skills/regress/run",
+                    serde_json::value::to_raw_value(&params)
+                        .expect("serialize skills/regress/run params")
+                        .into(),
+                );
+                let result = match acp_send(req, &tx).await {
+                    Ok(_) => Ok(name),
+                    Err(e) => Err(sanitize_user_error(&format!("couldn't run regression: {e}"))),
+                };
+                TaskResult::SkillRegressDone { agent_id, result }
+            });
+        }
+        Effect::CancelSkillRegress {
+            agent_id,
+            session_id: _,
+            name,
+        } => {
+            let tx = acp_tx.clone();
+            let cwd = cwd.to_path_buf();
+            tasks.spawn(async move {
+                let params = serde_json::json!({
+                    "apiVersion": 1,
+                    "cwd": cwd.to_string_lossy(),
+                    "name": name,
+                });
+                let req = acp::ExtRequest::new(
+                    "x.ai/skills/regress/cancel",
+                    serde_json::value::to_raw_value(&params)
+                        .expect("serialize skills/regress/cancel params")
+                        .into(),
+                );
+                let result = match acp_send(req, &tx).await {
+                    Ok(_) => Ok(name),
+                    Err(e) => Err(sanitize_user_error(&format!("couldn't cancel regression: {e}"))),
+                };
+                TaskResult::SkillRegressCancelled { agent_id, result }
+            });
+        }
+        Effect::FetchPrimeIndexStatus {
+            agent_id,
+            session_id: _,
+            expected_generation,
+            expected_fingerprint,
+        } => {
+            let tx = acp_tx.clone();
+            let cwd = cwd.to_path_buf();
+            tasks.spawn(async move {
+                let result = prime_index_acp(
+                    &tx,
+                    "x.ai/prime/index/status",
+                    &cwd,
+                    None,
+                    false,
+                    expected_generation,
+                    expected_fingerprint,
+                    None,
+                )
+                .await
+                .and_then(|v| {
+                    serde_json::from_value::<xai_grok_shell::session::prime::PrimeIndexStatus>(v)
+                        .map_err(|_| "couldn't load prime index".to_string())
+                });
+                TaskResult::PrimeIndexStatusLoaded { agent_id, result }
+            });
+        }
+        Effect::PrimeIndexBackfill {
+            agent_id,
+            session_id: _,
+            collection,
+            confirm,
+            expected_generation,
+            expected_fingerprint,
+        } => {
+            let tx = acp_tx.clone();
+            let cwd = cwd.to_path_buf();
+            tasks.spawn(async move {
+                let result = prime_index_job_acp(
+                    &tx,
+                    "x.ai/prime/index/backfill",
+                    &cwd,
+                    &collection,
+                    confirm,
+                    expected_generation,
+                    expected_fingerprint,
+                    None,
+                )
+                .await;
+                TaskResult::PrimeIndexJobLoaded {
+                    agent_id,
+                    result,
+                    kind: "backfill".into(),
+                    collection,
+                }
+            });
+        }
+        Effect::PrimeIndexRebuild {
+            agent_id,
+            session_id: _,
+            collection,
+            confirm,
+            expected_generation,
+            expected_fingerprint,
+        } => {
+            let tx = acp_tx.clone();
+            let cwd = cwd.to_path_buf();
+            tasks.spawn(async move {
+                let result = prime_index_job_acp(
+                    &tx,
+                    "x.ai/prime/index/rebuild",
+                    &cwd,
+                    &collection,
+                    confirm,
+                    expected_generation,
+                    expected_fingerprint,
+                    None,
+                )
+                .await;
+                TaskResult::PrimeIndexJobLoaded {
+                    agent_id,
+                    result,
+                    kind: "rebuild".into(),
+                    collection,
+                }
+            });
+        }
+        Effect::PrimeIndexCancel {
+            agent_id,
+            session_id: _,
+            expected_generation,
+            expected_fingerprint,
+            job_id,
+        } => {
+            let tx = acp_tx.clone();
+            let cwd = cwd.to_path_buf();
+            tasks.spawn(async move {
+                let result = prime_index_job_acp(
+                    &tx,
+                    "x.ai/prime/index/cancel",
+                    &cwd,
+                    "all",
+                    false,
+                    expected_generation,
+                    expected_fingerprint,
+                    job_id,
+                )
+                .await;
+                TaskResult::PrimeIndexJobLoaded {
+                    agent_id,
+                    result,
+                    kind: "cancel".into(),
+                    collection: "all".into(),
+                }
+            });
         }
         Effect::CheckMarketplaceUpdates { agent_id, session_id } => {
             let tx = acp_tx.clone();
@@ -4608,9 +4844,51 @@ fn format_session_info(
         xai_grok_update::channel_label(),
     );
     let auth_lines = format_auth_lines(is_api_key_auth, api_key_env_set);
+    let prime_line = compact_session_prime_line(&info.data.context);
     format!(
-        "{title_line}  Shell version: {version_display}\n{auth_lines}  Session ID: {session_id}{conversation_line}\n  Working directory: {cwd}\n  Model: {model_display}{model_hash_line}{backend_line}{sandbox_line}{turn_line}\n  Context: {used} / {total} tokens ({pct}%)"
+        "{title_line}  Shell version: {version_display}\n{auth_lines}  Session ID: {session_id}{conversation_line}\n  Working directory: {cwd}\n  Model: {model_display}{model_hash_line}{backend_line}{sandbox_line}{turn_line}\n  Context: {used} / {total} tokens ({pct}%){prime_line}"
     )
+}
+fn compact_session_prime_line(ctx: &xai_grok_shell::session::acp_types::ContextInfo) -> String {
+    let Some(prime) = ctx.prime.as_ref() else {
+        return String::new();
+    };
+    if !prime.should_render() {
+        return String::new();
+    }
+    let mut parts: Vec<&str> = Vec::new();
+    if let Some(mode) = prime.selection_mode.as_deref().filter(|s| !s.is_empty()) {
+        parts.push(mode);
+    }
+    if let Some(ready) = prime.readiness.as_deref().filter(|s| !s.is_empty()) {
+        parts.push(ready);
+    }
+    let degr = if prime.degradation.is_empty() {
+        String::new()
+    } else {
+        prime
+            .degradation
+            .iter()
+            .take(4)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join(",")
+    };
+    let mut owned = parts.join(" · ");
+    if !degr.is_empty() {
+        if !owned.is_empty() {
+            owned.push_str(" · ");
+        }
+        owned.push_str(&degr);
+    }
+    if owned.is_empty() {
+        if let Some(status) = prime.status.as_deref() {
+            owned = status.to_owned();
+        } else {
+            return String::new();
+        }
+    }
+    format!("\n  Prime: {owned}")
 }
 /// Auth section for `/session-info` — login method + where to manage account/credits.
 ///
@@ -5510,9 +5788,88 @@ async fn run_retrieval_operation(
             RetrievalCommand::ConfirmMemoryReindex => RetrievalManagementResult::Error(
                 "reindex confirmation missing pending draft mutation; reload and retry".into(),
             ),
+            RetrievalCommand::PrimeIndexBackfill { .. }
+            | RetrievalCommand::PrimeIndexRebuild { .. }
+            | RetrievalCommand::PrimeIndexCancel => RetrievalManagementResult::Error(
+                "prime index operations are ACP methods, not retrieval graph mutations".into(),
+            ),
         },
     };
     TaskResult::RetrievalOperationComplete { agent_id, result }
+}
+
+async fn prime_index_acp(
+    tx: &AcpAgentTx,
+    method: &str,
+    cwd: &Path,
+    collection: Option<&str>,
+    confirm: bool,
+    expected_generation: Option<u64>,
+    expected_fingerprint: Option<String>,
+    job_id: Option<String>,
+) -> Result<serde_json::Value, String> {
+    let mut params = serde_json::json!({
+        "apiVersion": 1,
+        "cwd": cwd.to_string_lossy(),
+        "confirmConfiguredProfile": confirm,
+    });
+    if let Some(c) = collection {
+        params["collection"] = serde_json::Value::String(c.to_owned());
+    }
+    if let Some(g) = expected_generation {
+        params["expectedGeneration"] = serde_json::Value::from(g);
+    }
+    if let Some(fp) = expected_fingerprint {
+        params["expectedFingerprint"] = serde_json::Value::String(fp);
+    }
+    if let Some(id) = job_id.filter(|s| !s.is_empty()) {
+        params["jobId"] = serde_json::Value::String(id);
+    }
+    let req = acp::ExtRequest::new(
+        method,
+        serde_json::value::to_raw_value(&params)
+            .expect("serialize prime index params")
+            .into(),
+    );
+    match acp_send(req, tx).await {
+        Ok(resp) => {
+            let wrapper: serde_json::Value =
+                serde_json::from_str(resp.0.get()).unwrap_or_default();
+            Ok(wrapper.get("result").cloned().unwrap_or(wrapper))
+        }
+        Err(e) => {
+            if i32::from(e.code) == i32::from(acp::Error::method_not_found().code) {
+                Err("unsupported".into())
+            } else {
+                let raw = e.to_string();
+                Err(xai_grok_shell::session::prime::sanitize_prime_job_failure(&raw))
+            }
+        }
+    }
+}
+
+async fn prime_index_job_acp(
+    tx: &AcpAgentTx,
+    method: &str,
+    cwd: &Path,
+    collection: &str,
+    confirm: bool,
+    expected_generation: Option<u64>,
+    expected_fingerprint: Option<String>,
+    job_id: Option<String>,
+) -> Result<xai_grok_shell::session::prime::PrimeIndexJobStatus, String> {
+    let v = prime_index_acp(
+        tx,
+        method,
+        cwd,
+        Some(collection),
+        confirm,
+        expected_generation,
+        expected_fingerprint,
+        job_id,
+    )
+    .await?;
+    serde_json::from_value(v).map_err(|_| "couldn't parse prime index job".to_string())
 }
 
 

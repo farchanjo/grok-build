@@ -30,6 +30,7 @@ pub mod dream_lock;
 pub mod embedding;
 pub mod fingerprint;
 pub mod index;
+pub mod metadata_index;
 pub mod mmr;
 pub mod query_expansion;
 pub mod rebuild;
@@ -39,14 +40,26 @@ pub mod search;
 pub mod storage;
 pub mod text_utils;
 pub mod watcher;
+pub mod workspace_identity;
 
 pub use backend::{
     EndpointScopedCredentials, MemoryBackendImpl, MemoryBackendParams, resolve_embedding_provider,
 };
-pub use fingerprint::{EmbeddingSourceSpec, VectorFingerprint};
+pub use embedding::{
+    L2_NORMALIZATION_VERSION, NormalizeError, l2_normalize_v1, validate_embedding_batch,
+};
+pub use fingerprint::{
+    EmbeddingSourceSpec, NORMALIZATION_L2_V1, VECTOR_SCHEMA_VERSION, VectorFingerprint,
+};
 pub use index::{MemoryIndex, init_sqlite_vec};
+pub use metadata_index::{
+    CollectionKind, MetadataFtsHit, MetadataIndex, MetadataIndexError, MetadataItem,
+    MetadataKnnHit, UpsertResult, metadata_doc_prep, metadata_index_path,
+    metadata_index_path_for_cwd, reject_persisted_paths,
+};
 pub use retrieval::{MemoryRetrieval, RetrievalError, RetrievalErrorKind};
 pub use storage::{MemoryScope, MemoryStorage};
+pub use workspace_identity::workspace_storage_identity;
 
 /// Embed all chunks that don't have embeddings yet.
 ///
@@ -109,10 +122,9 @@ pub async fn embed_missing_chunks(
                     }
                 }
             }
-            Err(e) => {
+            Err(_) => {
                 tracing::warn!(
                     target: xai_grok_telemetry::memory_log::TARGET,
-                    error = %e,
                     batch_size = texts.len(),
                     "embedding batch failed, skipping"
                 );

@@ -127,12 +127,13 @@ fn find_skill<'a>(name: &str, skills: &'a [SkillInfo]) -> FindSkillResult<'a> {
 }
 
 /// Load skill content from its SKILL.md file, stripping YAML frontmatter.
+/// Revalidates strictly so a quarantined or swapped file cannot be invoked.
+/// The body is the bytes already read from the no-follow fd; the path
+/// string is never re-opened.
 async fn load_skill_content(skill: &SkillInfo) -> Result<String, String> {
-    let path = Path::new(&skill.path);
-    match tokio::fs::read_to_string(path).await {
-        Ok(content) => Ok(extract_skill_body(&content)),
-        Err(e) => Err(format!("Failed to read skill file '{}': {}", skill.path, e)),
-    }
+    let loaded = crate::implementations::skills::strict::revalidate_skill_file_at_load(skill)
+        .map_err(|e| e.to_string())?;
+    Ok(extract_skill_body(&loaded.content))
 }
 
 /// List up to `limit` bundled files in the skill directory, excluding SKILL.md.
@@ -340,7 +341,20 @@ mod tests {
 
     use crate::implementations::skills::types::SkillScope;
     use crate::types::resources::Resources;
+    use std::path::{Path, PathBuf};
     use tempfile::TempDir;
+
+    fn official_skill_md(name: &str, body: &str) -> String {
+        format!("---\nname: {name}\ndescription: A test skill called {name}.\n---\n{body}")
+    }
+
+    fn write_official_skill(root: &Path, name: &str, body: &str) -> PathBuf {
+        let dir = root.join("skills").join(name);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("SKILL.md");
+        std::fs::write(&path, official_skill_md(name, body)).unwrap();
+        path
+    }
 
     fn make_test_skill(name: &str, scope: SkillScope, path: &str) -> SkillInfo {
         SkillInfo {
@@ -356,6 +370,7 @@ mod tests {
             plugin_name: None,
             plugin_version: None,
             plugin_root: None,
+            collection_root: None,
             plugin_data: None,
             allowed_tools: None,
             license: None,
@@ -571,12 +586,7 @@ mod tests {
     #[tokio::test]
     async fn skill_loads_content_from_file() {
         let tmp = TempDir::new().unwrap();
-        let skill_path = tmp.path().join("SKILL.md");
-        std::fs::write(
-            &skill_path,
-            "---\nname: test\ndescription: A test\n---\n# Test Skill\n\nDo the thing.",
-        )
-        .unwrap();
+        let skill_path = write_official_skill(tmp.path(), "test", "# Test Skill\n\nDo the thing.");
 
         let mut resources = Resources::new();
         resources.insert(AvailableSkills(vec![make_test_skill(
@@ -617,12 +627,7 @@ mod tests {
         use crate::types::output::ToolOutput;
 
         let tmp = TempDir::new().unwrap();
-        let skill_path = tmp.path().join("SKILL.md");
-        std::fs::write(
-            &skill_path,
-            "---\nname: test\ndescription: A test\n---\n# Test Skill\n\nDo the thing.",
-        )
-        .unwrap();
+        let skill_path = write_official_skill(tmp.path(), "test", "# Test Skill\n\nDo the thing.");
 
         let mut resources = Resources::new();
         resources.insert(AvailableSkills(vec![make_test_skill(
@@ -654,10 +659,10 @@ mod tests {
     #[tokio::test]
     async fn skill_lists_bundled_files() {
         let tmp = TempDir::new().unwrap();
-        let skill_path = tmp.path().join("SKILL.md");
-        std::fs::write(&skill_path, "# Skill\n\nContent.").unwrap();
-        std::fs::write(tmp.path().join("helper.sh"), "#!/bin/bash").unwrap();
-        std::fs::write(tmp.path().join("reference.md"), "# Ref").unwrap();
+        let skill_path = write_official_skill(tmp.path(), "test", "# Skill\n\nContent.");
+        let skill_dir = skill_path.parent().unwrap();
+        std::fs::write(skill_dir.join("helper.sh"), "#!/bin/bash").unwrap();
+        std::fs::write(skill_dir.join("reference.md"), "# Ref").unwrap();
 
         let mut resources = Resources::new();
         resources.insert(AvailableSkills(vec![make_test_skill(
@@ -712,8 +717,7 @@ mod tests {
     #[tokio::test]
     async fn works_through_erased_interface() {
         let tmp = TempDir::new().unwrap();
-        let skill_path = tmp.path().join("SKILL.md");
-        std::fs::write(&skill_path, "# Hello\n\nContent.").unwrap();
+        let skill_path = write_official_skill(tmp.path(), "hello", "# Hello\n\nContent.");
 
         let mut resources = Resources::new();
         resources.insert(AvailableSkills(vec![make_test_skill(
@@ -740,12 +744,7 @@ mod tests {
     #[tokio::test]
     async fn frontmatter_stripping() {
         let tmp = TempDir::new().unwrap();
-        let skill_path = tmp.path().join("SKILL.md");
-        std::fs::write(
-            &skill_path,
-            "---\nname: deploy\ndescription: Deploy to prod\ntags: [ops]\n---\nRun the deploy pipeline.",
-        )
-        .unwrap();
+        let skill_path = write_official_skill(tmp.path(), "deploy", "Run the deploy pipeline.");
 
         let mut resources = Resources::new();
         resources.insert(AvailableSkills(vec![make_test_skill(
@@ -778,9 +777,9 @@ mod tests {
     #[tokio::test]
     async fn skill_message_xml_structure() {
         let tmp = TempDir::new().unwrap();
-        let skill_path = tmp.path().join("SKILL.md");
-        std::fs::write(&skill_path, "---\nname: fmt\n---\nFormat the code.").unwrap();
-        std::fs::write(tmp.path().join("fmt.sh"), "#!/bin/bash").unwrap();
+        let skill_path = write_official_skill(tmp.path(), "fmt", "Format the code.");
+        let skill_dir = skill_path.parent().unwrap();
+        std::fs::write(skill_dir.join("fmt.sh"), "#!/bin/bash").unwrap();
 
         let mut resources = Resources::new();
         resources.insert(AvailableSkills(vec![make_test_skill(
@@ -810,14 +809,14 @@ mod tests {
         // Must have Base directory line
         assert!(msg.contains(&format!(
             "Base directory for this skill: file://{}",
-            tmp.path().display()
+            skill_dir.display()
         )));
         // Must have <skill_files> block
         assert!(msg.contains("<skill_files>\n"));
         // Must list the bundled file
         assert!(msg.contains(&format!(
             "<file>{}</file>",
-            tmp.path().join("fmt.sh").display()
+            skill_dir.join("fmt.sh").display()
         )));
         // Must close with </skill_content>
         assert!(msg.ends_with("</skill_content>"));
@@ -829,14 +828,12 @@ mod tests {
         let skill_dir = tmp.path().join("my-skills").join("linter");
         std::fs::create_dir_all(&skill_dir).unwrap();
         let skill_path = skill_dir.join("SKILL.md");
-        std::fs::write(&skill_path, "Lint all files.").unwrap();
+        std::fs::write(&skill_path, official_skill_md("linter", "Lint all files.")).unwrap();
 
+        let mut skill = make_test_skill("linter", SkillScope::User, skill_path.to_str().unwrap());
+        skill.collection_root = Some(tmp.path().join("my-skills").to_string_lossy().into_owned());
         let mut resources = Resources::new();
-        resources.insert(AvailableSkills(vec![make_test_skill(
-            "linter",
-            SkillScope::User,
-            skill_path.to_str().unwrap(),
-        )]));
+        resources.insert(AvailableSkills(vec![skill]));
 
         let tool = SkillTool;
         let output = xai_tool_runtime::Tool::run(
@@ -865,8 +862,7 @@ mod tests {
     #[tokio::test]
     async fn skill_with_no_bundled_files() {
         let tmp = TempDir::new().unwrap();
-        let skill_path = tmp.path().join("SKILL.md");
-        std::fs::write(&skill_path, "Solo skill, no extras.").unwrap();
+        let skill_path = write_official_skill(tmp.path(), "solo", "Solo skill, no extras.");
 
         let mut resources = Resources::new();
         resources.insert(AvailableSkills(vec![make_test_skill(
@@ -897,9 +893,7 @@ mod tests {
     #[tokio::test]
     async fn empty_skill_content() {
         let tmp = TempDir::new().unwrap();
-        let skill_path = tmp.path().join("SKILL.md");
-        // SKILL.md with only frontmatter — body after stripping is empty.
-        std::fs::write(&skill_path, "---\nname: empty\ndescription: nothing\n---\n").unwrap();
+        let skill_path = write_official_skill(tmp.path(), "empty", "");
 
         let mut resources = Resources::new();
         resources.insert(AvailableSkills(vec![make_test_skill(
@@ -935,17 +929,13 @@ mod tests {
     #[tokio::test]
     async fn ten_file_cap() {
         let tmp = TempDir::new().unwrap();
-        let skill_path = tmp.path().join("SKILL.md");
-        std::fs::write(
-            &skill_path,
-            "---\nname: bigskill\ndescription: lots of files\n---\nDo stuff.",
-        )
-        .unwrap();
+        let skill_path = write_official_skill(tmp.path(), "bigskill", "Do stuff.");
+        let skill_dir = skill_path.parent().unwrap();
 
         // Create 15 extra files in the skill directory.
         for i in 1..=15 {
             std::fs::write(
-                tmp.path().join(format!("file{i:02}.txt")),
+                skill_dir.join(format!("file{i:02}.txt")),
                 format!("content {i}"),
             )
             .unwrap();
@@ -975,6 +965,309 @@ mod tests {
         assert!(
             file_tag_count <= 10,
             "Expected at most 10 <file> entries, got {file_tag_count}"
+        );
+    }
+
+    #[tokio::test]
+    async fn unofficial_skill_cannot_be_invoked() {
+        let tmp = TempDir::new().unwrap();
+        let skill_dir = tmp.path().join("leaky");
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        let skill_path = skill_dir.join("SKILL.md");
+        std::fs::write(
+            &skill_path,
+            "---\nname: leaky\ndescription: A quarantined skill.\nwhen-to-use: secret-token\n---\nBody\n",
+        )
+        .unwrap();
+
+        let mut resources = Resources::new();
+        resources.insert(AvailableSkills(vec![make_test_skill(
+            "leaky",
+            SkillScope::Local,
+            skill_path.to_str().unwrap(),
+        )]));
+
+        let tool = SkillTool;
+        let output = xai_tool_runtime::Tool::run(
+            &tool,
+            test_ctx(resources.into_shared()),
+            SkillInput {
+                name: "leaky".into(),
+            },
+        )
+        .await
+        .unwrap();
+
+        assert!(!output.success);
+        assert!(output.tool_result.contains("Failed to load"));
+        assert!(output.error.is_some());
+        let dump = format!("{output:?}");
+        assert!(!dump.contains("secret-token"));
+    }
+
+    fn write_tool_skill(root: &Path, name: &str, body: &str) -> PathBuf {
+        let dir = root.join("skills").join(name);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("SKILL.md");
+        std::fs::write(&path, official_skill_md(name, body)).unwrap();
+        path
+    }
+
+    async fn invoke_skill(path: &Path, name: &str) -> SkillOutput {
+        let mut resources = Resources::new();
+        resources.insert(AvailableSkills(vec![make_test_skill(
+            name,
+            SkillScope::Local,
+            path.to_str().unwrap(),
+        )]));
+        let tool = SkillTool;
+        xai_tool_runtime::Tool::run(
+            &tool,
+            test_ctx(resources.into_shared()),
+            SkillInput { name: name.into() },
+        )
+        .await
+        .unwrap()
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn skill_tool_rejects_ancestor_dir_symlink_after_discovery() {
+        let tmp = TempDir::new().unwrap();
+        let skill_path = write_tool_skill(tmp.path(), "commit", "Trusted body.");
+        let skills_dir = tmp.path().join("skills");
+        let real = tmp.path().join("skills.real");
+        std::fs::rename(&skills_dir, &real).unwrap();
+        let evil_root = TempDir::new().unwrap();
+        write_tool_skill(evil_root.path(), "commit", "EVIL_SECRET_BODY");
+        std::os::unix::fs::symlink(evil_root.path().join("skills"), &skills_dir).unwrap();
+
+        let output = invoke_skill(&skill_path, "commit").await;
+        assert!(!output.success);
+        assert!(output.skill_message.is_none());
+        let dump = format!("{output:?}");
+        assert!(!dump.contains("EVIL_SECRET_BODY"));
+        assert!(
+            output.tool_result.contains("symlink")
+                || output.error.as_deref().unwrap_or("").contains("symlink")
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn skill_tool_rejects_leaf_symlink() {
+        let tmp = TempDir::new().unwrap();
+        let skill_path = write_tool_skill(tmp.path(), "commit", "Trusted body.");
+        let evil = tmp.path().join("evil.md");
+        std::fs::write(&evil, official_skill_md("commit", "EVIL_SECRET_BODY")).unwrap();
+        std::fs::remove_file(&skill_path).unwrap();
+        std::os::unix::fs::symlink(&evil, &skill_path).unwrap();
+
+        let output = invoke_skill(&skill_path, "commit").await;
+        assert!(!output.success);
+        assert!(output.skill_message.is_none());
+        let dump = format!("{output:?}");
+        assert!(!dump.contains("EVIL_SECRET_BODY"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn skill_tool_rejects_leaf_swap_between_revalidate_and_body() {
+        let tmp = TempDir::new().unwrap();
+        let skill_path = write_tool_skill(tmp.path(), "commit", "Trusted body.");
+        let evil = tmp.path().join("evil.md");
+        std::fs::write(&evil, official_skill_md("commit", "EVIL_SECRET_BODY")).unwrap();
+        let swap_path = skill_path.clone();
+        crate::implementations::skills::strict::set_after_nofollow_read_hook(move || {
+            std::fs::remove_file(&swap_path).unwrap();
+            std::os::unix::fs::symlink(&evil, &swap_path).unwrap();
+        });
+
+        let output = invoke_skill(&skill_path, "commit").await;
+        assert!(!output.success);
+        assert!(output.skill_message.is_none());
+        let dump = format!("{output:?}");
+        assert!(!dump.contains("EVIL_SECRET_BODY"));
+        assert!(
+            output.tool_result.contains("symlink")
+                || output.error.as_deref().unwrap_or("").contains("symlink")
+        );
+    }
+
+    fn write_deep_nested_tool_skill(root: &Path, name: &str, body: &str) -> PathBuf {
+        let dir = root.join("skills").join("team").join(name);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("SKILL.md");
+        std::fs::write(&path, official_skill_md(name, body)).unwrap();
+        path
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn skill_tool_rejects_nested_ancestor_dir_symlink_after_discovery() {
+        let tmp = TempDir::new().unwrap();
+        let skill_path = write_deep_nested_tool_skill(tmp.path(), "infra", "Trusted body.");
+        let skills_dir = tmp.path().join("skills");
+        let real = tmp.path().join("skills.real");
+        std::fs::rename(&skills_dir, &real).unwrap();
+        let evil_root = TempDir::new().unwrap();
+        write_deep_nested_tool_skill(evil_root.path(), "infra", "EVIL_SECRET_BODY");
+        std::os::unix::fs::symlink(evil_root.path().join("skills"), &skills_dir).unwrap();
+
+        let output = invoke_skill(&skill_path, "infra").await;
+        assert!(!output.success);
+        assert!(output.skill_message.is_none());
+        let dump = format!("{output:?}");
+        assert!(!dump.contains("EVIL_SECRET_BODY"));
+        assert!(
+            output.tool_result.contains("symlink")
+                || output.error.as_deref().unwrap_or("").contains("symlink")
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn skill_tool_rejects_parent_of_skills_dir_symlink_after_discovery() {
+        let tmp = TempDir::new().unwrap();
+        let grok = tmp.path().join(".grok");
+        let skill_path = write_tool_skill(&grok, "commit", "Trusted body.");
+        let real = tmp.path().join(".grok.real");
+        std::fs::rename(&grok, &real).unwrap();
+        let evil_root = TempDir::new().unwrap();
+        write_tool_skill(evil_root.path(), "commit", "EVIL_SECRET_BODY");
+        std::os::unix::fs::symlink(evil_root.path(), &grok).unwrap();
+
+        let output = invoke_skill(&skill_path, "commit").await;
+        assert!(!output.success);
+        assert!(output.skill_message.is_none());
+        let dump = format!("{output:?}");
+        assert!(!dump.contains("EVIL_SECRET_BODY"));
+        assert!(
+            output.tool_result.contains("symlink")
+                || output.error.as_deref().unwrap_or("").contains("symlink")
+        );
+    }
+
+    async fn invoke_skill_info(skill: SkillInfo) -> SkillOutput {
+        let name = skill.name.clone();
+        let mut resources = Resources::new();
+        resources.insert(AvailableSkills(vec![skill]));
+        let tool = SkillTool;
+        xai_tool_runtime::Tool::run(
+            &tool,
+            test_ctx(resources.into_shared()),
+            SkillInput { name },
+        )
+        .await
+        .unwrap()
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn skill_tool_rejects_project_dir_symlink_after_discovery() {
+        let tmp = TempDir::new().unwrap();
+        let proj = tmp.path().join("proj");
+        std::fs::create_dir_all(&proj).unwrap();
+        let grok = proj.join(".grok");
+        let skill_path = write_tool_skill(&grok, "commit", "Trusted body.");
+        let real = tmp.path().join("proj.real");
+        std::fs::rename(&proj, &real).unwrap();
+        let evil_root = TempDir::new().unwrap();
+        write_tool_skill(
+            &evil_root.path().join(".grok"),
+            "commit",
+            "EVIL_SECRET_BODY",
+        );
+        std::os::unix::fs::symlink(evil_root.path(), &proj).unwrap();
+
+        let output = invoke_skill(&skill_path, "commit").await;
+        assert!(!output.success);
+        assert!(output.skill_message.is_none());
+        let dump = format!("{output:?}");
+        assert!(!dump.contains("EVIL_SECRET_BODY"));
+        assert!(
+            output.tool_result.contains("symlink")
+                || output.error.as_deref().unwrap_or("").contains("symlink")
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn skill_tool_rejects_nested_collection_root_symlink_after_discovery() {
+        let tmp = TempDir::new().unwrap();
+        let pack = tmp.path().join("pack");
+        let dir = pack.join("team").join("infra");
+        std::fs::create_dir_all(&dir).unwrap();
+        let skill_path = dir.join("SKILL.md");
+        std::fs::write(&skill_path, official_skill_md("infra", "Trusted body.")).unwrap();
+        let mut skill = make_test_skill("infra", SkillScope::Local, skill_path.to_str().unwrap());
+        skill.collection_root = Some(pack.to_string_lossy().into_owned());
+        let ok = invoke_skill_info(skill.clone()).await;
+        assert!(
+            ok.success,
+            "nested collection must load from the stamped root"
+        );
+
+        let real = tmp.path().join("pack.real");
+        std::fs::rename(&pack, &real).unwrap();
+        let evil_root = TempDir::new().unwrap();
+        let evil_dir = evil_root.path().join("team").join("infra");
+        std::fs::create_dir_all(&evil_dir).unwrap();
+        std::fs::write(
+            evil_dir.join("SKILL.md"),
+            official_skill_md("infra", "EVIL_SECRET_BODY"),
+        )
+        .unwrap();
+        std::os::unix::fs::symlink(evil_root.path(), &pack).unwrap();
+
+        let output = invoke_skill_info(skill).await;
+        assert!(!output.success);
+        assert!(output.skill_message.is_none());
+        let dump = format!("{output:?}");
+        assert!(!dump.contains("EVIL_SECRET_BODY"));
+        assert!(
+            output.tool_result.contains("symlink")
+                || output.error.as_deref().unwrap_or("").contains("symlink")
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn skill_tool_rejects_stamped_skill_dir_grandparent_symlink_after_discovery() {
+        let tmp = TempDir::new().unwrap();
+        let pack = tmp.path().join("pack");
+        let dir = pack.join("team").join("infra");
+        std::fs::create_dir_all(&dir).unwrap();
+        let skill_path = dir.join("SKILL.md");
+        std::fs::write(&skill_path, official_skill_md("infra", "Trusted body.")).unwrap();
+        let mut skill = make_test_skill("infra", SkillScope::Local, skill_path.to_str().unwrap());
+        skill.collection_root = Some(dir.to_string_lossy().into_owned());
+        let ok = invoke_skill_info(skill.clone()).await;
+        assert!(
+            ok.success,
+            "stamped skill dir must load before the grandparent swap"
+        );
+
+        let real = tmp.path().join("pack.real");
+        std::fs::rename(&pack, &real).unwrap();
+        let evil_root = TempDir::new().unwrap();
+        let evil_dir = evil_root.path().join("team").join("infra");
+        std::fs::create_dir_all(&evil_dir).unwrap();
+        std::fs::write(
+            evil_dir.join("SKILL.md"),
+            official_skill_md("infra", "EVIL_SECRET_BODY"),
+        )
+        .unwrap();
+        std::os::unix::fs::symlink(evil_root.path(), &pack).unwrap();
+
+        let output = invoke_skill_info(skill).await;
+        assert!(!output.success);
+        assert!(output.skill_message.is_none());
+        let dump = format!("{output:?}");
+        assert!(!dump.contains("EVIL_SECRET_BODY"));
+        assert!(
+            output.tool_result.contains("symlink")
+                || output.error.as_deref().unwrap_or("").contains("symlink")
         );
     }
 }

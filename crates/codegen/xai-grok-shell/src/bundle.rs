@@ -105,9 +105,9 @@ pub fn read_cached_manifest(root: &Path) -> Result<Option<BundleManifest>> {
 
 pub fn write_bundle_to_cache(root: &Path, bundle: &SubagentBundle) -> Result<BundleManifest> {
     let old_manifest = read_cached_manifest(root)?.map(sanitize_manifest);
-    ensure_bundle_dirs(root)?;
-
     let bundle_files = bundle_files(bundle)?;
+    reject_invalid_bundle_skills(&bundle.skills)?;
+    ensure_bundle_dirs(root)?;
     let mut next_checksums = HashMap::new();
 
     for bundle_file in &bundle_files {
@@ -154,9 +154,8 @@ pub fn extract_bundle_archive(root: &Path, archive_bytes: &[u8]) -> Result<Bundl
     let mut archive = tar::Archive::new(decoder);
 
     let old_manifest = read_cached_manifest(root)?.map(sanitize_manifest);
-    ensure_bundle_dirs(root)?;
 
-    let mut next_checksums = HashMap::new();
+    let mut pending: Vec<(String, Vec<u8>, String)> = Vec::new();
     let mut version = String::new();
     let mut total_decompressed: usize = 0;
     let mut entry_count: usize = 0;
@@ -218,7 +217,18 @@ pub fn extract_bundle_archive(root: &Path, archive_bytes: &[u8]) -> Result<Bundl
             .read_to_end(&mut content)
             .with_context(|| format!("failed to read archive entry: {path}"))?;
         let checksum = checksum_bytes(&content);
+        pending.push((cache_relative_path, content, checksum));
+    }
 
+    if version.is_empty() {
+        bail!("archive missing bundle.json with version field");
+    }
+
+    reject_pending_skill_md_candidates(&pending)?;
+
+    ensure_bundle_dirs(root)?;
+    let mut next_checksums = HashMap::new();
+    for (cache_relative_path, content, checksum) in pending {
         let absolute_path = root.join(&cache_relative_path);
         let previous_checksum = old_manifest
             .as_ref()
@@ -235,10 +245,6 @@ pub fn extract_bundle_archive(root: &Path, archive_bytes: &[u8]) -> Result<Bundl
                 }
             }
         }
-    }
-
-    if version.is_empty() {
-        bail!("archive missing bundle.json with version field");
     }
 
     if let Some(old_manifest) = old_manifest.as_ref() {
@@ -451,6 +457,62 @@ fn relative_path_for(kind: BundleFileKind, name: &str) -> String {
     }
 }
 
+fn reject_invalid_bundle_skills(skills: &std::collections::HashMap<String, String>) -> Result<()> {
+    for (name, content) in skills {
+        if !bundled_skill_content_is_valid(name, content) {
+            bail!("bundled skill candidate failed strict validation; last-known-good retained");
+        }
+    }
+    Ok(())
+}
+
+fn skill_root_name_from_cache_path(relative_path: &str) -> Option<&str> {
+    let rest = relative_path.strip_prefix("skills/")?;
+    let (name, file) = rest.split_once('/')?;
+    if file == "SKILL.md" && !name.is_empty() && !name.contains('/') {
+        Some(name)
+    } else {
+        None
+    }
+}
+
+fn cache_path_is_skill_md(relative_path: &str) -> bool {
+    relative_path == "SKILL.md" || relative_path.ends_with("/SKILL.md")
+}
+
+/// Every pending `SKILL.md` is a skill candidate. Nested paths such as
+/// `skills/<name>/.../SKILL.md` are not a supported bundle skill shape and
+/// must fail closed before any write so last-known-good is retained.
+fn reject_pending_skill_md_candidates(pending: &[(String, Vec<u8>, String)]) -> Result<()> {
+    for (relative_path, content, _) in pending {
+        if !cache_path_is_skill_md(relative_path) {
+            continue;
+        }
+        let Some(name) = skill_root_name_from_cache_path(relative_path) else {
+            bail!("bundled skill candidate failed strict validation; last-known-good retained");
+        };
+        let text = std::str::from_utf8(content).unwrap_or("");
+        if !bundled_skill_content_is_valid(name, text) {
+            bail!("bundled skill candidate failed strict validation; last-known-good retained");
+        }
+    }
+    Ok(())
+}
+
+fn bundled_skill_content_is_valid(name: &str, content: &str) -> bool {
+    matches!(
+        xai_grok_tools::implementations::skills::strict::validate_strict_skill(
+            xai_grok_tools::implementations::skills::strict::StrictSkillInput {
+                file_name: "SKILL.md",
+                parent_dir_name: name,
+                content,
+                scope: Some(xai_grok_tools::implementations::skills::types::SkillScope::Bundled),
+            }
+        ),
+        xai_grok_tools::implementations::skills::strict::StrictSkillOutcome::Valid(_)
+    )
+}
+
 fn validate_bundle_name(kind: BundleFileKind, name: &str) -> Result<()> {
     if name.is_empty()
         || name == "."
@@ -498,6 +560,12 @@ mod tests {
             .insert(name.to_string(), content.to_string());
         bundle
     }
+
+    const VALID_COMMIT_SKILL: &str = "---\nname: commit\ndescription: Create well-formatted git commits.\n---\nCommit skill body.\n";
+    const VALID_COMMIT_SKILL_V2: &str =
+        "---\nname: commit\ndescription: Create better git commits.\n---\nUpdated body.\n";
+    const VALID_IMPLEMENT_SKILL: &str = "---\nname: implement\ndescription: Implement a change with tests.\n---\nImplement skill body.\n";
+    const VALID_REVIEW_SKILL: &str = "---\nname: review\ndescription: Review a change for correctness.\n---\nReview skill body.\n";
 
     fn bundle_with_skill(version: &str, name: &str, content: &str) -> SubagentBundle {
         let mut bundle = SubagentBundle::empty(version);
@@ -751,14 +819,14 @@ mod tests {
     fn write_new_skill_file() {
         let tmp = TempDir::new().unwrap();
         let root = cache_root(&tmp);
-        let bundle = bundle_with_skill("v1", "commit", "# Commit Skill\nRun git commit.");
+        let bundle = bundle_with_skill("v1", "commit", VALID_COMMIT_SKILL);
 
         let manifest = write_bundle_to_cache(&root, &bundle).unwrap();
 
         assert_eq!(manifest.version, "v1");
         assert_eq!(
             std::fs::read_to_string(root.join("skills/commit/SKILL.md")).unwrap(),
-            "# Commit Skill\nRun git commit."
+            VALID_COMMIT_SKILL
         );
         assert!(manifest.checksums.contains_key("skills/commit/SKILL.md"));
     }
@@ -768,12 +836,18 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let root = cache_root(&tmp);
 
-        let manifest_v1 =
-            write_bundle_to_cache(&root, &bundle_with_skill("v1", "commit", "# Original")).unwrap();
+        let manifest_v1 = write_bundle_to_cache(
+            &root,
+            &bundle_with_skill("v1", "commit", VALID_COMMIT_SKILL),
+        )
+        .unwrap();
         std::fs::write(root.join("skills/commit/SKILL.md"), "# User custom").unwrap();
 
-        let manifest_v2 =
-            write_bundle_to_cache(&root, &bundle_with_skill("v2", "commit", "# Updated")).unwrap();
+        let manifest_v2 = write_bundle_to_cache(
+            &root,
+            &bundle_with_skill("v2", "commit", VALID_COMMIT_SKILL_V2),
+        )
+        .unwrap();
 
         assert_eq!(
             std::fs::read_to_string(root.join("skills/commit/SKILL.md")).unwrap(),
@@ -790,7 +864,11 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let root = cache_root(&tmp);
 
-        write_bundle_to_cache(&root, &bundle_with_skill("v1", "commit", "# Original")).unwrap();
+        write_bundle_to_cache(
+            &root,
+            &bundle_with_skill("v1", "commit", VALID_COMMIT_SKILL),
+        )
+        .unwrap();
 
         let manifest = write_bundle_to_cache(&root, &SubagentBundle::empty("v2")).unwrap();
 
@@ -803,8 +881,11 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let root = cache_root(&tmp);
 
-        let manifest_v1 =
-            write_bundle_to_cache(&root, &bundle_with_skill("v1", "commit", "# Original")).unwrap();
+        let manifest_v1 = write_bundle_to_cache(
+            &root,
+            &bundle_with_skill("v1", "commit", VALID_COMMIT_SKILL),
+        )
+        .unwrap();
         std::fs::write(root.join("skills/commit/SKILL.md"), "# User custom").unwrap();
 
         let manifest_v2 = write_bundle_to_cache(&root, &SubagentBundle::empty("v2")).unwrap();
@@ -824,12 +905,34 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let root = cache_root(&tmp);
         let outside = tmp.path().join("outside.md");
-        let bundle = bundle_with_skill("v1", "../../outside", "# evil");
+        let bundle = bundle_with_skill("v1", "../../outside", VALID_COMMIT_SKILL);
 
         let error = write_bundle_to_cache(&root, &bundle).unwrap_err();
 
         assert!(error.to_string().contains("invalid bundled skill name"));
         assert!(!outside.exists());
+    }
+
+    #[test]
+    fn invalid_skill_candidate_keeps_last_known_good() {
+        let tmp = TempDir::new().unwrap();
+        let root = cache_root(&tmp);
+        write_bundle_to_cache(
+            &root,
+            &bundle_with_skill("v1", "commit", VALID_COMMIT_SKILL),
+        )
+        .unwrap();
+        let err = write_bundle_to_cache(
+            &root,
+            &bundle_with_skill("v2", "commit", "# not a valid skill"),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("last-known-good"));
+        assert_eq!(
+            std::fs::read_to_string(root.join("skills/commit/SKILL.md")).unwrap(),
+            VALID_COMMIT_SKILL
+        );
+        assert_eq!(read_cached_manifest(&root).unwrap().unwrap().version, "v1");
     }
 
     #[test]
@@ -915,7 +1018,7 @@ mod tests {
             ),
             ("subagents/roles/reviewer.toml", b"description = \"review\""),
             ("subagents/agents/default.md", b"# agent"),
-            ("skills/commit/SKILL.md", b"# Commit skill"),
+            ("skills/commit/SKILL.md", VALID_COMMIT_SKILL.as_bytes()),
         ]);
 
         let manifest = extract_bundle_archive(&root, &archive).unwrap();
@@ -935,7 +1038,7 @@ mod tests {
         );
         assert_eq!(
             std::fs::read_to_string(root.join("skills/commit/SKILL.md")).unwrap(),
-            "# Commit skill"
+            VALID_COMMIT_SKILL
         );
         assert!(manifest.checksums.contains_key("personas/researcher.toml"));
         assert!(manifest.checksums.contains_key("roles/reviewer.toml"));
@@ -950,7 +1053,10 @@ mod tests {
         let v = bundle_json("v1");
         let archive = make_test_archive(&[
             ("bundle.json", v.as_bytes()),
-            ("skills/implement/SKILL.md", b"# Implement skill"),
+            (
+                "skills/implement/SKILL.md",
+                VALID_IMPLEMENT_SKILL.as_bytes(),
+            ),
             ("skills/implement/scripts/memory.py", b"print('memory')\n"),
             (
                 "skills/implement/tests/test_memory.py",
@@ -963,7 +1069,7 @@ mod tests {
         assert_eq!(manifest.version, "v1");
         assert_eq!(
             std::fs::read_to_string(root.join("skills/implement/SKILL.md")).unwrap(),
-            "# Implement skill"
+            VALID_IMPLEMENT_SKILL
         );
         assert_eq!(
             std::fs::read_to_string(root.join("skills/implement/scripts/memory.py")).unwrap(),
@@ -987,6 +1093,111 @@ mod tests {
     }
 
     #[test]
+    fn extract_archive_rejects_invalid_nested_skill_md_keeps_last_known_good() {
+        let tmp = TempDir::new().unwrap();
+        let root = cache_root(&tmp);
+        let v1 = bundle_json("v1");
+        extract_bundle_archive(
+            &root,
+            &make_test_archive(&[
+                ("bundle.json", v1.as_bytes()),
+                ("skills/commit/SKILL.md", VALID_COMMIT_SKILL.as_bytes()),
+            ]),
+        )
+        .unwrap();
+
+        let v2 = bundle_json("v2");
+        let err = extract_bundle_archive(
+            &root,
+            &make_test_archive(&[
+                ("bundle.json", v2.as_bytes()),
+                ("skills/commit/SKILL.md", VALID_COMMIT_SKILL.as_bytes()),
+                (
+                    "skills/commit/hidden/SKILL.md",
+                    b"# not a valid nested skill",
+                ),
+            ]),
+        )
+        .unwrap_err();
+
+        assert!(err.to_string().contains("last-known-good"));
+        assert_eq!(
+            std::fs::read_to_string(root.join("skills/commit/SKILL.md")).unwrap(),
+            VALID_COMMIT_SKILL
+        );
+        assert!(!root.join("skills/commit/hidden/SKILL.md").exists());
+        assert_eq!(read_cached_manifest(&root).unwrap().unwrap().version, "v1");
+    }
+
+    #[test]
+    fn extract_archive_rejects_valid_nested_skill_md_keeps_last_known_good() {
+        let tmp = TempDir::new().unwrap();
+        let root = cache_root(&tmp);
+        let v1 = bundle_json("v1");
+        extract_bundle_archive(
+            &root,
+            &make_test_archive(&[
+                ("bundle.json", v1.as_bytes()),
+                ("skills/commit/SKILL.md", VALID_COMMIT_SKILL.as_bytes()),
+            ]),
+        )
+        .unwrap();
+
+        const VALID_HIDDEN_SKILL: &str =
+            "---\nname: hidden\ndescription: A nested hidden skill.\n---\nHidden body.\n";
+        let v2 = bundle_json("v2");
+        let err = extract_bundle_archive(
+            &root,
+            &make_test_archive(&[
+                ("bundle.json", v2.as_bytes()),
+                ("skills/commit/SKILL.md", VALID_COMMIT_SKILL.as_bytes()),
+                (
+                    "skills/commit/hidden/SKILL.md",
+                    VALID_HIDDEN_SKILL.as_bytes(),
+                ),
+            ]),
+        )
+        .unwrap_err();
+
+        assert!(err.to_string().contains("last-known-good"));
+        assert_eq!(
+            std::fs::read_to_string(root.join("skills/commit/SKILL.md")).unwrap(),
+            VALID_COMMIT_SKILL
+        );
+        assert!(
+            !root.join("skills/commit/hidden/SKILL.md").exists(),
+            "nested SKILL.md is not a supported bundle skill shape"
+        );
+        assert_eq!(read_cached_manifest(&root).unwrap().unwrap().version, "v1");
+    }
+
+    #[test]
+    fn extract_archive_rejects_nested_skill_md_without_replacing_empty_cache() {
+        let tmp = TempDir::new().unwrap();
+        let root = cache_root(&tmp);
+        const VALID_HIDDEN_SKILL: &str =
+            "---\nname: hidden\ndescription: A nested hidden skill.\n---\nHidden body.\n";
+        let v = bundle_json("v1");
+        let err = extract_bundle_archive(
+            &root,
+            &make_test_archive(&[
+                ("bundle.json", v.as_bytes()),
+                (
+                    "skills/implement/hidden/SKILL.md",
+                    VALID_HIDDEN_SKILL.as_bytes(),
+                ),
+                ("skills/implement/scripts/memory.py", b"print('memory')\n"),
+            ]),
+        )
+        .unwrap_err();
+
+        assert!(err.to_string().contains("last-known-good"));
+        assert!(!root.join("skills/implement/hidden/SKILL.md").exists());
+        assert!(!root.join("skills/implement/scripts/memory.py").exists());
+        assert!(read_cached_manifest(&root).unwrap().is_none());
+    }
+
+    #[test]
     fn extract_archive_prunes_removed_nested_skill_files() {
         let tmp = TempDir::new().unwrap();
         let root = cache_root(&tmp);
@@ -994,7 +1205,10 @@ mod tests {
         let v1 = bundle_json("v1");
         let v1_archive = make_test_archive(&[
             ("bundle.json", v1.as_bytes()),
-            ("skills/implement/SKILL.md", b"# Implement"),
+            (
+                "skills/implement/SKILL.md",
+                VALID_IMPLEMENT_SKILL.as_bytes(),
+            ),
             ("skills/implement/scripts/memory.py", b"# v1 helper\n"),
         ]);
         extract_bundle_archive(&root, &v1_archive).unwrap();
@@ -1003,7 +1217,10 @@ mod tests {
         let v2 = bundle_json("v2");
         let v2_archive = make_test_archive(&[
             ("bundle.json", v2.as_bytes()),
-            ("skills/implement/SKILL.md", b"# Implement"),
+            (
+                "skills/implement/SKILL.md",
+                VALID_IMPLEMENT_SKILL.as_bytes(),
+            ),
         ]);
         let manifest = extract_bundle_archive(&root, &v2_archive).unwrap();
 
@@ -1024,7 +1241,10 @@ mod tests {
         let v1 = bundle_json("v1");
         let v1_archive = make_test_archive(&[
             ("bundle.json", v1.as_bytes()),
-            ("skills/implement/SKILL.md", b"# v1"),
+            (
+                "skills/implement/SKILL.md",
+                VALID_IMPLEMENT_SKILL.as_bytes(),
+            ),
             ("skills/implement/scripts/memory.py", b"# v1 helper\n"),
         ]);
         let manifest_v1 = extract_bundle_archive(&root, &v1_archive).unwrap();
@@ -1038,7 +1258,10 @@ mod tests {
         let v2 = bundle_json("v2");
         let v2_archive = make_test_archive(&[
             ("bundle.json", v2.as_bytes()),
-            ("skills/implement/SKILL.md", b"# v2"),
+            (
+                "skills/implement/SKILL.md",
+                VALID_IMPLEMENT_SKILL.as_bytes(),
+            ),
             ("skills/implement/scripts/memory.py", b"# v2 helper\n"),
         ]);
         let manifest_v2 = extract_bundle_archive(&root, &v2_archive).unwrap();
@@ -1065,7 +1288,10 @@ mod tests {
         let v1 = bundle_json("v1");
         let v1_archive = make_test_archive(&[
             ("bundle.json", v1.as_bytes()),
-            ("skills/implement/SKILL.md", b"# v1"),
+            (
+                "skills/implement/SKILL.md",
+                VALID_IMPLEMENT_SKILL.as_bytes(),
+            ),
             ("skills/implement/scripts/memory.py", b"# v1 helper\n"),
         ]);
         extract_bundle_archive(&root, &v1_archive).unwrap();
@@ -1073,7 +1299,10 @@ mod tests {
         let v2 = bundle_json("v2");
         let v2_archive = make_test_archive(&[
             ("bundle.json", v2.as_bytes()),
-            ("skills/implement/SKILL.md", b"# v2"),
+            (
+                "skills/implement/SKILL.md",
+                VALID_IMPLEMENT_SKILL.as_bytes(),
+            ),
             ("skills/implement/scripts/memory.py", b"# v2 helper\n"),
         ]);
         extract_bundle_archive(&root, &v2_archive).unwrap();
@@ -1300,7 +1529,7 @@ mod tests {
                 "./subagents/personas/researcher.toml",
                 b"instructions = \"hello\"",
             ),
-            ("./skills/commit/SKILL.md", b"# Commit"),
+            ("./skills/commit/SKILL.md", VALID_COMMIT_SKILL.as_bytes()),
         ]);
 
         let manifest = extract_bundle_archive(&root, &archive).unwrap();
@@ -1455,7 +1684,7 @@ mod tests {
         let v = bundle_json("v1");
         let archive = make_test_archive(&[
             ("bundle.json", v.as_bytes()),
-            ("skills/review/SKILL.md", b"# Review skill"),
+            ("skills/review/SKILL.md", VALID_REVIEW_SKILL.as_bytes()),
             ("skills/shared/personas/reviewer.md", b"You are a reviewer."),
         ]);
 

@@ -1,0 +1,21 @@
+version: 1
+cases:
+  - id: should-commit
+    kind: should_trigger
+    query: commit changes
+    skill: commit
+  - id: not-weather
+    kind: should_not_trigger
+    query: weather
+    skill: commit
+  - id: pin-commit
+    kind: explicit_pin
+    skill: commit
+  - id: path-src
+    kind: path_trigger
+    path: src/lib.rs
+    skill: commit
+  - id: resource-commit
+    kind: resource
+    resource: commit
+    skill: commit

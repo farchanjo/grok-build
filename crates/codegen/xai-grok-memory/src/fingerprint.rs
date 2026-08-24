@@ -75,6 +75,14 @@ fn hex_encode(bytes: &[u8]) -> String {
 /// are expected pre-normalized to unit L2 norm by the provider/pipeline.
 pub const NORMALIZATION_NONE: &str = "none";
 
+/// Local unit-L2 normalization pin used by the Prime metadata index.
+///
+/// Distinct from [`NORMALIZATION_NONE`]: Prime always applies
+/// [`crate::embedding::l2_normalize_v1`] after the provider returns and
+/// fingerprints collections with this label so a route that claims
+/// provider-side normalization cannot mix with Prime vectors.
+pub const NORMALIZATION_L2_V1: &str = crate::embedding::L2_NORMALIZATION_VERSION;
+
 /// Deterministic document-preparation version for the canonical chunker.
 ///
 /// Bump when `chunk_markdown` semantically changes the produced chunks for
@@ -278,7 +286,7 @@ pub struct VectorFingerprint {
 impl VectorFingerprint {
     /// Compute the canonical payload and its digest (blake3). Returns
     /// `(fingerprint, persisted_payload_json)`.
-    pub(crate) fn build(
+    pub fn build(
         source: EmbeddingSourceSpec,
         document_preparation: DocPreparationSpec,
         vector_schema_version: u32,

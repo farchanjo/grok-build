@@ -11,10 +11,12 @@
 //! deterministic across runs over the same tree (unlike filesystem readdir
 //! order). Hidden entries are included (so `.<grok>/skills/...` can contribute
 //! path evidence) while VCS internals (`.git`, `.hg`, `.svn`) are explicitly
-//! skipped. Cross-device entries are excluded *and reported* via
-//! [`WorkspaceInventory::cross_device`] so an incomplete walk is never silent
-//! (device detection is Unix-only; on non-Unix the walker does not perform
-//! cross-device detection — documented).
+//! skipped. The walker honors repository gitignore/exclude files but **not**
+//! the developer global git excludes file (`git_global(false)`), so evidence
+//! does not depend on host `core.excludesFile`. Cross-device entries are
+//! excluded *and reported* via [`WorkspaceInventory::cross_device`] so an
+//! incomplete walk is never silent (device detection is Unix-only; on non-Unix
+//! the walker does not perform cross-device detection — documented).
 //!
 //! PR19 (`/clear`, touched paths) is not wired here — this exposes a
 //! race-free session-cache/invalidation seam ([`InventoryCache`]).
@@ -141,7 +143,7 @@ pub fn build_inventory(root: &Path, limits: InventoryLimits) -> Result<Workspace
         .same_file_system(false)
         .standard_filters(true)
         .git_ignore(true)
-        .git_global(true)
+        .git_global(false)
         .git_exclude(true)
         .ignore(true)
         .require_git(false)

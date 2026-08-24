@@ -146,11 +146,12 @@ impl Reminder for SkillDiscoveryReminder {
                     _ => SkillScope::User,
                 }
             };
-            let skills = discovery::parse_skill_files(vec![(target_path.to_path_buf(), scope)]);
-            if !skills.is_empty() {
+            let report =
+                discovery::parse_skill_sources(vec![(target_path.to_path_buf(), scope)], 0);
+            if !report.skills.is_empty() || !report.inventory.quarantined.is_empty() {
                 let mut res = resources.lock().await;
                 if let Some(tracker) = res.get_mut::<SkillManager>() {
-                    tracker.add_discovered(skills);
+                    tracker.ingest_incremental(report);
                 }
             }
             return vec![];
@@ -177,7 +178,7 @@ impl Reminder for SkillDiscoveryReminder {
 
         // 3. Run filesystem discovery OUTSIDE the lock.
         // Calls directly into the discovery module -- no callback indirection.
-        let discovered = discovery::discover_skills_for_paths(
+        let discovered = discovery::discover_skill_sources_for_paths(
             &[target_path],
             &cwd,
             git_root.as_deref(),
@@ -185,7 +186,10 @@ impl Reminder for SkillDiscoveryReminder {
             compat,
         );
 
-        if discovered.is_empty() {
+        if discovered.skills.is_empty()
+            && discovered.commands.is_empty()
+            && discovered.inventory.quarantined.is_empty()
+        {
             // Even if no skills found, merge checked_dirs back so we don't
             // re-stat the same directories on future calls.
             let mut res = resources.lock().await;
@@ -209,8 +213,8 @@ impl Reminder for SkillDiscoveryReminder {
             // Merge checked_dirs from the snapshot back into the tracker.
             tracker.checked_dirs.extend(checked_dirs_snapshot);
 
-            // Add discovered skills (dedup by canonical path, sets pending flag).
-            tracker.add_discovered(discovered);
+            // Merge incremental inventory by identity and refresh advertisement.
+            tracker.ingest_incremental(discovered);
         }
 
         // Return empty -- announcement delivery is handled by the session

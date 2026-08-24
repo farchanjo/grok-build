@@ -14109,6 +14109,7 @@ dependencies = [
  "tonic",
  "tracing",
  "tracing-subscriber",
+ "unicode-normalization",
  "url",
  "uuid",
  "wait-timeout",

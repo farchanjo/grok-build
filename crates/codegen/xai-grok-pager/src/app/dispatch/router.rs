@@ -109,7 +109,8 @@ use super::transcript::{
     dispatch_copy_assistant_message, dispatch_copy_block_content, dispatch_copy_block_meta,
     dispatch_dump_input_log, dispatch_export_conversation, dispatch_open_block_viewer,
     dispatch_open_config_agents_modal, dispatch_open_extensions_modal,
-    dispatch_open_transcript_pager,
+    dispatch_open_transcript_pager, dispatch_prime_index_cancel, dispatch_prime_index_job,
+    dispatch_prime_index_status, dispatch_refresh_extensions_tab,
 };
 use super::turn::{
     dispatch_cancel_scheduled_task, dispatch_cancel_turn, dispatch_cancel_turn_choice,
@@ -632,6 +633,27 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
             }
             dispatch_open_extensions_modal(app, tab, trigger)
         }
+        Action::RefreshExtensionsTab => dispatch_refresh_extensions_tab(app),
+        Action::OpenCreateSkillWizard { trigger } => {
+            if app.appearance.disable_plugins {
+                return vec![];
+            }
+            let effects = dispatch_open_extensions_modal(
+                app,
+                crate::views::extensions_modal::ExtensionsTab::Skills,
+                trigger,
+            );
+            if let ActiveView::Agent(id) = app.active_view
+                && let Some(agent) = app.agents.get_mut(&id)
+                && let Some(ref mut modal) = agent.extensions_modal
+            {
+                modal.picker_state.search_active = false;
+                modal.picker_state.tabs_focused = false;
+                modal.window.tabs_focused = false;
+                modal.input = Some(crate::views::extensions_modal::create_skill_wizard_input());
+            }
+            effects
+        }
         Action::OpenConfigAgentsModal(tab) => dispatch_open_config_agents_modal(app, tab),
         Action::McpAuthTrigger { server_name } => {
             let ActiveView::Agent(id) = app.active_view else {
@@ -693,6 +715,35 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
                     session_id,
                 },
             ]
+        }
+        Action::SearchSkillsSmart => {
+            let ActiveView::Agent(id) = app.active_view else {
+                return vec![];
+            };
+            let Some(agent) = app.agents.get_mut(&id) else {
+                return vec![];
+            };
+            let Some(session_id) = agent.session.session_id.clone() else {
+                return vec![];
+            };
+            // Drop the previous rank and bump the agent-scoped search
+            // generation before refetch so a later same-query completion
+            // cannot reinstall pre-reload names, and vector hits for query
+            // A cannot stay selected while query B is in flight.
+            let Some(query) = agent
+                .extensions_modal
+                .as_mut()
+                .and_then(|modal| modal.prepare_skills_smart_search_fetch())
+            else {
+                return vec![];
+            };
+            let r#gen = agent.bump_skills_smart_search_gen();
+            vec![Effect::FetchSkillsSearch {
+                agent_id: id,
+                session_id,
+                query,
+                r#gen,
+            }]
         }
         Action::RefreshMcpList => {
             let ActiveView::Agent(id) = app.active_view else {
@@ -814,6 +865,72 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
                 enabled,
             }]
         }
+        Action::PublishSkill {
+            name,
+            description,
+            scope,
+            body,
+        } => {
+            let ActiveView::Agent(id) = app.active_view else {
+                return vec![];
+            };
+            let Some(agent) = app.agents.get(&id) else {
+                return vec![];
+            };
+            let Some(session_id) = agent.session.session_id.clone() else {
+                return vec![];
+            };
+            vec![Effect::PublishSkill {
+                agent_id: id,
+                session_id,
+                name,
+                description,
+                scope,
+                body,
+            }]
+        }
+        Action::RunSkillRegress { name } => {
+            let ActiveView::Agent(id) = app.active_view else {
+                return vec![];
+            };
+            let Some(agent) = app.agents.get(&id) else {
+                return vec![];
+            };
+            let Some(session_id) = agent.session.session_id.clone() else {
+                return vec![];
+            };
+            vec![Effect::RunSkillRegress {
+                agent_id: id,
+                session_id,
+                name,
+            }]
+        }
+        Action::CancelSkillRegress { name } => {
+            let ActiveView::Agent(id) = app.active_view else {
+                return vec![];
+            };
+            let Some(agent) = app.agents.get(&id) else {
+                return vec![];
+            };
+            let Some(session_id) = agent.session.session_id.clone() else {
+                return vec![];
+            };
+            vec![Effect::CancelSkillRegress {
+                agent_id: id,
+                session_id,
+                name,
+            }]
+        }
+        Action::FetchPrimeIndexStatus => dispatch_prime_index_status(app),
+        Action::PrimeIndexBackfill {
+            collection,
+            confirm,
+        } => dispatch_prime_index_job(app, "backfill", collection, confirm),
+        Action::PrimeIndexRebuild {
+            collection,
+            confirm,
+        } => dispatch_prime_index_job(app, "rebuild", collection, confirm),
+        Action::PrimeIndexCancel => dispatch_prime_index_cancel(app),
         Action::ToggleMcpServer {
             server_name,
             enabled,

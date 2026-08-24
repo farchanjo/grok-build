@@ -1,0 +1,15 @@
+{
+  "apiVersion": 1,
+  "jobId": "job-1",
+  "kind": "backfill",
+  "collection": "skills",
+  "state": "failed",
+  "generation": 4,
+  "fingerprintShort": "abc123def456",
+  "done": 1,
+  "total": 3,
+  "confirmConfiguredProfile": false,
+  "configuredRoute": "main",
+  "failure": "embed_failed",
+  "futureField": true
+}

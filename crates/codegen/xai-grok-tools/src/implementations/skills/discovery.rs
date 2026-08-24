@@ -3,12 +3,18 @@
 //! Provides `discover_skills_for_paths()` for dynamic mid-session discovery
 //! and the shared parsing primitives (`parse_skill_files`, `find_skill_paths`,
 //! frontmatter parsing) used by both startup and dynamic discovery.
+//!
+//! Runtime SKILL.md ingest goes through the canonical strict validator in
+//! [`super::strict`]. Invalid skills are quarantined; only valid rows become
+//! [`SkillInfo`]. Flat `commands/*.md` files use the command-only DTO.
 
 use std::collections::HashSet;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 
+#[cfg(test)]
 use super::skill::extract_skill_body;
+use super::strict::{SkillSourceReport, ingest_skill_sources, is_real_directory, is_regular_file};
 use super::types::{SkillInfo, SkillScope};
 use crate::types::compat::CompatConfig;
 
@@ -58,7 +64,7 @@ const CLAUDE_DEFAULT_SKILLS: &[&str] = &["pdf", "docx", "xlsx", "pptx", "skill-c
 /// The path check ensures a user's own skill that merely shares a denylisted
 /// name (e.g. `~/.grok/skills/shell`) is NOT dropped — only skills physically
 /// located under the vendor dir are treated as vendor builtins.
-fn is_vendor_default_skill(path: &str, name: &str) -> bool {
+pub(crate) fn is_vendor_default_skill(path: &str, name: &str) -> bool {
     let in_cursor = path.contains("/.cursor/") || path.contains("\\.cursor\\");
     let in_claude = path.contains("/.claude/") || path.contains("\\.claude\\");
     (in_cursor && CURSOR_DEFAULT_SKILLS.contains(&name))
@@ -70,7 +76,7 @@ pub fn find_skill_paths(dir: &Path) -> Vec<PathBuf> {
     let mut paths = Vec::new();
     for subdir in SKILL_SUBDIRS {
         let skills_dir = dir.join(subdir);
-        if skills_dir.is_dir() {
+        if is_real_directory(&skills_dir) {
             walk_for_skill_md(&skills_dir, &mut paths, 0);
         }
     }
@@ -84,14 +90,14 @@ pub fn find_command_paths(dir: &Path) -> Vec<PathBuf> {
 
 /// Scan a directory for `.md` files (flat, no recursion).
 pub fn scan_md_files(dir: &Path) -> Vec<PathBuf> {
-    if !dir.is_dir() {
+    if !is_real_directory(dir) {
         return vec![];
     }
     let mut paths = Vec::new();
     if let Ok(entries) = std::fs::read_dir(dir) {
         for entry in entries.flatten() {
             let path = entry.path();
-            if path.is_file() && path.extension().and_then(|e| e.to_str()) == Some("md") {
+            if is_regular_file(&path) && path.extension().and_then(|e| e.to_str()) == Some("md") {
                 paths.push(path);
             }
         }
@@ -111,8 +117,11 @@ pub fn scan_md_files(dir: &Path) -> Vec<PathBuf> {
 /// collection so they can never drift apart.
 pub fn find_skill_md_paths(dir: &Path) -> Vec<PathBuf> {
     let mut paths = Vec::new();
+    if !is_real_directory(dir) {
+        return paths;
+    }
     let self_skill_md = dir.join("SKILL.md");
-    if self_skill_md.is_file() {
+    if is_regular_file(&self_skill_md) {
         paths.push(self_skill_md);
     }
     walk_for_skill_md(dir, &mut paths, 0);
@@ -128,16 +137,19 @@ pub fn walk_for_skill_md(dir: &Path, paths: &mut Vec<PathBuf>, depth: usize) {
     if depth > MAX_SKILL_WALK_DEPTH {
         return;
     }
+    if !is_real_directory(dir) {
+        return;
+    }
     if let Ok(entries) = std::fs::read_dir(dir) {
         let mut dirs: Vec<PathBuf> = entries
             .flatten()
             .map(|entry| entry.path())
-            .filter(|path| path.is_dir())
+            .filter(|path| is_real_directory(path))
             .collect();
         dirs.sort();
         for path in dirs {
             let skill_md_path = path.join("SKILL.md");
-            if skill_md_path.is_file() {
+            if is_regular_file(&skill_md_path) {
                 paths.push(skill_md_path);
             }
             walk_for_skill_md(&path, paths, depth + 1);
@@ -613,6 +625,7 @@ pub fn extract_first_paragraph(body: &str) -> Option<String> {
 }
 
 /// First top-level heading or prose paragraph, in document order.
+#[cfg(test)]
 fn extract_description_from_markdown(body: &str) -> Option<String> {
     extract_lead_block(body, true)
 }
@@ -664,12 +677,32 @@ fn extract_lead_block(body: &str, include_headings: bool) -> Option<String> {
     None
 }
 
-/// Parse a list of `(path, scope)` pairs into `SkillInfo` values.
+/// Parse a list of `(path, scope)` pairs into valid `SkillInfo` values.
 ///
-/// This is the single chokepoint for all skill parsing (startup, dynamic, and
-/// host-driven scans), so the vendor-default denylist is applied here to cover
-/// every path. See [`is_vendor_default_skill`].
+/// SKILL.md files are routed through the canonical strict validator. Invalid
+/// skills are quarantined and omitted from the returned vector. Flat command
+/// markdown is not returned here — use [`parse_skill_sources`].
+///
+/// The vendor-default denylist is applied to every path. See
+/// [`is_vendor_default_skill`].
 pub fn parse_skill_files(skill_files: Vec<(PathBuf, SkillScope)>) -> Vec<SkillInfo> {
+    parse_skill_sources(skill_files, 0).skills
+}
+
+/// Parse skill and command files, publishing a complete inventory.
+pub fn parse_skill_sources(
+    skill_files: Vec<(PathBuf, SkillScope)>,
+    generation: u64,
+) -> SkillSourceReport {
+    ingest_skill_sources(skill_files, generation)
+}
+
+/// Legacy tolerant parser retained for command markdown and unit tests of
+/// historical recovery behavior. Runtime SKILL.md ingest must not call this.
+#[cfg(test)]
+pub(crate) fn parse_skill_files_tolerant(
+    skill_files: Vec<(PathBuf, SkillScope)>,
+) -> Vec<SkillInfo> {
     let mut skills: Vec<SkillInfo> = skill_files
         .into_iter()
         .filter_map(|(path, scope)| {
@@ -798,6 +831,7 @@ pub fn parse_skill_files(skill_files: Vec<(PathBuf, SkillScope)>) -> Vec<SkillIn
                 plugin_name: None,
                 plugin_version: None,
                 plugin_root: None,
+                collection_root: None,
                 plugin_data: None,
                 allowed_tools: parsed.allowed_tools,
                 model: parsed.model,
@@ -825,36 +859,27 @@ pub fn parse_skill_files(skill_files: Vec<(PathBuf, SkillScope)>) -> Vec<SkillIn
 /// directories not found at startup.
 ///
 /// For each path in `file_paths`, walks from `dirname(path)` upward toward
-/// `cwd` (exclusive). At each directory, checks for `.grok/skills/`,
-/// `.agents/skills/`, and (gated on `compat.claude.skills`) `.claude/skills/`.
-/// Skips already-checked dirs.
+/// `cwd` (exclusive). At each directory, checks the same compat-gated vendor
+/// skill roots used at startup (`.grok`, `.agents`, and optionally `.claude`
+/// / `.cursor`). Skips already-checked dirs.
 ///
 /// Skill/command roots are **not** filtered by `.gitignore`. Discovery only
-/// visits known config roots (`.grok`, `.agents`, `.claude`, …); those are
-/// local harness config (often intentionally gitignored), not tree content.
+/// visits known config roots (`.grok`, `.agents`, `.claude`, `.cursor`); those
+/// are local harness config (often intentionally gitignored), not tree content.
 /// Contrast with AGENTS.md discovery, which still respects gitignore. Use
 /// `[skills] ignore` to hide a path. Compat loaders likewise load project
 /// `.claude/commands` even when ignored.
 ///
-/// `.cursor/` is intentionally NOT scanned in this dynamic path — it never was
-/// historically, and preserving that keeps default behavior byte-for-byte. The
-/// `.cursor` skills toggle only governs the startup discovery dir list.
-///
-/// Returns raw `SkillInfo` without surface-specific filtering.
+/// Returns a complete source report (valid skills, quarantined rows, commands).
 /// Ordering: deepest-first so deeper local skills take precedence.
-pub fn discover_skills_for_paths(
+pub fn discover_skill_sources_for_paths(
     file_paths: &[&Path],
     cwd: &Path,
     git_root: Option<&Path>,
     already_checked: &mut HashSet<PathBuf>,
     compat: CompatConfig,
-) -> Vec<SkillInfo> {
-    // `.grok` and `.agents` are always scanned; `.claude` is gated on the
-    // claude-vendor skills cell. (`.cursor` is excluded here by design — see fn docs.)
-    let mut config_dir_names: Vec<&str> = vec![".grok", ".agents"];
-    if compat.claude.skills {
-        config_dir_names.push(".claude");
-    }
+) -> SkillSourceReport {
+    let config_dir_names = compat.skill_config_dirs();
 
     let mut skill_files: Vec<(PathBuf, SkillScope)> = Vec::new();
     let mut seen_canonical_paths = HashSet::new();
@@ -910,15 +935,32 @@ pub fn discover_skills_for_paths(
         }
     }
 
-    let mut skills = parse_skill_files(skill_files);
+    let mut report = parse_skill_sources(skill_files, 0);
 
-    skills.sort_by(|a, b| {
+    report.skills.sort_by(|a, b| {
+        let depth_a = Path::new(&a.path).components().count();
+        let depth_b = Path::new(&b.path).components().count();
+        depth_b.cmp(&depth_a)
+    });
+    report.commands.sort_by(|a, b| {
         let depth_a = Path::new(&a.path).components().count();
         let depth_b = Path::new(&b.path).components().count();
         depth_b.cmp(&depth_a)
     });
 
-    skills
+    report
+}
+
+/// Walk upward from accessed file paths toward cwd, discovering skill
+/// directories not found at startup. Returns only strictly valid skills.
+pub fn discover_skills_for_paths(
+    file_paths: &[&Path],
+    cwd: &Path,
+    git_root: Option<&Path>,
+    already_checked: &mut HashSet<PathBuf>,
+    compat: CompatConfig,
+) -> Vec<SkillInfo> {
+    discover_skill_sources_for_paths(file_paths, cwd, git_root, already_checked, compat).skills
 }
 
 #[cfg(test)]
@@ -930,7 +972,8 @@ mod tests {
         let skill_dir = tmp.path().join(dir_name);
         std::fs::create_dir_all(&skill_dir).unwrap();
         std::fs::write(skill_dir.join("SKILL.md"), content).unwrap();
-        let mut skills = parse_skill_files(vec![(skill_dir.join("SKILL.md"), SkillScope::Local)]);
+        let mut skills =
+            parse_skill_files_tolerant(vec![(skill_dir.join("SKILL.md"), SkillScope::Local)]);
         skills.pop().unwrap()
     }
 
@@ -1299,7 +1342,7 @@ model: test-model
         std::fs::create_dir_all(&skill_dir).unwrap();
         std::fs::write(
             skill_dir.join("SKILL.md"),
-            "---\nname: deploy\ndescription: Deploy to prod\nwhen-to-use: User says deploy or ship it\n---\nBody text",
+            "---\nname: deploy\ndescription: Deploy to prod\nmetadata:\n  grok:\n    when-to-use: User says deploy or ship it\n---\nBody text",
         )
         .unwrap();
 
@@ -1309,6 +1352,21 @@ model: test-model
             skills[0].when_to_use.as_deref(),
             Some("User says deploy or ship it")
         );
+    }
+
+    #[test]
+    fn unofficial_top_level_when_to_use_is_quarantined() {
+        let tmp = tempfile::tempdir().unwrap();
+        let skill_dir = tmp.path().join("skills").join("deploy");
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        std::fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\nname: deploy\ndescription: Deploy to prod\nwhen-to-use: User says deploy or ship it\n---\nBody text",
+        )
+        .unwrap();
+        let report = parse_skill_sources(vec![(skill_dir.join("SKILL.md"), SkillScope::Local)], 1);
+        assert!(report.skills.is_empty());
+        assert_eq!(report.inventory.quarantined.len(), 1);
     }
 
     #[test]
@@ -1323,8 +1381,10 @@ model: test-model
         .unwrap();
 
         let skills = parse_skill_files(vec![(skill_dir.join("SKILL.md"), SkillScope::Repo)]);
-        assert_eq!(skills.len(), 1);
-        assert!(skills[0].when_to_use.is_none());
+        assert!(
+            skills.is_empty(),
+            "missing frontmatter is quarantined, not repaired"
+        );
     }
 
     #[test]
@@ -1370,8 +1430,10 @@ model: test-model
         .unwrap();
 
         let skills = parse_skill_files(vec![(skill_dir.join("SKILL.md"), SkillScope::User)]);
-        assert_eq!(skills.len(), 1);
-        assert_eq!(skills[0].name, "narrate-crash-video");
+        assert!(
+            skills.is_empty(),
+            "underscore names are quarantined; no hyphen repair"
+        );
     }
 
     // ── skills-cursor removal ──────────────────────────────
@@ -1520,12 +1582,16 @@ model: test-model
         std::fs::create_dir_all(&claude_skill).unwrap();
         std::fs::write(
             claude_skill.join("SKILL.md"),
-            "---\nname: claude-dyn\n---\n",
+            "---\nname: claude-dyn\ndescription: Claude dynamic skill\n---\n",
         )
         .unwrap();
         let grok_skill = sub.join(".grok").join("skills").join("grok-dyn");
         std::fs::create_dir_all(&grok_skill).unwrap();
-        std::fs::write(grok_skill.join("SKILL.md"), "---\nname: grok-dyn\n---\n").unwrap();
+        std::fs::write(
+            grok_skill.join("SKILL.md"),
+            "---\nname: grok-dyn\ndescription: Grok dynamic skill\n---\n",
+        )
+        .unwrap();
 
         let file = sub.join("file.rs");
         std::fs::write(&file, "fn main() {}").unwrap();
@@ -1602,6 +1668,51 @@ model: test-model
                 "mid/SKILL.md",
                 "zeta/SKILL.md"
             ]
+        );
+    }
+
+    #[test]
+    fn discover_skill_sources_for_paths_scans_cursor_skills_when_compat_on() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cwd = dunce::canonicalize(tmp.path()).unwrap();
+        let src = cwd.join("src");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::write(src.join("lib.rs"), "fn main() {}\n").unwrap();
+        let skill_dir = src.join(".cursor/skills/cursor-walk");
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        std::fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\nname: cursor-walk\ndescription: Cursor mid-session discovery.\n---\n# Cursor\n",
+        )
+        .unwrap();
+
+        let mut checked = HashSet::new();
+        let mut compat = CompatConfig::default();
+        compat.cursor.skills = true;
+        let report = discover_skill_sources_for_paths(
+            &[src.join("lib.rs").as_path()],
+            &cwd,
+            Some(&cwd),
+            &mut checked,
+            compat,
+        );
+        assert!(
+            report.skills.iter().any(|s| s.name == "cursor-walk"),
+            "dynamic walk must ingest .cursor/skills when the cursor skills cell is on"
+        );
+
+        checked.clear();
+        compat.cursor.skills = false;
+        let hidden = discover_skill_sources_for_paths(
+            &[src.join("lib.rs").as_path()],
+            &cwd,
+            Some(&cwd),
+            &mut checked,
+            compat,
+        );
+        assert!(
+            !hidden.skills.iter().any(|s| s.name == "cursor-walk"),
+            "dynamic walk must honor the cursor skills cell"
         );
     }
 }

@@ -701,16 +701,22 @@ impl AgentBuilder {
     pub async fn build(mut self) -> Result<Agent, AgentBuildError> {
         let mut definition = self.resolve_definition();
         let working_dir_str = self.working_directory.to_str().unwrap_or(".").to_string();
+        let mut discovered_commands = Vec::new();
+        let mut discovered_inventory =
+            xai_grok_tools::implementations::skills::strict::SkillInventory::default();
         let skill_info = if let Some(preloaded) = self.preloaded_skills.take() {
             preloaded
         } else if definition.discover_skills {
-            crate::prompt::skills::list_skills_with_plugins(
+            let listing = crate::prompt::skills::list_skill_sources_with_plugins(
                 Some(&working_dir_str),
                 &self.skills_config,
                 self.plugin_registry.as_deref(),
                 self.compat,
             )
-            .await
+            .await;
+            discovered_commands = listing.commands;
+            discovered_inventory = listing.inventory;
+            listing.skills
         } else {
             vec![]
         };
@@ -1179,6 +1185,9 @@ impl AgentBuilder {
                     skill_budget_percent,
                     self.compat,
                 )
+                .await;
+            tool_bridge
+                .publish_skill_sources(discovered_inventory, discovered_commands)
                 .await;
         }
         let now = chrono::Utc::now();

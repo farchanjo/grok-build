@@ -1,0 +1,17 @@
+version: 1
+cases:
+  - id: should-review
+    kind: should_trigger
+    query: review a pull request
+    skill: review
+  - id: not-weather
+    kind: should_not_trigger
+    query: weather
+    skill: review
+  - id: pin-review
+    kind: explicit_pin
+    skill: review
+  - id: path-src
+    kind: path_trigger
+    path: src/lib.rs
+    skill: review

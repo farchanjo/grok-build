@@ -105,6 +105,7 @@ pub fn builtin_commands() -> Vec<Arc<dyn SlashCommand>> {
         Arc::new(plugin::PluginsCommand),
         Arc::new(plugin::MarketplaceCommand),
         Arc::new(plugin::SkillsCommand),
+        Arc::new(plugin::CreateSkillCommand),
         Arc::new(share::ShareCommand),
         Arc::new(session_info::SessionInfoCommand),
         Arc::new(rename::RenameCommand),

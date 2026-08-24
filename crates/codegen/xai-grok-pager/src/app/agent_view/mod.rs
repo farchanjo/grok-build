@@ -1159,6 +1159,14 @@ pub struct AgentView {
     /// Active hooks/plugins modal popup. When `Some`, blocks all input and
     /// renders as a centered overlay. Opened by `/hooks`, `/plugins`, or `/mcps`.
     pub(crate) extensions_modal: Option<ExtensionsModalState>,
+    /// Skill name of an in-flight local regression started from `/skills`.
+    /// Survives Esc/tab-switch so reopen can restore the "regressing..." badge
+    /// and `x` can still cancel. Cleared when the run reports done.
+    pub(crate) skill_regress_in_flight: Option<String>,
+    /// Monotonic generation for `/skills` Smart search. Lives on the agent so
+    /// it outlives modal close/reopen. Completions must match this generation
+    /// and the current session before installing a rank.
+    pub(crate) skills_smart_search_gen: u64,
     /// Active agents modal popup. When `Some`, blocks all input and
     /// renders as a centered overlay. Opened by `/config-agents` or `/agents`.
     pub(crate) agents_modal: Option<crate::views::agents_modal::AgentsModalState>,

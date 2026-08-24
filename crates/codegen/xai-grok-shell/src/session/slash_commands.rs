@@ -749,13 +749,22 @@ pub(crate) async fn list_commands(
     compat: xai_grok_tools::types::compat::CompatConfig,
     include_project_workflows: bool,
 ) -> ListCommandsResponse {
-    let skills = xai_grok_agent::prompt::skills::list_skills_with_plugins(
+    let listing = xai_grok_agent::prompt::skills::list_skill_sources_with_plugins(
         cwd,
         skills_config,
         plugin_registry,
         compat,
     )
     .await;
+    let mut skills = listing.skills;
+    let claimed: std::collections::HashSet<String> = skills.iter().map(|s| s.dedup_key()).collect();
+    for command in listing.commands {
+        let slash = command.to_slash_skill();
+        if claimed.contains(&slash.dedup_key()) {
+            continue;
+        }
+        skills.push(slash);
+    }
     let workflows = crate::session::workflow::registry::list_workflows(
         include_project_workflows
             .then_some(cwd)
@@ -1289,6 +1298,7 @@ mod tests {
             plugin_name: None,
             plugin_version: None,
             plugin_root: None,
+            collection_root: None,
             plugin_data: None,
             allowed_tools: None,
             license: None,
@@ -1488,8 +1498,14 @@ mod tests {
     #[tokio::test]
     async fn build_skill_information_for_refs_loads_and_wraps() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("SKILL.md");
-        std::fs::write(&path, "Body with $ARGUMENTS").unwrap();
+        let skill_dir = dir.path().join("commit");
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        let path = skill_dir.join("SKILL.md");
+        std::fs::write(
+            &path,
+            "---\nname: commit\ndescription: Create a git commit.\n---\nBody with $ARGUMENTS\n",
+        )
+        .unwrap();
 
         let mut skill = make_skill("commit", true);
         skill.path = path.to_string_lossy().to_string();
@@ -1517,6 +1533,329 @@ mod tests {
         assert_eq!(
             build_skill_information_for_refs(&parsed, &missing, "sid-1").await,
             None
+        );
+    }
+
+    #[tokio::test]
+    async fn unofficial_skill_md_cannot_be_loaded_for_slash() {
+        let dir = tempfile::tempdir().unwrap();
+        let skill_dir = dir.path().join("commit");
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        let path = skill_dir.join("SKILL.md");
+        std::fs::write(&path, "# Body with $ARGUMENTS\n").unwrap();
+
+        let mut skill = make_skill("commit", true);
+        skill.path = path.to_string_lossy().to_string();
+        let skills = vec![skill];
+        let parsed = parse_skill_references("/commit fix typo", &skills, all_gated())
+            .expect("known skill must parse");
+        assert_eq!(
+            build_skill_information_for_refs(&parsed, &skills, "sid-1").await,
+            None,
+            "unofficial SKILL.md must not expand"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn slash_rejects_ancestor_dir_symlink_after_discovery() {
+        let dir = tempfile::tempdir().unwrap();
+        let skill_dir = dir.path().join("skills").join("commit");
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        let path = skill_dir.join("SKILL.md");
+        std::fs::write(
+            &path,
+            "---\nname: commit\ndescription: Create a git commit.\n---\nTrusted body.\n",
+        )
+        .unwrap();
+
+        let mut skill = make_skill("commit", true);
+        skill.path = path.to_string_lossy().to_string();
+        let skills = vec![skill];
+        let parsed = parse_skill_references("/commit", &skills, all_gated())
+            .expect("known skill must parse");
+
+        let skills_dir = dir.path().join("skills");
+        let real = dir.path().join("skills.real");
+        std::fs::rename(&skills_dir, &real).unwrap();
+        let evil_root = tempfile::tempdir().unwrap();
+        let evil_skill = evil_root.path().join("skills").join("commit");
+        std::fs::create_dir_all(&evil_skill).unwrap();
+        std::fs::write(
+            evil_skill.join("SKILL.md"),
+            "---\nname: commit\ndescription: Create a git commit.\n---\nEVIL_SECRET_BODY\n",
+        )
+        .unwrap();
+        std::os::unix::fs::symlink(evil_root.path().join("skills"), &skills_dir).unwrap();
+
+        let info = build_skill_information_for_refs(&parsed, &skills, "sid-1").await;
+        if let Some(text) = &info {
+            assert!(
+                !text.contains("EVIL_SECRET_BODY"),
+                "ancestor symlink must not inject swapped body: {text}"
+            );
+        }
+        assert_eq!(info, None, "ancestor symlink must not expand");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn slash_rejects_leaf_symlink() {
+        let dir = tempfile::tempdir().unwrap();
+        let skill_dir = dir.path().join("skills").join("commit");
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        let path = skill_dir.join("SKILL.md");
+        std::fs::write(
+            &path,
+            "---\nname: commit\ndescription: Create a git commit.\n---\nTrusted body.\n",
+        )
+        .unwrap();
+        let evil = dir.path().join("evil.md");
+        std::fs::write(
+            &evil,
+            "---\nname: commit\ndescription: Create a git commit.\n---\nEVIL_SECRET_BODY\n",
+        )
+        .unwrap();
+        std::fs::remove_file(&path).unwrap();
+        std::os::unix::fs::symlink(&evil, &path).unwrap();
+
+        let mut skill = make_skill("commit", true);
+        skill.path = path.to_string_lossy().to_string();
+        let skills = vec![skill];
+        let parsed = parse_skill_references("/commit", &skills, all_gated())
+            .expect("known skill must parse");
+        let info = build_skill_information_for_refs(&parsed, &skills, "sid-1").await;
+        if let Some(text) = &info {
+            assert!(
+                !text.contains("EVIL_SECRET_BODY"),
+                "leaf symlink must not inject swapped body: {text}"
+            );
+        }
+        assert_eq!(info, None, "leaf symlink must not expand");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn slash_rejects_nested_ancestor_dir_symlink_after_discovery() {
+        let dir = tempfile::tempdir().unwrap();
+        let skill_dir = dir.path().join("skills").join("team").join("infra");
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        let path = skill_dir.join("SKILL.md");
+        std::fs::write(
+            &path,
+            "---\nname: infra\ndescription: Nested infrastructure skill.\n---\nTrusted body.\n",
+        )
+        .unwrap();
+
+        let mut skill = make_skill("infra", true);
+        skill.path = path.to_string_lossy().to_string();
+        let skills = vec![skill];
+        let parsed =
+            parse_skill_references("/infra", &skills, all_gated()).expect("known skill must parse");
+
+        let skills_dir = dir.path().join("skills");
+        let real = dir.path().join("skills.real");
+        std::fs::rename(&skills_dir, &real).unwrap();
+        let evil_root = tempfile::tempdir().unwrap();
+        let evil_skill = evil_root.path().join("skills").join("team").join("infra");
+        std::fs::create_dir_all(&evil_skill).unwrap();
+        std::fs::write(
+            evil_skill.join("SKILL.md"),
+            "---\nname: infra\ndescription: Nested infrastructure skill.\n---\nEVIL_SECRET_BODY\n",
+        )
+        .unwrap();
+        std::os::unix::fs::symlink(evil_root.path().join("skills"), &skills_dir).unwrap();
+
+        let info = build_skill_information_for_refs(&parsed, &skills, "sid-1").await;
+        if let Some(text) = &info {
+            assert!(
+                !text.contains("EVIL_SECRET_BODY"),
+                "nested ancestor symlink must not inject swapped body: {text}"
+            );
+        }
+        assert_eq!(info, None, "nested ancestor symlink must not expand");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn slash_rejects_parent_of_skills_dir_symlink_after_discovery() {
+        let dir = tempfile::tempdir().unwrap();
+        let grok = dir.path().join(".grok");
+        let skill_dir = grok.join("skills").join("commit");
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        let path = skill_dir.join("SKILL.md");
+        std::fs::write(
+            &path,
+            "---\nname: commit\ndescription: Create a git commit.\n---\nTrusted body.\n",
+        )
+        .unwrap();
+
+        let mut skill = make_skill("commit", true);
+        skill.path = path.to_string_lossy().to_string();
+        let skills = vec![skill];
+        let parsed = parse_skill_references("/commit", &skills, all_gated())
+            .expect("known skill must parse");
+
+        let real = dir.path().join(".grok.real");
+        std::fs::rename(&grok, &real).unwrap();
+        let evil_root = tempfile::tempdir().unwrap();
+        let evil_skill = evil_root.path().join("skills").join("commit");
+        std::fs::create_dir_all(&evil_skill).unwrap();
+        std::fs::write(
+            evil_skill.join("SKILL.md"),
+            "---\nname: commit\ndescription: Create a git commit.\n---\nEVIL_SECRET_BODY\n",
+        )
+        .unwrap();
+        std::os::unix::fs::symlink(evil_root.path(), &grok).unwrap();
+
+        let info = build_skill_information_for_refs(&parsed, &skills, "sid-1").await;
+        if let Some(text) = &info {
+            assert!(
+                !text.contains("EVIL_SECRET_BODY"),
+                "parent-of-skills symlink must not inject swapped body: {text}"
+            );
+        }
+        assert_eq!(info, None, "parent-of-skills symlink must not expand");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn slash_rejects_project_dir_symlink_after_discovery() {
+        let dir = tempfile::tempdir().unwrap();
+        let proj = dir.path().join("proj");
+        let skill_dir = proj.join(".grok").join("skills").join("commit");
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        let path = skill_dir.join("SKILL.md");
+        std::fs::write(
+            &path,
+            "---\nname: commit\ndescription: Create a git commit.\n---\nTrusted body.\n",
+        )
+        .unwrap();
+
+        let mut skill = make_skill("commit", true);
+        skill.path = path.to_string_lossy().to_string();
+        let skills = vec![skill];
+        let parsed = parse_skill_references("/commit", &skills, all_gated())
+            .expect("known skill must parse");
+
+        let real = dir.path().join("proj.real");
+        std::fs::rename(&proj, &real).unwrap();
+        let evil_root = tempfile::tempdir().unwrap();
+        let evil_skill = evil_root.path().join(".grok").join("skills").join("commit");
+        std::fs::create_dir_all(&evil_skill).unwrap();
+        std::fs::write(
+            evil_skill.join("SKILL.md"),
+            "---\nname: commit\ndescription: Create a git commit.\n---\nEVIL_SECRET_BODY\n",
+        )
+        .unwrap();
+        std::os::unix::fs::symlink(evil_root.path(), &proj).unwrap();
+
+        let info = build_skill_information_for_refs(&parsed, &skills, "sid-1").await;
+        if let Some(text) = &info {
+            assert!(
+                !text.contains("EVIL_SECRET_BODY"),
+                "project-dir symlink must not inject swapped body: {text}"
+            );
+        }
+        assert_eq!(info, None, "project-dir symlink must not expand");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn slash_rejects_nested_collection_root_symlink_after_discovery() {
+        let dir = tempfile::tempdir().unwrap();
+        let pack = dir.path().join("pack");
+        let skill_dir = pack.join("team").join("infra");
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        let path = skill_dir.join("SKILL.md");
+        std::fs::write(
+            &path,
+            "---\nname: infra\ndescription: Nested infrastructure skill.\n---\nTrusted body.\n",
+        )
+        .unwrap();
+
+        let mut skill = make_skill("infra", true);
+        skill.path = path.to_string_lossy().to_string();
+        skill.collection_root = Some(pack.to_string_lossy().into_owned());
+        let skills = vec![skill];
+        let parsed =
+            parse_skill_references("/infra", &skills, all_gated()).expect("known skill must parse");
+        let loaded = build_skill_information_for_refs(&parsed, &skills, "sid-1").await;
+        assert!(
+            loaded.is_some(),
+            "nested collection must expand from the stamped root"
+        );
+
+        let real = dir.path().join("pack.real");
+        std::fs::rename(&pack, &real).unwrap();
+        let evil_root = tempfile::tempdir().unwrap();
+        let evil_skill = evil_root.path().join("team").join("infra");
+        std::fs::create_dir_all(&evil_skill).unwrap();
+        std::fs::write(
+            evil_skill.join("SKILL.md"),
+            "---\nname: infra\ndescription: Nested infrastructure skill.\n---\nEVIL_SECRET_BODY\n",
+        )
+        .unwrap();
+        std::os::unix::fs::symlink(evil_root.path(), &pack).unwrap();
+
+        let info = build_skill_information_for_refs(&parsed, &skills, "sid-1").await;
+        if let Some(text) = &info {
+            assert!(
+                !text.contains("EVIL_SECRET_BODY"),
+                "collection-root symlink must not inject swapped body: {text}"
+            );
+        }
+        assert_eq!(info, None, "collection-root symlink must not expand");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn slash_rejects_stamped_skill_dir_grandparent_symlink_after_discovery() {
+        let dir = tempfile::tempdir().unwrap();
+        let pack = dir.path().join("pack");
+        let skill_dir = pack.join("team").join("infra");
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        let path = skill_dir.join("SKILL.md");
+        std::fs::write(
+            &path,
+            "---\nname: infra\ndescription: Nested infrastructure skill.\n---\nTrusted body.\n",
+        )
+        .unwrap();
+
+        let mut skill = make_skill("infra", true);
+        skill.path = path.to_string_lossy().to_string();
+        skill.collection_root = Some(skill_dir.to_string_lossy().into_owned());
+        let skills = vec![skill];
+        let parsed =
+            parse_skill_references("/infra", &skills, all_gated()).expect("known skill must parse");
+        let loaded = build_skill_information_for_refs(&parsed, &skills, "sid-1").await;
+        assert!(
+            loaded.is_some(),
+            "stamped skill dir must expand before the grandparent swap"
+        );
+
+        let real = dir.path().join("pack.real");
+        std::fs::rename(&pack, &real).unwrap();
+        let evil_root = tempfile::tempdir().unwrap();
+        let evil_skill = evil_root.path().join("team").join("infra");
+        std::fs::create_dir_all(&evil_skill).unwrap();
+        std::fs::write(
+            evil_skill.join("SKILL.md"),
+            "---\nname: infra\ndescription: Nested infrastructure skill.\n---\nEVIL_SECRET_BODY\n",
+        )
+        .unwrap();
+        std::os::unix::fs::symlink(evil_root.path(), &pack).unwrap();
+
+        let info = build_skill_information_for_refs(&parsed, &skills, "sid-1").await;
+        if let Some(text) = &info {
+            assert!(
+                !text.contains("EVIL_SECRET_BODY"),
+                "grandparent symlink of stamped skill dir must not inject swapped body: {text}"
+            );
+        }
+        assert_eq!(
+            info, None,
+            "grandparent symlink of stamped skill dir must not expand"
         );
     }
 
@@ -2078,6 +2417,7 @@ mod tests {
             plugin_name: None,
             plugin_version: None,
             plugin_root: None,
+            collection_root: None,
             plugin_data: None,
             allowed_tools: None,
             license: None,

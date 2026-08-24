@@ -28,9 +28,18 @@
 //! It never splices a conversation and performs no prompt injection (PR19).
 
 pub mod agents;
+pub mod fusion;
+pub mod index;
 pub mod inventory;
+pub mod notify;
+pub mod ops;
 pub mod render;
 pub mod skills;
+
+#[cfg(test)]
+mod acp_fixtures;
+#[cfg(test)]
+mod quality;
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -46,8 +55,25 @@ use crate::retrieval::{DegradationKind, DegradationNotice, RetrievalService};
 use self::inventory::{InventoryLimits, WorkspaceInventory};
 use self::render::render_skills;
 
+pub use self::index::{
+    FrozenEmbeddingPin, PrimeIndexError, PrimeIndexHandle, agent_index_text, agent_rerank_document,
+    agent_source_class, agent_to_metadata_item, agents_to_index_items, bounded_cancel,
+    opaque_agent_id, opaque_skill_id, prime_index_for, skill_index_text, skill_rerank_document,
+    skill_to_metadata_item, skills_to_index_items, uninstall_prime_index,
+};
+pub use self::ops::{
+    PRIME_FAILURE_CONFIRM_REQUIRED, PRIME_INDEX_API_VERSION, PRIME_INDEX_SCHEMA_VERSION,
+    PrimeIndexCapabilities, PrimeIndexCollectionStatus, PrimeIndexJobStatus, PrimeIndexOpKind,
+    PrimeIndexOpRequest, PrimeIndexStatus, PrimeIndexUpdate, cancel_job, collect_status,
+    confirm_required_display_route, displayable_configured_route, fingerprint_short,
+    initialize_capability_value, inspect_status, parse_prime_index_available,
+    prime_failure_is_confirm_required, require_api_version, sanitize_prime_job_failure, start_job,
+    status as prime_index_status,
+};
 pub use self::render::{LoadedSkill, RenderBudgets, RenderedSkills};
-pub use self::skills::{PrimeBudgetState, PrimeDropReason, SemanticFillOutcome};
+pub use self::skills::{
+    PrimeBudgetState, PrimeDropReason, SemanticFillOutcome, smart_search_names,
+};
 
 pub use self::agents::{
     AgentDropReason, AgentEligibility, AgentGateVerdict, AgentInput, AgentPrimeBudgetState,
@@ -110,6 +136,10 @@ pub struct PrimeInput<'a> {
     pub semantic_service: Option<&'a RetrievalService>,
     /// Optional pre-built inventory (cache seam for PR19). `None` builds one.
     pub inventory: Option<&'a WorkspaceInventory>,
+    /// Canonical Grok home used to key the process-level Prime index.
+    pub grok_home: Option<&'a Path>,
+    /// Retrieval/inventory snapshot generation used at revalidation.
+    pub snapshot_generation: Option<u64>,
 }
 
 impl Default for PrimeInput<'_> {
@@ -126,6 +156,8 @@ impl Default for PrimeInput<'_> {
             semantic_profile: None,
             semantic_service: None,
             inventory: None,
+            grok_home: None,
+            snapshot_generation: None,
         }
     }
 }
@@ -430,6 +462,10 @@ pub async fn run_prime_selection(
             &pinned,
             gate.deadline.child_token(),
             hard,
+            input.grok_home,
+            input.workspace_root,
+            inventory,
+            input.config.min_score,
         )
         .await;
 
@@ -492,7 +528,7 @@ pub async fn run_prime_selection(
         degradations,
         budget_state,
         inventory_truncated: inventory_error,
-        snapshot_generation: None,
+        snapshot_generation: input.snapshot_generation,
         cancelled: false,
     })
 }
@@ -518,6 +554,8 @@ mod tests {
             semantic_profile: None,
             semantic_service: None,
             inventory: None,
+            grok_home: None,
+            snapshot_generation: None,
         };
         let cancelled = CancellationToken::new();
         cancelled.cancel();
@@ -583,7 +621,11 @@ mod tests {
         let root = dunce::canonicalize(tmp.path()).unwrap();
         let sdir = root.join("skills").join("a");
         std::fs::create_dir_all(&sdir).unwrap();
-        std::fs::write(sdir.join("SKILL.md"), "# Skill A\n").unwrap();
+        std::fs::write(
+            sdir.join("SKILL.md"),
+            "---\nname: a\ndescription: Skill A used in prime load tests.\n---\n# Skill A\n",
+        )
+        .unwrap();
         let path_a = sdir.join("SKILL.md").to_string_lossy().to_string();
 
         let bdir = root.join("skills").join("gone");
@@ -620,6 +662,8 @@ mod tests {
             semantic_profile: None,
             semantic_service: None,
             inventory: None,
+            grok_home: None,
+            snapshot_generation: None,
         };
         let sel = run_prime_selection(&input, CancellationToken::new())
             .await

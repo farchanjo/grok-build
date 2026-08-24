@@ -32,7 +32,8 @@ workspace. It supports:
 - model inference and tool calling;
 - filesystem, shell, VCS, search, MCP, and media tools;
 - session persistence, worktrees, checkpoints, memory, and compaction;
-- permission policies and operating-system sandboxing.
+- permission policies and operating-system sandboxing;
+- retrieval and Prime (skill/agent ranking, metadata index, strict skills).
 
 The composition-root package is `xai-grok-pager-bin`. It builds the
 `xai-grok-pager` artifact, which official releases expose as `grok`.
@@ -156,6 +157,22 @@ Permissions and sandboxing are distinct layers:
 Do not treat one as a replacement for the other. Changes to shell parsing,
 command wrappers, path matching, MCP access, web access, or sandbox profiles are
 security-sensitive and require adversarial failure-path tests.
+
+### Retrieval and Prime
+
+Prime selects a small set of skills (and advisory agents) for the next turn
+from a strict inventory. Ranking fuses local/path evidence with optional
+BM25 and sqlite-vec KNN over a disposable metadata index. Vectors are
+locally L2-normalized (`l2_v1`) and fingerprinted so mixed embedding spaces
+cannot share a collection.
+
+Development and tests for this path must stay hermetic: no live embedding
+or rerank providers, no production `GROK_HOME`, and no secret/path leakage
+in inspect JSON, logs, or rendered `<skill_prime>` blocks. Routing-quality
+metrics live beside the Prime code. Operator docs:
+
+- [`crates/codegen/xai-grok-pager/docs/user-guide/30-retrieval-and-prime.md`](crates/codegen/xai-grok-pager/docs/user-guide/30-retrieval-and-prime.md)
+- [`crates/codegen/xai-grok-pager/docs/user-guide/31-strict-skills-migration.md`](crates/codegen/xai-grok-pager/docs/user-guide/31-strict-skills-migration.md)
 
 ### MCP
 

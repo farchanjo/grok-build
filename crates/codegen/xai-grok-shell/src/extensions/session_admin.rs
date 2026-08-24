@@ -47,7 +47,7 @@ pub async fn handle(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
         }
         "x.ai/internal/reload_skills" => handle_reload_skills(agent),
         "x.ai/internal/reload_workflows" => handle_reload_workflows(agent),
-        "x.ai/internal/reload_models" => handle_reload_models(agent),
+        "x.ai/internal/reload_models" => handle_reload_models(agent, args),
         "x.ai/internal/reload_models_cache" => handle_reload_models_cache(agent),
         "x.ai/internal/reload_compaction" => handle_reload_compaction(agent, args),
         "x.ai/internal/auth_cleared" => handle_auth_cleared(agent),
@@ -547,6 +547,81 @@ fn cwd_matches(session_cwd: &std::path::Path, target_cwd: &std::path::Path) -> b
 
 // internal/reload_models
 
+/// Reload lanes. A bare request retains the legacy model/catalog behavior.
+#[derive(Deserialize)]
+#[serde(from = "ReloadModelLaneFlagsWire")]
+struct ReloadModelLaneFlags {
+    models: bool,
+    providers: bool,
+    retrieval: bool,
+    cache: bool,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(default, rename_all = "camelCase")]
+struct ReloadModelLaneFlagsWire {
+    models: Option<bool>,
+    providers: Option<bool>,
+    retrieval: Option<bool>,
+    cache: Option<bool>,
+}
+
+impl From<ReloadModelLaneFlagsWire> for ReloadModelLaneFlags {
+    fn from(wire: ReloadModelLaneFlagsWire) -> Self {
+        let bare = wire.models.is_none()
+            && wire.providers.is_none()
+            && wire.retrieval.is_none()
+            && wire.cache.is_none();
+        Self {
+            // Explicit partial requests must not widen omitted lanes.
+            models: wire.models.unwrap_or(bare),
+            providers: wire.providers.unwrap_or(false),
+            retrieval: wire.retrieval.unwrap_or(false),
+            cache: wire.cache.unwrap_or(false),
+        }
+    }
+}
+
+const MAX_RELOAD_RETRIEVAL_WARNINGS: usize = 8;
+const MAX_RELOAD_RETRIEVAL_WARNING_CHARS: usize = 160;
+
+fn safe_retrieval_load_warning(error: &str) -> &'static str {
+    if error.starts_with("config.toml parse error:") {
+        "config_parse_error"
+    } else if error.starts_with("read config.toml:") {
+        "config_read_error"
+    } else {
+        "retrieval_unavailable"
+    }
+}
+
+fn safe_retrieval_validation_warnings(reasons: Vec<String>) -> Vec<String> {
+    let mut warnings: Vec<String> = reasons
+        .into_iter()
+        .take(MAX_RELOAD_RETRIEVAL_WARNINGS)
+        .map(|reason| {
+            let mut chars = reason.chars();
+            let mut bounded: String = chars
+                .by_ref()
+                .take(MAX_RELOAD_RETRIEVAL_WARNING_CHARS)
+                .map(|ch| if ch.is_control() { ' ' } else { ch })
+                .collect();
+            if chars.next().is_some() {
+                bounded.push('\u{2026}');
+            }
+            if bounded.trim().is_empty() {
+                "invalid".to_owned()
+            } else {
+                bounded
+            }
+        })
+        .collect();
+    if warnings.is_empty() {
+        warnings.push("invalid".to_owned());
+    }
+    warnings
+}
+
 /// Re-resolve the agent model list from config.toml. Called by the config
 /// hot-reload watcher when `[model.*]` or `[models]` changes.
 ///
@@ -554,62 +629,200 @@ fn cwd_matches(session_cwd: &std::path::Path, target_cwd: &std::path::Path) -> b
 /// `new_with_models()` for user TOML config entries, and swaps the model list
 /// in-place. Prefetched (API) and default models are NOT re-fetched -- only
 /// BYOK entries from config are updated.
-fn handle_reload_models(agent: &MvpAgent) -> ExtResult {
-    let disk_config = crate::config::load_effective_config()
-        .map_err(|e| acp::Error::internal_error().data(e.to_string()))?;
+///
+/// The ACP-serialized owner for atomic provider/catalog/retrieval publication.
+fn handle_reload_models(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
+    let flags: ReloadModelLaneFlags = parse_params(args)?;
 
-    let toml_config = crate::agent::config::Config::new_from_toml_cfg(&disk_config)
-        .map_err(|e| acp::Error::internal_error().data(e))?;
-
-    // Merge TOML-derived model fields into the agent's in-memory config so
-    // runtime-only fields (#[serde(skip)]: remote_settings, endpoints, CLI
-    // flags) are preserved. Only model-related TOML fields are refreshed.
-    {
-        let agent_config = agent.cfg.borrow();
-        let overrides = crate::config::ModelOverrideConfig::resolve(
-            agent_config.web_search_model_override.as_deref(),
-            agent_config.session_summary_model_override.as_deref(),
-            &disk_config,
-            agent_config.remote_settings.as_ref(),
-        );
-        drop(agent_config);
-        let mut agent_config = agent.cfg.borrow_mut();
-        agent_config.models = toml_config.models.clone();
-        agent_config.config_models = toml_config.config_models.clone();
-        agent_config.endpoints = toml_config.endpoints.clone();
-        agent_config.voice = toml_config.voice.clone();
-        agent_config.web_search_model = overrides.web_search;
-        agent_config.session_summary_model = overrides.session_summary;
-        agent_config.media_config = crate::config::MediaConfig::resolve(
-            &disk_config,
-            agent_config.remote_settings.as_ref(),
-        );
-        agent_config.image_description_model = agent_config.media_config.image_model.clone();
-        agent_config.prompt_suggest_model_pin = overrides.prompt_suggestion;
+    // Cache-only events must not advance provider or graph generations.
+    if flags.cache && !flags.models && !flags.providers && !flags.retrieval {
+        agent.models_manager.reload_from_disk_cache();
+        agent.sync_process_static_api_key(None);
+        let count = agent.models_manager.models().len();
+        return ExtMethodResult::success(serde_json::json!({
+            "reloaded": true,
+            "models": count,
+        }))
+        .to_ext_response()
+        .map_err(|e| acp::Error::internal_error().data(e.to_string()));
     }
-    let media_config = agent.cfg.borrow().media_config.clone();
-    let sessions = agent.sessions.borrow();
-    let updated_media_sessions = sessions
-        .values()
-        .filter(|session| {
-            session
-                .cmd_tx
-                .send(SessionCommand::UpdateMediaConfig {
-                    media: Box::new(media_config.clone()),
+
+    let home = crate::util::grok_home::grok_home();
+    // Validate retrieval before catalog mutation; model/media-only batches
+    // remain independent of unrelated graph validity.
+    let retrieval_candidate = if flags.retrieval {
+        let input = match crate::retrieval::load_build_input_from_home(&home) {
+            Ok(input) => input,
+            Err(error) => {
+                let warning = safe_retrieval_load_warning(&error);
+                tracing::warn!(
+                    warning,
+                    "reload batch rejected; retrieval candidate unavailable"
+                );
+                if flags.cache {
+                    agent.models_manager.reload_from_disk_cache();
+                }
+                agent.sync_process_static_api_key(None);
+                return ExtMethodResult::success(serde_json::json!({
+                    "models": agent.models_manager.models().len(),
+                    "retainedLastKnownGood": true,
+                    "retrievalWarnings": [warning],
+                }))
+                .to_ext_response()
+                .map_err(|e| acp::Error::internal_error().data(e.to_string()));
+            }
+        };
+        match crate::retrieval::build_snapshot(input.clone(), 0) {
+            Ok(_) => crate::retrieval::registry_for_home(&home).map(|registry| (registry, input)),
+            Err(error) => {
+                let warnings = safe_retrieval_validation_warnings(error.reasons);
+                tracing::warn!(
+                    ?warnings,
+                    "reload batch rejected; retrieval candidate invalid"
+                );
+                if flags.cache {
+                    agent.models_manager.reload_from_disk_cache();
+                }
+                agent.sync_process_static_api_key(None);
+                return ExtMethodResult::success(serde_json::json!({
+                    "models": agent.models_manager.models().len(),
+                    "retainedLastKnownGood": true,
+                    "retrievalWarnings": warnings,
+                }))
+                .to_ext_response()
+                .map_err(|e| acp::Error::internal_error().data(e.to_string()));
+            }
+        }
+    } else {
+        None
+    };
+
+    let mut updated_media_sessions = 0;
+    if flags.models {
+        let prior_agent_config = agent.cfg.borrow().clone();
+        let disk_config = crate::config::load_effective_config()
+            .map_err(|e| acp::Error::internal_error().data(e.to_string()))?;
+
+        let toml_config = crate::agent::config::Config::new_from_toml_cfg(&disk_config)
+            .map_err(|e| acp::Error::internal_error().data(e))?;
+
+        // Merge TOML-derived model fields into the agent's in-memory config so
+        // runtime-only fields (#[serde(skip)]: remote_settings, endpoints, CLI
+        // flags) are preserved. Only model-related TOML fields are refreshed.
+        {
+            let agent_config = agent.cfg.borrow();
+            let overrides = crate::config::ModelOverrideConfig::resolve(
+                agent_config.web_search_model_override.as_deref(),
+                agent_config.session_summary_model_override.as_deref(),
+                &disk_config,
+                agent_config.remote_settings.as_ref(),
+            );
+            drop(agent_config);
+            let mut agent_config = agent.cfg.borrow_mut();
+            agent_config.models = toml_config.models.clone();
+            agent_config.config_models = toml_config.config_models.clone();
+            agent_config.config_warnings = toml_config.config_warnings.clone();
+            if flags.providers {
+                agent_config.model_providers = toml_config.model_providers.clone();
+            }
+            agent_config.endpoints = toml_config.endpoints.clone();
+            agent_config.voice = toml_config.voice.clone();
+            agent_config.web_search_model = overrides.web_search;
+            agent_config.session_summary_model = overrides.session_summary;
+            agent_config.media_config = crate::config::MediaConfig::resolve(
+                &disk_config,
+                agent_config.remote_settings.as_ref(),
+            );
+            agent_config.image_description_model = agent_config.media_config.image_model.clone();
+            agent_config.prompt_suggest_model_pin = overrides.prompt_suggestion;
+        }
+        let media_config = agent.cfg.borrow().media_config.clone();
+        let sessions = agent.sessions.borrow();
+        updated_media_sessions = sessions
+            .values()
+            .filter(|session| {
+                session
+                    .cmd_tx
+                    .send(SessionCommand::UpdateMediaConfig {
+                        media: Box::new(media_config.clone()),
+                    })
+                    .is_ok()
+            })
+            .count();
+        drop(sessions);
+        // Recompute the campaign overlay + `pre_campaign_default` (the
+        // catalog-miss fallback) so reload matches spawn; `new_from_toml_cfg`
+        // reset it to None.
+        {
+            let mut agent_config = agent.cfg.borrow_mut();
+            crate::util::config::sync_campaign_fields(&mut agent_config);
+        }
+        let merged_config = agent.cfg.borrow().clone();
+
+        let outcome = agent
+            .models_manager
+            .apply_config_with_outcome_gated(merged_config, || {
+                match retrieval_candidate.as_ref() {
+                    Some((registry, input)) => matches!(
+                        registry.reload_from_input(input.clone()),
+                        crate::retrieval::ReloadOutcome::Published { .. }
+                            | crate::retrieval::ReloadOutcome::Unchanged { .. }
+                            | crate::retrieval::ReloadOutcome::Disabled { .. }
+                    ),
+                    None => true,
+                }
+            });
+
+        let catalog_ok = !matches!(
+            outcome,
+            crate::agent::models::ModelReloadOutcome::RetainedLastKnownGood
+        );
+        if !catalog_ok {
+            // Restore config so a rejected catalog cannot leak partial policy.
+            *agent.cfg.borrow_mut() = prior_agent_config.clone();
+            let prior_media = prior_agent_config.media_config.clone();
+            let sessions = agent.sessions.borrow();
+            updated_media_sessions = sessions
+                .values()
+                .filter(|session| {
+                    session
+                        .cmd_tx
+                        .send(SessionCommand::UpdateMediaConfig {
+                            media: Box::new(prior_media.clone()),
+                        })
+                        .is_ok()
                 })
-                .is_ok()
-        })
-        .count();
-    drop(sessions);
-    // Recompute the campaign overlay + `pre_campaign_default` (the catalog-miss
-    // fallback) so reload matches spawn; `new_from_toml_cfg` reset it to None.
-    {
-        let mut agent_config = agent.cfg.borrow_mut();
-        crate::util::config::sync_campaign_fields(&mut agent_config);
+                .count();
+            drop(sessions);
+            tracing::warn!(
+                "model config reload rejected; agent config restored and retrieval registry not rebuilt (LKG retained)"
+            );
+            if flags.cache {
+                agent.models_manager.reload_from_disk_cache();
+            }
+            agent.sync_process_static_api_key(None);
+            return ExtMethodResult::success(serde_json::json!({
+                "models": agent.models_manager.models().len(),
+                "updated_media_sessions": updated_media_sessions,
+                "retainedLastKnownGood": true,
+            }))
+            .to_ext_response()
+            .map_err(|e| acp::Error::internal_error().data(e.to_string()));
+        }
     }
-    let merged_config = agent.cfg.borrow().clone();
 
-    agent.models_manager.apply_config(merged_config);
+    // Model batches publish this candidate inside the catalog gate.
+    if !flags.models
+        && let Some((registry, input)) = retrieval_candidate
+    {
+        let outcome = registry.reload_from_input(input);
+        tracing::info!(?home, ?outcome, "retrieval-only candidate published");
+    }
+
+    // Apply cache last so it cannot precede an accepted graph candidate.
+    if flags.cache {
+        agent.models_manager.reload_from_disk_cache();
+    }
     agent.sync_process_static_api_key(None);
 
     let sessions = agent.sessions.borrow();
@@ -642,13 +855,7 @@ fn handle_reload_models(agent: &MvpAgent) -> ExtResult {
 /// Hot-reload the model catalog from `~/.grok/models_cache.json` after an
 /// external write detected by the config watcher.
 ///
-/// Routed through the agent's ACP stream (injected by the
-/// `ConfigUpdate::ModelsCacheChanged` arm in `agent/app.rs`) instead of being
-/// applied directly on the manager from the config-update task: stream
-/// requests are processed in order, so when `config.toml` and
-/// `models_cache.json` change in the same watcher batch this runs strictly
-/// after `reload_models`' `apply_config` accepted or rejected the new config,
-/// rather than rebuilding the catalog and notifying clients mid-flight.
+/// Legacy cache-only entry point for external callers.
 fn handle_reload_models_cache(agent: &MvpAgent) -> ExtResult {
     agent.models_manager.reload_from_disk_cache();
     agent.sync_process_static_api_key(None);
@@ -845,12 +1052,89 @@ async fn handle_session_fork(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtRes
 
 #[cfg(test)]
 mod tests {
+    use super::ReloadModelLaneFlags;
     use super::{fan_out_catalog_context_windows, fan_out_compaction_config};
+    use super::{safe_retrieval_load_warning, safe_retrieval_validation_warnings};
     use crate::agent::config::ModelEntry;
     use crate::agent::models::ModelsManager;
     use crate::session::SessionCommand;
     use agent_client_protocol as acp;
     use std::num::NonZeroU64;
+
+    #[test]
+    fn reload_lane_flags_parse_combined_intent() {
+        // The app config-update task always sends explicit flags.
+        let combined: ReloadModelLaneFlags = serde_json::from_value(serde_json::json!({
+            "models": true,
+            "providers": true,
+            "retrieval": true,
+            "cache": true,
+        }))
+        .unwrap();
+        assert!(combined.models && combined.providers && combined.retrieval && combined.cache);
+
+        let cache_only: ReloadModelLaneFlags = serde_json::from_value(serde_json::json!({
+            "models": false,
+            "retrieval": false,
+            "cache": true,
+        }))
+        .unwrap();
+        assert!(
+            !cache_only.models
+                && !cache_only.providers
+                && !cache_only.retrieval
+                && cache_only.cache
+        );
+
+        let models_only: ReloadModelLaneFlags = serde_json::from_value(serde_json::json!({
+            "models": true,
+            "retrieval": false,
+            "cache": false,
+        }))
+        .unwrap();
+        assert!(
+            models_only.models
+                && !models_only.providers
+                && !models_only.retrieval
+                && !models_only.cache
+        );
+
+        // A bare request preserves the historical model/catalog reload.
+        let bare: ReloadModelLaneFlags = serde_json::from_value(serde_json::json!({})).unwrap();
+        assert!(bare.models);
+        assert!(!bare.retrieval && !bare.cache);
+
+        let partial: ReloadModelLaneFlags =
+            serde_json::from_value(serde_json::json!({ "cache": true })).unwrap();
+        assert!(!partial.models && !partial.retrieval && partial.cache);
+    }
+
+    #[test]
+    fn retrieval_reload_warnings_are_bounded_and_hide_raw_config_errors() {
+        assert_eq!(
+            safe_retrieval_load_warning(
+                "config.toml parse error: secret = \"literal that must not escape\""
+            ),
+            "config_parse_error"
+        );
+        assert_eq!(
+            safe_retrieval_load_warning("read config.toml: permission denied"),
+            "config_read_error"
+        );
+        assert_eq!(
+            safe_retrieval_load_warning("unexpected loader failure"),
+            "retrieval_unavailable"
+        );
+
+        let warnings = safe_retrieval_validation_warnings(vec![
+            "line one\nline two".to_owned(),
+            "x".repeat(200),
+        ]);
+        assert_eq!(warnings[0], "line one line two");
+        assert_eq!(warnings[1].chars().count(), 161);
+        assert!(warnings[1].ends_with('\u{2026}'));
+        assert_eq!(safe_retrieval_validation_warnings(Vec::new()), ["invalid"]);
+    }
 
     #[test]
     fn compaction_reload_fans_out_to_every_live_session() {

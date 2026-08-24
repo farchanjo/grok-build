@@ -95,6 +95,32 @@ An SQLite index supports hybrid search across all memory files:
 - **FTS5** provides full-text search for keyword matching.
 - **vec0** provides vector search for semantic similarity. Vector search is optional and requires an embedding.
 
+### Retrieval profiles and the embedding boundary
+
+Memory can be driven by a **named retrieval profile** (see
+[Retrieval and Prime](30-retrieval-and-prime.md)):
+
+- **Named-profile precedence.** A named retrieval profile takes precedence
+  over legacy `[memory.embedding]` configuration.
+- **Legacy synthesis.** When no named profile is set, legacy `[memory.embedding]`
+  configuration synthesizes a compatible profile where applicable.
+- **Pinned embedding space.** The persistent memory backend pins its first
+  usable embedding space/profile at index open. A profile or provider reload
+  changes the **next** eligible prime turn — it does not switch the active
+  vectors.
+- **Changed embedding identity** requires the existing serialized safe rebuild
+  or a new session. During an incomplete or failed rebuild, memory remains
+  FTS-only and does **not** claim vector compatibility.
+- **Rerank placement.** Reranking happens after retrieval, according to the
+  selected profile.
+- **Rollback-safe warning.** Reverting does not rewrite active vectors, and
+  there is no destructive cleanup step.
+
+Named routes live under `[embedding_models.*]`, `[reranker_models.*]`, and
+`[retrieval_profiles.*]`; memory selects one with
+`[memory] retrieval_profile = "<PROFILE_NAME>"` (see
+[Configuration](05-configuration.md)).
+
 ---
 
 ## Automatic Saves

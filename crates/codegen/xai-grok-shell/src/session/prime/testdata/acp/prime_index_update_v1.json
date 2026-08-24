@@ -1,0 +1,9 @@
+{
+  "schemaVersion": 1,
+  "apiVersion": 1,
+  "generation": 4,
+  "notifySeq": 9,
+  "fingerprintShort": "abc123def456",
+  "changedFields": ["job"],
+  "futureField": true
+}

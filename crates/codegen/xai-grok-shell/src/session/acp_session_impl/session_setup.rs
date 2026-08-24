@@ -181,21 +181,23 @@ impl SessionActor {
         let cwd = &self.session_info.cwd;
         let skills_config = crate::util::config::load_config().await.skills;
         let plugin_snapshot = self.plugin_registry.borrow().clone();
-        let new_skills = xai_grok_agent::prompt::skills::list_skills_with_plugins(
+        let listing = xai_grok_agent::prompt::skills::list_skill_sources_with_plugins(
             Some(cwd),
             &skills_config,
             plugin_snapshot.as_deref(),
             self.rebuild_spec.compat,
         )
         .await;
-        let skill_count = new_skills.len();
+        let skill_count = listing.skills.len();
         tracing::info!(
             session_id = %self.session_info.id.0,
             skill_count,
             "Reloaded skills from disk",
         );
         let bridge = self.agent.borrow().tool_bridge().clone();
-        bridge.update_skill_baseline(new_skills).await;
+        bridge
+            .update_skill_sources(listing.skills, listing.inventory, listing.commands)
+            .await;
         match bridge.apply_pending_skill_update().await {
             Some(effects) => self.apply_skill_update_effects(effects).await,
             None => self.send_available_commands_update().await,
@@ -599,6 +601,14 @@ impl SessionActor {
             .map(|id| self.models_manager.model_show_model_fingerprint(id))
             .unwrap_or(false);
         let conversation_id = None;
+        // Actual session prime accounting (never a fresh config echo or a
+        // re-run of retrieval/aliases/callability). Only the actor's last
+        // finalized eligible real-turn outcome is projected here.
+        let prime = self
+            .last_prime_outcome
+            .borrow()
+            .as_ref()
+            .map(LastPrimeOutcome::to_projection);
         SessionInfoData {
             model,
             model_display_name: None,
@@ -625,6 +635,7 @@ impl SessionActor {
                 usage_pct,
                 auto_compact_threshold_percent: self.compaction.threshold_percent.get(),
                 usage_categories,
+                prime,
             },
         }
     }

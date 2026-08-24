@@ -12,7 +12,10 @@ mod listing;
 use std::collections::HashSet;
 use std::path::PathBuf;
 
-use crate::implementations::skills::types::SkillInfo;
+use crate::implementations::skills::strict::{
+    LegacyCommand, SkillIdentity, SkillInventory, SkillSourceReport,
+};
+use crate::implementations::skills::types::{SkillInfo, SkillScope};
 use crate::types::compat::CompatConfig;
 
 use conditional::ConditionalSkills;
@@ -141,6 +144,13 @@ pub struct SkillManager {
     /// `paths:`-gated skills held back from the listing until a matching file
     /// is touched, plus their activation state. See [`ConditionalSkills`].
     conditional: ConditionalSkills,
+
+    /// Last published strict inventory (valid + quarantined). Invalid rows
+    /// never enter `startup_skills` / `discovered_skills`.
+    inventory: SkillInventory,
+
+    /// Flat legacy commands advertised as slash-only. Never model-invocable.
+    legacy_commands: Vec<LegacyCommand>,
 }
 
 /// Canonicalize a skill path, falling back to the raw path for not-yet-created
@@ -336,6 +346,161 @@ impl SkillManager {
         }
     }
 
+    /// Replace the published strict inventory (valid + quarantined diagnostics).
+    ///
+    /// Full snapshots (startup, plugin reload) must call this. Incremental
+    /// discovery must use [`Self::ingest_incremental`] so a one-file report
+    /// cannot wipe a fuller inventory.
+    pub fn set_inventory(&mut self, inventory: SkillInventory) {
+        self.inventory = inventory;
+    }
+
+    /// Current published inventory.
+    pub fn inventory(&self) -> &SkillInventory {
+        &self.inventory
+    }
+
+    /// Merge an incremental source report by identity and refresh advertisement.
+    ///
+    /// Quarantined or missing identities are dropped from startup/discovered
+    /// projections so `take_pending` / `eligible_native_skills` cannot keep a
+    /// stale `SkillInfo` after an unofficial rewrite.
+    pub fn ingest_incremental(&mut self, report: SkillSourceReport) -> bool {
+        self.inventory = self.inventory.merge_incremental(report.inventory);
+        let quarantined: HashSet<(String, Option<SkillScope>)> = self
+            .inventory
+            .quarantined
+            .iter()
+            .map(|row| (row.identity.parent_dir_name.clone(), row.identity.scope))
+            .collect();
+        let evicted = self.evict_quarantined(&quarantined);
+        let refreshed = self.add_or_refresh_discovered(report.skills);
+        let commands = self.add_legacy_commands(report.commands);
+        evicted || refreshed || commands
+    }
+
+    fn advertised_identity(skill: &SkillInfo) -> SkillIdentity {
+        let parent = std::path::Path::new(&skill.path)
+            .parent()
+            .and_then(|parent| parent.file_name())
+            .and_then(|name| name.to_str())
+            .unwrap_or(skill.name.as_str());
+        SkillIdentity::new(parent, Some(skill.scope))
+    }
+
+    fn identity_matches_quarantine(
+        skill: &SkillInfo,
+        quarantined: &HashSet<(String, Option<SkillScope>)>,
+    ) -> bool {
+        let identity = Self::advertised_identity(skill);
+        quarantined.contains(&(identity.parent_dir_name.clone(), identity.scope))
+            || quarantined.contains(&(identity.parent_dir_name, None))
+    }
+
+    fn evict_quarantined(&mut self, quarantined: &HashSet<(String, Option<SkillScope>)>) -> bool {
+        if quarantined.is_empty() {
+            return false;
+        }
+        let mut evicted = false;
+        let mut drop_paths = Vec::new();
+        self.startup_skills.retain(|skill| {
+            if Self::identity_matches_quarantine(skill, quarantined) {
+                drop_paths.push(canonical_path(&skill.path));
+                evicted = true;
+                false
+            } else {
+                true
+            }
+        });
+        self.discovered_skills.retain(|skill| {
+            if Self::identity_matches_quarantine(skill, quarantined) {
+                drop_paths.push(canonical_path(&skill.path));
+                evicted = true;
+                false
+            } else {
+                true
+            }
+        });
+        for path in drop_paths {
+            self.discovered_canonical_paths.remove(&path);
+        }
+        if evicted {
+            self.pending = Some(PendingKind::Discovery);
+        }
+        evicted
+    }
+
+    fn add_or_refresh_discovered(&mut self, skills: Vec<SkillInfo>) -> bool {
+        let mut any = false;
+        let mut insert = Vec::new();
+        for skill in skills {
+            if !crate::implementations::skills::strict::is_skill_md_path(&skill.path) {
+                continue;
+            }
+            let canonical = canonical_path(&skill.path);
+            if let Some(existing) = self
+                .discovered_skills
+                .iter_mut()
+                .find(|row| canonical_path(&row.path) == canonical)
+            {
+                *existing = skill;
+                any = true;
+                continue;
+            }
+            if let Some(existing) = self
+                .startup_skills
+                .iter_mut()
+                .find(|row| canonical_path(&row.path) == canonical)
+            {
+                *existing = skill;
+                any = true;
+                continue;
+            }
+            insert.push(skill);
+        }
+        if self.add_discovered(insert) {
+            any = true;
+        }
+        if any {
+            self.pending = Some(PendingKind::Discovery);
+        }
+        any
+    }
+
+    /// Replace the slash-only legacy command set.
+    pub fn set_legacy_commands(&mut self, commands: Vec<LegacyCommand>) {
+        if self
+            .legacy_commands
+            .iter()
+            .map(|c| &c.path)
+            .collect::<HashSet<_>>()
+            != commands.iter().map(|c| &c.path).collect::<HashSet<_>>()
+        {
+            self.pending = Some(PendingKind::BaselineChange);
+        }
+        self.legacy_commands = commands;
+    }
+
+    /// Append newly discovered command-only rows (dynamic path).
+    pub fn add_legacy_commands(&mut self, commands: Vec<LegacyCommand>) -> bool {
+        let mut any_new = false;
+        let mut seen: HashSet<String> = self
+            .legacy_commands
+            .iter()
+            .map(|c| c.path.clone())
+            .collect();
+        for command in commands {
+            if seen.insert(command.path.clone()) {
+                self.legacy_commands.push(command);
+                any_new = true;
+            }
+        }
+        if any_new {
+            self.pending = Some(PendingKind::Discovery);
+        }
+        any_new
+    }
+
     /// Replace the startup baseline (plugin reload / bundle sync).
     ///
     /// Marks a pending baseline-change reconciliation only if the skill set
@@ -364,6 +529,9 @@ impl SkillManager {
     pub fn add_discovered(&mut self, skills: Vec<SkillInfo>) -> bool {
         let mut any_new = false;
         for skill in skills {
+            if !crate::implementations::skills::strict::is_skill_md_path(&skill.path) {
+                continue;
+            }
             let canonical = canonical_path(&skill.path);
             if self.discovered_canonical_paths.contains(&canonical) {
                 continue;
@@ -412,7 +580,10 @@ impl SkillManager {
     pub fn take_pending(&mut self) -> Option<(Vec<SkillInfo>, SkillUpdateEffects)> {
         let pending = self.pending.take()?;
 
-        let runtime_skills = dedup_by_canonical_path(&self.discovered_skills, &self.startup_skills);
+        let runtime_skills = dedup_by_canonical_path(&self.discovered_skills, &self.startup_skills)
+            .into_iter()
+            .filter(|s| crate::implementations::skills::strict::is_skill_md_path(&s.path))
+            .collect();
 
         let kind = match pending {
             PendingKind::Discovery => SkillUpdateKind::Discovery,
@@ -466,7 +637,17 @@ impl SkillManager {
     /// and name (discovered wins). This is the authoritative source
     /// for slash command advertisement.
     pub fn slash_skills(&self) -> Vec<SkillInfo> {
-        dedupe_by_canonical_path_and_name(&self.discovered_skills, &self.startup_skills)
+        let mut skills =
+            dedupe_by_canonical_path_and_name(&self.discovered_skills, &self.startup_skills);
+        let claimed: HashSet<String> = skills.iter().map(|s| s.dedup_key()).collect();
+        for command in &self.legacy_commands {
+            let slash = command.to_slash_skill();
+            if claimed.contains(&slash.dedup_key()) {
+                continue;
+            }
+            skills.push(slash);
+        }
+        skills
     }
 
     /// Render the canonical listing for the entire current skill set, for
@@ -515,7 +696,10 @@ impl SkillManager {
     pub fn eligible_native_skills(&self) -> Vec<SkillInfo> {
         dedup_by_canonical_path(&self.discovered_skills, &self.startup_skills)
             .into_iter()
-            .filter(SkillInfo::is_native_model_invocable)
+            .filter(|s| {
+                crate::implementations::skills::strict::is_skill_md_path(&s.path)
+                    && s.is_native_model_invocable()
+            })
             .collect()
     }
 
@@ -1227,6 +1411,51 @@ mod tests {
     }
 
     #[test]
+    fn add_discovered_rejects_legacy_command_markdown() {
+        let mut mgr = SkillManager::new();
+        assert!(!mgr.add_discovered(vec![make_skill("frontend", "/commands/frontend.md")]));
+        assert!(mgr.discovered_skills().is_empty());
+    }
+
+    #[test]
+    fn slash_skills_project_commands_as_model_locked() {
+        let mut mgr = SkillManager::new();
+        mgr.seed(
+            None,
+            None,
+            vec![make_skill("commit", "/s/commit/SKILL.md")],
+            None,
+            None,
+            None,
+        );
+        mgr.set_legacy_commands(vec![LegacyCommand {
+            name: "frontend".into(),
+            description: "UI kit".into(),
+            path: "/commands/frontend.md".into(),
+            scope: crate::implementations::skills::types::SkillScope::Local,
+            argument_hint: None,
+            plugin_name: None,
+            plugin_version: None,
+            plugin_root: None,
+            plugin_data: None,
+        }]);
+        let slash = mgr.slash_skills();
+        assert!(slash.iter().any(|s| s.name == "commit"));
+        let command = slash
+            .iter()
+            .find(|s| s.name == "frontend")
+            .expect("command advertised as slash-only");
+        assert!(command.disable_model_invocation);
+        assert!(command.user_invocable);
+        let eligible = mgr.eligible_native_skills();
+        assert!(eligible.iter().any(|s| s.name == "commit"));
+        assert!(
+            !eligible.iter().any(|s| s.name == "frontend"),
+            "legacy commands must not enter native skill eligibility"
+        );
+    }
+
+    #[test]
     fn compaction_does_not_produce_pending() {
         // Compaction clears announced_names but does NOT queue a pending.
         // Re-announcement happens when the reminder re-fires after compaction.
@@ -1677,5 +1906,86 @@ mod tests {
                 .unwrap();
             assert_eq!(snapshot.text, injected, "xml={xml}");
         }
+    }
+
+    fn write_skill(dir: &std::path::Path, name: &str, body: &str) -> PathBuf {
+        let skill_dir = dir.join(name);
+        fs::create_dir_all(&skill_dir).unwrap();
+        let path = skill_dir.join("SKILL.md");
+        fs::write(&path, body).unwrap();
+        path
+    }
+
+    #[test]
+    fn unofficial_rewrite_evicts_advertised_skill_from_pending_and_eligibility() {
+        use crate::implementations::skills::discovery::parse_skill_sources;
+        use crate::implementations::skills::types::SkillScope;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let path = write_skill(
+            tmp.path(),
+            "commit",
+            "---\nname: commit\ndescription: Create well-formatted git commits.\n---\n# Commit\n",
+        );
+        let mut mgr = SkillManager::new();
+        mgr.seed(None, None, vec![], None, None, None);
+        let valid = parse_skill_sources(vec![(path.clone(), SkillScope::Local)], 0);
+        assert!(!valid.skills.is_empty(), "fixture must ingest as valid");
+        mgr.ingest_incremental(valid);
+        let pending = mgr.take_pending_reconciliation().unwrap();
+        assert!(pending.runtime_skills.iter().any(|s| s.name == "commit"));
+        assert!(
+            mgr.eligible_native_skills()
+                .iter()
+                .any(|s| s.name == "commit")
+        );
+
+        fs::write(
+            &path,
+            "---\nname: commit\ndescription: Create well-formatted git commits.\nwhen-to-use: secret-token\n---\n# Commit\n",
+        )
+        .unwrap();
+        let unofficial = parse_skill_sources(vec![(path, SkillScope::Local)], 0);
+        assert!(unofficial.skills.is_empty());
+        assert!(!unofficial.inventory.quarantined.is_empty());
+        mgr.ingest_incremental(unofficial);
+        let pending = mgr.take_pending_reconciliation();
+        let runtime = pending.map(|p| p.runtime_skills).unwrap_or_default();
+        assert!(
+            !runtime.iter().any(|s| s.name == "commit"),
+            "quarantined rewrite must leave take_pending"
+        );
+        assert!(
+            !mgr.eligible_native_skills()
+                .iter()
+                .any(|s| s.name == "commit"),
+            "quarantined rewrite must leave eligible_native_skills"
+        );
+    }
+
+    #[test]
+    fn incremental_unofficial_write_leaves_other_quarantined_inventory_rows() {
+        use crate::implementations::skills::discovery::parse_skill_sources;
+        use crate::implementations::skills::types::SkillScope;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let alpha = write_skill(tmp.path(), "alpha", "no frontmatter\n");
+        let beta = write_skill(tmp.path(), "beta", "still invalid\n");
+        let mut mgr = SkillManager::new();
+        mgr.seed(None, None, vec![], None, None, None);
+        mgr.ingest_incremental(parse_skill_sources(vec![(alpha, SkillScope::Local)], 0));
+        assert_eq!(mgr.inventory().quarantined.len(), 1);
+        mgr.ingest_incremental(parse_skill_sources(vec![(beta, SkillScope::Local)], 0));
+        let names: Vec<_> = mgr
+            .inventory()
+            .quarantined
+            .iter()
+            .map(|row| row.identity.parent_dir_name.as_str())
+            .collect();
+        assert!(
+            names.contains(&"alpha"),
+            "one-file ingest must not wipe the other quarantined row"
+        );
+        assert!(names.contains(&"beta"));
     }
 }

@@ -281,9 +281,8 @@ async fn build_embedding_provider(
     if !credentials_approved {
         tracing::error!(
             target: xai_grok_telemetry::memory_log::TARGET,
-            base_url,
-            approved = ?credentials.endpoint,
-            "memory embeddings: scoped credentials do not match the request URL; dropping them"
+            mismatch = true,
+            "memory embeddings: scoped credentials do not match the request origin; dropping them"
         );
     }
 

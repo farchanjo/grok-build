@@ -24,6 +24,7 @@ use crate::app::app_view::{ActiveView, AppView};
 use crate::app::dispatch::ctx::with_active_agent;
 use crate::app::dispatch::modes::{set_yolo_mode_inner, sync_active_auto_flag};
 use crate::app::dispatch::router::dispatch;
+use crate::app::dispatch::transcript::{dispatch_prime_index_cancel, dispatch_prime_index_job};
 use crate::app::dispatch::turn::apply_cancel_subagents_preference_global;
 use crate::scrollback::block::RenderBlock;
 use agent_client_protocol as acp;
@@ -256,6 +257,20 @@ pub(in crate::app::dispatch) fn dispatch_open_retrieval_settings(app: &mut AppVi
         agent_id: id,
         operation: crate::app::actions::RetrievalOperation::LoadSnapshot,
     });
+    if app.prime_index.status {
+        if let Some(session_id) = app
+            .agents
+            .get(&id)
+            .and_then(|a| a.session.session_id.clone())
+        {
+            effects.push(Effect::FetchPrimeIndexStatus {
+                agent_id: id,
+                session_id,
+                expected_generation: None,
+                expected_fingerprint: None,
+            });
+        }
+    }
     effects
 }
 
@@ -270,6 +285,22 @@ pub(in crate::app::dispatch) fn dispatch_retrieval_command(
     let ActiveView::Agent(agent_id) = app.active_view else {
         return vec![];
     };
+    match &command {
+        RetrievalCommand::PrimeIndexBackfill {
+            collection,
+            confirm,
+        } => {
+            return dispatch_prime_index_job(app, "backfill", collection.clone(), *confirm);
+        }
+        RetrievalCommand::PrimeIndexRebuild {
+            collection,
+            confirm,
+        } => {
+            return dispatch_prime_index_job(app, "rebuild", collection.clone(), *confirm);
+        }
+        RetrievalCommand::PrimeIndexCancel => return dispatch_prime_index_cancel(app),
+        _ => {}
+    }
     let Some(agent) = app.agents.get_mut(&agent_id) else {
         return vec![];
     };

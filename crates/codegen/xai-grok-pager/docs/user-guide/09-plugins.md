@@ -8,7 +8,7 @@ A plugin bundles skills, slash commands, agents, hooks, MCP server configuration
 
 A plugin is a directory that holds any combination of these components:
 
-- **Skills** -- a `skills/` directory of SKILL.md files
+- **Skills** -- a `skills/` directory of SKILL.md files. Each skill must pass the same strict Agent Skills contract as native skills, including official top-level keys and `metadata.grok.*` extensions. Invalid skill components are quarantined and cannot be advertised, invoked, or primed; other plugin components may remain. There is no silent repair. See [Strict Skills Migration](31-strict-skills-migration.md).
 - **Slash commands** -- a `commands/` directory of command files
 - **Agents** -- an `agents/` directory of agent definitions
 - **Hooks** -- a `hooks/hooks.json` file of lifecycle hooks. Plugin hooks also receive `GROK_PLUGIN_ROOT` and `GROK_PLUGIN_DATA` (see the [Hooks guide](10-hooks.md) for every environment variable passed to hooks).

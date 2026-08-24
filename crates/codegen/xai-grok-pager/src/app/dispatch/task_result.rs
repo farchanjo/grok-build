@@ -841,15 +841,73 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
         }
         TaskResult::SkillsListLoaded { agent_id, result } => {
             use crate::views::extensions_modal::TabDataState;
+            let mut effects = Vec::new();
+            if let Some(agent) = app.agents.get_mut(&agent_id) {
+                let in_flight = agent.skill_regress_in_flight.is_some();
+                let session_id = agent.session.session_id.clone();
+                let mut search_query = None;
+                if let Some(ref mut modal) = agent.extensions_modal {
+                    modal.skills_smart_rank = None;
+                    modal.skills_data = match result {
+                        Ok(skills) => TabDataState::Loaded(skills),
+                        Err(e) => TabDataState::Error(e),
+                    };
+                    if in_flight || modal.pending_action.as_deref() == Some("regressing...") {
+                        if modal.active_tab == crate::views::extensions_modal::ExtensionsTab::Skills
+                        {
+                            modal.pending_action = Some("regressing...".into());
+                        }
+                    } else {
+                        modal.pending_action = None;
+                        modal.pending_entry_index = None;
+                    }
+                    if matches!(modal.skills_data, TabDataState::Loaded(_)) {
+                        search_query = modal.skills_smart_search_query().map(str::to_owned);
+                    }
+                }
+                // Always bump when inventory is applied so a stale same-query
+                // completion cannot match after reload, including off-tab
+                // ListLoaded and a missing session_id. Issue at most one
+                // fetch with that generation when Skills+Smart+query+session
+                // are all live.
+                if agent.extensions_modal.is_some() {
+                    let r#gen = agent.bump_skills_smart_search_gen();
+                    if let (Some(session_id), Some(query)) = (session_id, search_query) {
+                        effects.push(Effect::FetchSkillsSearch {
+                            agent_id,
+                            session_id,
+                            query,
+                            r#gen,
+                        });
+                    }
+                }
+            }
+            effects
+        }
+        TaskResult::SkillsSearchLoaded {
+            agent_id,
+            session_id,
+            query,
+            r#gen,
+            result,
+        } => {
             if let Some(agent) = app.agents.get_mut(&agent_id)
-                && let Some(ref mut modal) = agent.extensions_modal
+                && agent.session.session_id.as_ref() == Some(&session_id)
             {
-                modal.skills_data = match result {
-                    Ok(skills) => TabDataState::Loaded(skills),
-                    Err(e) => TabDataState::Error(e),
-                };
-                modal.pending_action = None;
-                modal.pending_entry_index = None;
+                let current_gen = agent.skills_smart_search_gen;
+                if let Some(ref mut modal) = agent.extensions_modal {
+                    let live = modal.skills_smart_search_query().map(str::to_owned);
+                    if r#gen != current_gen || live.as_deref() != Some(query.as_str()) {
+                        // Stale generation, query change, mode change, empty
+                        // query, or a later occupancy: do not install a rank,
+                        // change selection, or trigger another side effect.
+                    } else {
+                        modal.skills_smart_rank = match result {
+                            Ok((names, false)) => Some(names),
+                            Ok((_, true)) | Err(_) => None,
+                        };
+                    }
+                }
             }
             vec![]
         }
@@ -872,6 +930,78 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
         }
         TaskResult::SkillsToggleDone { agent_id, result } => {
             handle_skills_toggle_done(app, agent_id, result)
+        }
+        TaskResult::SkillPublishDone { agent_id, result } => {
+            use crate::views::extensions_modal::{ModalMessage, TabDataState};
+            let mut effects = Vec::new();
+            if let Some(agent) = app.agents.get_mut(&agent_id) {
+                let session_id = agent.session.session_id.clone();
+                if let Some(ref mut modal) = agent.extensions_modal {
+                    modal.pending_action = None;
+                    match result {
+                        Ok(_) => {
+                            modal.skills_data = TabDataState::Loading;
+                            if let Some(session_id) = session_id {
+                                effects.push(Effect::FetchSkillsList {
+                                    agent_id,
+                                    session_id,
+                                });
+                            }
+                        }
+                        Err(e) => {
+                            modal.modal_message = Some(ModalMessage::Error(e));
+                        }
+                    }
+                }
+            }
+            effects
+        }
+        TaskResult::SkillRegressDone { agent_id, result } => {
+            use crate::views::extensions_modal::{ModalMessage, TabDataState};
+            let mut effects = Vec::new();
+            if let Some(agent) = app.agents.get_mut(&agent_id) {
+                agent.skill_regress_in_flight = None;
+                let session_id = agent.session.session_id.clone();
+                if let Some(ref mut modal) = agent.extensions_modal {
+                    modal.pending_action = None;
+                    match result {
+                        Ok(_) => {
+                            modal.skills_data = TabDataState::Loading;
+                            if let Some(session_id) = session_id {
+                                effects.push(Effect::FetchSkillsList {
+                                    agent_id,
+                                    session_id,
+                                });
+                            }
+                        }
+                        Err(e) => {
+                            modal.modal_message = Some(ModalMessage::Error(e));
+                        }
+                    }
+                }
+            }
+            effects
+        }
+        TaskResult::PrimeIndexStatusLoaded { agent_id, result } => {
+            apply_prime_index_status(app, agent_id, result);
+            vec![]
+        }
+        TaskResult::PrimeIndexJobLoaded {
+            agent_id,
+            result,
+            kind,
+            collection,
+        } => apply_prime_index_job(app, agent_id, result, &kind, &collection),
+        TaskResult::SkillRegressCancelled { agent_id, result } => {
+            use crate::views::extensions_modal::ModalMessage;
+            if let Some(agent) = app.agents.get_mut(&agent_id)
+                && let Some(ref mut modal) = agent.extensions_modal
+            {
+                if let Err(e) = result {
+                    modal.modal_message = Some(ModalMessage::Error(e));
+                }
+            }
+            vec![]
         }
         TaskResult::ShareSessionComplete {
             agent_id,
@@ -1690,9 +1820,343 @@ pub(crate) fn mutation_operation_matches(
     }
 }
 
+fn apply_prime_index_status(
+    app: &mut crate::app::app_view::AppView,
+    agent_id: crate::app::agent::AgentId,
+    result: Result<xai_grok_shell::session::prime::PrimeIndexStatus, String>,
+) {
+    let Some(agent) = app.agents.get_mut(&agent_id) else {
+        return;
+    };
+    match result {
+        Ok(mut status) => {
+            status.sanitize_secrets();
+            let unchanged = status.unchanged;
+            if let Some(ref mut modal) = agent.extensions_modal {
+                if let Some(idx) = modal.selected_data_index()
+                    && let crate::views::extensions_modal::TabDataState::Loaded(ref snap) =
+                        modal.skills_data
+                    && let Some(row) = snap.rows.get(idx)
+                {
+                    modal.skills_anchor_identity = Some(row.identity.clone());
+                }
+                // Always merge compact index state, including when
+                // `unchanged=true` (generation matched but job/counts/readiness
+                // still advance). Search/filter/selection live on the modal,
+                // not on this DTO.
+                if unchanged && let Some(existing) = modal.prime_index.as_mut() {
+                    merge_live_prime_index_fields(existing, &status);
+                } else {
+                    modal.prime_index = Some(status.clone());
+                }
+                modal.prime_index_capable = true;
+            }
+            if let Some(ref mut agents_modal) = agent.agents_modal {
+                agents_modal.prime_index = Some(status.clone());
+                agents_modal.prime_index_capable = true;
+            }
+            if let Some(crate::views::modal::ActiveModal::RetrievalSettings { state }) =
+                agent.active_modal.as_mut()
+            {
+                state.prime_index = Some(status);
+            }
+        }
+        Err(e) if e == "unsupported" => {
+            if let Some(ref mut modal) = agent.extensions_modal {
+                modal.prime_index_capable = false;
+            }
+            if let Some(ref mut agents_modal) = agent.agents_modal {
+                agents_modal.prime_index_capable = false;
+            }
+        }
+        Err(e) => {
+            if let Some(ref mut modal) = agent.extensions_modal {
+                modal.modal_message = Some(crate::views::extensions_modal::ModalMessage::Error(e));
+            }
+        }
+    }
+}
+
+fn merge_live_prime_index_fields(
+    existing: &mut xai_grok_shell::session::prime::PrimeIndexStatus,
+    incoming: &xai_grok_shell::session::prime::PrimeIndexStatus,
+) {
+    existing.job = incoming.job.clone();
+    existing.skills = incoming.skills.clone();
+    existing.agents = incoming.agents.clone();
+    existing.configured_route = incoming.configured_route.clone();
+    existing.capabilities = incoming.capabilities;
+    if !incoming.fingerprint_short.is_empty() {
+        existing.fingerprint_short = incoming.fingerprint_short.clone();
+    }
+}
+
+fn prime_job_matches_displayed(
+    displayed: Option<&xai_grok_shell::session::prime::PrimeIndexJobStatus>,
+    incoming: &xai_grok_shell::session::prime::PrimeIndexJobStatus,
+) -> bool {
+    let Some(current) = displayed else {
+        return true;
+    };
+    if current.job_id.is_empty() || incoming.job_id.is_empty() {
+        return true;
+    }
+    let busy = matches!(current.state.as_str(), "running" | "cancelling");
+    !(busy && current.job_id != incoming.job_id)
+}
+
+fn apply_prime_index_job(
+    app: &mut crate::app::app_view::AppView,
+    agent_id: crate::app::agent::AgentId,
+    result: Result<xai_grok_shell::session::prime::PrimeIndexJobStatus, String>,
+    inflight_kind: &str,
+    inflight_collection: &str,
+) -> Vec<crate::app::actions::Effect> {
+    let mut fetch = None;
+    {
+        let Some(agent) = app.agents.get_mut(&agent_id) else {
+            return vec![];
+        };
+        if let Some(ref mut modal) = agent.extensions_modal {
+            modal.pending_action = None;
+        }
+        match result {
+            Ok(mut job) => {
+                job.sanitize_secrets();
+                let confirm = xai_grok_shell::session::prime::prime_failure_is_confirm_required(
+                    job.failure.as_deref(),
+                );
+                let route = prime_job_display_route(&job);
+                if job.is_terminal() && !confirm {
+                    fetch = Some((job.generation, job.fingerprint_short.clone()));
+                }
+                if let Some(ref mut modal) = agent.extensions_modal {
+                    if let Some(ref mut status) = modal.prime_index
+                        && prime_job_matches_displayed(status.job.as_ref(), &job)
+                    {
+                        status.job = Some(job.clone());
+                        status.generation = job.generation;
+                    }
+                }
+                if let Some(ref mut agents_modal) = agent.agents_modal
+                    && let Some(ref mut status) = agents_modal.prime_index
+                    && prime_job_matches_displayed(status.job.as_ref(), &job)
+                {
+                    status.job = Some(job.clone());
+                }
+                let skills_open = agent.extensions_modal.is_some();
+                if let Some(crate::views::modal::ActiveModal::RetrievalSettings { state }) =
+                    agent.active_modal.as_mut()
+                {
+                    if let Some(ref mut status) = state.prime_index
+                        && prime_job_matches_displayed(status.job.as_ref(), &job)
+                    {
+                        status.job = Some(job.clone());
+                    }
+                    if confirm && !skills_open && !route.is_empty() {
+                        prompt_retrieval_prime_confirm(
+                            state,
+                            &job.kind,
+                            job.collection.clone(),
+                            route,
+                        );
+                        return vec![];
+                    }
+                    if confirm && route.is_empty() {
+                        let msg = crate::views::retrieval_settings_modal::PRIME_UNAVAILABLE_PROFILE
+                            .to_string();
+                        state.error = Some(msg.clone());
+                        state.status = Some(msg);
+                        if !skills_open {
+                            return vec![];
+                        }
+                    }
+                }
+                if confirm && route.is_empty() {
+                    if let Some(ref mut modal) = agent.extensions_modal {
+                        modal.modal_message =
+                            Some(crate::views::extensions_modal::ModalMessage::Error(
+                                crate::views::retrieval_settings_modal::PRIME_UNAVAILABLE_PROFILE
+                                    .to_string(),
+                            ));
+                    }
+                } else if confirm && !route.is_empty() {
+                    if let Some(ref mut modal) = agent.extensions_modal {
+                        modal.modal_message = Some(
+                            crate::views::extensions_modal::ModalMessage::Confirmation {
+                                message: format!(
+                                    "Use configured route `{route}`? This contacts the embedding profile."
+                                ),
+                                action:
+                                    crate::views::extensions_modal::ConfirmationAction::PrimeIndex {
+                                        kind: job.kind.clone(),
+                                        collection: job.collection.clone(),
+                                    },
+                                pending_entry_index: None,
+                            },
+                        );
+                    }
+                } else if let Some(fail) = &job.failure
+                    && let Some(ref mut modal) = agent.extensions_modal
+                {
+                    modal.modal_message =
+                        Some(crate::views::extensions_modal::ModalMessage::Error(
+                            compact_prime_job_error(fail),
+                        ));
+                }
+            }
+            Err(e) if e == "unsupported" => {
+                if let Some(ref mut modal) = agent.extensions_modal {
+                    modal.prime_index_capable = false;
+                }
+            }
+            Err(e) => {
+                let confirm =
+                    xai_grok_shell::session::prime::prime_failure_is_confirm_required(Some(&e));
+                let route = display_configured_route(confirm_required_route(&e)).to_owned();
+                let skills_open = agent.extensions_modal.is_some();
+                if confirm && route.is_empty() {
+                    let msg = crate::views::retrieval_settings_modal::PRIME_UNAVAILABLE_PROFILE
+                        .to_string();
+                    if let Some(crate::views::modal::ActiveModal::RetrievalSettings { state }) =
+                        agent.active_modal.as_mut()
+                    {
+                        state.error = Some(msg.clone());
+                        state.status = Some(msg.clone());
+                    }
+                    if let Some(ref mut modal) = agent.extensions_modal {
+                        modal.modal_message =
+                            Some(crate::views::extensions_modal::ModalMessage::Error(msg));
+                    }
+                } else if confirm
+                    && !route.is_empty()
+                    && let Some((kind, collection)) =
+                        inflight_prime_confirm_target(inflight_kind, inflight_collection)
+                {
+                    if !skills_open
+                        && let Some(crate::views::modal::ActiveModal::RetrievalSettings { state }) =
+                            agent.active_modal.as_mut()
+                    {
+                        prompt_retrieval_prime_confirm(state, &kind, collection, route);
+                    } else if let Some(ref mut modal) = agent.extensions_modal {
+                        modal.modal_message = Some(
+                            crate::views::extensions_modal::ModalMessage::Confirmation {
+                                message: format!(
+                                    "Use configured route `{route}`? This contacts the embedding profile."
+                                ),
+                                action:
+                                    crate::views::extensions_modal::ConfirmationAction::PrimeIndex {
+                                        kind,
+                                        collection,
+                                    },
+                                pending_entry_index: None,
+                            },
+                        );
+                    }
+                } else if let Some(ref mut modal) = agent.extensions_modal {
+                    modal.modal_message =
+                        Some(crate::views::extensions_modal::ModalMessage::Error(
+                            compact_prime_job_error(&e),
+                        ));
+                } else if let Some(crate::views::modal::ActiveModal::RetrievalSettings { state }) =
+                    agent.active_modal.as_mut()
+                {
+                    let compact = compact_prime_job_error(&e);
+                    state.error = Some(compact.clone());
+                    state.status = Some(compact);
+                }
+            }
+        }
+    }
+    let mut effects = Vec::new();
+    if let Some((generation, fingerprint)) = fetch
+        && app.prime_index.status
+        && let Some(agent) = app.agents.get(&agent_id)
+    {
+        let surface_open = agent.extensions_modal.is_some()
+            || agent.agents_modal.is_some()
+            || matches!(
+                agent.active_modal,
+                Some(crate::views::modal::ActiveModal::RetrievalSettings { .. })
+            );
+        if surface_open && let Some(session_id) = agent.session.session_id.clone() {
+            effects.push(crate::app::actions::Effect::FetchPrimeIndexStatus {
+                agent_id,
+                session_id,
+                expected_generation: Some(generation),
+                expected_fingerprint: Some(fingerprint),
+            });
+        }
+    }
+    effects
+}
+
+fn inflight_prime_confirm_target(kind: &str, collection: &str) -> Option<(String, String)> {
+    let kind = match kind {
+        "rebuild" => "rebuild",
+        "backfill" => "backfill",
+        _ => return None,
+    };
+    let collection = match collection {
+        "skills" | "agents" | "all" => collection,
+        _ => return None,
+    };
+    Some((kind.to_owned(), collection.to_owned()))
+}
+
+fn prompt_retrieval_prime_confirm(
+    state: &mut crate::views::retrieval_settings_modal::RetrievalSettingsState,
+    kind: &str,
+    collection: String,
+    route: String,
+) {
+    state.edit = if kind == "rebuild" {
+        crate::views::retrieval_settings_modal::RetrievalEditMode::ConfirmPrimeRebuild {
+            collection,
+            route,
+        }
+    } else {
+        crate::views::retrieval_settings_modal::RetrievalEditMode::ConfirmPrimeBackfill {
+            collection,
+            route,
+        }
+    };
+}
+
+fn compact_prime_job_error(message: &str) -> String {
+    crate::views::retrieval_settings_modal::compact_prime_job_error(message)
+}
+
+fn display_configured_route(raw: Option<&str>) -> String {
+    crate::views::retrieval_settings_modal::display_configured_route(raw)
+}
+
+fn prime_job_display_route(job: &xai_grok_shell::session::prime::PrimeIndexJobStatus) -> String {
+    let from_field = display_configured_route(job.configured_route.as_deref());
+    if !from_field.is_empty() {
+        return from_field;
+    }
+    display_configured_route(job.failure.as_deref().and_then(confirm_required_route))
+}
+
+fn confirm_required_route(message: &str) -> Option<&str> {
+    xai_grok_shell::session::prime::confirm_required_display_route(message)
+}
+
 #[cfg(test)]
 mod management_result_tests {
-    use super::{management_result_is_fresh, mutation_operation_matches};
+    use super::{
+        apply_prime_index_job, apply_prime_index_status, confirm_required_route,
+        inflight_prime_confirm_target, management_result_is_fresh, mutation_operation_matches,
+    };
+
+    fn apply_job(
+        app: &mut crate::app::app_view::AppView,
+        agent_id: crate::app::agent::AgentId,
+        result: Result<xai_grok_shell::session::prime::PrimeIndexJobStatus, String>,
+    ) -> Vec<crate::app::actions::Effect> {
+        apply_prime_index_job(app, agent_id, result, "backfill", "skills")
+    }
 
     #[test]
     fn rejects_wrong_provider_and_older_generation() {
@@ -1717,5 +2181,606 @@ mod management_result_tests {
         // No op-id on result → discard (no None => accept).
         assert!(!mutation_operation_matches(None, Some("op-1")));
         assert!(!mutation_operation_matches(None, None));
+    }
+
+    #[test]
+    fn confirm_required_route_extracts_id_not_endpoint() {
+        assert_eq!(
+            confirm_required_route("confirm_required:main"),
+            Some("main")
+        );
+        assert_eq!(
+            confirm_required_route("couldn't run prime index: confirm_required:lab-emb"),
+            Some("lab-emb")
+        );
+        assert_eq!(confirm_required_route("unavailable"), None);
+        assert_eq!(
+            confirm_required_route("confirm_required:http://127.0.0.1/v1"),
+            None,
+            "endpoints must not be shown as a configured route"
+        );
+        assert!(confirm_required_route("sk-live-secret").is_none());
+        assert_eq!(
+            confirm_required_route("confirm_required:file:///tmp/secret"),
+            None
+        );
+        assert_eq!(
+            confirm_required_route("confirm_required:main\nsk-live-secret"),
+            None
+        );
+        assert_eq!(
+            confirm_required_route(&format!("confirm_required:{}", "x".repeat(200))),
+            None
+        );
+        assert_eq!(
+            confirm_required_route("confirm_required"),
+            None,
+            "bare confirm_required has no display route"
+        );
+    }
+
+    fn sample_status(
+        unchanged: bool,
+        done: u64,
+        state: &str,
+    ) -> xai_grok_shell::session::prime::PrimeIndexStatus {
+        xai_grok_shell::session::prime::PrimeIndexStatus {
+            api_version: 1,
+            generation: 4,
+            fingerprint_short: "abc123def456".into(),
+            skills: xai_grok_shell::session::prime::PrimeIndexCollectionStatus {
+                collection: "skills".into(),
+                generation: 4,
+                fingerprint_short: "abc123def456".into(),
+                item_count: 3,
+                vector_count: 1,
+                missing_vectors: 2,
+                readiness: "pending".into(),
+                route_id: Some("main".into()),
+                dimensions: None,
+            },
+            agents: xai_grok_shell::session::prime::PrimeIndexCollectionStatus {
+                collection: "agents".into(),
+                generation: 0,
+                fingerprint_short: String::new(),
+                item_count: 0,
+                vector_count: 0,
+                missing_vectors: 0,
+                readiness: "ready".into(),
+                route_id: None,
+                dimensions: None,
+            },
+            job: Some(xai_grok_shell::session::prime::PrimeIndexJobStatus {
+                api_version: 1,
+                job_id: "j1".into(),
+                kind: "backfill".into(),
+                collection: "skills".into(),
+                state: state.into(),
+                generation: 4,
+                fingerprint_short: "abc123def456".into(),
+                done,
+                total: 3,
+                confirm_configured_profile: false,
+                configured_route: Some("main".into()),
+                failure: None,
+            }),
+            configured_route: Some("main".into()),
+            capabilities: xai_grok_shell::session::prime::PrimeIndexCapabilities::SUPPORTED,
+            unchanged,
+        }
+    }
+
+    #[test]
+    fn unchanged_status_still_merges_job_progress() {
+        use crate::views::extensions_modal::{ExtensionsModalState, ExtensionsTab};
+        let mut app = crate::app::app_view::tests::test_app_with_agent();
+        let agent_id = crate::app::agent::AgentId(0);
+        if let Some(agent) = app.agents.get_mut(&agent_id) {
+            let mut modal = ExtensionsModalState::new(ExtensionsTab::Skills);
+            modal.picker_state.set_query("commit");
+            modal.prime_index = Some(sample_status(false, 1, "running"));
+            agent.extensions_modal = Some(modal);
+        }
+        apply_prime_index_status(&mut app, agent_id, Ok(sample_status(true, 2, "failed")));
+        let agent = app.agents.get(&agent_id).expect("agent");
+        let modal = agent.extensions_modal.as_ref().expect("skills");
+        assert_eq!(modal.picker_state.query(), "commit");
+        let job = modal
+            .prime_index
+            .as_ref()
+            .and_then(|s| s.job.as_ref())
+            .expect("job");
+        assert_eq!(job.done, 2);
+        assert_eq!(job.state, "failed");
+        let footer = modal.prime_index_footer_line(true).expect("footer");
+        assert!(
+            footer.contains("failed") && footer.contains("2/3"),
+            "{footer}"
+        );
+    }
+
+    #[test]
+    fn confirm_required_attaches_to_retrieval_when_skills_closed() {
+        use crate::views::modal::ActiveModal;
+        use crate::views::retrieval_settings_modal::{RetrievalEditMode, RetrievalSettingsState};
+        let mut app = crate::app::app_view::tests::test_app_with_agent();
+        let agent_id = crate::app::agent::AgentId(0);
+        if let Some(agent) = app.agents.get_mut(&agent_id) {
+            agent.extensions_modal = None;
+            let mut state = RetrievalSettingsState::new();
+            state.prime_index = Some(sample_status(false, 0, "failed"));
+            agent.active_modal = Some(ActiveModal::RetrievalSettings {
+                state: Box::new(state),
+            });
+        }
+        let job = xai_grok_shell::session::prime::PrimeIndexJobStatus {
+            api_version: 1,
+            job_id: String::new(),
+            kind: "backfill".into(),
+            collection: "skills".into(),
+            state: "failed".into(),
+            generation: 4,
+            fingerprint_short: "abc123def456".into(),
+            done: 0,
+            total: 0,
+            confirm_configured_profile: false,
+            configured_route: Some("main".into()),
+            failure: Some("confirm_required:main".into()),
+        };
+        apply_job(&mut app, agent_id, Ok(job));
+        let agent = app.agents.get(&agent_id).expect("agent");
+        let ActiveModal::RetrievalSettings { state } = agent.active_modal.as_ref().unwrap() else {
+            panic!("retrieval settings");
+        };
+        match &state.edit {
+            RetrievalEditMode::ConfirmPrimeBackfill { collection, route } => {
+                assert_eq!(collection, "skills");
+                assert_eq!(route, "main");
+            }
+            other => panic!("expected ConfirmPrimeBackfill, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn completed_same_generation_job_then_unchanged_status_shows_ready() {
+        use crate::app::actions::Effect;
+        use crate::views::extensions_modal::{ExtensionsModalState, ExtensionsTab};
+        let mut app = crate::app::app_view::tests::test_app_with_agent();
+        app.prime_index = xai_grok_shell::session::prime::PrimeIndexCapabilities::SUPPORTED;
+        let agent_id = crate::app::agent::AgentId(0);
+        if let Some(agent) = app.agents.get_mut(&agent_id) {
+            let mut modal = ExtensionsModalState::new(ExtensionsTab::Skills);
+            modal.prime_index = Some(sample_status(false, 1, "running"));
+            agent.extensions_modal = Some(modal);
+        }
+        let completed = xai_grok_shell::session::prime::PrimeIndexJobStatus {
+            api_version: 1,
+            job_id: "j1".into(),
+            kind: "backfill".into(),
+            collection: "skills".into(),
+            state: "completed".into(),
+            generation: 4,
+            fingerprint_short: "abc123def456".into(),
+            done: 3,
+            total: 3,
+            confirm_configured_profile: false,
+            configured_route: Some("main".into()),
+            failure: None,
+        };
+        let effects = apply_job(&mut app, agent_id, Ok(completed));
+        assert!(
+            effects.iter().any(|e| matches!(
+                e,
+                Effect::FetchPrimeIndexStatus {
+                    expected_generation: Some(4),
+                    ..
+                }
+            )),
+            "completed same-gen job must enqueue a status refresh, got {effects:?}"
+        );
+        let mut ready = sample_status(true, 3, "completed");
+        ready.skills.vector_count = 3;
+        ready.skills.missing_vectors = 0;
+        ready.skills.readiness = "ready".into();
+        apply_prime_index_status(&mut app, agent_id, Ok(ready));
+        let agent = app.agents.get(&agent_id).expect("agent");
+        let modal = agent.extensions_modal.as_ref().expect("skills");
+        let status = modal.prime_index.as_ref().expect("status");
+        assert_eq!(status.skills.vector_count, 3);
+        assert_eq!(status.skills.readiness, "ready");
+        let footer = modal.prime_index_footer_line(true).expect("footer");
+        assert!(
+            footer.contains("ready") && footer.contains("3/3"),
+            "{footer}"
+        );
+        assert!(!footer.contains("completed"), "{footer}");
+    }
+
+    #[test]
+    fn unavailable_job_error_surfaces_on_retrieval_when_skills_closed() {
+        use crate::views::modal::ActiveModal;
+        use crate::views::retrieval_settings_modal::{
+            PRIME_UNAVAILABLE_PROFILE, RetrievalSettingsState,
+        };
+        let mut app = crate::app::app_view::tests::test_app_with_agent();
+        let agent_id = crate::app::agent::AgentId(0);
+        if let Some(agent) = app.agents.get_mut(&agent_id) {
+            agent.extensions_modal = None;
+            agent.active_modal = Some(ActiveModal::RetrievalSettings {
+                state: Box::new(RetrievalSettingsState::new()),
+            });
+        }
+        let _ = apply_job(&mut app, agent_id, Err("unavailable".into()));
+        let agent = app.agents.get(&agent_id).expect("agent");
+        let ActiveModal::RetrievalSettings { state } = agent.active_modal.as_ref().unwrap() else {
+            panic!("retrieval settings");
+        };
+        assert_eq!(state.error.as_deref(), Some(PRIME_UNAVAILABLE_PROFILE));
+        assert_eq!(state.status.as_deref(), Some(PRIME_UNAVAILABLE_PROFILE));
+        let _ = apply_job(&mut app, agent_id, Err("already_running".into()));
+        let agent = app.agents.get(&agent_id).expect("agent");
+        let ActiveModal::RetrievalSettings { state } = agent.active_modal.as_ref().unwrap() else {
+            panic!("retrieval settings");
+        };
+        assert_eq!(state.error.as_deref(), Some("already_running"));
+        assert_eq!(state.status.as_deref(), Some("already_running"));
+    }
+
+    fn unsanitary_confirm_job(raw: &str) -> xai_grok_shell::session::prime::PrimeIndexJobStatus {
+        xai_grok_shell::session::prime::PrimeIndexJobStatus {
+            api_version: 1,
+            job_id: String::new(),
+            kind: "backfill".into(),
+            collection: "skills".into(),
+            state: "failed".into(),
+            generation: 4,
+            fingerprint_short: "abc123def456".into(),
+            done: 0,
+            total: 0,
+            confirm_configured_profile: false,
+            configured_route: Some(raw.into()),
+            failure: Some(format!("confirm_required:{raw}")),
+        }
+    }
+
+    fn assert_no_raw_in_job(job: &xai_grok_shell::session::prime::PrimeIndexJobStatus, raw: &str) {
+        let json = serde_json::to_string(job).expect("job json");
+        for leak in [raw, raw.trim(), "127.0.0.1", "sk-live-secret", "file://"] {
+            if leak.is_empty() {
+                continue;
+            }
+            assert!(
+                !json.contains(leak),
+                "leaked {leak:?} from {raw:?} in job json {json}"
+            );
+        }
+        if let Some(route) = &job.configured_route {
+            assert!(
+                !route.contains(raw.trim()) && !raw.contains('\n') || route != raw,
+                "configured_route retained raw {raw:?}"
+            );
+        }
+        if let Some(failure) = &job.failure {
+            assert!(
+                !failure.contains(raw.trim()),
+                "failure retained raw {raw:?}: {failure}"
+            );
+            assert!(
+                !failure.contains('\n') && !failure.contains('\u{0007}'),
+                "failure retained control text: {failure}"
+            );
+        }
+    }
+
+    #[test]
+    fn apply_prime_index_job_ok_omits_unsanitary_routes_from_overlay_and_state() {
+        use crate::views::extensions_modal::{ExtensionsModalState, ExtensionsTab, ModalMessage};
+        use crate::views::modal::ActiveModal;
+        use crate::views::retrieval_settings_modal::{
+            PRIME_UNAVAILABLE_PROFILE, RetrievalEditMode, RetrievalSettingsState,
+        };
+
+        let long = "x".repeat(200);
+        let cases = [
+            "http://127.0.0.1/v1",
+            "sk-live-secret",
+            "file:///tmp/secret",
+            "main\nsk-live-secret",
+            long.as_str(),
+        ];
+        for raw in cases {
+            let mut app = crate::app::app_view::tests::test_app_with_agent();
+            let agent_id = crate::app::agent::AgentId(0);
+            if let Some(agent) = app.agents.get_mut(&agent_id) {
+                let mut modal = ExtensionsModalState::new(ExtensionsTab::Skills);
+                modal.prime_index = Some(sample_status(false, 0, "failed"));
+                agent.extensions_modal = Some(modal);
+                let mut state = RetrievalSettingsState::new();
+                state.prime_index = Some(sample_status(false, 0, "failed"));
+                agent.active_modal = Some(ActiveModal::RetrievalSettings {
+                    state: Box::new(state),
+                });
+            }
+            apply_job(&mut app, agent_id, Ok(unsanitary_confirm_job(raw)));
+            let agent = app.agents.get(&agent_id).expect("agent");
+            let modal = agent.extensions_modal.as_ref().expect("skills");
+            match modal.modal_message.as_ref() {
+                Some(ModalMessage::Error(msg)) => {
+                    assert_eq!(msg, PRIME_UNAVAILABLE_PROFILE);
+                    assert!(!msg.contains(raw.trim()), "{msg}");
+                }
+                Some(ModalMessage::Confirmation { message, .. }) => {
+                    panic!(
+                        "must not dispatch confirmation for unsanitary route {raw:?}: {message}"
+                    );
+                }
+                None => panic!("expected unavailable overlay for {raw:?}"),
+            }
+            let job = modal
+                .prime_index
+                .as_ref()
+                .and_then(|s| s.job.as_ref())
+                .expect("stored job");
+            assert_no_raw_in_job(job, raw);
+            let ActiveModal::RetrievalSettings { state } = agent.active_modal.as_ref().unwrap()
+            else {
+                panic!("retrieval settings");
+            };
+            assert!(
+                matches!(state.edit, RetrievalEditMode::Browse),
+                "must not dispatch retrieval confirm for {raw:?}: {:?}",
+                state.edit
+            );
+            let stored = state.prime_index.as_ref().and_then(|s| s.job.as_ref());
+            if let Some(job) = stored {
+                assert_no_raw_in_job(job, raw);
+            }
+            let diag = format!(
+                "{:?} {:?} {:?}",
+                modal.modal_message, modal.prime_index, state.prime_index
+            );
+            assert!(
+                !diag.contains(raw.trim()),
+                "diagnostics leaked {raw:?}: {diag}"
+            );
+            assert!(
+                !diag.contains("127.0.0.1") || !raw.contains("127.0.0.1"),
+                "{diag}"
+            );
+            assert!(
+                !diag.contains("sk-live-secret") || !raw.contains("sk-"),
+                "{diag}"
+            );
+        }
+    }
+
+    #[test]
+    fn apply_prime_index_job_ok_safe_profile_id_still_confirms() {
+        use crate::views::extensions_modal::{ExtensionsModalState, ExtensionsTab, ModalMessage};
+        let mut app = crate::app::app_view::tests::test_app_with_agent();
+        let agent_id = crate::app::agent::AgentId(0);
+        if let Some(agent) = app.agents.get_mut(&agent_id) {
+            let mut modal = ExtensionsModalState::new(ExtensionsTab::Skills);
+            modal.prime_index = Some(sample_status(false, 0, "failed"));
+            agent.extensions_modal = Some(modal);
+        }
+        apply_job(&mut app, agent_id, Ok(unsanitary_confirm_job("main")));
+        let agent = app.agents.get(&agent_id).expect("agent");
+        let modal = agent.extensions_modal.as_ref().expect("skills");
+        match modal.modal_message.as_ref() {
+            Some(ModalMessage::Confirmation { message, .. }) => {
+                assert!(message.contains("`main`"), "{message}");
+                assert!(!message.contains("http"), "{message}");
+            }
+            other => panic!("expected confirmation for safe id, got {other:?}"),
+        }
+        let job = modal
+            .prime_index
+            .as_ref()
+            .and_then(|s| s.job.as_ref())
+            .expect("job");
+        assert_eq!(job.configured_route.as_deref(), Some("main"));
+        assert_eq!(job.failure.as_deref(), Some("confirm_required:main"));
+    }
+
+    #[test]
+    fn apply_prime_index_job_err_prefixed_confirm_required_is_safe() {
+        use crate::views::extensions_modal::{ExtensionsModalState, ExtensionsTab, ModalMessage};
+        use crate::views::modal::ActiveModal;
+        use crate::views::retrieval_settings_modal::{
+            PRIME_UNAVAILABLE_PROFILE, RetrievalEditMode, RetrievalSettingsState,
+        };
+
+        let mut app = crate::app::app_view::tests::test_app_with_agent();
+        let agent_id = crate::app::agent::AgentId(0);
+        if let Some(agent) = app.agents.get_mut(&agent_id) {
+            let mut modal = ExtensionsModalState::new(ExtensionsTab::Skills);
+            modal.prime_index = Some(sample_status(false, 0, "failed"));
+            agent.extensions_modal = Some(modal);
+        }
+        apply_job(
+            &mut app,
+            agent_id,
+            Err("couldn't run prime index: confirm_required:main".into()),
+        );
+        let agent = app.agents.get(&agent_id).expect("agent");
+        match agent
+            .extensions_modal
+            .as_ref()
+            .and_then(|m| m.modal_message.as_ref())
+        {
+            Some(ModalMessage::Confirmation {
+                message,
+                action:
+                    crate::views::extensions_modal::ConfirmationAction::PrimeIndex { kind, collection },
+                ..
+            }) => {
+                assert!(message.contains("`main`"), "{message}");
+                assert!(!message.contains("couldn't run"), "{message}");
+                assert_eq!(kind, "backfill");
+                assert_eq!(collection, "skills");
+            }
+            other => panic!("prefixed confirm_required:main must confirm, got {other:?}"),
+        }
+
+        let mut app = crate::app::app_view::tests::test_app_with_agent();
+        if let Some(agent) = app.agents.get_mut(&agent_id) {
+            let mut modal = ExtensionsModalState::new(ExtensionsTab::Skills);
+            modal.prime_index = Some(sample_status(false, 0, "failed"));
+            agent.extensions_modal = Some(modal);
+            agent.active_modal = Some(ActiveModal::RetrievalSettings {
+                state: Box::new(RetrievalSettingsState::new()),
+            });
+        }
+        let raw = "couldn't run prime index: confirm_required:http://127.0.0.1/v1";
+        apply_job(&mut app, agent_id, Err(raw.into()));
+        let agent = app.agents.get(&agent_id).expect("agent");
+        match agent
+            .extensions_modal
+            .as_ref()
+            .and_then(|m| m.modal_message.as_ref())
+        {
+            Some(ModalMessage::Error(msg)) => {
+                assert_eq!(msg, PRIME_UNAVAILABLE_PROFILE);
+                assert!(!msg.contains("127.0.0.1"), "{msg}");
+                assert!(!msg.contains("couldn't run"), "{msg}");
+            }
+            other => panic!("prefixed unsanitary confirm must be unavailable, got {other:?}"),
+        }
+        let ActiveModal::RetrievalSettings { state } = agent.active_modal.as_ref().unwrap() else {
+            panic!("retrieval settings");
+        };
+        assert!(matches!(state.edit, RetrievalEditMode::Browse));
+        assert_eq!(state.error.as_deref(), Some(PRIME_UNAVAILABLE_PROFILE));
+    }
+
+    #[test]
+    fn apply_prime_index_job_err_confirm_retries_inflight_kind_and_collection() {
+        use crate::views::extensions_modal::{
+            ConfirmationAction, ExtensionsModalState, ExtensionsTab, ModalMessage,
+        };
+        use crate::views::modal::ActiveModal;
+        use crate::views::retrieval_settings_modal::{RetrievalEditMode, RetrievalSettingsState};
+
+        let mut app = crate::app::app_view::tests::test_app_with_agent();
+        let agent_id = crate::app::agent::AgentId(0);
+        if let Some(agent) = app.agents.get_mut(&agent_id) {
+            let mut modal = ExtensionsModalState::new(ExtensionsTab::Skills);
+            modal.prime_index = Some(sample_status(false, 0, "failed"));
+            agent.extensions_modal = Some(modal);
+        }
+        apply_prime_index_job(
+            &mut app,
+            agent_id,
+            Err("couldn't run prime index: confirm_required:main".into()),
+            "rebuild",
+            "agents",
+        );
+        let agent = app.agents.get(&agent_id).expect("agent");
+        match agent
+            .extensions_modal
+            .as_ref()
+            .and_then(|m| m.modal_message.as_ref())
+        {
+            Some(ModalMessage::Confirmation {
+                action: ConfirmationAction::PrimeIndex { kind, collection },
+                ..
+            }) => {
+                assert_eq!(kind, "rebuild");
+                assert_eq!(collection, "agents");
+            }
+            other => panic!("rebuild/agents inflight must confirm that op, got {other:?}"),
+        }
+
+        let mut app = crate::app::app_view::tests::test_app_with_agent();
+        if let Some(agent) = app.agents.get_mut(&agent_id) {
+            agent.extensions_modal = None;
+            let mut state = RetrievalSettingsState::new();
+            state.prime_index = Some(sample_status(false, 0, "failed"));
+            agent.active_modal = Some(ActiveModal::RetrievalSettings {
+                state: Box::new(state),
+            });
+        }
+        apply_prime_index_job(
+            &mut app,
+            agent_id,
+            Err("couldn't run prime index: confirm_required:main".into()),
+            "rebuild",
+            "agents",
+        );
+        let agent = app.agents.get(&agent_id).expect("agent");
+        let ActiveModal::RetrievalSettings { state } = agent.active_modal.as_ref().unwrap() else {
+            panic!("retrieval settings");
+        };
+        match &state.edit {
+            RetrievalEditMode::ConfirmPrimeRebuild { collection, route } => {
+                assert_eq!(collection, "agents");
+                assert_eq!(route, "main");
+            }
+            other => panic!("expected ConfirmPrimeRebuild for agents, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn apply_prime_index_job_err_confirm_without_inflight_does_not_guess_backfill() {
+        use crate::views::extensions_modal::{ExtensionsModalState, ExtensionsTab, ModalMessage};
+        use crate::views::modal::ActiveModal;
+        use crate::views::retrieval_settings_modal::{
+            PRIME_UNAVAILABLE_PROFILE, RetrievalEditMode, RetrievalSettingsState,
+        };
+
+        assert!(inflight_prime_confirm_target("cancel", "all").is_none());
+        assert!(inflight_prime_confirm_target("", "").is_none());
+        assert_eq!(
+            inflight_prime_confirm_target("rebuild", "agents"),
+            Some(("rebuild".into(), "agents".into()))
+        );
+
+        let mut app = crate::app::app_view::tests::test_app_with_agent();
+        let agent_id = crate::app::agent::AgentId(0);
+        if let Some(agent) = app.agents.get_mut(&agent_id) {
+            let mut modal = ExtensionsModalState::new(ExtensionsTab::Skills);
+            modal.prime_index = Some(sample_status(false, 0, "failed"));
+            agent.extensions_modal = Some(modal);
+        }
+        apply_prime_index_job(
+            &mut app,
+            agent_id,
+            Err("couldn't run prime index: confirm_required:main".into()),
+            "cancel",
+            "all",
+        );
+        let agent = app.agents.get(&agent_id).expect("agent");
+        match agent
+            .extensions_modal
+            .as_ref()
+            .and_then(|m| m.modal_message.as_ref())
+        {
+            Some(ModalMessage::Error(msg)) => {
+                assert_eq!(msg, PRIME_UNAVAILABLE_PROFILE);
+            }
+            other => panic!("bare cancel inflight must not confirm backfill/skills, got {other:?}"),
+        }
+
+        let mut app = crate::app::app_view::tests::test_app_with_agent();
+        if let Some(agent) = app.agents.get_mut(&agent_id) {
+            agent.extensions_modal = None;
+            agent.active_modal = Some(ActiveModal::RetrievalSettings {
+                state: Box::new(RetrievalSettingsState::new()),
+            });
+        }
+        apply_prime_index_job(
+            &mut app,
+            agent_id,
+            Err("couldn't run prime index: confirm_required:main".into()),
+            "",
+            "",
+        );
+        let agent = app.agents.get(&agent_id).expect("agent");
+        let ActiveModal::RetrievalSettings { state } = agent.active_modal.as_ref().unwrap() else {
+            panic!("retrieval settings");
+        };
+        assert!(matches!(state.edit, RetrievalEditMode::Browse));
+        assert_eq!(state.error.as_deref(), Some(PRIME_UNAVAILABLE_PROFILE));
     }
 }

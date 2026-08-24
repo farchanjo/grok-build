@@ -1495,6 +1495,7 @@ pub(crate) async fn handle_assigned_subagent_request(
             ctx.client_hooks.clone(),
             None,
             std::collections::HashMap::new(),
+            Vec::new(), // cli_agents: subagent spawns do not expose CLI-defined agents
             Vec::new(),
             xai_grok_agent::prompt::context::PromptAudience::Subagent,
             effective_runtime.role_prompt.clone(),

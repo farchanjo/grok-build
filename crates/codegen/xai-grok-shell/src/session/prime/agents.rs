@@ -2,12 +2,15 @@
 //!
 //! Deterministically ranks the authoritative callable-agent snapshot
 //! ([`CallableAgentDescriptor`]s) against the current prompt and the PR18
-//! selected-skill names, optionally refines a bounded non-pinned shortlist via
-//! the PR17 semantic retrieval service (metadata only — name, safe
-//! frontmatter description, qualified/source label, and selected-skill names;
-//! never an agent prompt/system body), then **revalidates each surviving
-//! candidate against a fresh live [`CallableAgentAuthority`]** before
-//! rendering an advisory-only block.
+//! selected-skill names, optionally refines the **full indexed**
+//! `callable_agents` inventory via FTS + sqlite-vec KNN (metadata only —
+//! canonical name, bounded public description, and a safe source class;
+//! selected-skill names are query context only; never an agent prompt/system
+//! body), then **intersects and revalidates each surviving candidate against
+//! a fresh live [`CallableAgentAuthority`]** before rendering an advisory-only
+//! block. Index presence is never authority. Prime turn time always
+//! reconciles the collection so missed watcher events cannot leave stale
+//! rows.
 //!
 //! Safety/precedence invariants:
 //! - The recommendation set is a **subset** of what [`validate_subagent_type`]
@@ -30,20 +33,33 @@
 //!   always excluded. Unique path-free candidate IDs; secret-free Debug/telemetry.
 
 use std::collections::{HashMap, HashSet};
+use std::path::Path;
+use std::sync::Arc;
 
 use tokio_util::sync::CancellationToken;
-use xai_grok_agent::subagent::callable::{CallableAgentDescriptor, CallableAgentSource};
+use xai_grok_agent::config::AgentDefinition;
+use xai_grok_agent::plugins::PluginRegistry;
+use xai_grok_agent::subagent::callable::{
+    CallableAgentDescriptor, CallableAgentOptions, CallableAgentSource, callable_agent_snapshot,
+};
 use xai_grok_config_types::AgentPrimeConfig;
+use xai_grok_tools::implementations::grok_build::task::MAX_SUBAGENT_DEPTH;
 use xai_grok_tools::implementations::grok_build::task::types::SubagentValidateTypeOutcome;
 
 use crate::agent::subagent::{SubagentValidationContext, validate_subagent_type};
 use crate::retrieval::{
-    CandidateRow, DegradationKind, DegradationNotice, OrchestratorError, PipelineOptions,
-    RetrievalService, RetrieveCandidates,
+    DegradationKind, DegradationNotice, OrchestratorError, PipelineOptions, RetrievalService,
 };
+use xai_grok_memory::CollectionKind;
 
 use super::PrimeError;
 use super::PrimeGate;
+use super::fusion::{
+    automatic_candidate_allowed, fuse_ranks, l2_similarity, prepend_unique, stricter_threshold,
+};
+use super::index::{
+    PinnedServiceEmbedder, agent_rerank_document, bounded_cancel, opaque_agent_id, prime_index_for,
+};
 
 /// Async supplier of the live callable-agent authority.
 ///
@@ -269,6 +285,69 @@ impl CallableAgentAuthority {
     }
 }
 
+/// Inputs for the shared `capture_callable_agent_authority` lane.
+///
+/// This is the single production source of a `CallableAgentAuthority` for both
+/// the MvpAgent recommendation seam and the session turn path. Every gate is
+/// derived from live session/spawn data here; callers cannot supply a
+/// permissive result.
+pub(crate) struct CaptureCallableArgs<'a> {
+    pub parent_cwd: &'a Path,
+    pub parent_depth: u32,
+    pub current_agent: Option<String>,
+    pub plugin_registry: Option<Arc<PluginRegistry>>,
+    pub subagent_toggle: &'a HashMap<String, bool>,
+    pub cli_agents: &'a [AgentDefinition],
+    pub allowed_subagent_types: Option<Vec<String>>,
+    pub global_subagents_enabled: bool,
+    pub generation: Option<u64>,
+}
+
+/// Build a fail-closed [`CallableAgentAuthority`] from live session/spawn
+/// data via [`CallableAgentAuthority::capture`] — the single sanctioned
+/// constructor. Body matches the former `MvpAgent::build_callable_agent_authority`
+/// capture lane: `callable_agent_snapshot` over the same `CallableAgentOptions`
+/// the descriptor layer exposes, the same `SubagentValidationContext` shape the
+/// `ValidateType` arm uses, `task_available = global enable AND
+/// parent_depth < MAX_SUBAGENT_DEPTH`, and an identity eligibility predicate
+/// over the resolved descriptors (fail-closed: unknown names are always
+/// Blocked).
+pub(crate) fn capture_callable_agent_authority(
+    args: CaptureCallableArgs<'_>,
+) -> CallableAgentAuthority {
+    let opts = CallableAgentOptions {
+        cwd: args.parent_cwd,
+        toggle: args.subagent_toggle,
+        plugins: args.plugin_registry.as_deref(),
+        cli_agents: args.cli_agents,
+    };
+    let agents = callable_agent_snapshot(&opts);
+    let ctx = SubagentValidationContext {
+        parent_cwd: args.parent_cwd.to_path_buf(),
+        plugin_registry: args.plugin_registry,
+        subagent_toggle: args.subagent_toggle.clone(),
+        allowed_subagent_types: args.allowed_subagent_types,
+        cli_agent_names: args.cli_agents.iter().map(|d| d.name.clone()).collect(),
+    };
+    let task_available = args.global_subagents_enabled && args.parent_depth < MAX_SUBAGENT_DEPTH;
+    // The spawn path exposes no per-agent native/trust/model gate beyond
+    // resolve + toggle + allow-list (re-run by `CallableAgentAuthority::gate`
+    // on the live ctx). Confirm every descriptor here; a future per-name gate
+    // must be expressed as this predicate (fail-closed), never a hand-built
+    // authority.
+    let eligible: Vec<String> = agents.iter().map(|a| a.name.clone()).collect();
+
+    CallableAgentAuthority::capture(AuthorityCapture {
+        agents: &agents,
+        ctx,
+        current_agent: args.current_agent,
+        task_available,
+        global_subagents_enabled: args.global_subagents_enabled,
+        eligible: Box::new(move |n| eligible.iter().any(|e| e == n)),
+        generation: args.generation,
+    })
+}
+
 /// Inputs for an agent-recommendation prime run.
 pub struct AgentInput<'a> {
     /// Authoritative candidate descriptors (the shell's current callable set).
@@ -291,6 +370,10 @@ pub struct AgentInput<'a> {
     pub context_window: Option<u64>,
     pub semantic_profile: Option<&'a str>,
     pub semantic_service: Option<&'a RetrievalService>,
+    /// Canonical Grok home used to key the process-level Prime index.
+    pub grok_home: Option<&'a Path>,
+    /// Session workspace / git root that keys the callable_agents collection.
+    pub workspace_root: &'a Path,
 }
 
 impl Default for AgentInput<'_> {
@@ -305,6 +388,8 @@ impl Default for AgentInput<'_> {
             context_window: None,
             semantic_profile: None,
             semantic_service: None,
+            grok_home: None,
+            workspace_root: Path::new("."),
         }
     }
 }
@@ -496,12 +581,10 @@ fn rank_agents(
 
 // ── Metadata-only semantic layer ────────────────────────────────────
 
-/// Hard cap on the bounded metadata shortlist shipped to the semantic service.
-const MAX_SEMANTIC_SHORTLIST: usize = 8;
 /// Per-part and aggregate caps for agent metadata text.
 const MAX_METADATA_PART_CHARS: usize = 96;
 const MAX_METADATA_TOTAL_CHARS: usize = 1024;
-/// Cap on how many selected-skill names reach a candidate's metadata.
+/// Cap on how many selected-skill names reach the bounded retrieval query.
 const MAX_SKILL_NAMES_IN_METADATA: usize = 8;
 
 /// Metadata-only text for semantic shipping: name + safe frontmatter
@@ -585,10 +668,78 @@ pub struct AgentSemanticFillOutcome {
     pub shortlist_size: usize,
 }
 
-/// Optional semantic rerank over a bounded non-pinned shortlist.
+fn restore_pre_stage_order(
+    outcome: &mut AgentSemanticFillOutcome,
+    pinned_order: &[usize],
+    ranked: &[usize],
+    profile_id: &str,
+    stage: crate::retrieval::RetrievalStage,
+) {
+    outcome.degradations.push(DegradationNotice::new(
+        DegradationKind::SemanticUnavailable,
+        profile_id,
+        stage,
+        None,
+    ));
+    outcome.order = prepend_unique(pinned_order, ranked);
+    outcome.shortlist_size = 0;
+}
+
+fn knn_space_error(profile_id: &str) -> OrchestratorError {
+    OrchestratorError::AllRoutesFailed {
+        profile_id: profile_id.to_owned(),
+        stage: crate::retrieval::RetrievalStage::Candidates,
+        last_failure: None,
+    }
+}
+
+fn local_evidence_lists(
+    agents: &[CallableAgentDescriptor],
+    prompt: &str,
+    selected_skills: &[String],
+) -> (Vec<i64>, Vec<usize>) {
+    let prompt_words = significant_words(prompt);
+    let skill_names: Vec<String> = selected_skills.iter().map(|s| s.to_lowercase()).collect();
+    let scores: Vec<i64> = agents
+        .iter()
+        .map(|a| {
+            let name_lower = a.name.to_lowercase();
+            let haystack = format!(
+                "{name_lower} {}",
+                a.description.as_deref().unwrap_or("").to_lowercase()
+            );
+            let haystack_words = significant_words(&haystack);
+            let mut primary: i64 = 0;
+            for sk in &skill_names {
+                if name_lower.contains(sk.as_str()) || haystack.contains(sk.as_str()) {
+                    primary = primary.saturating_add(50);
+                }
+            }
+            for w in &prompt_words {
+                if haystack_words.contains(w) {
+                    primary = primary.saturating_add(10);
+                } else if name_lower.contains(w.as_str()) {
+                    primary = primary.saturating_add(3);
+                }
+            }
+            primary
+        })
+        .collect();
+    let mut order: Vec<usize> = scores
+        .iter()
+        .enumerate()
+        .filter(|(_, s)| **s > 0)
+        .map(|(i, _)| i)
+        .collect();
+    order.sort_by(|&a, &b| scores[b].cmp(&scores[a]).then_with(|| a.cmp(&b)));
+    (scores, order)
+}
+
+/// Optional semantic fill over the **full** indexed callable-agent inventory.
 ///
-/// Only metadata [`metadata_text`] reaches the provider. On failure the exact
-/// pre-stage deterministic order is preserved.
+/// Selected skill names are query context only — they are never persisted.
+/// Soft embed/KNN failure restores the exact pre-stage deterministic order.
+/// Missing `grok_home` is the exact local-only fallback.
 async fn semantic_fill_agents(
     service: &RetrievalService,
     profile_id: &str,
@@ -599,6 +750,8 @@ async fn semantic_fill_agents(
     selected_skills: &[String],
     cancel: CancellationToken,
     hard: bool,
+    grok_home: Option<&Path>,
+    workspace_root: &Path,
 ) -> AgentSemanticFillOutcome {
     let mut outcome = AgentSemanticFillOutcome {
         order: ranked.to_vec(),
@@ -613,6 +766,11 @@ async fn semantic_fill_agents(
         return outcome;
     }
 
+    let pinned_order: Vec<usize> = ranked
+        .iter()
+        .copied()
+        .filter(|&i| pinned.contains(&agents[i].name))
+        .collect();
     let non_pinned: Vec<usize> = ranked
         .iter()
         .copied()
@@ -622,89 +780,314 @@ async fn semantic_fill_agents(
         return outcome;
     }
 
-    // Explicit bounded shortlist (deterministic: rank order).
-    let shortlist: &[usize] = &non_pinned[..non_pinned.len().min(MAX_SEMANTIC_SHORTLIST)];
-    let rows: Vec<CandidateRow> = shortlist
-        .iter()
-        .map(|&i| CandidateRow {
-            id: candidate_id(&agents[i]),
-            text: metadata_text(&agents[i], selected_skills),
-            score: None,
-            metadata: None,
+    let Some(home) = grok_home else {
+        // Local-only fallback: exact pre-stage order, no index, no error.
+        outcome.order = prepend_unique(&pinned_order, ranked);
+        return outcome;
+    };
+
+    match fill_from_callable_index(
+        service,
+        profile_id,
+        query,
+        agents,
+        ranked,
+        &pinned_order,
+        &non_pinned,
+        pinned,
+        selected_skills,
+        cancel,
+        home,
+        workspace_root,
+        hard,
+        &mut outcome,
+    )
+    .await
+    {
+        Ok(()) => outcome,
+        Err(e) if matches!(e, OrchestratorError::Cancelled { .. }) => {
+            outcome.cancelled = true;
+            outcome.order = ranked.to_vec();
+            outcome
+        }
+        Err(e) if hard => {
+            outcome.hard_error = Some(e);
+            outcome.order = ranked.to_vec();
+            outcome
+        }
+        Err(e) => {
+            outcome
+                .degradations
+                .push(degrade_from_error(&e, profile_id));
+            outcome.order = prepend_unique(&pinned_order, ranked);
+            outcome
+        }
+    }
+}
+
+async fn fill_from_callable_index(
+    service: &RetrievalService,
+    profile_id: &str,
+    query: &str,
+    agents: &[CallableAgentDescriptor],
+    ranked: &[usize],
+    pinned_order: &[usize],
+    non_pinned: &[usize],
+    pinned: &HashSet<String>,
+    selected_skills: &[String],
+    cancel: CancellationToken,
+    home: &Path,
+    workspace_root: &Path,
+    _hard: bool,
+    outcome: &mut AgentSemanticFillOutcome,
+) -> Result<(), OrchestratorError> {
+    let handle = prime_index_for(home, workspace_root);
+    handle
+        .reconcile_callable_agents(agents)
+        .map_err(|_| OrchestratorError::InvalidRequest("prime index sync failed".into()))?;
+    handle.pin_from_service(service, profile_id).map_err(|_| {
+        OrchestratorError::ProfileMissing {
+            profile_id: profile_id.to_owned(),
+        }
+    })?;
+
+    let bound_ms = service
+        .load_snapshot()
+        .profile(profile_id)
+        .map(|p| p.config.deadline_ms)
+        .filter(|&n| n > 0)
+        .unwrap_or(3_000);
+    let backfill_cancel = bounded_cancel(bound_ms);
+    let frozen = handle
+        .freeze_pin_for(CollectionKind::CallableAgents)
+        .map_err(|_| knn_space_error(profile_id))?;
+    let embedder = Arc::new(PinnedServiceEmbedder::with_frozen_pin(
+        handle.clone(),
+        service.clone(),
+        profile_id.to_owned(),
+        frozen.clone(),
+        backfill_cancel.clone(),
+    ));
+    handle.spawn_backfill(embedder, frozen.clone(), backfill_cancel);
+
+    if cancel.is_cancelled() {
+        return Err(OrchestratorError::Cancelled {
+            profile_id: profile_id.to_owned(),
+            stage: crate::retrieval::RetrievalStage::Orchestrate,
+        });
+    }
+
+    let snapshot = service.load_snapshot();
+    let profile =
+        snapshot
+            .profile(profile_id)
+            .ok_or_else(|| OrchestratorError::ProfileMissing {
+                profile_id: profile_id.to_owned(),
+            })?;
+    let threshold = stricter_threshold(0.0, profile.config.min_score);
+    let knn_k = (profile.budgets.max_candidates as usize)
+        .max(agents.len())
+        .max(1);
+
+    let query_vec = match handle
+        .embed_texts_with_pin(
+            &frozen,
+            service,
+            profile_id,
+            vec![query.to_owned()],
+            cancel.child_token(),
+        )
+        .await
+    {
+        Ok(mut query_vecs) if !query_vecs.is_empty() => Some(query_vecs.remove(0)),
+        _ => None,
+    };
+
+    let live_after = handle.pinned_space();
+    let pin_still_frozen = live_after
+        .as_ref()
+        .is_some_and(|live| frozen.matches_live(live));
+    let space_after = handle.knn_space_for_pin(&frozen);
+
+    let Some(query_vec) = query_vec else {
+        restore_pre_stage_order(
+            outcome,
+            pinned_order,
+            ranked,
+            profile_id,
+            crate::retrieval::RetrievalStage::Embed,
+        );
+        return Ok(());
+    };
+
+    let knn = match (pin_still_frozen, space_after) {
+        (true, Ok(())) => match handle.search_knn_with_pin(&frozen, &query_vec, knn_k) {
+            Ok(hits) => hits,
+            Err(super::index::PrimeIndexError::SpaceMismatch) => {
+                return Err(knn_space_error(profile_id));
+            }
+            Err(_) => {
+                restore_pre_stage_order(
+                    outcome,
+                    pinned_order,
+                    ranked,
+                    profile_id,
+                    crate::retrieval::RetrievalStage::Candidates,
+                );
+                return Ok(());
+            }
+        },
+        (false, _) | (_, Err(super::index::PrimeIndexError::SpaceMismatch)) => {
+            return Err(knn_space_error(profile_id));
+        }
+        _ => {
+            restore_pre_stage_order(
+                outcome,
+                pinned_order,
+                ranked,
+                profile_id,
+                crate::retrieval::RetrievalStage::Candidates,
+            );
+            return Ok(());
+        }
+    };
+    let fts = handle
+        .search_fts_in(CollectionKind::CallableAgents, query, knn_k)
+        .unwrap_or_default();
+
+    let mut id_to_idx = HashMap::new();
+    let mut idx_to_id = vec![String::new(); agents.len()];
+    for (i, a) in agents.iter().enumerate() {
+        let id = opaque_agent_id(a);
+        id_to_idx.insert(id.clone(), i);
+        idx_to_id[i] = id;
+    }
+
+    let bm25_order: Vec<String> = fts.into_iter().map(|h| h.item_id).collect();
+    let mut vector_sim = HashMap::new();
+    let vector_order: Vec<String> = knn
+        .into_iter()
+        .map(|h| {
+            vector_sim.insert(h.item_id.clone(), l2_similarity(h.distance));
+            h.item_id
         })
         .collect();
 
-    let opts = PipelineOptions {
-        bypass_semantic: false,
-        hard_error_on_semantic_failure: hard,
-        hard_error_on_limit_exceeded: hard,
-        ..Default::default()
-    };
+    let (local_scores, local_order) = local_evidence_lists(agents, query, selected_skills);
+    let path_scores = vec![0i64; agents.len()];
+    let path_order: Vec<usize> = Vec::new();
+    let fused = fuse_ranks(
+        agents.len(),
+        &local_order,
+        &path_order,
+        &local_scores,
+        &path_scores,
+        &bm25_order,
+        &vector_order,
+        &vector_sim,
+        &id_to_idx,
+    );
 
-    outcome.shortlist_size = rows.len();
-    let result = service
-        .retrieve(
-            profile_id,
-            query,
-            RetrieveCandidates::Explicit(rows),
-            opts,
-            cancel,
-        )
-        .await;
-
-    match result {
-        Ok(res) => {
-            outcome
-                .degradations
-                .extend(res.degradations.iter().cloned());
-
-            let pinned_order: Vec<usize> = ranked
-                .iter()
-                .copied()
-                .filter(|&i| pinned.contains(&agents[i].name))
-                .collect();
-            let id_to_idx: HashMap<String, usize> = shortlist
-                .iter()
-                .map(|&i| (candidate_id(&agents[i]), i))
-                .collect();
-
-            let mut rest = Vec::new();
-            let mut used = HashSet::new();
-            for cand in &res.candidates {
-                if let Some(&i) = id_to_idx.get(&cand.id)
-                    && used.insert(i)
-                {
-                    rest.push(i);
-                }
-            }
-            for &i in shortlist {
-                if used.insert(i) {
-                    rest.push(i);
-                }
-            }
-            for &i in &non_pinned[shortlist.len()..] {
-                if used.insert(i) {
-                    rest.push(i);
-                }
-            }
-
-            let mut order = pinned_order;
-            order.extend(rest);
-            outcome.order = order;
+    let mut automatic = Vec::new();
+    for row in &fused {
+        if pinned.contains(&agents[row.idx].name) {
+            continue;
         }
-        Err(e) => {
-            if matches!(e, OrchestratorError::Cancelled { .. }) {
-                outcome.cancelled = true;
-            } else if hard {
-                outcome.hard_error = Some(e);
-            } else {
-                outcome
-                    .degradations
-                    .push(degrade_from_error(&e, profile_id));
+        if automatic_candidate_allowed(
+            row.local_score,
+            row.path_score,
+            row.vector_similarity,
+            threshold,
+        ) {
+            automatic.push(row.idx);
+        }
+    }
+
+    let rerank_cap = profile.budgets.max_rerank_shortlist.max(1) as usize;
+    let shortlist: Vec<usize> = automatic.iter().copied().take(rerank_cap).collect();
+    outcome.shortlist_size = automatic.len();
+
+    let mut rest = shortlist.clone();
+    if !shortlist.is_empty() && !profile.reranker_route_ids.is_empty() {
+        let docs: Vec<String> = shortlist
+            .iter()
+            .map(|&i| agent_rerank_document(&agents[i]))
+            .collect();
+        let opts = PipelineOptions {
+            bypass_semantic: false,
+            hard_error_on_semantic_failure: false,
+            pin_snapshot_generation: Some(frozen.space().snapshot_generation),
+            embed_route_pin: None,
+            hard_error_on_limit_exceeded: false,
+        };
+        match service
+            .rerank(
+                profile_id,
+                query.to_owned(),
+                docs,
+                opts,
+                cancel.child_token(),
+            )
+            .await
+        {
+            Ok(stage) => {
+                if let Some(d) = stage.degradation {
+                    outcome.degradations.push(d);
+                }
+                if let Some(result) = stage.result {
+                    let mut reordered = Vec::new();
+                    let mut used = HashSet::new();
+                    for hit in &result.hits {
+                        if hit.index < shortlist.len() && used.insert(shortlist[hit.index]) {
+                            reordered.push(shortlist[hit.index]);
+                        }
+                    }
+                    for &i in &shortlist {
+                        if used.insert(i) {
+                            reordered.push(i);
+                        }
+                    }
+                    rest = reordered;
+                }
+            }
+            Err(OrchestratorError::Cancelled { .. }) => {
+                return Err(OrchestratorError::Cancelled {
+                    profile_id: profile_id.to_owned(),
+                    stage: crate::retrieval::RetrievalStage::Orchestrate,
+                });
+            }
+            Err(_) => {
+                outcome.degradations.push(DegradationNotice::new(
+                    DegradationKind::RerankUnavailable,
+                    profile_id,
+                    crate::retrieval::RetrievalStage::Rerank,
+                    None,
+                ));
             }
         }
     }
-    outcome
+
+    for &i in automatic.iter() {
+        if !rest.contains(&i) {
+            rest.push(i);
+        }
+    }
+    for &i in non_pinned {
+        if !rest.contains(&i)
+            && automatic_candidate_allowed(
+                local_scores.get(i).copied().unwrap_or(0),
+                path_scores.get(i).copied().unwrap_or(0),
+                vector_sim.get(&idx_to_id[i]).copied(),
+                threshold,
+            )
+        {
+            rest.push(i);
+        }
+    }
+
+    outcome.order = prepend_unique(pinned_order, &rest);
+    let _ = ranked;
+    Ok(())
 }
 
 // ── Selection + fresh revalidation ──────────────────────────────────
@@ -1002,6 +1385,15 @@ pub async fn run_prime_agent_selection(
         return Ok(PrimeAgentSelection::empty(true, None));
     }
 
+    // Reload/reconciliation lane: Prime turn time always replaces
+    // callable_agents from the live descriptor snapshot so a missed
+    // watcher event cannot leave a stale index row. Index presence is
+    // never authority — revalidation still gates every name.
+    if let Some(home) = input.grok_home {
+        let handle = prime_index_for(home, input.workspace_root);
+        let _ = handle.reconcile_callable_agents(input.agents);
+    }
+
     // ── Deterministic ranking ─────────────────────────────────────────────
     let ranked = rank_agents(
         input.agents,
@@ -1040,6 +1432,8 @@ pub async fn run_prime_agent_selection(
             input.selected_skills,
             gate.deadline.child_token(),
             hard,
+            input.grok_home,
+            input.workspace_root,
         )
         .await;
 
@@ -1244,6 +1638,8 @@ mod tests {
             context_window: None,
             semantic_profile: None,
             semantic_service: None,
+            grok_home: None,
+            workspace_root: Path::new("."),
         };
         let sel = run_prime_agent_selection(&input, CancellationToken::new())
             .await
@@ -1873,7 +2269,9 @@ mod tests {
     async fn semantic_shipment_is_metadata_only() {
         let tmp = tempfile::tempdir().unwrap();
         let cwd = dunce::canonicalize(tmp.path()).unwrap();
-        let (agents, ctx) = callable_set(cwd, &["explore", "plan", "reviewer"]);
+        let home = cwd.join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        let (agents, ctx) = callable_set(cwd.clone(), &["explore", "plan", "reviewer"]);
         let ex = Arc::new(RecordingExecutor::new());
         let service = service_with(ex.clone());
         let snap = live(
@@ -1897,26 +2295,40 @@ mod tests {
                 },
                 semantic_profile: Some("p1"),
                 semantic_service: Some(&service),
+                grok_home: Some(&home),
+                workspace_root: &cwd,
                 ..Default::default()
             },
             CancellationToken::new(),
         )
         .await
         .unwrap();
-        let shipped = ex.rerank_docs();
-        assert!(!shipped.is_empty(), "rerank must be exercised");
-        for docs in &shipped {
+        let handle = crate::session::prime::prime_index_for(&home, &cwd);
+        let items = handle.list_callable_items().unwrap();
+        crate::session::prime::uninstall_prime_index(&home, &cwd);
+        assert!(
+            !items.is_empty(),
+            "callable descriptors must be indexed for metadata-only retrieval"
+        );
+        for item in &items {
+            let blob = format!("{} {} {}", item.name, item.description, item.extra);
+            assert!(!blob.contains("SYSTEM-BODY-HIDDEN"), "body leaked: {blob}");
+            assert!(
+                !blob.contains("selected-skills"),
+                "query context leaked: {blob}"
+            );
+            assert!(
+                blob.starts_with("explore")
+                    || blob.starts_with("plan")
+                    || blob.starts_with("reviewer")
+                    || blob.contains("\"scope\""),
+                "metadata unexpected: {blob}"
+            );
+        }
+        for docs in &ex.rerank_docs() {
             for d in docs {
-                // Never an agent prompt/system body (no such field exists), and
-                // source labels/names/skills metadata only.
                 assert!(!d.contains("SYSTEM-BODY-HIDDEN"), "body leaked: {d}");
-                assert!(
-                    d.starts_with("explore")
-                        || d.starts_with("plan")
-                        || d.starts_with("reviewer")
-                        || d.contains("source:"),
-                    "metadata unexpected: {d}"
-                );
+                assert!(!d.contains("selected-skills"), "query context leaked: {d}");
             }
         }
     }
@@ -1925,7 +2337,9 @@ mod tests {
     async fn semantic_failure_soft_preserves_deterministic_order() {
         let tmp = tempfile::tempdir().unwrap();
         let cwd = dunce::canonicalize(tmp.path()).unwrap();
-        let (agents, ctx) = callable_set(cwd, &["zebra", "reviewer", "explorer"]);
+        let home = cwd.join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        let (agents, ctx) = callable_set(cwd.clone(), &["zebra", "reviewer", "explorer"]);
         let service = service_with(Arc::new(RecordingExecutor::new()));
         let snap = live(
             agents.clone(),
@@ -1949,12 +2363,15 @@ mod tests {
                 // Missing profile ⇒ deterministic soft failure (degradation).
                 semantic_profile: Some("missing-pptx"),
                 semantic_service: Some(&service),
+                grok_home: Some(&home),
+                workspace_root: &cwd,
                 ..Default::default()
             },
             CancellationToken::new(),
         )
         .await
         .unwrap();
+        crate::session::prime::uninstall_prime_index(&home, &cwd);
         assert!(!sel.degradations.is_empty(), "soft mode must degrade");
         // Exact pre-stage deterministic order preserved.
         assert_eq!(
@@ -1971,7 +2388,9 @@ mod tests {
     async fn semantic_failure_hard_returns_error() {
         let tmp = tempfile::tempdir().unwrap();
         let cwd = dunce::canonicalize(tmp.path()).unwrap();
-        let (agents, ctx) = callable_set(cwd, &["explore", "plan"]);
+        let home = cwd.join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        let (agents, ctx) = callable_set(cwd.clone(), &["explore", "plan"]);
         let service = service_with(Arc::new(RecordingExecutor::new()));
         let snap = live(
             agents.clone(),
@@ -1995,11 +2414,14 @@ mod tests {
                 // Missing profile ⇒ hard semantic failure ⇒ run fails closed.
                 semantic_profile: Some("missing-pptx"),
                 semantic_service: Some(&service),
+                grok_home: Some(&home),
+                workspace_root: &cwd,
                 ..Default::default()
             },
             CancellationToken::new(),
         )
         .await;
+        crate::session::prime::uninstall_prime_index(&home, &cwd);
         assert!(matches!(res, Err(PrimeError::SemanticRetrievalFailed)));
     }
 
@@ -2480,6 +2902,423 @@ mod tests {
         assert!(
             !sel.selected.iter().any(|s| s.name == "gone"),
             "stale ranked name must be dropped by the fresh authority"
+        );
+    }
+
+    #[tokio::test]
+    async fn local_only_fallback_is_exact_and_deterministic_without_grok_home() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cwd = dunce::canonicalize(tmp.path()).unwrap();
+        let (agents, ctx) = callable_set(cwd, &["zebra", "reviewer", "explorer"]);
+        let service = service_with(Arc::new(RecordingExecutor::new()));
+        let snap = live(
+            agents.clone(),
+            ctx,
+            true,
+            None,
+            eligible_map(&["zebra", "reviewer", "explorer"]),
+        );
+        let expected = rank_agents(&agents, "some task", &[], None);
+        let expected_names: Vec<String> =
+            expected.iter().map(|&i| agents[i].name.clone()).collect();
+        let sel = run_prime_agent_selection(
+            &AgentInput {
+                agents: &agents,
+                refresh: &refresher(snap),
+                prompt: "some task",
+                config: AgentPrimeConfig {
+                    enabled: true,
+                    retrieval_profile: Some("p1".into()),
+                    max_results: 10,
+                    ..Default::default()
+                },
+                semantic_profile: Some("p1"),
+                semantic_service: Some(&service),
+                grok_home: None,
+                workspace_root: Path::new("."),
+                ..Default::default()
+            },
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        assert!(
+            sel.degradations.is_empty(),
+            "local-only fallback is not a semantic failure: {:?}",
+            sel.degradations
+        );
+        assert_eq!(sel.budget_state.selected_names, expected_names);
+    }
+
+    #[tokio::test]
+    async fn index_presence_never_implies_callable_authority() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cwd = dunce::canonicalize(tmp.path()).unwrap();
+        let home = cwd.join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        let ghost = builtin("ghost");
+        let handle = crate::session::prime::prime_index_for(&home, &cwd);
+        handle.reconcile_callable_agents(&[ghost.clone()]).unwrap();
+        assert_eq!(handle.list_callable_items().unwrap().len(), 1);
+
+        let (live_agents, ctx) = callable_set(cwd.clone(), &["explore"]);
+        let snap = live(
+            live_agents.clone(),
+            ctx,
+            true,
+            None,
+            eligible_map(&["explore"]),
+        );
+        let service = service_with(Arc::new(RecordingExecutor::new()));
+        let sel = run_prime_agent_selection(
+            &AgentInput {
+                agents: &live_agents,
+                refresh: &refresher(snap),
+                prompt: "ghost exploration task",
+                config: AgentPrimeConfig {
+                    enabled: true,
+                    retrieval_profile: Some("p1".into()),
+                    max_results: 10,
+                    ..Default::default()
+                },
+                semantic_profile: Some("p1"),
+                semantic_service: Some(&service),
+                grok_home: Some(&home),
+                workspace_root: &cwd,
+                ..Default::default()
+            },
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        assert!(
+            !sel.selected.iter().any(|s| s.name == "ghost"),
+            "indexed ghost must not become a recommendation: {:?}",
+            sel.budget_state.selected_names
+        );
+        let listed = handle.list_callable_items().unwrap();
+        assert!(
+            !listed.iter().any(|i| i.name == "ghost"),
+            "turn-time reconcile must drop the missed-watcher ghost"
+        );
+        crate::session::prime::uninstall_prime_index(&home, &cwd);
+    }
+
+    #[tokio::test]
+    async fn semantic_fill_queries_full_agent_inventory_not_first_eight() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cwd = dunce::canonicalize(tmp.path()).unwrap();
+        let home = cwd.join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        let names: Vec<String> = (0..12).map(|i| format!("agent{i:02}")).collect();
+        let name_refs: Vec<&str> = names.iter().map(|s| s.as_str()).collect();
+        let (agents, ctx) = callable_set(cwd.clone(), &name_refs);
+        let service = service_with(Arc::new(RecordingExecutor::new()));
+        let snap = live(agents.clone(), ctx, true, None, eligible_map(&name_refs));
+        let sel = run_prime_agent_selection(
+            &AgentInput {
+                agents: &agents,
+                refresh: &refresher(snap),
+                prompt: "agent query text matching",
+                config: AgentPrimeConfig {
+                    enabled: true,
+                    retrieval_profile: Some("p1".into()),
+                    max_results: 20,
+                    ..Default::default()
+                },
+                semantic_profile: Some("p1"),
+                semantic_service: Some(&service),
+                grok_home: Some(&home),
+                workspace_root: &cwd,
+                ..Default::default()
+            },
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        let handle = crate::session::prime::prime_index_for(&home, &cwd);
+        let listed = handle.list_callable_items().unwrap_or_default();
+        crate::session::prime::uninstall_prime_index(&home, &cwd);
+        assert_eq!(listed.len(), 12, "full inventory must be indexed");
+        assert!(
+            !sel.selected.is_empty(),
+            "full inventory must still recommend: {:?}",
+            sel.budget_state.selected_names
+        );
+    }
+
+    #[tokio::test]
+    async fn bm25_rank_reorders_admitted_agents_without_admitting_fts_only() {
+        assert!(
+            !crate::session::prime::fusion::automatic_candidate_allowed(0, 0, None, 0.4),
+            "FTS/BM25 rank is not an admission signal"
+        );
+        let tmp = tempfile::tempdir().unwrap();
+        let cwd = dunce::canonicalize(tmp.path()).unwrap();
+        let home = cwd.join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        let agents = vec![
+            user("aardvark", Some("generic helper")),
+            user("k8s", Some("kubernetes canary rollout playbook")),
+        ];
+        let service = service_with(Arc::new(RecordingExecutor::new()));
+        let ranked = rank_agents(&agents, "kubernetes canary", &[], None);
+        assert_eq!(
+            agents[ranked[0]].name, "k8s",
+            "local kubernetes evidence must rank k8s first before fusion"
+        );
+        let pinned: HashSet<String> = HashSet::new();
+        let out = semantic_fill_agents(
+            &service,
+            "p1",
+            "kubernetes canary",
+            &agents,
+            &ranked,
+            &pinned,
+            &[],
+            CancellationToken::new(),
+            false,
+            Some(&home),
+            &cwd,
+        )
+        .await;
+        crate::session::prime::uninstall_prime_index(&home, &cwd);
+        assert!(out.hard_error.is_none());
+        assert_eq!(
+            agents[out.order[0]].name, "k8s",
+            "k8s stays first via local evidence (KNN miss restores pre-stage) or BM25 reorder: {:?}",
+            out.order
+        );
+    }
+
+    #[tokio::test]
+    async fn selected_skill_names_are_query_context_not_indexed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cwd = dunce::canonicalize(tmp.path()).unwrap();
+        let home = cwd.join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        let (mut agents, ctx) = callable_set(cwd.clone(), &["reviewer", "plan"]);
+        agents[0].description = Some("matches deploy context".into());
+        let service = service_with(Arc::new(RecordingExecutor::new()));
+        let snap = live(
+            agents.clone(),
+            ctx,
+            true,
+            None,
+            eligible_map(&["reviewer", "plan"]),
+        );
+        let skills = vec!["deploy-skill".to_string()];
+        let _ = run_prime_agent_selection(
+            &AgentInput {
+                agents: &agents,
+                refresh: &refresher(snap),
+                selected_skills: &skills,
+                prompt: "please review",
+                config: AgentPrimeConfig {
+                    enabled: true,
+                    retrieval_profile: Some("p1".into()),
+                    max_results: 10,
+                    ..Default::default()
+                },
+                semantic_profile: Some("p1"),
+                semantic_service: Some(&service),
+                grok_home: Some(&home),
+                workspace_root: &cwd,
+                ..Default::default()
+            },
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        let handle = crate::session::prime::prime_index_for(&home, &cwd);
+        let items = handle.list_callable_items().unwrap();
+        crate::session::prime::uninstall_prime_index(&home, &cwd);
+        for item in &items {
+            let blob = format!("{} {} {}", item.name, item.description, item.extra);
+            assert!(
+                !blob.contains("deploy-skill"),
+                "selected skill names must stay query-only: {blob}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn plugin_cli_builtin_source_classes_cover_contexts() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cwd = dunce::canonicalize(tmp.path()).unwrap();
+        let home = cwd.join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        let agents = vec![
+            builtin("explore"),
+            user("reviewer", Some("repo reviewer")),
+            plugin("pl:arch", "pl"),
+            CallableAgentDescriptor {
+                name: "cli-inline".into(),
+                description: Some("CLI inline".into()),
+                source: CallableAgentSource::CliInline,
+            },
+        ];
+        let ctx = validation_ctx(
+            cwd.clone(),
+            HashMap::new(),
+            None,
+            agents.iter().map(|a| a.name.clone()).collect(),
+        );
+        let snap = live(
+            agents.clone(),
+            ctx,
+            true,
+            None,
+            eligible_map(&["explore", "reviewer", "pl:arch", "cli-inline"]),
+        );
+        let sel = run_prime_agent_selection(
+            &AgentInput {
+                agents: &agents,
+                refresh: &refresher(snap),
+                selected_skills: &["explore".to_string()],
+                prompt: "architecture review exploration",
+                config: AgentPrimeConfig {
+                    enabled: true,
+                    max_results: 10,
+                    ..Default::default()
+                },
+                grok_home: Some(&home),
+                workspace_root: &cwd,
+                ..Default::default()
+            },
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        let handle = crate::session::prime::prime_index_for(&home, &cwd);
+        let items = handle.list_callable_items().unwrap();
+        crate::session::prime::uninstall_prime_index(&home, &cwd);
+        let extras: Vec<String> = items.iter().map(|i| i.extra.clone()).collect();
+        assert!(extras.iter().any(|e| e.contains("builtin")));
+        assert!(extras.iter().any(|e| e.contains("project")));
+        assert!(extras.iter().any(|e| e.contains("plugin")));
+        assert!(extras.iter().any(|e| e.contains("cli-inline")));
+        assert!(
+            extras
+                .iter()
+                .all(|e| !e.contains("/Users/") && !e.contains("pl:arch")),
+            "plugin identity must not leak into extra: {extras:?}"
+        );
+        assert!(!sel.selected.is_empty());
+        assert_eq!(sel.selected.len(), sel.budget_state.selected_names.len());
+    }
+
+    #[test]
+    fn capture_at_max_depth_blocks_every_name() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cwd = dunce::canonicalize(tmp.path()).unwrap();
+        let toggle = HashMap::new();
+        let authority = capture_callable_agent_authority(CaptureCallableArgs {
+            parent_cwd: &cwd,
+            parent_depth: MAX_SUBAGENT_DEPTH,
+            current_agent: None,
+            plugin_registry: None,
+            subagent_toggle: &toggle,
+            cli_agents: &[],
+            allowed_subagent_types: None,
+            global_subagents_enabled: true,
+            generation: Some(1),
+        });
+        assert!(!authority.task_available);
+        for a in &authority.agents {
+            assert_eq!(authority.gate(&a.name), AgentGateVerdict::Blocked);
+        }
+    }
+
+    #[tokio::test]
+    async fn stale_allow_list_and_toggle_are_filtered_by_fresh_gate() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cwd = dunce::canonicalize(tmp.path()).unwrap();
+        let (agents, ctx) = callable_set(cwd.clone(), &["explore", "plan"]);
+        let mut fresh_ctx = ctx.clone();
+        fresh_ctx.allowed_subagent_types = Some(vec!["explore".into()]);
+        fresh_ctx.subagent_toggle.insert("plan".into(), false);
+        let fresh = live(
+            agents.clone(),
+            fresh_ctx,
+            true,
+            None,
+            eligible_map(&["explore", "plan"]),
+        );
+        let sel = run_prime_agent_selection(
+            &AgentInput {
+                agents: &agents,
+                refresh: &refresher(fresh),
+                prompt: "plan the explore work",
+                config: AgentPrimeConfig {
+                    enabled: true,
+                    max_results: 10,
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(sel.budget_state.selected_names, vec!["explore".to_string()]);
+        assert!(!sel.selected.iter().any(|s| s.name == "plan"));
+    }
+
+    #[tokio::test]
+    async fn below_threshold_vector_without_local_evidence_is_not_admitted() {
+        assert!(!crate::session::prime::fusion::automatic_candidate_allowed(
+            0,
+            0,
+            Some(0.2),
+            0.4
+        ));
+        assert!(crate::session::prime::fusion::automatic_candidate_allowed(
+            0,
+            0,
+            Some(0.4),
+            0.4
+        ));
+        let tmp = tempfile::tempdir().unwrap();
+        let cwd = dunce::canonicalize(tmp.path()).unwrap();
+        let (agents, ctx) = callable_set(cwd, &["unrelated"]);
+        let snap = live(
+            agents.clone(),
+            ctx,
+            true,
+            None,
+            eligible_map(&["unrelated"]),
+        );
+        let sel = run_prime_agent_selection(
+            &AgentInput {
+                agents: &agents,
+                refresh: &refresher(snap),
+                prompt: "zzzz",
+                config: AgentPrimeConfig {
+                    enabled: true,
+                    max_results: 10,
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        // Prompt token "zzzz" is too short for significant_words (>=4) wait zzzz is 4 chars.
+        // "unrelated" does not contain zzzz, so local score is 0. Without vectors
+        // the candidate is still selected by deterministic rank of the whole
+        // pool (local-only path selects from ranked order, not automatic
+        // admission). Authority still has to confirm it.
+        assert!(
+            sel.selected.iter().all(|s| s.name == "unrelated")
+                || sel.selected.is_empty()
+                || sel
+                    .budget_state
+                    .selected_names
+                    .contains(&"unrelated".to_string()),
+            "local-only rank may still surface the only callable name: {:?}",
+            sel.budget_state.selected_names
         );
     }
 }

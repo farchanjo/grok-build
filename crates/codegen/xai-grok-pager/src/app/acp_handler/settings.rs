@@ -221,6 +221,111 @@ pub(super) fn handle_retrieval_update(notif: &acp::ExtNotification, app: &mut Ap
     true
 }
 
+/// Handle `x.ai/prime/index/update` — version-tolerant job/status broadcast.
+///
+/// `notifySeq` is the delivery clock. Inventory `generation` is a blake3
+/// identity hash, not a monotonic watermark: when `notifySeq > 0`, apply if
+/// the sequence advanced and treat generation as equality/precondition
+/// identity (`!=`, never `.max()`). Legacy shells (`notifySeq == 0`) still
+/// reject `generation < last`. Same-generation job ticks apply when
+/// `notifySeq` advances. Terminal jobs refresh compact counts via a
+/// generation/fingerprint-preconditioned status fetch so `unchanged=true`
+/// still merges vector_count/readiness. Unknown optional fields are ignored.
+/// Search/filter/selection in `/skills` are preserved because this only
+/// refreshes compact index state, not the inventory rows.
+pub(super) fn handle_prime_index_update(notif: &acp::ExtNotification, app: &mut AppView) -> bool {
+    use xai_grok_shell::session::prime::PrimeIndexUpdate;
+    let update: PrimeIndexUpdate = serde_json::from_str(notif.params.get()).unwrap_or_default();
+    if !prime_index_update_is_actionable(
+        &update,
+        app.prime_index_last_generation,
+        app.prime_index_last_notify_seq,
+    ) {
+        return true;
+    }
+    if let Some(api) = update.api_version
+        && api != 1
+    {
+        // Unknown major: still advance watermarks so we do not retry, but do
+        // not apply job details.
+        advance_prime_index_watermarks(app, &update);
+        return true;
+    }
+    let generation_advanced = update.generation != app.prime_index_last_generation;
+    advance_prime_index_watermarks(app, &update);
+    let fetch_status = app.prime_index.status && (generation_advanced || update.job_is_terminal());
+    let mut effects = Vec::new();
+    for (agent_id, agent) in app.agents.iter_mut() {
+        let session_id = agent.session.session_id.clone();
+        let mut surface_open = false;
+        if let Some(ref mut modal) = agent.extensions_modal {
+            modal.apply_prime_index_update(&update);
+            surface_open = true;
+        }
+        if let Some(ref mut agents_modal) = agent.agents_modal {
+            agents_modal.apply_prime_index_update(&update);
+            surface_open = true;
+        }
+        if let Some(crate::views::modal::ActiveModal::RetrievalSettings { state }) =
+            agent.active_modal.as_mut()
+        {
+            state.apply_prime_index_update(&update);
+            surface_open = true;
+        }
+        if fetch_status
+            && surface_open
+            && let Some(session_id) = session_id
+        {
+            effects.push(crate::app::actions::Effect::FetchPrimeIndexStatus {
+                agent_id: *agent_id,
+                session_id,
+                expected_generation: Some(update.generation),
+                expected_fingerprint: Some(update.fingerprint_short.clone()),
+            });
+        }
+    }
+    app.pending_effects.extend(effects);
+    true
+}
+
+fn prime_index_update_is_actionable(
+    update: &xai_grok_shell::session::prime::PrimeIndexUpdate,
+    last_gen: u64,
+    last_seq: u64,
+) -> bool {
+    let has_job = update.job.is_some() || update.changed_fields.iter().any(|f| f == "job");
+    if update.notify_seq > 0 {
+        // Order solely by notifySeq. Generation is an identity hash.
+        return update.notify_seq > last_seq;
+    }
+    // Legacy shells omit notifySeq: generation is the only watermark.
+    if update.generation == 0 {
+        return has_job && last_seq == 0;
+    }
+    if update.generation < last_gen {
+        return false;
+    }
+    if update.generation > last_gen {
+        return true;
+    }
+    has_job
+}
+
+fn advance_prime_index_watermarks(
+    app: &mut AppView,
+    update: &xai_grok_shell::session::prime::PrimeIndexUpdate,
+) {
+    if update.notify_seq > 0 {
+        // Identity, not a clock — a restage hash may be numerically smaller.
+        app.prime_index_last_generation = update.generation;
+        if update.notify_seq > app.prime_index_last_notify_seq {
+            app.prime_index_last_notify_seq = update.notify_seq;
+        }
+    } else {
+        app.prime_index_last_generation = app.prime_index_last_generation.max(update.generation);
+    }
+}
+
 /// Handle `x.ai/settings/update` — remote settings refreshed on `/new`.
 pub(super) fn handle_settings_update(notif: &acp::ExtNotification, app: &mut AppView) -> bool {
     let Ok(update) = serde_json::from_str::<PagerSettingsUpdate>(notif.params.get()) else {
@@ -907,5 +1012,367 @@ mod providers_update_handler_tests {
         };
         assert!(ed.conflict.is_some(), "dirty editor must enter conflict");
         assert_eq!(ed.clone_id_draft, "dirty-draft", "drafts must stay intact");
+    }
+}
+
+#[cfg(test)]
+mod prime_index_update_handler_tests {
+    use super::handle_prime_index_update;
+    use crate::app::app_view::AppView;
+    use agent_client_protocol as acp;
+
+    fn notif(params: serde_json::Value) -> acp::ExtNotification {
+        let raw = serde_json::value::to_raw_value(&params).unwrap();
+        acp::ExtNotification::new("x.ai/prime/index/update", raw.into())
+    }
+
+    #[test]
+    fn stale_and_zero_generation_are_rejected() {
+        use crate::acp::model_state::ModelState;
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = AppView::new(tx, ModelState::default(), Vec::new());
+        app.prime_index_last_generation = 4;
+        assert!(handle_prime_index_update(
+            &notif(serde_json::json!({})),
+            &mut app
+        ));
+        assert_eq!(app.prime_index_last_generation, 4);
+        assert!(handle_prime_index_update(
+            &notif(serde_json::json!({"generation": 3, "apiVersion": 1})),
+            &mut app
+        ));
+        assert_eq!(app.prime_index_last_generation, 4);
+        assert!(handle_prime_index_update(
+            &notif(serde_json::json!({"generation": 5, "apiVersion": 1})),
+            &mut app
+        ));
+        assert_eq!(app.prime_index_last_generation, 5);
+    }
+
+    #[test]
+    fn unknown_api_version_advances_watermark_without_job() {
+        use crate::acp::model_state::ModelState;
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = AppView::new(tx, ModelState::default(), Vec::new());
+        assert!(handle_prime_index_update(
+            &notif(serde_json::json!({"generation": 2, "apiVersion": 9})),
+            &mut app
+        ));
+        assert_eq!(app.prime_index_last_generation, 2);
+    }
+
+    fn job_update(generation: u64, notify_seq: u64, done: u64, state: &str) -> serde_json::Value {
+        serde_json::json!({
+            "schemaVersion": 1,
+            "apiVersion": 1,
+            "generation": generation,
+            "notifySeq": notify_seq,
+            "fingerprintShort": "abc123def456",
+            "changedFields": ["job"],
+            "job": {
+                "apiVersion": 1,
+                "jobId": "j1",
+                "kind": "backfill",
+                "collection": "skills",
+                "state": state,
+                "generation": generation,
+                "fingerprintShort": "abc123def456",
+                "done": done,
+                "total": 3,
+                "confirmConfiguredProfile": false
+            }
+        })
+    }
+
+    #[test]
+    fn same_generation_job_progress_updates_footer() {
+        use crate::views::extensions_modal::{ExtensionsModalState, ExtensionsTab};
+        let mut app = crate::app::app_view::tests::test_app_with_agent();
+        app.prime_index = xai_grok_shell::session::prime::PrimeIndexCapabilities::SUPPORTED;
+        let agent_id = crate::app::agent::AgentId(0);
+        if let Some(agent) = app.agents.get_mut(&agent_id) {
+            let mut modal = ExtensionsModalState::new(ExtensionsTab::Skills);
+            modal.prime_index_capable = true;
+            modal.picker_state.set_query("commit");
+            modal.prime_index = Some(xai_grok_shell::session::prime::PrimeIndexStatus {
+                api_version: 1,
+                generation: 4,
+                fingerprint_short: "abc123def456".into(),
+                skills: xai_grok_shell::session::prime::PrimeIndexCollectionStatus {
+                    collection: "skills".into(),
+                    generation: 4,
+                    fingerprint_short: "abc123def456".into(),
+                    item_count: 3,
+                    vector_count: 1,
+                    missing_vectors: 2,
+                    readiness: "pending".into(),
+                    route_id: None,
+                    dimensions: None,
+                },
+                agents: xai_grok_shell::session::prime::PrimeIndexCollectionStatus {
+                    collection: "agents".into(),
+                    generation: 0,
+                    fingerprint_short: String::new(),
+                    item_count: 0,
+                    vector_count: 0,
+                    missing_vectors: 0,
+                    readiness: "ready".into(),
+                    route_id: None,
+                    dimensions: None,
+                },
+                job: None,
+                configured_route: None,
+                capabilities: xai_grok_shell::session::prime::PrimeIndexCapabilities::SUPPORTED,
+                unchanged: false,
+            });
+            agent.extensions_modal = Some(modal);
+        }
+        assert!(handle_prime_index_update(
+            &notif(job_update(4, 1, 1, "running")),
+            &mut app
+        ));
+        assert_eq!(app.prime_index_last_generation, 4);
+        assert_eq!(app.prime_index_last_notify_seq, 1);
+        assert!(handle_prime_index_update(
+            &notif(job_update(4, 2, 2, "failed")),
+            &mut app
+        ));
+        assert_eq!(app.prime_index_last_notify_seq, 2);
+        let agent = app.agents.get(&agent_id).expect("agent");
+        let modal = agent.extensions_modal.as_ref().expect("skills modal");
+        assert_eq!(modal.picker_state.query(), "commit");
+        let footer = modal.prime_index_footer_line(true).expect("compact footer");
+        assert!(footer.contains("failed"), "{footer}");
+        assert!(footer.contains("2/3"), "{footer}");
+        assert!(
+            footer.len() < 80,
+            "compact footer must fit a narrow terminal: {footer}"
+        );
+    }
+
+    #[test]
+    fn generation_zero_job_update_is_delivered() {
+        use crate::views::extensions_modal::{ExtensionsModalState, ExtensionsTab};
+        let mut app = crate::app::app_view::tests::test_app_with_agent();
+        app.prime_index = xai_grok_shell::session::prime::PrimeIndexCapabilities::SUPPORTED;
+        let agent_id = crate::app::agent::AgentId(0);
+        if let Some(agent) = app.agents.get_mut(&agent_id) {
+            agent.extensions_modal = Some(ExtensionsModalState::new(ExtensionsTab::Skills));
+        }
+        assert!(handle_prime_index_update(
+            &notif(job_update(0, 1, 1, "running")),
+            &mut app
+        ));
+        let job = app
+            .agents
+            .get(&agent_id)
+            .and_then(|a| a.extensions_modal.as_ref())
+            .and_then(|m| m.prime_index.as_ref())
+            .and_then(|s| s.job.as_ref());
+        assert_eq!(job.map(|j| j.done), Some(1));
+    }
+
+    #[test]
+    fn malicious_job_update_is_sanitized_and_old_schema_is_version_safe() {
+        use crate::views::extensions_modal::{ExtensionsModalState, ExtensionsTab};
+        let mut app = crate::app::app_view::tests::test_app_with_agent();
+        app.prime_index = xai_grok_shell::session::prime::PrimeIndexCapabilities::SUPPORTED;
+        let agent_id = crate::app::agent::AgentId(0);
+        if let Some(agent) = app.agents.get_mut(&agent_id) {
+            let mut modal = ExtensionsModalState::new(ExtensionsTab::Skills);
+            modal.prime_index_capable = true;
+            modal.picker_state.set_query("commit");
+            agent.extensions_modal = Some(modal);
+        }
+        let raw = "http://127.0.0.1/v1";
+        assert!(handle_prime_index_update(
+            &notif(serde_json::json!({
+                "schemaVersion": 1,
+                "apiVersion": 1,
+                "generation": 4,
+                "notifySeq": 1,
+                "fingerprintShort": "abc123def456",
+                "changedFields": ["job"],
+                "job": {
+                    "apiVersion": 1,
+                    "jobId": "j1",
+                    "kind": "backfill",
+                    "collection": "skills",
+                    "state": "failed",
+                    "generation": 4,
+                    "fingerprintShort": "abc123def456",
+                    "done": 0,
+                    "total": 3,
+                    "confirmConfiguredProfile": false,
+                    "configuredRoute": raw,
+                    "failure": format!("confirm_required:{raw}")
+                }
+            })),
+            &mut app
+        ));
+        let agent = app.agents.get(&agent_id).expect("agent");
+        let modal = agent.extensions_modal.as_ref().expect("skills");
+        assert_eq!(modal.picker_state.query(), "commit");
+        let job = modal.prime_index.as_ref().and_then(|s| s.job.as_ref());
+        let json = serde_json::to_string(&job).expect("job json");
+        assert!(!json.contains("127.0.0.1"), "{json}");
+        assert!(!json.contains("http://"), "{json}");
+        let footer = modal.prime_index_footer_line(true).expect("footer");
+        assert!(
+            footer.contains("unavailable")
+                || footer.contains("failed")
+                || footer.contains("confirm"),
+            "{footer}"
+        );
+        assert!(!footer.contains("127.0.0.1"), "{footer}");
+        app.prime_index_last_generation = 9;
+        app.prime_index_last_notify_seq = 0;
+        assert!(handle_prime_index_update(
+            &notif(serde_json::json!({"generation": 3, "apiVersion": 1})),
+            &mut app
+        ));
+        assert_eq!(app.prime_index_last_generation, 9);
+        assert!(handle_prime_index_update(
+            &notif(serde_json::json!({"generation": 11, "apiVersion": 1})),
+            &mut app
+        ));
+        assert_eq!(app.prime_index_last_generation, 11);
+    }
+
+    #[test]
+    fn decreasing_generation_with_advancing_notify_seq_is_applied() {
+        use crate::views::extensions_modal::{ExtensionsModalState, ExtensionsTab};
+        let mut app = crate::app::app_view::tests::test_app_with_agent();
+        app.prime_index = xai_grok_shell::session::prime::PrimeIndexCapabilities::SUPPORTED;
+        let prior = 1u64 << 62;
+        app.prime_index_last_generation = prior;
+        app.prime_index_last_notify_seq = 1;
+        let agent_id = crate::app::agent::AgentId(0);
+        if let Some(agent) = app.agents.get_mut(&agent_id) {
+            let mut modal = ExtensionsModalState::new(ExtensionsTab::Skills);
+            modal.prime_index_capable = true;
+            modal.prime_index = Some(xai_grok_shell::session::prime::PrimeIndexStatus {
+                api_version: 1,
+                generation: prior,
+                fingerprint_short: "oldfpoldfp12".into(),
+                skills: xai_grok_shell::session::prime::PrimeIndexCollectionStatus {
+                    collection: "skills".into(),
+                    generation: prior,
+                    fingerprint_short: "oldfpoldfp12".into(),
+                    item_count: 3,
+                    vector_count: 1,
+                    missing_vectors: 2,
+                    readiness: "pending".into(),
+                    route_id: None,
+                    dimensions: None,
+                },
+                agents: xai_grok_shell::session::prime::PrimeIndexCollectionStatus {
+                    collection: "agents".into(),
+                    generation: 0,
+                    fingerprint_short: String::new(),
+                    item_count: 0,
+                    vector_count: 0,
+                    missing_vectors: 0,
+                    readiness: "ready".into(),
+                    route_id: None,
+                    dimensions: None,
+                },
+                job: None,
+                configured_route: None,
+                capabilities: xai_grok_shell::session::prime::PrimeIndexCapabilities::SUPPORTED,
+                unchanged: false,
+            });
+            agent.extensions_modal = Some(modal);
+        }
+        assert!(handle_prime_index_update(
+            &notif(job_update(123, 2, 2, "running")),
+            &mut app
+        ));
+        assert_eq!(app.prime_index_last_generation, 123);
+        assert_eq!(app.prime_index_last_notify_seq, 2);
+        let job = app
+            .agents
+            .get(&agent_id)
+            .and_then(|a| a.extensions_modal.as_ref())
+            .and_then(|m| m.prime_index.as_ref())
+            .and_then(|s| s.job.as_ref());
+        assert_eq!(job.map(|j| j.done), Some(2));
+        assert!(handle_prime_index_update(
+            &notif(job_update(prior, 2, 3, "running")),
+            &mut app
+        ));
+        let job = app
+            .agents
+            .get(&agent_id)
+            .and_then(|a| a.extensions_modal.as_ref())
+            .and_then(|m| m.prime_index.as_ref())
+            .and_then(|s| s.job.as_ref());
+        assert_eq!(
+            job.map(|j| j.done),
+            Some(2),
+            "equal notifySeq must be rejected even when generation is larger"
+        );
+    }
+
+    #[test]
+    fn completed_same_generation_job_enqueues_status_fetch() {
+        use crate::app::actions::Effect;
+        use crate::views::extensions_modal::{ExtensionsModalState, ExtensionsTab};
+        let mut app = crate::app::app_view::tests::test_app_with_agent();
+        app.prime_index = xai_grok_shell::session::prime::PrimeIndexCapabilities::SUPPORTED;
+        app.prime_index_last_generation = 4;
+        app.prime_index_last_notify_seq = 1;
+        let agent_id = crate::app::agent::AgentId(0);
+        if let Some(agent) = app.agents.get_mut(&agent_id) {
+            let mut modal = ExtensionsModalState::new(ExtensionsTab::Skills);
+            modal.prime_index_capable = true;
+            modal.prime_index = Some(xai_grok_shell::session::prime::PrimeIndexStatus {
+                api_version: 1,
+                generation: 4,
+                fingerprint_short: "abc123def456".into(),
+                skills: xai_grok_shell::session::prime::PrimeIndexCollectionStatus {
+                    collection: "skills".into(),
+                    generation: 4,
+                    fingerprint_short: "abc123def456".into(),
+                    item_count: 3,
+                    vector_count: 1,
+                    missing_vectors: 2,
+                    readiness: "pending".into(),
+                    route_id: None,
+                    dimensions: None,
+                },
+                agents: xai_grok_shell::session::prime::PrimeIndexCollectionStatus {
+                    collection: "agents".into(),
+                    generation: 0,
+                    fingerprint_short: String::new(),
+                    item_count: 0,
+                    vector_count: 0,
+                    missing_vectors: 0,
+                    readiness: "ready".into(),
+                    route_id: None,
+                    dimensions: None,
+                },
+                job: None,
+                configured_route: None,
+                capabilities: xai_grok_shell::session::prime::PrimeIndexCapabilities::SUPPORTED,
+                unchanged: false,
+            });
+            agent.extensions_modal = Some(modal);
+        }
+        assert!(handle_prime_index_update(
+            &notif(job_update(4, 2, 3, "completed")),
+            &mut app
+        ));
+        assert!(
+            app.pending_effects.iter().any(|e| matches!(
+                e,
+                Effect::FetchPrimeIndexStatus {
+                    expected_generation: Some(4),
+                    ..
+                }
+            )),
+            "terminal same-gen jobs must refresh compact counts, got {:?}",
+            app.pending_effects
+        );
     }
 }

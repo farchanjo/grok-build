@@ -270,6 +270,10 @@ pub struct SkillPrimeConfig {
     pub deadline_ms: u64,
     /// When true, degrade (omit) rather than fail the turn on retrieval errors.
     pub degrade_on_error: bool,
+    /// Consumer vector-similarity floor (`0.0..=1.0`). The runtime applies
+    /// the stricter of this value and the named profile's `min_score`.
+    #[serde(default)]
+    pub min_score: f32,
 }
 
 impl Default for SkillPrimeConfig {
@@ -284,6 +288,7 @@ impl Default for SkillPrimeConfig {
             max_context_fraction: 0.05,
             deadline_ms: 3_000,
             degrade_on_error: true,
+            min_score: 0.0,
         }
     }
 }

@@ -1,0 +1,62 @@
+{
+  "apiVersion": 1,
+  "generation": 4,
+  "fingerprint": "abcd1234",
+  "health": {
+    "validPass": 1,
+    "failed": 0,
+    "quarantined": 1,
+    "stale": 0,
+    "untested": 1
+  },
+  "skills": [
+    {
+      "identity": {
+        "parent_dir_name": "commit",
+        "file_label": "commit/SKILL.md",
+        "scope": "repo"
+      },
+      "status": "valid-pass",
+      "enableable": true,
+      "skill": {
+        "name": "commit",
+        "description": "Create well-formatted git commits.",
+        "has_user_specified_description": true,
+        "path": "commit/SKILL.md",
+        "scope": "repo",
+        "user_invocable": true,
+        "disable_model_invocation": false,
+        "enabled": true
+      },
+      "regression": {
+        "status": "valid-pass",
+        "generation": 4,
+        "casesFingerprint": "1111aaaa",
+        "passed": 5,
+        "failed": 0,
+        "cancelled": false,
+        "stable": true
+      }
+    },
+    {
+      "identity": {
+        "parent_dir_name": "bad",
+        "file_label": "bad/SKILL.md",
+        "scope": "local"
+      },
+      "status": "quarantined",
+      "enableable": false,
+      "skill": null,
+      "diagnostics": [
+        {
+          "code": "missing-frontmatter",
+          "field": null,
+          "message": "SKILL.md is missing YAML frontmatter.",
+          "remediation": "Add YAML frontmatter with name and description.",
+          "position": { "line": 1, "column": 1 }
+        }
+      ]
+    }
+  ],
+  "futureField": true
+}

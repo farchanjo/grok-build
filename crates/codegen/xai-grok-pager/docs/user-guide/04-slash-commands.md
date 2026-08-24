@@ -214,7 +214,19 @@ Open the extensions modal on the Marketplace tab to browse and install plugins.
 
 ### `/skills`
 
-Open the extensions modal on the Skills tab to view installed skills.
+Open the extensions modal on the Skills tab. Skills is one list with one
+Local/Smart search field:
+
+- `/` focuses search.
+- `m` switches Local (name-only) and Smart (Prime index / fusion) mode.
+- `f` cycles status: valid-pass, failed, quarantined, stale, untested.
+- `n` opens the create-skill wizard.
+- `g` runs regression for the selected skill.
+
+Index rebuilds stay on Retrieval Settings (`b` backfill / `u` rebuild), not
+this list. Workflows stay on `/workflows` and the Tasks pane. See
+[08-skills.md](08-skills.md) for skill files and [30-retrieval-and-prime.md](30-retrieval-and-prime.md)
+for ranking.
 
 ---
 

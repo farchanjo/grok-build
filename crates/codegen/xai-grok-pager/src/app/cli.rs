@@ -313,6 +313,8 @@ pub enum Command {
     Mcp(crate::mcp_cmd::McpArgs),
     /// Manage plugins and marketplace sources
     Plugin(crate::plugin_cmd::PluginArgs),
+    /// Validate or regress skills without starting the TUI
+    Skills(crate::skills_cmd::SkillsCliArgs),
     /// Manage cross-session memory
     Memory(crate::memory_cmd::MemoryArgs),
     /// List available models and exit

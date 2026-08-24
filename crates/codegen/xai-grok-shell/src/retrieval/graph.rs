@@ -124,7 +124,6 @@ impl fmt::Debug for EmbeddingRouteDescriptor {
             .field("model_id", &self.model_id)
             .field("provider_instance_id", &self.provider_instance_id)
             .field("incarnation", &self.incarnation)
-            .field("origin_host", &self.origin_host)
             .field("embedding_space", &self.embedding_space)
             .field("model", &self.config.model)
             .field("protocol", &self.config.protocol)
@@ -152,10 +151,8 @@ impl fmt::Debug for RerankerRouteDescriptor {
             .field("model_id", &self.model_id)
             .field("provider_instance_id", &self.provider_instance_id)
             .field("incarnation", &self.incarnation)
-            .field("origin_host", &self.origin_host)
             .field("model", &self.config.model)
             .field("protocol", &self.config.protocol)
-            .field("endpoint", &self.config.endpoint)
             .field("request_timeout_ms", &self.request_timeout_ms)
             .finish()
     }

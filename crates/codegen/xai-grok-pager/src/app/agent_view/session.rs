@@ -229,6 +229,8 @@ impl AgentView {
             terminal_size_stale: false,
             inline_media_hits: InlineMediaHitAreas::default(),
             extensions_modal: None,
+            skill_regress_in_flight: None,
+            skills_smart_search_gen: 0,
             agents_modal: None,
             persona_detail: None,
             btw_state: None,

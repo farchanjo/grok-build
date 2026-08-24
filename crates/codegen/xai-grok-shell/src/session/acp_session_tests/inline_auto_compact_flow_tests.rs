@@ -186,6 +186,7 @@ async fn create_test_actor(
         queue_exit_reminder_on_approved_exit: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         active_skill: parking_lot::Mutex::new(None),
         prime_cache: crate::session::prime::inventory::InventoryCache::new(),
+        last_prime_outcome: std::cell::RefCell::new(None),
         plan_mode: Arc::new(parking_lot::Mutex::new(
             crate::session::plan_mode::PlanModeTracker::new(std::path::PathBuf::from(
                 "/tmp/test-session",
@@ -744,6 +745,7 @@ async fn create_test_actor_with_memory(
         queue_exit_reminder_on_approved_exit: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         active_skill: parking_lot::Mutex::new(None),
         prime_cache: crate::session::prime::inventory::InventoryCache::new(),
+        last_prime_outcome: std::cell::RefCell::new(None),
         current_prompt_mode: Arc::new(parking_lot::Mutex::new(PromptMode::Agent)),
         turn_start_prompt_mode: parking_lot::Mutex::new(PromptMode::Agent),
         turn_prompt_mode: Arc::new(parking_lot::Mutex::new(PromptMode::Agent)),
@@ -1555,6 +1557,7 @@ async fn test_e2e_idle_resume_refreshes_model_metadata() {
                 )),
                 active_skill: parking_lot::Mutex::new(None),
                 prime_cache: crate::session::prime::inventory::InventoryCache::new(),
+                last_prime_outcome: std::cell::RefCell::new(None),
                 plan_mode: Arc::new(parking_lot::Mutex::new(
                     crate::session::plan_mode::PlanModeTracker::new(std::path::PathBuf::from(
                         "/tmp/test-session",

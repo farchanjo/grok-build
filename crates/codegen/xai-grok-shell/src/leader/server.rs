@@ -400,6 +400,9 @@ fn is_machine_wide_broadcast_notification(json: &serde_json::Value) -> bool {
                 // Retrieval graph generation: every client refreshes
                 // /retrieval-settings. Version-tolerant optional fields.
                 | "x.ai/retrieval/update"
+                // Prime index job/status: every client refreshes /skills
+                // footer and Retrieval Settings. Version-tolerant extras.
+                | "x.ai/prime/index/update"
         )
     )
 }
@@ -6276,6 +6279,23 @@ mod tests {
             &serde_json::from_str(minimal).unwrap()
         ));
         let unknown = r#"{"jsonrpc":"2.0","method":"x.ai/providers/unknown","params":{}}"#;
+        assert!(!is_machine_wide_broadcast_notification(
+            &serde_json::from_str(unknown).unwrap()
+        ));
+    }
+
+    #[test]
+    fn prime_index_update_is_machine_wide_and_version_tolerant() {
+        let update = r#"{"jsonrpc":"2.0","method":"_x.ai/prime/index/update","params":{"generation":4,"schemaVersion":1,"apiVersion":1}}"#;
+        assert!(
+            is_machine_wide_broadcast_notification(&serde_json::from_str(update).unwrap()),
+            "prime/index/update must be machine-wide"
+        );
+        let minimal = r#"{"jsonrpc":"2.0","method":"x.ai/prime/index/update","params":{}}"#;
+        assert!(is_machine_wide_broadcast_notification(
+            &serde_json::from_str(minimal).unwrap()
+        ));
+        let unknown = r#"{"jsonrpc":"2.0","method":"x.ai/prime/index/status","params":{}}"#;
         assert!(!is_machine_wide_broadcast_notification(
             &serde_json::from_str(unknown).unwrap()
         ));

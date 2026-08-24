@@ -432,13 +432,12 @@ impl MvpAgent {
         &self,
         parent_session_id: &str,
     ) -> crate::session::prime::agents::CallableAgentAuthority {
-        use xai_grok_agent::subagent::callable::{CallableAgentOptions, callable_agent_snapshot};
-        use xai_grok_tools::implementations::grok_build::task::MAX_SUBAGENT_DEPTH;
-
-        use crate::session::prime::agents::{AuthorityCapture, CallableAgentAuthority};
+        use crate::session::prime::agents::{
+            CaptureCallableArgs, capture_callable_agent_authority,
+        };
 
         let parent_sid = acp::SessionId::new(parent_session_id);
-        let (parent_cwd, parent_depth, current_agent) = {
+        let (parent_cwd, parent_depth, current_agent, allowed_subagent_types) = {
             let sessions = self.sessions.borrow();
             let ps = sessions.get(&parent_sid);
             (
@@ -446,6 +445,7 @@ impl MvpAgent {
                     .unwrap_or_default(),
                 ps.map(|h| h.tool_context.subagent_depth).unwrap_or(0),
                 ps.map(|h| h.agent_name.clone()),
+                ps.and_then(|h| h.allowed_subagent_types.clone()),
             )
         };
         let (subagent_toggle, cli_agents, subagents_enabled) = {
@@ -457,30 +457,15 @@ impl MvpAgent {
             )
         };
         let plugins = self.plugin_registry_handle.snapshot();
-        let opts = CallableAgentOptions {
-            cwd: &parent_cwd,
-            toggle: &subagent_toggle,
-            plugins: plugins.as_deref(),
-            cli_agents: &cli_agents,
-        };
-        let agents = callable_agent_snapshot(&opts);
-        let ctx = self.build_subagent_validation_context(parent_session_id);
-
-        let task_available = subagents_enabled && parent_depth < MAX_SUBAGENT_DEPTH;
-        // The spawn path exposes no per-agent native/trust/model gate beyond
-        // resolve + toggle + allow-list (re-run by `CallableAgentAuthority::gate`
-        // on the live ctx). Confirm every descriptor here; a future per-name
-        // gate must be expressed as this predicate (fail-closed), never a
-        // hand-built authority.
-        let eligible: Vec<String> = agents.iter().map(|a| a.name.clone()).collect();
-
-        CallableAgentAuthority::capture(AuthorityCapture {
-            agents: &agents,
-            ctx,
+        capture_callable_agent_authority(CaptureCallableArgs {
+            parent_cwd: &parent_cwd,
+            parent_depth,
             current_agent,
-            task_available,
+            plugin_registry: plugins,
+            subagent_toggle: &subagent_toggle,
+            cli_agents: &cli_agents,
+            allowed_subagent_types,
             global_subagents_enabled: subagents_enabled,
-            eligible: Box::new(move |n| eligible.iter().any(|e| e == n)),
             generation: None,
         })
     }

@@ -85,6 +85,39 @@ pub enum ConfigUpdate {
     /// `[memory] retrieval_profile`). Agent rebuilds the PR17 registry
     /// snapshot (last-known-good retained on invalid candidates).
     RetrievalGraphChanged,
+    /// One coalesced reload intent for a watcher batch that touched model/
+    /// provider config, the retrieval graph, and/or `models_cache.json`.
+    /// Flags record which inputs need a reload; the agent/session-admin lane
+    /// owns candidate build, validation, publication, and notification.
+    ModelReload {
+        /// `[model.*]`, `[models]`, `[model_providers]`, or `[media]` changed.
+        models: bool,
+        /// `[model_providers]` changed and must join catalog/retrieval publish.
+        providers: bool,
+        /// Named retrieval graph sections changed.
+        retrieval: bool,
+        /// `~/.grok/models_cache.json` was rewritten on disk.
+        cache: bool,
+    },
+}
+
+/// Sections the reloader diffs in a global-config change that route through
+/// the agent/session-admin reload lane (models/retrieval only). Other sections
+/// (MCP, memory, skills, UI, compaction) are dispatched directly.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct ConfigReloadDiffs {
+    models: bool,
+    providers: bool,
+    retrieval: bool,
+}
+
+fn coalesced_reload_intent(diffs: ConfigReloadDiffs, cache: bool) -> Option<ConfigUpdate> {
+    (diffs.models || diffs.retrieval || cache).then_some(ConfigUpdate::ModelReload {
+        models: diffs.models,
+        providers: diffs.providers,
+        retrieval: diffs.retrieval,
+        cache,
+    })
 }
 
 /// Runs on `tokio::spawn` (`Send`). Receives raw [`ConfigChangeEvent`]s from
@@ -214,6 +247,8 @@ impl ConfigReloader {
                 }
             }
 
+            // Coalesce all catalog and graph inputs from this watcher batch.
+            let mut diffs = ConfigReloadDiffs::default();
             if has_config {
                 let result =
                     std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.reload_config()));
@@ -224,7 +259,7 @@ impl ConfigReloader {
                     Err(_) => {
                         error!("panic in config reload handler, keeping last-known-good");
                     }
-                    Ok(Ok(())) => {}
+                    Ok(Ok(loaded)) => diffs = loaded,
                 }
             }
 
@@ -243,14 +278,6 @@ impl ConfigReloader {
             if has_home_claude_json {
                 info!("~/.claude.json change detected — broadcasting MCP reload");
                 let _ = self.config_update_tx.send(ConfigUpdate::McpServersChanged);
-            }
-
-            // Pass-through (no toml diff possible here): the
-            // content-vs-in-memory dedup happens in
-            // `ModelsManager::reload_from_disk_cache`.
-            if has_models_cache {
-                debug!("models_cache.json change detected — forwarding to agent");
-                let _ = self.config_update_tx.send(ConfigUpdate::ModelsCacheChanged);
             }
 
             // Fan out one
@@ -283,6 +310,17 @@ impl ConfigReloader {
                 let _ = self
                     .config_update_tx
                     .send(ConfigUpdate::ProjectMcpServersChanged { cwd });
+            }
+
+            if let Some(update) = coalesced_reload_intent(diffs, has_models_cache) {
+                info!(
+                    models = diffs.models,
+                    providers = diffs.providers,
+                    retrieval = diffs.retrieval,
+                    cache = has_models_cache,
+                    "coalesced model/retrieval/cache reload intent"
+                );
+                let _ = self.config_update_tx.send(update);
             }
         }
     }
@@ -328,19 +366,19 @@ impl ConfigReloader {
         Ok(())
     }
 
-    fn reload_config(&mut self) -> anyhow::Result<()> {
-        // `has_project_config` parameter dropped —
-        // project-scoped reloads are dispatched via
-        // `ProjectMcpServersChanged { cwd }` in the caller's
-        // `collect_project_cwds` fan-out, so this function only
-        // needs to diff the global toml.
+    fn reload_config(&mut self) -> anyhow::Result<ConfigReloadDiffs> {
         let new_global = match crate::config::load_from_disk() {
-            Ok(v) => v,
-            Err(e) => {
-                error!(error = %e, "failed to parse config.toml, keeping last-known-good");
-                return Ok(());
+            Ok(value) => value,
+            Err(error) => {
+                error!(%error, "failed to parse config.toml, keeping last-known-good");
+                return Ok(ConfigReloadDiffs::default());
             }
         };
+        Ok(self.reload_config_value(new_global))
+    }
+
+    fn reload_config_value(&mut self, new_global: toml::Value) -> ConfigReloadDiffs {
+        let mut diffs = ConfigReloadDiffs::default();
 
         // MCP servers — compare [mcp_servers] table in the **global**
         // config (`~/.grok/config.toml`) via toml::Value. Project-
@@ -395,9 +433,9 @@ impl ConfigReloader {
                 .send(ConfigUpdate::Compat(Box::new(new_compat)));
         }
 
-        // Models — compare [model] (BYOK entries), [models] (default, surprise),
-        // and [model_providers] (dynamic registry metadata). Hot reload must
-        // refresh provider rows and related warnings, not only model entries.
+        // Catalog/model policy changes do not inherently change retrieval.
+        // Provider changes do: exact retrieval pins and capability validation
+        // must converge atomically with the provider-backed catalog.
         let old_model_table = self.last_global_config.get("model");
         let new_model_table = new_global.get("model");
         let old_models_table = self.last_global_config.get("models");
@@ -406,13 +444,17 @@ impl ConfigReloader {
         let new_providers_table = new_global.get("model_providers");
         let old_media_table = self.last_global_config.get("media");
         let new_media_table = new_global.get("media");
-        if old_model_table != new_model_table
+        let model_policy_changed = old_model_table != new_model_table
             || old_models_table != new_models_table
-            || old_providers_table != new_providers_table
-            || old_media_table != new_media_table
-        {
+            || old_media_table != new_media_table;
+        let providers_changed = old_providers_table != new_providers_table;
+        if model_policy_changed || providers_changed {
             info!("model or model_providers config change detected");
-            let _ = self.config_update_tx.send(ConfigUpdate::ModelsChanged);
+            diffs.models = true;
+        }
+        if providers_changed {
+            diffs.providers = true;
+            diffs.retrieval = true;
         }
 
         // UI fields (theme, yolo, fork_secondary_model)
@@ -433,13 +475,11 @@ impl ConfigReloader {
         // ModelsChanged; this covers retrieval-only section edits.
         if retrieval_graph_sections_changed(&self.last_global_config, &new_global) {
             info!("retrieval graph config change detected");
-            let _ = self
-                .config_update_tx
-                .send(ConfigUpdate::RetrievalGraphChanged);
+            diffs.retrieval = true;
         }
 
         self.last_global_config = new_global;
-        Ok(())
+        diffs
     }
 
     /// Apply a changed `[compaction]` section only after both deserialization
@@ -806,10 +846,9 @@ mod tests {
         );
     }
 
-    /// `ModelsCacheChanged` is a pure pass-through: the reloader has no toml
-    /// so the event must surface as `ConfigUpdate::ModelsCacheChanged`
-    /// (walked to the git root by the loaders), not just files directly
-    /// without touching auth or config state.
+    /// A `models_cache.json` rewrite is a pass-through the reloader cannot
+    /// diff (TTL/version/auth validation needs `ModelsManager` state), so the
+    /// event surfaces as a coalesced reload intent with the cache flag set.
     #[tokio::test]
     async fn reloader_forwards_models_cache_changed() {
         let tmp = tempfile::TempDir::new().unwrap();
@@ -838,10 +877,78 @@ mod tests {
             .await
             .expect("should receive an update within 2s")
             .expect("update channel should remain open");
-        assert!(matches!(update, ConfigUpdate::ModelsCacheChanged));
+        assert!(
+            matches!(
+                update,
+                ConfigUpdate::ModelReload {
+                    models: false,
+                    providers: false,
+                    retrieval: false,
+                    cache: true,
+                }
+            ),
+            "cache-only event must coalesce into one reload intent: {update:?}"
+        );
 
         cancel.cancel();
         let _ = handle.await;
+    }
+
+    /// Model-section diffing is deterministic and does not depend on the
+    /// process-global GROK_HOME/OnceLock, so it is safe under both nextest and
+    /// shared-process `cargo test`.
+    #[test]
+    fn reload_config_value_detects_model_change_without_global_home() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let initial = toml::Value::Table(toml::map::Map::new());
+        let mut reloader = ConfigReloader::new(
+            tmp.path().to_path_buf(),
+            0,
+            initial,
+            "https://test.example.com".to_string(),
+            None,
+            tx,
+            false,
+            false,
+        );
+        let changed: toml::Value =
+            toml::from_str("[models]\ndefault = \"grok-code-fast-1\"\n").unwrap();
+
+        let diffs = reloader.reload_config_value(changed);
+
+        assert!(diffs.models);
+        assert!(!diffs.providers);
+        assert!(!diffs.retrieval);
+    }
+
+    /// Provider changes affect both catalog publication and exact retrieval
+    /// pins, so the serialized owner must validate/publish them as one batch.
+    #[test]
+    fn reload_config_value_marks_provider_change_as_retrieval_affecting() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let initial = toml::Value::Table(toml::map::Map::new());
+        let mut reloader = ConfigReloader::new(
+            tmp.path().to_path_buf(),
+            0,
+            initial,
+            "https://test.example.com".to_string(),
+            None,
+            tx,
+            false,
+            false,
+        );
+        let changed: toml::Value = toml::from_str(
+            "[model_providers.team]\nkind = \"openai_compatible\"\nbase_url = \"https://example.test/v1\"\napi_surfaces = [\"openai_compatible_subset\"]\ncredential_routes = [\"none\"]\n",
+        )
+        .unwrap();
+
+        let diffs = reloader.reload_config_value(changed);
+
+        assert!(diffs.models);
+        assert!(diffs.providers);
+        assert!(diffs.retrieval);
     }
 
     /// A project event with unchanged bytes must not re-dispatch a
