@@ -214,8 +214,19 @@ impl SearchBarLayout {
 }
 
 pub fn search_bar_layout(width: u16, trailing_width: u16) -> SearchBarLayout {
-    let label_width = (SEARCH_BAR_LABEL.len() as u16).min(width);
-    let available_input = width - label_width;
+    search_bar_layout_for_label(width, trailing_width, SEARCH_BAR_LABEL.len() as u16)
+}
+
+/// Like [`search_bar_layout`] but reserves the caller-supplied prompt width
+/// (Skills ` Local: ` / ` Smart: `, dashboard ` path: `) instead of the
+/// default `" search: "` label.
+pub fn search_bar_layout_for_label(
+    width: u16,
+    trailing_width: u16,
+    label_width: u16,
+) -> SearchBarLayout {
+    let label_width = label_width.min(width);
+    let available_input = width.saturating_sub(label_width);
     let trailing_reserved = if trailing_width > 0
         && available_input
             >= trailing_width
@@ -226,7 +237,7 @@ pub fn search_bar_layout(width: u16, trailing_width: u16) -> SearchBarLayout {
     } else {
         0
     };
-    let render_width = width - trailing_reserved;
+    let render_width = width.saturating_sub(trailing_reserved);
     let input_width = render_width.saturating_sub(label_width) as usize;
     SearchBarLayout {
         render_width,
@@ -544,6 +555,19 @@ fn render_search_bar_with_label_viewport(
             &Line::from(Span::styled(
                 " / to search",
                 bg_style(Style::default().fg(theme.gray_dim)),
+            )),
+            width,
+        );
+    } else {
+        // Custom-labeled fields (Skills Local/Smart, dashboard path) stay
+        // visible at rest. `show_hint: false` must not blank the prompt or
+        // compact/narrow widths lose the only labeled search control.
+        buf.set_line(
+            x,
+            y,
+            &Line::from(Span::styled(
+                label,
+                bg_style(Style::default().fg(theme.gray)),
             )),
             width,
         );
@@ -3394,6 +3418,44 @@ mod tests {
         assert!(
             unfocused_text.contains("/ to search"),
             "unfocused search bar should show the `/ to search` placeholder, got {unfocused_text:?}",
+        );
+    }
+
+    #[test]
+    fn custom_search_label_stays_visible_when_idle() {
+        use ratatui::buffer::Buffer;
+        use ratatui::layout::Rect;
+
+        let theme = Theme::groknight();
+        let area = Rect::new(0, 0, 36, 1);
+        let mut buf = Buffer::empty(area);
+        let state = PickerState::default();
+        render_picker_search_bar_with_label(
+            &mut buf,
+            0,
+            0,
+            28,
+            &theme,
+            " Local: ",
+            &state,
+            false,
+            false,
+            Some(theme.bg_base),
+        );
+        let row: String = (0..area.width)
+            .map(|x| buf[(x, 0)].symbol().to_string())
+            .collect();
+        assert!(
+            row.contains("Local:"),
+            "idle custom prompt must stay labeled, got {row:?}"
+        );
+        assert!(
+            !row.contains("/ to search"),
+            "Skills/path prompts must not fall back to / to search, got {row:?}"
+        );
+        assert!(
+            !(0..28).any(|x| buf[(x, 0)].bg == theme.text_primary),
+            "idle labeled field must not draw a cursor"
         );
     }
 

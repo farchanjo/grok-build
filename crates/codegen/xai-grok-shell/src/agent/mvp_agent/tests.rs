@@ -3452,6 +3452,7 @@ fn spawn_model_switch_actor(
                             reasoning_effort: Some(inference_config.reasoning_effort),
                             execution_backend: Some(applied_backend),
                             external_runtime: Some(external_runtime.clone()),
+                            route_provenance: None,
                         },
                     );
                     let _ = responds_to.send(Ok(model_id));

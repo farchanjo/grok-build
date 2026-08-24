@@ -3959,14 +3959,20 @@ pub fn render_extensions_modal(
     } else {
         0
     };
-    let layout = picker::search_bar_layout(search_width, trailing);
+    let skills_mode_label =
+        (state.active_tab == ExtensionsTab::Skills).then_some(state.skills_search_mode.label());
+    let layout = if let Some(mode_label) = skills_mode_label {
+        picker::search_bar_layout_for_label(search_width, trailing, mode_label.len() as u16)
+    } else {
+        picker::search_bar_layout(search_width, trailing)
+    };
     if !in_input_mode {
         // Search bar at top of content area. Skills uses one Local/Smart field.
         let search_active_render = state.picker_state.search_active;
-        if state.active_tab == ExtensionsTab::Skills {
+        if let Some(mode_label) = skills_mode_label {
             // Always paint the Local/Smart prompt (never "/ to search") so
-            // compact/narrow widths still have exactly one labeled field.
-            let mode_label = state.skills_search_mode.label();
+            // compact/narrow widths still have exactly one labeled field,
+            // including idle (empty query, search not focused).
             state.picker_state.search_mode_label_width = mode_label.len() as u16;
             picker::render_picker_search_bar_with_label(
                 buf,
@@ -5671,6 +5677,27 @@ mod tests {
         );
         let search_hits = buffer_count(&buf, "Local:") + buffer_count(&buf, "Smart:");
         assert_eq!(search_hits, 1, "exactly one search field at narrow width");
+        assert_eq!(buffer_count(&buf, "Local:"), 1);
+        assert_eq!(buffer_count(&buf, "Smart:"), 0);
+        assert!(
+            buffer_count(&buf, "Skills") >= 1,
+            "tab bar must remain visible at narrow width"
+        );
+        assert_eq!(buffer_count(&buf, "commit"), 1);
+
+        state.skills_search_mode = SkillSearchMode::Smart;
+        let mut buf = Buffer::empty(area);
+        render_extensions_modal(&mut buf, area, &mut state, None, true, 0);
+        assert_eq!(
+            buffer_count(&buf, "Smart:"),
+            1,
+            "idle Smart prompt must stay labeled at narrow width"
+        );
+        assert_eq!(buffer_count(&buf, "Local:"), 0);
+        assert!(
+            buffer_count(&buf, "untested") >= 1 || buffer_count(&buf, "quarantined") >= 1,
+            "health header must survive a mode switch"
+        );
         assert_eq!(buffer_count(&buf, "commit"), 1);
     }
 
@@ -5741,6 +5768,29 @@ mod tests {
             );
         }
         assert!(row.contains("Local:"), "{row}");
+
+        state.picker_state.set_query("");
+        let mut buf = Buffer::empty(area);
+        render_extensions_modal(&mut buf, area, &mut state, None, true, 0);
+        let search_y = state
+            .picker_state
+            .hit_areas
+            .as_ref()
+            .map(|h| h.search_bar.y)
+            .unwrap_or(0);
+        let idle: String = (0..buf.area.width)
+            .map(|x| buf[(x, search_y)].symbol().to_string())
+            .collect();
+        assert!(
+            idle.contains("Local:"),
+            "idle compact search row must keep Local:, got {idle}"
+        );
+        if let (Some(local), Some(filt)) = (idle.find("Local:"), idle.find(filter)) {
+            assert!(
+                local + "Local:".len() <= filt,
+                "idle Local: and filter must not share cells: {idle}"
+            );
+        }
     }
 
     #[test]
