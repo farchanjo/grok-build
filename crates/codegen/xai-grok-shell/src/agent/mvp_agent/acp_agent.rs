@@ -2630,8 +2630,14 @@ impl acp::Agent for MvpAgent {
             .send(crate::session::SessionCommand::GetCurrentModelRoute {
                 responds_to: model_tx,
             });
-        let (selection_model_id, native_provider) = model_rx.await.unwrap_or_else(|_| {
-            (self.models_manager.current_model_id().0.to_string(), None)
+        let crate::session::CurrentModelRoute {
+            selection_model_id,
+            wire_model,
+            native_provider,
+        } = model_rx.await.unwrap_or_else(|_| crate::session::CurrentModelRoute {
+            selection_model_id: self.models_manager.current_model_id().0.to_string(),
+            wire_model: self.inference_config.borrow().model.clone(),
+            native_provider: None,
         });
         if native_provider.is_none()
             && let Some(provider) = crate::agent::providers::missing_api_key_for_canonical_selection(
@@ -2706,7 +2712,7 @@ impl acp::Agent for MvpAgent {
                 team_id,
                 client_source,
                 client_version,
-                model: model.to_owned(),
+                model: wire_model.to_owned(),
                 reasoning_effort: ctx
                     .session_handle
                     .reasoning_effort
@@ -2883,7 +2889,7 @@ impl acp::Agent for MvpAgent {
                                 session_id: &arguments.session_id.to_string(),
                                 prompt_id: &prompt_id,
                                 total_tokens: 0,
-                                model_id: &model,
+                                model_id: &wire_model,
                                 last_turn_usage: None,
                                 prompt_usage: None,
                                 cancellation_category: None,
@@ -2974,7 +2980,7 @@ impl acp::Agent for MvpAgent {
                     &arguments.session_id,
                     &handle.info,
                     &handle.cmd_tx,
-                    &model,
+                    &wire_model,
                     harness_trace_turns,
                 )
                 .await;
@@ -3014,7 +3020,7 @@ impl acp::Agent for MvpAgent {
                         &handle.cmd_tx,
                         prompt_id.clone(),
                         matches!(stop_reason, acp::StopReason::EndTurn),
-                        Some(model.clone()),
+                        Some(wire_model.clone()),
                     )
                     .await
                     .map(|mut cap| {
@@ -3429,7 +3435,7 @@ impl acp::Agent for MvpAgent {
                                     session_id: &arguments.session_id.to_string(),
                                     prompt_id: &prompt_id,
                                     total_tokens,
-                                    model_id: &model,
+                                    model_id: &wire_model,
                                     last_turn_usage: last_turn_usage.as_ref(),
                                     prompt_usage,
                                     cancellation_category,
@@ -3466,7 +3472,7 @@ impl acp::Agent for MvpAgent {
                         &handle.cmd_tx,
                         prompt_id.clone(),
                         false,
-                        Some(model.clone()),
+                        Some(wire_model.clone()),
                     )
                     .await
                     .map(|mut cap| {

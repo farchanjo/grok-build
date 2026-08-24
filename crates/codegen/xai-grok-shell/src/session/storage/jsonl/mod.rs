@@ -2312,7 +2312,7 @@ impl JsonlStorageAdapter {
         let target_model_id = options
             .new_model_id
             .map(acp::ModelId::new)
-            .unwrap_or(source_summary.current_model_id);
+            .unwrap_or_else(|| source_summary.current_model_id.clone());
         let target_summary = crate::session::persistence::Summary {
             info: target_info.clone(),
             cwd_generation: source_summary.cwd_generation,

@@ -2444,7 +2444,7 @@ impl SessionActor {
                 .or_else(|| tool_parsed_args.get("path"))
                 .and_then(|value| value.as_str())
                 .unwrap_or("unknown");
-            if let Err(error) = auxiliary_tool_media_allowed {
+            if let Err(ref error) = auxiliary_tool_media_allowed {
                 prompt_text = format!("[Image from {path} was not understood: {error}]");
             } else {
                 let raw_bytes = base64::Engine::decode(

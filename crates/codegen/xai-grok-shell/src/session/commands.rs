@@ -9,6 +9,23 @@ use crate::extensions::notification::SessionNotification;
 use crate::session::signals::TurnDeltaSnapshot;
 use agent_client_protocol as acp;
 use tokio::sync::oneshot;
+
+/// Session-authoritative model identities for ACP prompt setup.
+///
+/// `selection_model_id` is the canonical catalog key. `wire_model` is the
+/// upstream id from frozen inference settings. These are not interchangeable:
+/// OpenAI Platform and ChatGPT subscription rows can share a wire slug.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct CurrentModelRoute {
+    /// Canonical catalog selection id. Missing-key preflight must look up
+    /// this exact key and must never resolve by an ambiguous wire slug.
+    pub selection_model_id: String,
+    /// Upstream wire model from session inference settings. Used for
+    /// persistence, campaign attribution, traces, and streaming capture.
+    pub wire_model: String,
+    /// Native-agent provider marker from sampling extra headers, if any.
+    pub native_provider: Option<String>,
+}
 /// Structured context for a cancelled turn, replacing stringly-typed JSON.
 #[derive(Debug, Clone, Default, serde::Deserialize)]
 pub struct CancellationContext {
@@ -269,11 +286,12 @@ pub enum SessionCommand {
     GetCurrentModel {
         responds_to: oneshot::Sender<String>,
     },
-    /// Return the canonical session selection id together with the native-agent
-    /// provider marker retained in sampling config. Callers must look up the
-    /// catalog by this exact selection id (never the upstream wire slug).
+    /// Return session-authoritative model identities for ACP prompt setup.
+    /// Callers must use [`CurrentModelRoute::selection_model_id`] for exact
+    /// catalog lookup and [`CurrentModelRoute::wire_model`] for persistence,
+    /// traces, and campaign attribution.
     GetCurrentModelRoute {
-        responds_to: oneshot::Sender<(String, Option<String>)>,
+        responds_to: oneshot::Sender<CurrentModelRoute>,
     },
     GetCurrentPromptMode {
         responds_to: oneshot::Sender<PromptMode>,

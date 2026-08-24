@@ -31,6 +31,32 @@ mod yolo_toggle_report_tests {
 /// teardown. A no-op in builds without a scratch producer.
 fn cleanup_session_scratch(_session: &SessionActor) {}
 impl SessionActor {
+    /// Canonical selection plus frozen wire model for ACP prompt setup.
+    ///
+    /// Missing-key preflight must use `selection_model_id`. Persistence,
+    /// campaign attribution, traces, and streaming capture must use
+    /// `wire_model`.
+    pub(crate) async fn current_model_route(&self) -> crate::session::CurrentModelRoute {
+        let selection_model_id = self.selection_model_id.borrow().0.to_string();
+        let (wire_model, native_provider) = self
+            .chat_state_handle
+            .get_inference_settings()
+            .await
+            .map(|config| {
+                let provider = config
+                    .extra_headers
+                    .get(crate::agent::model_providers::NATIVE_AGENT_PROVIDER_HEADER)
+                    .cloned();
+                (config.model, provider)
+            })
+            .unwrap_or_default();
+        crate::session::CurrentModelRoute {
+            selection_model_id,
+            wire_model,
+            native_provider,
+        }
+    }
+
     /// Serialize terminal task-wake admission with interactive cancellation.
     pub(super) async fn admit_task_completion_wake(
         &self,
@@ -1165,18 +1191,7 @@ pub(super) async fn run_session(
                             let _ = responds_to.send(model);
                         }
                         SessionCommand::GetCurrentModelRoute { responds_to } => {
-                            let selection = session.selection_model_id.borrow().0.to_string();
-                            let native_provider = session
-                                .chat_state_handle
-                                .get_inference_settings()
-                                .await
-                                .and_then(|config| {
-                                    config
-                                        .extra_headers
-                                        .get(crate::agent::model_providers::NATIVE_AGENT_PROVIDER_HEADER)
-                                        .cloned()
-                                });
-                            let _ = responds_to.send((selection, native_provider));
+                            let _ = responds_to.send(session.current_model_route().await);
                         }
                         SessionCommand::GetCurrentPromptMode { responds_to } => {
                             let mode = *session.current_prompt_mode.lock();

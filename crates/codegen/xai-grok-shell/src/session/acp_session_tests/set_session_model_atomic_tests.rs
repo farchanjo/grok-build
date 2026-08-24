@@ -134,3 +134,36 @@ async fn unusable_route_leaves_selection_inference_credentials_and_route_unchang
         })
         .await;
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn current_model_route_keeps_canonical_selection_distinct_from_wire_model() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (gateway_tx, _) =
+                tokio::sync::mpsc::unbounded_channel::<xai_acp_lib::AcpClientMessage>();
+            let (persistence_tx, _) = tokio::sync::mpsc::unbounded_channel::<PersistenceMsg>();
+            let actor = create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await;
+
+            let mut settings = actor
+                .chat_state_handle
+                .get_inference_settings()
+                .await
+                .expect("inference settings");
+            settings.model = "gpt-5.6-sol".to_owned();
+            settings.base_url = crate::auth::chatgpt_oauth::CODEX_RESPONSES_BASE_URL.to_owned();
+            settings.extra_headers.insert(
+                crate::agent::model_providers::NATIVE_AGENT_PROVIDER_HEADER.to_owned(),
+                "native-test".to_owned(),
+            );
+            actor.chat_state_handle.update_inference_settings(settings);
+            *actor.selection_model_id.borrow_mut() =
+                acp::ModelId::new("chatgpt-gpt-5.6-sol".to_owned());
+
+            let route = actor.current_model_route().await;
+            assert_eq!(route.selection_model_id, "chatgpt-gpt-5.6-sol");
+            assert_eq!(route.wire_model, "gpt-5.6-sol");
+            assert_eq!(route.native_provider.as_deref(), Some("native-test"));
+        })
+        .await;
+}
