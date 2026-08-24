@@ -584,7 +584,7 @@ impl crate::openai_platform::client::OpenAiClient {
     }
 
     /// `POST /batches/{batch_id}/cancel` — `cancelBatch` (json).
-    /// Transports: http_json.
+    /// Transports: http_json, unknown.
     pub async fn cancel_batch(
         &self,
         request: CancelBatchParams,
@@ -865,7 +865,7 @@ impl crate::openai_platform::client::OpenAiClient {
     }
 
     /// `POST /chatkit/sessions/{session_id}/cancel` — `CancelChatSessionMethod` (json).
-    /// Transports: http_json.
+    /// Transports: http_json, unknown.
     pub async fn cancel_chat_session_method(
         &self,
         request: CancelChatSessionMethodParams,
@@ -1033,7 +1033,7 @@ impl crate::openai_platform::client::OpenAiClient {
     }
 
     /// `POST /completions` — `createCompletion` (json).
-    /// Transports: http_json.
+    /// Transports: http_json, http_sse.
     pub async fn create_completion(
         &self,
         request: CreateCompletionParams,
@@ -1058,6 +1058,34 @@ impl crate::openai_platform::client::OpenAiClient {
         };
         let raw = self.transport.execute_json(spec).await?;
         serde_json::from_value(raw).map_err(|e| PlatformError::Decode(e.to_string()))
+    }
+
+    /// `POST /completions` — `createCompletion` (sse).
+    /// Transports: http_json, http_sse.
+    pub async fn create_completion_stream(
+        &self,
+        request: CreateCompletionParams,
+    ) -> PlatformResult<CreateCompletionSseResult> {
+        let path = String::from("/completions");
+        let query: BTreeMap<String, String> = BTreeMap::new();
+        let body = Some(
+            serde_json::to_value(&request.body)
+                .map_err(|e| PlatformError::InvalidRequest(e.to_string()))?,
+        );
+        let spec = HttpRequestSpec {
+            method: "POST",
+            path,
+            query,
+            body,
+            credential: CredentialKind::Application,
+            expect_sse: true,
+            expect_binary: false,
+            multipart: false,
+            operation_id: "createCompletion",
+            idempotent: false,
+        };
+        let events = self.transport.execute_sse(spec).await?;
+        Ok(CreateCompletionSseResult { events })
     }
 
     /// `GET /containers` — `ListContainers` (json).
@@ -1891,7 +1919,7 @@ impl crate::openai_platform::client::OpenAiClient {
     }
 
     /// `POST /evals/{eval_id}/runs/{run_id}` — `cancelEvalRun` (json).
-    /// Transports: http_json.
+    /// Transports: http_json, unknown.
     pub async fn cancel_eval_run(
         &self,
         request: CancelEvalRunParams,
@@ -2446,7 +2474,7 @@ impl crate::openai_platform::client::OpenAiClient {
     }
 
     /// `POST /fine_tuning/jobs/{fine_tuning_job_id}/cancel` — `cancelFineTuningJob` (json).
-    /// Transports: http_json.
+    /// Transports: http_json, unknown.
     pub async fn cancel_fine_tuning_job(
         &self,
         request: CancelFineTuningJobParams,
@@ -2545,7 +2573,7 @@ impl crate::openai_platform::client::OpenAiClient {
     }
 
     /// `POST /fine_tuning/jobs/{fine_tuning_job_id}/pause` — `pauseFineTuningJob` (json).
-    /// Transports: http_json.
+    /// Transports: http_json, unknown.
     pub async fn pause_fine_tuning_job(
         &self,
         request: PauseFineTuningJobParams,
@@ -2574,7 +2602,7 @@ impl crate::openai_platform::client::OpenAiClient {
     }
 
     /// `POST /fine_tuning/jobs/{fine_tuning_job_id}/resume` — `resumeFineTuningJob` (json).
-    /// Transports: http_json.
+    /// Transports: http_json, unknown.
     pub async fn resume_fine_tuning_job(
         &self,
         request: ResumeFineTuningJobParams,
@@ -3395,7 +3423,7 @@ impl crate::openai_platform::client::OpenAiClient {
     }
 
     /// `POST /realtime/calls/{call_id}/hangup` — `hangup-realtime-call` (json).
-    /// Transports: http_json.
+    /// Transports: http_json, unknown.
     pub async fn hangup_realtime_call(
         &self,
         request: HangupRealtimeCallParams,
@@ -3838,7 +3866,7 @@ impl crate::openai_platform::client::OpenAiClient {
     }
 
     /// `POST /responses/{response_id}/cancel` — `cancelResponse` (json).
-    /// Transports: http_json.
+    /// Transports: http_json, unknown.
     pub async fn cancel_response(
         &self,
         request: CancelResponseParams,
@@ -3867,7 +3895,7 @@ impl crate::openai_platform::client::OpenAiClient {
     }
 
     /// `POST /responses/{response_id}/cancel?beta=true` — `beta_cancelResponse` (json).
-    /// Transports: http_json.
+    /// Transports: http_json, unknown.
     pub async fn beta_cancel_response(
         &self,
         request: BetaCancelResponseParams,
@@ -4250,11 +4278,12 @@ impl crate::openai_platform::client::OpenAiClient {
         serde_json::from_value(raw).map_err(|e| PlatformError::Decode(e.to_string()))
     }
 
-    /// `GET /skills/{skill_id}/content` — `GetSkillContent` (json).
-    /// Transports: http_json.
+    /// `GET /skills/{skill_id}/content` — `GetSkillContent` (binary).
+    /// Transports: http_binary.
     pub async fn get_skill_content(
         &self,
         request: GetSkillContentParams,
+        sink: Option<&std::path::Path>,
     ) -> PlatformResult<GetSkillContentResult> {
         let mut path = String::from("/skills/{skill_id}/content");
         path = path.replace(
@@ -4270,13 +4299,16 @@ impl crate::openai_platform::client::OpenAiClient {
             body,
             credential: CredentialKind::Application,
             expect_sse: false,
-            expect_binary: false,
+            expect_binary: true,
             multipart: false,
             operation_id: "GetSkillContent",
             idempotent: true,
         };
-        let raw = self.transport.execute_json(spec).await?;
-        serde_json::from_value(raw).map_err(|e| PlatformError::Decode(e.to_string()))
+        let (bytes, content_type) = self.transport.execute_binary(spec, sink).await?;
+        Ok(GetSkillContentResult {
+            bytes,
+            content_type,
+        })
     }
 
     /// `POST /skills/{skill_id}/versions` — `CreateSkillVersion` (multipart).
@@ -4416,11 +4448,12 @@ impl crate::openai_platform::client::OpenAiClient {
         serde_json::from_value(raw).map_err(|e| PlatformError::Decode(e.to_string()))
     }
 
-    /// `GET /skills/{skill_id}/versions/{version}/content` — `GetSkillVersionContent` (json).
-    /// Transports: http_json.
+    /// `GET /skills/{skill_id}/versions/{version}/content` — `GetSkillVersionContent` (binary).
+    /// Transports: http_binary.
     pub async fn get_skill_version_content(
         &self,
         request: GetSkillVersionContentParams,
+        sink: Option<&std::path::Path>,
     ) -> PlatformResult<GetSkillVersionContentResult> {
         let mut path = String::from("/skills/{skill_id}/versions/{version}/content");
         path = path.replace(
@@ -4440,13 +4473,16 @@ impl crate::openai_platform::client::OpenAiClient {
             body,
             credential: CredentialKind::Application,
             expect_sse: false,
-            expect_binary: false,
+            expect_binary: true,
             multipart: false,
             operation_id: "GetSkillVersionContent",
             idempotent: true,
         };
-        let raw = self.transport.execute_json(spec).await?;
-        serde_json::from_value(raw).map_err(|e| PlatformError::Decode(e.to_string()))
+        let (bytes, content_type) = self.transport.execute_binary(spec, sink).await?;
+        Ok(GetSkillVersionContentResult {
+            bytes,
+            content_type,
+        })
     }
 
     /// `POST /threads` — `createThread` (json).
@@ -4478,7 +4514,7 @@ impl crate::openai_platform::client::OpenAiClient {
     }
 
     /// `POST /threads/runs` — `createThreadAndRun` (json).
-    /// Transports: http_json.
+    /// Transports: http_json, http_sse.
     pub async fn create_thread_and_run(
         &self,
         request: CreateThreadAndRunParams,
@@ -4503,6 +4539,34 @@ impl crate::openai_platform::client::OpenAiClient {
         };
         let raw = self.transport.execute_json(spec).await?;
         serde_json::from_value(raw).map_err(|e| PlatformError::Decode(e.to_string()))
+    }
+
+    /// `POST /threads/runs` — `createThreadAndRun` (sse).
+    /// Transports: http_json, http_sse.
+    pub async fn create_thread_and_run_stream(
+        &self,
+        request: CreateThreadAndRunParams,
+    ) -> PlatformResult<CreateThreadAndRunSseResult> {
+        let path = String::from("/threads/runs");
+        let query: BTreeMap<String, String> = BTreeMap::new();
+        let body = Some(
+            serde_json::to_value(&request.body)
+                .map_err(|e| PlatformError::InvalidRequest(e.to_string()))?,
+        );
+        let spec = HttpRequestSpec {
+            method: "POST",
+            path,
+            query,
+            body,
+            credential: CredentialKind::Application,
+            expect_sse: true,
+            expect_binary: false,
+            multipart: false,
+            operation_id: "createThreadAndRun",
+            idempotent: false,
+        };
+        let events = self.transport.execute_sse(spec).await?;
+        Ok(CreateThreadAndRunSseResult { events })
     }
 
     /// `GET /threads/{thread_id}` — `getThread` (json).
@@ -4807,6 +4871,8 @@ impl crate::openai_platform::client::OpenAiClient {
 
     /// `POST /threads/{thread_id}/runs` — `createRun` (json).
     /// Transports: http_json.
+    /// `POST /threads/{thread_id}/runs` — `createRun` (json).
+    /// Transports: http_json, http_sse.
     pub async fn create_run(&self, request: CreateRunParams) -> PlatformResult<CreateRunResult> {
         let mut path = String::from("/threads/{thread_id}/runs");
         path = path.replace(
@@ -4835,6 +4901,41 @@ impl crate::openai_platform::client::OpenAiClient {
         };
         let raw = self.transport.execute_json(spec).await?;
         serde_json::from_value(raw).map_err(|e| PlatformError::Decode(e.to_string()))
+    }
+
+    /// `POST /threads/{thread_id}/runs` — `createRun` (sse).
+    /// Transports: http_json, http_sse.
+    pub async fn create_run_stream(
+        &self,
+        request: CreateRunParams,
+    ) -> PlatformResult<CreateRunSseResult> {
+        let mut path = String::from("/threads/{thread_id}/runs");
+        path = path.replace(
+            "{thread_id}",
+            &crate::openai_platform::url_policy::encode_path_segment(&request.thread_id),
+        );
+        let mut query: BTreeMap<String, String> = BTreeMap::new();
+        if let Some(v) = request.include.as_ref() {
+            query.insert("include[]".into(), query_value(v));
+        }
+        let body = Some(
+            serde_json::to_value(&request.body)
+                .map_err(|e| PlatformError::InvalidRequest(e.to_string()))?,
+        );
+        let spec = HttpRequestSpec {
+            method: "POST",
+            path,
+            query,
+            body,
+            credential: CredentialKind::Application,
+            expect_sse: true,
+            expect_binary: false,
+            multipart: false,
+            operation_id: "createRun",
+            idempotent: false,
+        };
+        let events = self.transport.execute_sse(spec).await?;
+        Ok(CreateRunSseResult { events })
     }
 
     /// `GET /threads/{thread_id}/runs/{run_id}` — `getRun` (json).
@@ -4901,7 +5002,7 @@ impl crate::openai_platform::client::OpenAiClient {
     }
 
     /// `POST /threads/{thread_id}/runs/{run_id}/cancel` — `cancelRun` (json).
-    /// Transports: http_json.
+    /// Transports: http_json, unknown.
     pub async fn cancel_run(&self, request: CancelRunParams) -> PlatformResult<CancelRunResult> {
         let mut path = String::from("/threads/{thread_id}/runs/{run_id}/cancel");
         path = path.replace(
@@ -5019,7 +5120,7 @@ impl crate::openai_platform::client::OpenAiClient {
     }
 
     /// `POST /threads/{thread_id}/runs/{run_id}/submit_tool_outputs` — `submitToolOuputsToRun` (json).
-    /// Transports: http_json.
+    /// Transports: http_json, http_sse.
     pub async fn submit_tool_ouputs_to_run(
         &self,
         request: SubmitToolOuputsToRunParams,
@@ -5054,6 +5155,42 @@ impl crate::openai_platform::client::OpenAiClient {
         serde_json::from_value(raw).map_err(|e| PlatformError::Decode(e.to_string()))
     }
 
+    /// `POST /threads/{thread_id}/runs/{run_id}/submit_tool_outputs` — `submitToolOuputsToRun` (sse).
+    /// Transports: http_json, http_sse.
+    pub async fn submit_tool_ouputs_to_run_stream(
+        &self,
+        request: SubmitToolOuputsToRunParams,
+    ) -> PlatformResult<SubmitToolOuputsToRunSseResult> {
+        let mut path = String::from("/threads/{thread_id}/runs/{run_id}/submit_tool_outputs");
+        path = path.replace(
+            "{thread_id}",
+            &crate::openai_platform::url_policy::encode_path_segment(&request.thread_id),
+        );
+        path = path.replace(
+            "{run_id}",
+            &crate::openai_platform::url_policy::encode_path_segment(&request.run_id),
+        );
+        let query: BTreeMap<String, String> = BTreeMap::new();
+        let body = Some(
+            serde_json::to_value(&request.body)
+                .map_err(|e| PlatformError::InvalidRequest(e.to_string()))?,
+        );
+        let spec = HttpRequestSpec {
+            method: "POST",
+            path,
+            query,
+            body,
+            credential: CredentialKind::Application,
+            expect_sse: true,
+            expect_binary: false,
+            multipart: false,
+            operation_id: "submitToolOuputsToRun",
+            idempotent: false,
+        };
+        let events = self.transport.execute_sse(spec).await?;
+        Ok(SubmitToolOuputsToRunSseResult { events })
+    }
+
     /// `POST /uploads` — `createUpload` (json).
     /// Transports: http_json.
     pub async fn create_upload(
@@ -5083,7 +5220,7 @@ impl crate::openai_platform::client::OpenAiClient {
     }
 
     /// `POST /uploads/{upload_id}/cancel` — `cancelUpload` (json).
-    /// Transports: http_json.
+    /// Transports: http_json, unknown.
     pub async fn cancel_upload(
         &self,
         request: CancelUploadParams,
@@ -5397,7 +5534,7 @@ impl crate::openai_platform::client::OpenAiClient {
     }
 
     /// `POST /vector_stores/{vector_store_id}/file_batches/{batch_id}/cancel` — `cancelVectorStoreFileBatch` (json).
-    /// Transports: http_json.
+    /// Transports: http_json, unknown.
     pub async fn cancel_vector_store_file_batch(
         &self,
         request: CancelVectorStoreFileBatchParams,

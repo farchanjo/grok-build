@@ -672,14 +672,62 @@ impl PagerLocalSnapshot {
     }
 
     /// Resolve a user-supplied display name or stable model ID.
+    ///
+    /// Fail-closed on ambiguity: when multiple distinct ids share a label,
+    /// returns `None` (never the first sibling). Prefer
+    /// [`Self::resolve_model_name_detailed`] for candidate lists.
     pub fn resolve_model_name(&self, query: &str) -> Option<acp::ModelId> {
-        self.available_models.iter().find_map(|(name, id)| {
-            if name.eq_ignore_ascii_case(query) || id.0.as_ref().eq_ignore_ascii_case(query) {
-                Some(id.clone())
-            } else {
-                None
-            }
-        })
+        self.resolve_model_name_detailed(query).ok()
+    }
+
+    /// Detailed resolve matching [`crate::acp::model_state::ModelState`] policy:
+    /// exact catalog id wins; unique display name resolves; multiple matches
+    /// are Ambiguous.
+    pub fn resolve_model_name_detailed(
+        &self,
+        query: &str,
+    ) -> crate::acp::model_state::ModelResolveResult {
+        use crate::acp::model_state::ModelResolveResult;
+        let query = query.trim();
+        if query.is_empty() {
+            return ModelResolveResult::Missing {
+                query: query.to_owned(),
+            };
+        }
+        // 1. Exact catalog id (case-insensitive).
+        if let Some((_, id)) = self
+            .available_models
+            .iter()
+            .find(|(_, id)| id.0.as_ref().eq_ignore_ascii_case(query))
+        {
+            return ModelResolveResult::Resolved(id.clone());
+        }
+        // 2. Collect display-name matches (and bare id after first colon).
+        let mut candidates: Vec<acp::ModelId> = self
+            .available_models
+            .iter()
+            .filter(|(name, id)| {
+                name.eq_ignore_ascii_case(query)
+                    || id
+                        .0
+                        .as_ref()
+                        .split_once(':')
+                        .is_some_and(|(_, rest)| rest.eq_ignore_ascii_case(query))
+            })
+            .map(|(_, id)| id.clone())
+            .collect();
+        candidates.sort_by(|a, b| a.0.as_ref().cmp(b.0.as_ref()));
+        candidates.dedup_by(|a, b| a.0.as_ref() == b.0.as_ref());
+        match candidates.len() {
+            0 => ModelResolveResult::Missing {
+                query: query.to_owned(),
+            },
+            1 => ModelResolveResult::Resolved(candidates.remove(0)),
+            _ => ModelResolveResult::Ambiguous {
+                query: query.to_owned(),
+                candidates,
+            },
+        }
     }
 }
 
@@ -1023,6 +1071,10 @@ pub fn current_value_for(
         "media_audio_model" => Some(SettingValue::String(pager.media_audio_model.clone())),
         "media_video_model" => Some(SettingValue::String(pager.media_video_model.clone())),
         "media_status" => Some(SettingValue::String(pager.media_status.clone())),
+        // Action deep-link row (Status kind); Enter opens retrieval modal.
+        "open_retrieval_settings" => {
+            Some(SettingValue::String("Open /retrieval-settings".to_string()))
+        }
 
         _ => None,
     }
@@ -1051,6 +1103,39 @@ pub fn default_value_for(meta: &SettingMeta) -> SettingValue {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::acp::model_state::ModelResolveResult;
+
+    #[test]
+    fn resolve_model_name_rejects_ambiguous_sibling_labels() {
+        let snapshot = PagerLocalSnapshot {
+            available_models: vec![
+                (
+                    "GPT-4o (openai)".to_owned(),
+                    acp::ModelId::new("openai:gpt-4o"),
+                ),
+                (
+                    "GPT-4o (openai_work)".to_owned(),
+                    acp::ModelId::new("openai_work:gpt-4o"),
+                ),
+            ],
+            ..PagerLocalSnapshot::default()
+        };
+        assert_eq!(
+            snapshot
+                .resolve_model_name_detailed("openai:gpt-4o")
+                .ok()
+                .as_ref()
+                .map(|id| id.0.as_ref()),
+            Some("openai:gpt-4o")
+        );
+        match snapshot.resolve_model_name_detailed("gpt-4o") {
+            ModelResolveResult::Ambiguous { candidates, .. } => {
+                assert_eq!(candidates.len(), 2);
+            }
+            other => panic!("expected Ambiguous, got {other:?}"),
+        }
+        assert!(snapshot.resolve_model_name("gpt-4o").is_none());
+    }
 
     /// Every SHELL/SHARED setting's default must match `UiConfig::default()`.
     /// PAGER-owned settings are covered by `defaults_match_pager_state`.
@@ -1533,6 +1618,7 @@ mod tests {
                     );
                 }
                 ("media_status", SettingKind::Status) => {}
+                ("open_retrieval_settings", SettingKind::Status) => {}
 
                 _ => panic!(
                     "settings::defs::default_settings() contains entry `{}` with no \
@@ -1592,6 +1678,8 @@ mod tests {
                         "media_status default drifts from PagerLocalSnapshot::default()"
                     );
                 }
+                // Action deep-link; no pager scalar to align.
+                ("open_retrieval_settings", SettingKind::Status) => {}
                 _ => panic!(
                     "settings::defs::default_settings() contains PAGER entry `{}` with no \
                      matching arm in defaults_match_pager_state. Add an arm.",

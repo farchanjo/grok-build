@@ -204,6 +204,10 @@ impl Summary {
 /// write so concurrent writers cannot lose each other's updates. Synchronous:
 /// callers run it on `spawn_blocking` because the lock acquisition blocks.
 ///
+/// When a model-identity companion pair is present, the rewritten summary is
+/// committed through the identity **Leave** journal so `model_identity.meta`
+/// digests stay aligned (chat/title/git/activity must not invalidate the pair).
+///
 /// Returns whether a `generated_title_if_absent` was applied (see
 /// [`Summary::apply_patch`]). Because the read-modify-write happens under the
 /// lock, this "set the title only if absent" check is atomic against a
@@ -221,9 +225,26 @@ pub(crate) fn apply_patch_locked(
 }
 
 fn read_modify_write(summary_path: &Path, patch: &SummaryPatch) -> io::Result<bool> {
-    let mut summary = read_summary(summary_path)?;
+    let session_dir = summary_path.parent().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "summary path has no session parent",
+        )
+    })?;
+    // Contained read only. ELOOP / owner / mode / TOCTOU walk failures fail
+    // closed — never path-follow summary.json after a rejected walk.
+    let mut summary = crate::session::storage::model_route::read_summary_contained(session_dir)?;
     let absent_title_applied = summary.apply_patch(patch, Utc::now());
-    write_summary_atomic(summary_path, &summary)?;
+    // Always Leave-commit: updates meta digest when a pair exists; otherwise
+    // journals summary alone. Keeps companion valid across ordinary patches.
+    // Commit also walks the same trusted root; a swapped sessions symlink
+    // cannot complete a mutation.
+    crate::session::storage::model_route::commit_summary_and_companion(
+        session_dir,
+        &summary,
+        None,
+        true,
+    )?;
     Ok(absent_title_applied)
 }
 
@@ -236,6 +257,10 @@ fn open_lock_file(path: &Path) -> io::Result<File> {
         .open(path)
 }
 
+/// Path-based summary read for **unit-test fixtures only** (explicit session
+/// dirs already known to be walkable). Production identity-enabled paths must
+/// use [`crate::session::storage::model_route::read_summary_contained`].
+#[cfg(test)]
 fn read_summary(path: &Path) -> io::Result<Summary> {
     let bytes = std::fs::read(path)?;
     if bytes.is_empty() {
@@ -246,12 +271,6 @@ fn read_summary(path: &Path) -> io::Result<Summary> {
     }
     serde_json::from_slice::<Summary>(&bytes)
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
-}
-
-fn write_summary_atomic(summary_path: &Path, summary: &Summary) -> io::Result<()> {
-    let bytes = serde_json::to_vec_pretty(summary)
-        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-    crate::session::storage::write_bytes_atomic(summary_path, &bytes)
 }
 
 #[cfg(test)]
@@ -269,6 +288,62 @@ mod tests {
             id: acp::SessionId::new("concurrent-summary-test"),
             cwd: "/test".into(),
         }
+    }
+
+    /// Intermediate `sessions` symlink: apply_patch_locked must fail closed
+    /// and must not adopt/mutate attacker summary content via path follow.
+    #[cfg(unix)]
+    #[test]
+    fn intermediate_sessions_symlink_patch_fails_closed() {
+        use std::os::unix::fs::symlink;
+        let dir = TempDir::new().unwrap();
+        let root = dir.path();
+        let encoded = crate::util::grok_home::encode_cwd_dirname("/project");
+        let evil_sess = root
+            .join("evil")
+            .join("sessions")
+            .join(&encoded)
+            .join("sid");
+        std::fs::create_dir_all(&evil_sess).unwrap();
+        let attacker = br#"{"not":"a-valid-session-summary-adoption-probe"}"#;
+        std::fs::write(evil_sess.join("summary.json"), attacker).unwrap();
+        symlink(root.join("evil").join("sessions"), root.join("sessions")).unwrap();
+
+        let summary_path = root
+            .join("sessions")
+            .join(&encoded)
+            .join("sid")
+            .join("summary.json");
+        let lock_path = root
+            .join("sessions")
+            .join(&encoded)
+            .join("sid")
+            .join("summary.json.lock");
+        // Kernel path-follow would reach attacker file; walk must refuse first.
+        let err = apply_patch_locked(
+            &summary_path,
+            &lock_path,
+            &SummaryPatch {
+                record_activity: true,
+                ..Default::default()
+            },
+        )
+        .unwrap_err();
+        assert!(
+            err.raw_os_error() == Some(libc::ELOOP)
+                || err.raw_os_error() == Some(libc::ENOTDIR)
+                || err.kind() == io::ErrorKind::NotADirectory
+                || err.kind() == io::ErrorKind::InvalidData
+                || err.kind() == io::ErrorKind::PermissionDenied
+                || err.kind() == io::ErrorKind::Other
+                || err.kind() == io::ErrorKind::NotFound,
+            "unexpected err: {err:?}"
+        );
+        // Attacker payload untouched (no mutation / adoption as Ok patch).
+        assert_eq!(
+            std::fs::read(evil_sess.join("summary.json")).unwrap(),
+            attacker
+        );
     }
 
     /// Regression guard for the `/resume` "frozen `last_active_at`" lost-update

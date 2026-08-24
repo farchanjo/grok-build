@@ -5,7 +5,13 @@ use std::time::Duration;
 
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
-use xai_workflow::{AgentOpts, AgentResult, BudgetState, HostError, WorkflowHostRequest};
+use xai_workflow::{
+    AgentOpts, AgentResult, BudgetState, HostError, WorkflowHostEnvelope, WorkflowHostMessage,
+    WorkflowHostRequest,
+};
+
+use crate::agent::subagent::assigned_spawn::TrustedAssignedSpawnSender;
+use crate::agent::subagent::exact_route::ExactRoute;
 
 use super::notify::WorkflowNotifySender;
 use super::schema_contract::{
@@ -39,6 +45,10 @@ pub(crate) struct WorkflowHostParams {
     pub subagent_event_tx: mpsc::UnboundedSender<
         xai_grok_tools::implementations::grok_build::task::types::SubagentEvent,
     >,
+    pub assigned_spawn_sender: Option<TrustedAssignedSpawnSender>,
+    pub models_manager: crate::agent::models::ModelsManager,
+    pub inference_config: xai_grok_inference::InferenceConfig,
+    pub grok_home: Option<PathBuf>,
     pub parent_session_id: String,
     pub allow_fork_context: bool,
     pub templates: std::collections::HashMap<String, String>,
@@ -54,7 +64,7 @@ pub(crate) enum HostDrainOutcome {
 
 pub(crate) fn spawn_workflow_host_service(
     params: WorkflowHostParams,
-    mut rx: mpsc::UnboundedReceiver<WorkflowHostRequest>,
+    mut rx: mpsc::UnboundedReceiver<WorkflowHostMessage>,
 ) -> (
     tokio::task::JoinHandle<()>,
     oneshot::Receiver<HostDrainOutcome>,
@@ -75,8 +85,8 @@ pub(crate) fn spawn_workflow_host_service(
                     None => break,
                 },
                 _ = service.params.cancel.cancelled() => {
-                    while let Ok(req) = rx.try_recv() {
-                        reply_cancelled(req);
+                    while let Ok(message) = rx.try_recv() {
+                        reply_cancelled(message);
                     }
                     break;
                 }
@@ -89,8 +99,12 @@ pub(crate) fn spawn_workflow_host_service(
     (handle, drained_rx)
 }
 
-fn reply_cancelled(req: WorkflowHostRequest) {
+fn reply_cancelled(message: WorkflowHostMessage) {
     use WorkflowHostRequest as R;
+    let req = match message {
+        WorkflowHostMessage::Request(req) => req,
+        WorkflowHostMessage::AssignedSpawn(envelope) => envelope.request,
+    };
     match req {
         R::ReserveAgentCalls { reply, .. } | R::ReleaseAgentCalls { reply, .. } => {
             let _ = reply.send(Err(HostError::Cancelled));
@@ -142,7 +156,30 @@ impl FinishOnce<'_> {
 }
 
 impl HostService {
-    fn dispatch(self: Arc<Self>, req: WorkflowHostRequest) {
+    fn dispatch(self: Arc<Self>, message: WorkflowHostMessage) {
+        match message {
+            WorkflowHostMessage::Request(req) => self.dispatch_request(req),
+            WorkflowHostMessage::AssignedSpawn(envelope) => self.dispatch_assigned_spawn(envelope),
+        }
+    }
+
+    fn dispatch_assigned_spawn(self: Arc<Self>, envelope: WorkflowHostEnvelope) {
+        let WorkflowHostEnvelope {
+            request: WorkflowHostRequest::SpawnAgent { opts, reply },
+            assignment_seq,
+        } = envelope
+        else {
+            tracing::error!(run_id = %self.params.run_id, "workflow assignment envelope contained a non-spawn request");
+            return;
+        };
+        let svc = self.clone();
+        tokio::spawn(async move {
+            let result = svc.spawn_agent_assigned(opts, assignment_seq).await;
+            let _ = reply.send(result);
+        });
+    }
+
+    fn dispatch_request(self: Arc<Self>, req: WorkflowHostRequest) {
         match req {
             WorkflowHostRequest::ReserveAgentCalls { count, reply } => {
                 let reserved = self
@@ -309,7 +346,57 @@ impl HostService {
         self.params.tracker.lock().elapsed_ms(&self.params.run_id)
     }
 
-    async fn spawn_agent(&self, mut opts: AgentOpts) -> Result<AgentResult, HostError> {
+    async fn spawn_agent_assigned(
+        &self,
+        opts: AgentOpts,
+        assignment_seq: u64,
+    ) -> Result<AgentResult, HostError> {
+        let requested = opts
+            .model
+            .clone()
+            .unwrap_or_else(|| self.params.models_manager.current_model_id().0.to_string());
+        let identities = self.params.models_manager.models();
+        let identity =
+            crate::agent::model_identity::resolve_model_identity(&identities, &requested)
+                .resolved()
+                .ok_or_else(|| {
+                    HostError::Failed(format!(
+                        "workflow model is not uniquely resolvable: {requested}"
+                    ))
+                })?;
+        let route = crate::session::route_context::resolve_for_models_manager_with_selection(
+            &self.params.inference_config,
+            &self.params.models_manager,
+            identity.canonical_id.as_str(),
+            self.params.grok_home.as_deref(),
+        )
+        .map_err(|e| {
+            HostError::Failed(format!("provider route unusable for workflow model: {e}"))
+        })?;
+        let canonical = identity.canonical_id;
+        let route =
+            ExactRoute::new(canonical.clone(), identity.upstream_id, route).ok_or_else(|| {
+                HostError::Failed(
+                    "workflow model route did not match the resolved upstream model".into(),
+                )
+            })?;
+        // Keep AgentOpts source-compatible while pinning the child resolver to
+        // the canonical selection that the exact route just validated.
+        let mut opts = opts;
+        opts.model = Some(canonical.as_str().to_owned());
+        self.spawn_agent_with_assignment(opts, Some((assignment_seq, route)))
+            .await
+    }
+
+    async fn spawn_agent(&self, opts: AgentOpts) -> Result<AgentResult, HostError> {
+        self.spawn_agent_with_assignment(opts, None).await
+    }
+
+    async fn spawn_agent_with_assignment(
+        &self,
+        mut opts: AgentOpts,
+        assigned: Option<(u64, ExactRoute)>,
+    ) -> Result<AgentResult, HostError> {
         use xai_grok_tools::implementations::grok_build::task::types::{
             ModelOverrideProvenance, SubagentEvent, SubagentOwner, SubagentRequest,
             SubagentRuntimeOverrides,
@@ -463,16 +550,25 @@ impl HostService {
                 fork_context,
             );
 
-            if self
-                .params
-                .subagent_event_tx
-                .send(SubagentEvent::Spawn(Box::new(request)))
-                .is_err()
-            {
+            let send_result = match assigned.as_ref() {
+                Some((assignment_seq, route)) => self
+                    .params
+                    .assigned_spawn_sender
+                    .as_ref()
+                    .ok_or_else(|| {
+                        HostError::Failed("assigned spawn capability unavailable".into())
+                    })?
+                    .send_workflow(*assignment_seq, Box::new(request), route.clone())
+                    .map_err(|error| error.to_string()),
+                None => self
+                    .params
+                    .subagent_event_tx
+                    .send(SubagentEvent::Spawn(Box::new(request)))
+                    .map_err(|_| "subagent coordinator channel closed".to_string()),
+            };
+            if let Err(error) = send_result {
                 row.finish("failed", total_tokens, total_duration);
-                return Err(HostError::Failed(
-                    "subagent coordinator channel closed".into(),
-                ));
+                return Err(HostError::Failed(error));
             }
             self.active_agents.fetch_add(1, Ordering::Relaxed);
             self.tick();
@@ -885,6 +981,10 @@ mod tests {
             store,
             notify,
             subagent_event_tx: subagent_tx,
+            assigned_spawn_sender: None,
+            models_manager: crate::agent::models::ModelsManager::default(),
+            inference_config: xai_grok_inference::InferenceConfig::default(),
+            grok_home: None,
             parent_session_id: "parent".into(),
             allow_fork_context: false,
             templates: Default::default(),
@@ -897,10 +997,12 @@ mod tests {
 
         let (reply_tx, reply_rx) = oneshot::channel();
         host_tx
-            .send(WorkflowHostRequest::ReserveAgentCalls {
-                count: 40,
-                reply: reply_tx,
-            })
+            .send(WorkflowHostMessage::Request(
+                WorkflowHostRequest::ReserveAgentCalls {
+                    count: 40,
+                    reply: reply_tx,
+                },
+            ))
             .unwrap();
 
         let result = reply_rx.await.unwrap();
@@ -957,6 +1059,10 @@ mod tests {
             store,
             notify,
             subagent_event_tx: subagent_tx,
+            assigned_spawn_sender: None,
+            models_manager: crate::agent::models::ModelsManager::default(),
+            inference_config: xai_grok_inference::InferenceConfig::default(),
+            grok_home: None,
             parent_session_id: "parent".into(),
             allow_fork_context: false,
             templates: Default::default(),
@@ -969,10 +1075,12 @@ mod tests {
 
         let (reply_tx, reply_rx) = oneshot::channel();
         host_tx
-            .send(WorkflowHostRequest::ReleaseAgentCalls {
-                count: 50,
-                reply: reply_tx,
-            })
+            .send(WorkflowHostMessage::Request(
+                WorkflowHostRequest::ReleaseAgentCalls {
+                    count: 50,
+                    reply: reply_tx,
+                },
+            ))
             .unwrap();
 
         let result = reply_rx.await.unwrap();

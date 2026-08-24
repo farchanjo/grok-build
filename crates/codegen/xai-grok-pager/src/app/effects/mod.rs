@@ -121,6 +121,12 @@ pub(crate) fn execute(
                 }
             });
         }
+        Effect::RetrievalOperation {
+            agent_id,
+            operation,
+        } => {
+            tasks.spawn(run_retrieval_operation(agent_id, operation));
+        }
         Effect::ScheduleClearAuthCopyFeedback { generation } => {
             tasks
                 .spawn(async move {
@@ -1162,8 +1168,8 @@ pub(crate) fn execute(
                     }
                 });
         }
-        Effect::SendPromptBlocks { agent_id, session_id, blocks, prompt_id }
-        | Effect::SendPromptNow { agent_id, session_id, blocks, prompt_id } => {
+        Effect::SendPromptBlocks { agent_id, session_id, blocks, prompt_id, prompt_origin }
+        | Effect::SendPromptNow { agent_id, session_id, blocks, prompt_id, prompt_origin } => {
             let send_now = effect_is_send_now;
             let tx = acp_tx.clone();
             let screen_mode = session_flags.screen_mode_label;
@@ -1178,11 +1184,13 @@ pub(crate) fn execute(
                         "kind": if send_now { "send_now" } else { "blocks" },
                         "block_count": blocks.len(),
                         "prompt_id": prompt_id,
+                        "origin_tag": prompt_origin.map(|t| t.as_meta_tag()),
                     }),
                         ),
                     );
                     let send_start = std::time::Instant::now();
                     let mut meta = prompt_request_meta(&prompt_id, screen_mode);
+                    stamp_prompt_origin_meta(&mut meta, prompt_origin);
                     if send_now && let Some(map) = meta.as_object_mut() {
                         map.insert("sendNow".into(), serde_json::Value::Bool(true));
                     }
@@ -4660,6 +4668,18 @@ fn plain_prompt_content_block(
 /// `screen_mode` is `None` only under `SessionFlags::default()` (tests); the
 /// key is omitted then, keeping the legacy wire shape byte-identical.
 /// Extracted from the spawns for testability.
+fn stamp_prompt_origin_meta(
+    meta: &mut serde_json::Value,
+    origin: Option<crate::app::actions::PromptOriginTag>,
+) {
+    if let (Some(tag), Some(map)) = (origin, meta.as_object_mut()) {
+        map.insert(
+            xai_grok_shell::session::PROMPT_ORIGIN_META_KEY.into(),
+            serde_json::Value::String(tag.as_meta_tag().into()),
+        );
+    }
+}
+
 fn prompt_request_meta(
     prompt_id: &str,
     screen_mode: Option<&'static str>,
@@ -4911,7 +4931,216 @@ async fn run_provider_operation(
 
     let manager = ProviderManager::default();
     let mut claude_cli_status = None;
+    // Store-returned generation only — never a post-hoc live lookup.
+    let mut store_post_generation: Option<u64> = None;
+    let mut management: Option<actions::ProviderManagementResult> = None;
     let (provider, mut status) = match operation {
+        ProviderOperation::LoadListSnapshot => {
+            let svc = xai_grok_shell::provider_registry::ProviderManagementService::from_grok_home();
+            management = Some(match svc.list_snapshot() {
+                Ok(snap) => actions::ProviderManagementResult::List(snap),
+                Err(e) => actions::ProviderManagementResult::Error(e),
+            });
+            (
+                ProviderKind::Xai,
+                ProviderStatus::Missing,
+            )
+        }
+        ProviderOperation::LoadEditorDetail { provider_id } => {
+            let svc = xai_grok_shell::provider_registry::ProviderManagementService::from_grok_home();
+            management = Some(match svc.detail(&provider_id) {
+                Ok(d) => actions::ProviderManagementResult::Detail(d),
+                Err(e) => actions::ProviderManagementResult::Error(e),
+            });
+            (
+                ProviderKind::Configured(provider_id),
+                ProviderStatus::Missing,
+            )
+        }
+        ProviderOperation::AddConfigured {
+            id,
+            kind,
+            base_url,
+            display_name,
+            expected_generation,
+            operation_id,
+        } => {
+            use xai_grok_shell::provider_registry::management::dto::{
+                ProviderAddRequest, RegistryGeneration,
+            };
+            let svc = xai_grok_shell::provider_registry::ProviderManagementService::from_grok_home();
+            let mut result = svc.add(ProviderAddRequest {
+                id: id.clone(),
+                kind,
+                base_url,
+                display_name,
+                admin_base_url: None,
+                enabled: true,
+                expected_generation: RegistryGeneration(expected_generation),
+            });
+            result.operation_id = operation_id;
+            management = Some(actions::ProviderManagementResult::Mutation(result));
+            (ProviderKind::Configured(id), ProviderStatus::Missing)
+        }
+        ProviderOperation::SaveEditor {
+            id,
+            expected_generation,
+            patch,
+            credential_update,
+            application_key,
+            admin_key,
+            operation_id,
+        } => {
+            use xai_grok_shell::provider_registry::management::dto::{
+                ProviderSaveRequest, RegistryGeneration,
+            };
+            let svc = xai_grok_shell::provider_registry::ProviderManagementService::from_grok_home();
+            let app = application_key.map(|k| k.into_inner());
+            let admin = admin_key.map(|k| k.into_inner());
+            // Generation-gated metadata + credentials in one locked path (Issue 1).
+            let mut result = svc.save_with_credentials(
+                ProviderSaveRequest {
+                    id: id.clone(),
+                    expected_generation: RegistryGeneration(expected_generation),
+                    patch,
+                },
+                &credential_update,
+                app.as_deref(),
+                admin.as_deref(),
+            );
+            result.operation_id = operation_id;
+            management = Some(actions::ProviderManagementResult::Mutation(result));
+            drop(app);
+            drop(admin);
+            (ProviderKind::Configured(id), ProviderStatus::Missing)
+        }
+        ProviderOperation::Enable {
+            provider_id,
+            expected_generation,
+            operation_id,
+        } => {
+            use xai_grok_shell::provider_registry::management::dto::RegistryGeneration;
+            let svc = xai_grok_shell::provider_registry::ProviderManagementService::from_grok_home();
+            let mut result = svc.set_enabled(
+                &provider_id,
+                true,
+                RegistryGeneration(expected_generation),
+            );
+            result.operation_id = operation_id;
+            management = Some(actions::ProviderManagementResult::Mutation(result));
+            (ProviderKind::Configured(provider_id), ProviderStatus::Missing)
+        }
+        ProviderOperation::Disable {
+            provider_id,
+            expected_generation,
+            operation_id,
+        } => {
+            use xai_grok_shell::provider_registry::management::dto::RegistryGeneration;
+            let svc = xai_grok_shell::provider_registry::ProviderManagementService::from_grok_home();
+            let mut result = svc.set_enabled(
+                &provider_id,
+                false,
+                RegistryGeneration(expected_generation),
+            );
+            result.operation_id = operation_id;
+            management = Some(actions::ProviderManagementResult::Mutation(result));
+            (ProviderKind::Configured(provider_id), ProviderStatus::Missing)
+        }
+        ProviderOperation::CloneProvider {
+            source_id,
+            new_id,
+            expected_generation,
+            operation_id,
+        } => {
+            use xai_grok_shell::provider_registry::management::dto::{
+                ProviderCloneRequest, RegistryGeneration,
+            };
+            let svc = xai_grok_shell::provider_registry::ProviderManagementService::from_grok_home();
+            let mut result = svc.clone_provider(ProviderCloneRequest {
+                source_id,
+                new_id: new_id.clone(),
+                display_name: None,
+                expected_generation: RegistryGeneration(expected_generation),
+            });
+            result.operation_id = operation_id;
+            management = Some(actions::ProviderManagementResult::Mutation(result));
+            (ProviderKind::Configured(new_id), ProviderStatus::Missing)
+        }
+        ProviderOperation::RefreshCatalogId { provider_id } => {
+            let svc = xai_grok_shell::provider_registry::ProviderManagementService::from_grok_home();
+            let snap = svc.refresh_catalog(&provider_id).await;
+            management = Some(actions::ProviderManagementResult::Catalog(snap));
+            (ProviderKind::Configured(provider_id), ProviderStatus::Missing)
+        }
+        ProviderOperation::RefreshCapabilitiesId { provider_id } => {
+            let svc = xai_grok_shell::provider_registry::ProviderManagementService::from_grok_home();
+            let snap = svc.refresh_capabilities(&provider_id).await;
+            management = Some(actions::ProviderManagementResult::Capabilities(snap));
+            (ProviderKind::Configured(provider_id), ProviderStatus::Missing)
+        }
+        ProviderOperation::TestId { provider_id } => {
+            let svc = xai_grok_shell::provider_registry::ProviderManagementService::from_grok_home();
+            let snap = svc.test_connection(&provider_id).await;
+            let status = if snap.connected {
+                ProviderStatus::Connected {
+                    detail: snap.detail.clone(),
+                    chatgpt_account_email: None,
+                    chatgpt_models: Vec::new(),
+                }
+            } else if snap.error.is_some() {
+                ProviderStatus::Error(snap.error.clone().unwrap_or_default())
+            } else {
+                ProviderStatus::Missing
+            };
+            management = Some(actions::ProviderManagementResult::Status(snap));
+            (ProviderKind::Configured(provider_id), status)
+        }
+        ProviderOperation::CreditsId { provider_id } => {
+            let svc = xai_grok_shell::provider_registry::ProviderManagementService::from_grok_home();
+            let snap = svc.credits_snapshot(&provider_id).await;
+            management = Some(actions::ProviderManagementResult::Credits(snap));
+            (ProviderKind::Configured(provider_id), ProviderStatus::Missing)
+        }
+        ProviderOperation::LoadReferences { provider_id } => {
+            let svc = xai_grok_shell::provider_registry::ProviderManagementService::from_grok_home();
+            management = Some(match svc.reference_impact(&provider_id) {
+                Ok(r) => actions::ProviderManagementResult::References(r),
+                Err(e) => actions::ProviderManagementResult::Error(e),
+            });
+            (ProviderKind::Configured(provider_id), ProviderStatus::Missing)
+        }
+        ProviderOperation::ForceRemove {
+            provider_id,
+            typed_id,
+            expected_generation,
+            expected_incarnation,
+            clear_app,
+            clear_admin,
+            clear_oauth,
+            clear_cache,
+            operation_id,
+        } => {
+            use xai_grok_shell::provider_registry::management::dto::{
+                ForceRemoveClearOptions, ProviderForceRemoveRequest, RegistryGeneration,
+            };
+            let svc = xai_grok_shell::provider_registry::ProviderManagementService::from_grok_home();
+            let result = svc.force_remove(ProviderForceRemoveRequest {
+                id: provider_id.clone(),
+                typed_id_confirmation: typed_id,
+                expected_generation: RegistryGeneration(expected_generation),
+                expected_incarnation,
+                clear: ForceRemoveClearOptions {
+                    clear_application_key: clear_app,
+                    clear_admin_key: clear_admin,
+                    clear_oauth,
+                    clear_catalog_cache: clear_cache,
+                    clear_capability_cache: clear_cache,
+                },
+                operation_id,
+            });
+            management = Some(actions::ProviderManagementResult::Mutation(result));
+            (ProviderKind::Configured(provider_id), ProviderStatus::Missing)
+        }
         ProviderOperation::Refresh(provider) => {
             if provider == ProviderKind::Anthropic {
                 // The subscription-backed CLI is independent of the Messages
@@ -4975,35 +5204,39 @@ async fn run_provider_operation(
         ProviderOperation::SaveAndTest { provider, api_key } => {
             let key = api_key.into_inner();
             let status = if let Some(backend) = backend_id(&provider) {
-                let result = manager.set_api_key(backend, &key);
+                let result = manager.set_api_key_binding_generation(backend, &key);
                 match result {
-                    Ok(()) => match manager.test_connection(backend).await {
-                        Ok(ProviderConnectionTest::Connected { .. }) => {
-                            display_provider_status(manager.status(backend))
+                    Ok(generation) => {
+                        store_post_generation = generation;
+                        match manager.test_connection(backend).await {
+                            Ok(ProviderConnectionTest::Connected { .. }) => {
+                                display_provider_status(manager.status(backend))
+                            }
+                            Ok(test) => connection_test_status(test, true),
+                            Err(error) => ProviderStatus::Error(error.to_string()),
                         }
-                        Ok(test) => connection_test_status(test, true),
-                        Err(error) => ProviderStatus::Error(error.to_string()),
-                    },
+                    }
                     Err(error) => ProviderStatus::Error(error.to_string()),
                 }
             } else if let ProviderKind::Configured(id) = &provider {
                 // Store under openai_compatible::<id>::api_key without logging.
                 use xai_grok_shell::provider_registry::id::ProviderId as CfgId;
-                use xai_grok_shell::provider_registry::secrets::{
-                    application_key_scope, store_provider_secret,
-                };
+                use xai_grok_shell::provider_registry::secrets::application_key_scope;
                 let home = xai_grok_config::grok_home();
                 match CfgId::new(id) {
-                    Ok(pid) => match store_provider_secret(
+                    Ok(pid) => match xai_grok_shell::auth::store_provider_api_key(
                         &home,
                         &application_key_scope(&pid),
                         &key,
                     ) {
-                        Ok(()) => ProviderStatus::Connected {
-                            detail: Some("Connected with API key".into()),
-                            chatgpt_account_email: None,
-                            chatgpt_models: Vec::new(),
-                        },
+                        Ok(generation) => {
+                            store_post_generation = Some(generation);
+                            ProviderStatus::Connected {
+                                detail: Some("Connected with API key".into()),
+                                chatgpt_account_email: None,
+                                chatgpt_models: Vec::new(),
+                            }
+                        }
                         Err(e) => ProviderStatus::Error(e.to_string()),
                     },
                     Err(e) => ProviderStatus::Error(e.to_string()),
@@ -5022,15 +5255,24 @@ async fn run_provider_operation(
                     Ok(test) => connection_test_status(test, false),
                     Err(error) => ProviderStatus::Error(error.to_string()),
                 }
-            } else {
-                ProviderStatus::Connected {
-                    detail: Some(
-                        "Use `grok openai --provider <id> models list` to probe configured providers"
-                            .into(),
-                    ),
-                    chatgpt_account_email: None,
-                    chatgpt_models: Vec::new(),
+            } else if let ProviderKind::Configured(id) = &provider {
+                let svc =
+                    xai_grok_shell::provider_registry::ProviderManagementService::from_grok_home();
+                let snap = svc.test_connection(id).await;
+                management = Some(actions::ProviderManagementResult::Status(snap.clone()));
+                if snap.connected {
+                    ProviderStatus::Connected {
+                        detail: snap.detail,
+                        chatgpt_account_email: None,
+                        chatgpt_models: Vec::new(),
+                    }
+                } else if let Some(err) = snap.error {
+                    ProviderStatus::Error(err)
+                } else {
+                    ProviderStatus::Missing
                 }
+            } else {
+                ProviderStatus::Missing
             };
             (provider, status)
         }
@@ -5057,8 +5299,11 @@ async fn run_provider_operation(
             (provider, status)
         }
         ProviderOperation::LoginCodex => {
-            let status = match manager.codex_login().await {
-                Ok(()) => display_provider_status(manager.status(ProviderId::OpenAi)),
+            let status = match manager.codex_login_binding_generation().await {
+                Ok(generation) => {
+                    store_post_generation = Some(generation);
+                    display_provider_status(manager.status(ProviderId::OpenAi))
+                }
                 Err(error) => ProviderStatus::Error(error.to_string()),
             };
             (ProviderKind::OpenAi, status)
@@ -5100,14 +5345,176 @@ async fn run_provider_operation(
         tracing::warn!(?agent_id, %error, "provider model catalog reload failed");
     }
 
+    let credential_write_receipt = match (repair.as_ref(), store_post_generation) {
+        (Some(scope), Some(post)) => Some(scope.write_receipt(post)),
+        _ => None,
+    };
+
     TaskResult::ProviderOperationComplete {
         agent_id,
         provider,
         status,
         claude_cli_status,
         repair,
+        credential_write_receipt,
+        management,
     }
 }
+
+
+async fn run_retrieval_operation(
+    agent_id: crate::app::agent::AgentId,
+    operation: actions::RetrievalOperation,
+) -> TaskResult {
+    use actions::{RetrievalManagementResult, RetrievalOperation};
+    use crate::views::retrieval_settings_modal::RetrievalCommand;
+    use xai_grok_shell::retrieval_config::management::dto::{
+        CloneRetrievalEntityRequest, DeleteRetrievalEntityRequest, ReorderRetrievalRequest,
+        UpsertEmbeddingRequest, UpsertProfileRequest, UpsertRerankerRequest,
+    };
+    use xai_grok_shell::retrieval_config::RetrievalManagementService;
+
+    let svc = RetrievalManagementService::from_grok_home();
+    let result = match operation {
+        RetrievalOperation::LoadSnapshot => match svc.graph_snapshot() {
+            Ok(snap) => RetrievalManagementResult::Snapshot(snap),
+            Err(e) => RetrievalManagementResult::Error(e),
+        },
+        RetrievalOperation::Preview {
+            kind,
+            id,
+            operation_id,
+        } => RetrievalManagementResult::Preview(svc.preview(&kind, &id, operation_id)),
+        RetrievalOperation::Command(cmd) => match cmd {
+            RetrievalCommand::Reload
+            | RetrievalCommand::ValidateAndReload
+            | RetrievalCommand::DismissConflictReload
+            | RetrievalCommand::DismissConflictKeepDraft => match svc.graph_snapshot() {
+                Ok(snap) => RetrievalManagementResult::Snapshot(snap),
+                Err(e) => RetrievalManagementResult::Error(e),
+            },
+            RetrievalCommand::ValidatePreview {
+                kind,
+                id,
+                operation_id,
+                ..
+            } => RetrievalManagementResult::Preview(svc.preview(
+                &kind,
+                &id,
+                Some(operation_id),
+            )),
+            // Client CAS: expected_generation from modal; never current_generation().
+            RetrievalCommand::UpsertEmbedding {
+                id,
+                config,
+                expected_generation,
+                confirm_memory_reindex,
+                operation_id,
+            } => RetrievalManagementResult::Mutation(svc.upsert_embedding(UpsertEmbeddingRequest {
+                expected_generation,
+                id,
+                config,
+                confirm_memory_reindex,
+                operation_id: Some(operation_id),
+            })),
+            RetrievalCommand::UpsertReranker {
+                id,
+                config,
+                expected_generation,
+                confirm_memory_reindex,
+                operation_id,
+            } => RetrievalManagementResult::Mutation(svc.upsert_reranker(UpsertRerankerRequest {
+                expected_generation,
+                id,
+                config,
+                confirm_memory_reindex,
+                operation_id: Some(operation_id),
+            })),
+            RetrievalCommand::UpsertProfile {
+                id,
+                config,
+                expected_generation,
+                confirm_memory_reindex,
+                operation_id,
+            } => RetrievalManagementResult::Mutation(svc.upsert_profile(UpsertProfileRequest {
+                expected_generation,
+                id,
+                config,
+                confirm_memory_reindex,
+                operation_id: Some(operation_id),
+            })),
+            RetrievalCommand::CloneEntity {
+                kind,
+                source_id,
+                new_id,
+                expected_generation,
+                confirm_memory_reindex,
+                operation_id,
+            } => RetrievalManagementResult::Mutation(svc.clone_entity(CloneRetrievalEntityRequest {
+                expected_generation,
+                kind,
+                source_id,
+                new_id,
+                confirm_memory_reindex,
+                operation_id: Some(operation_id),
+            })),
+            RetrievalCommand::DeleteEntity {
+                kind,
+                id,
+                expected_generation,
+                confirm_memory_reindex,
+                operation_id,
+            } => RetrievalManagementResult::Mutation(svc.delete_entity(DeleteRetrievalEntityRequest {
+                expected_generation,
+                kind,
+                id,
+                confirm_memory_reindex,
+                operation_id: Some(operation_id),
+            })),
+            RetrievalCommand::Reorder {
+                kind,
+                ordered_ids,
+                expected_generation,
+                confirm_memory_reindex,
+                operation_id,
+            } => RetrievalManagementResult::Mutation(svc.reorder(ReorderRetrievalRequest {
+                expected_generation,
+                kind,
+                ordered_ids,
+                confirm_memory_reindex,
+                operation_id: Some(operation_id),
+            })),
+            RetrievalCommand::SavePrime {
+                prime,
+                expected_generation,
+                confirm_memory_reindex,
+                operation_id,
+            } => RetrievalManagementResult::Mutation(svc.save_prime(
+                expected_generation,
+                prime,
+                confirm_memory_reindex,
+                Some(operation_id),
+            )),
+            RetrievalCommand::SaveMemoryProfile {
+                profile,
+                expected_generation,
+                confirm_memory_reindex,
+                operation_id,
+            } => RetrievalManagementResult::Mutation(svc.save_memory_profile(
+                expected_generation,
+                profile,
+                confirm_memory_reindex,
+                Some(operation_id),
+            )),
+            // Confirm without pending draft is a programming error; fail closed.
+            RetrievalCommand::ConfirmMemoryReindex => RetrievalManagementResult::Error(
+                "reindex confirmation missing pending draft mutation; reload and retry".into(),
+            ),
+        },
+    };
+    TaskResult::RetrievalOperationComplete { agent_id, result }
+}
+
 
 #[cfg(test)]
 mod provider_status_tests {

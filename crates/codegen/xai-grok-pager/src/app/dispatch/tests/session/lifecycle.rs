@@ -1097,6 +1097,7 @@ fn auth_complete_defers_startup_until_trust_resolved() {
             request_seq: 1,
             meta: None,
             repair: None,
+            credential_write_receipt: None,
         }),
         &mut app,
     );
@@ -1162,6 +1163,7 @@ fn trust_answered_first_defers_startup_until_auth_completes() {
             request_seq: 1,
             meta: None,
             repair: None,
+            credential_write_receipt: None,
         }),
         &mut app,
     );
@@ -1475,10 +1477,10 @@ fn login_mid_session_resets_welcome_announcement_expanded() {
         "mid-session login must reset the expanded announcement"
     );
 }
-/// After a successful provider-scoped mid-session re-auth, the matching
-/// credential CTA is stripped so the user returns to a clean session.
+/// xAI OAuth AuthComplete without a store write receipt must leave the
+/// matching credential CTA in place (fail closed).
 #[test]
-fn auth_complete_strips_reauth_prompt_after_mid_session_login() {
+fn auth_complete_without_write_receipt_leaves_reauth_prompt_after_mid_session_login() {
     use crate::scrollback::block::RenderBlock;
     let mut app = test_app_with_agent();
     let id = AgentId(0);
@@ -1487,6 +1489,14 @@ fn auth_complete_strips_reauth_prompt_after_mid_session_login() {
         agent.reauth_stashed_prompt = Some(crate::app::agent::ProviderScopedStashedPrompt {
             provider_id: "xai".into(),
             credential_generation: 1,
+            incarnation: None,
+            registry_generation: 0,
+            binding_generation: 0,
+            host_fallback: false,
+            binding_complete: true,
+            credential_route: "api_key".into(),
+            route_authority: "authoritative".into(),
+            correlation_token: String::new(),
             prompt: crate::app::agent::InFlightPrompt {
                 text: "retry me".into(),
                 images: Vec::new(),
@@ -1520,6 +1530,7 @@ fn auth_complete_strips_reauth_prompt_after_mid_session_login() {
             request_seq: seq,
             meta: None,
             repair,
+            credential_write_receipt: None,
         }),
         &mut app,
     );
@@ -1537,14 +1548,14 @@ fn auth_complete_strips_reauth_prompt_after_mid_session_login() {
         )
     });
     assert!(
-        !has_reauth,
-        "re-auth prompt must be stripped after successful re-auth"
+        has_reauth,
+        "xAI AuthComplete without write receipt must leave the credential CTA"
     );
 }
-/// After a successful mid-session re-auth, the prompt that failed on the
-/// expired login is auto-resubmitted so the user doesn't have to retype it.
+/// xAI OAuth AuthComplete without a store write receipt must not consume
+/// the stashed prompt or auto-resubmit it.
 #[test]
-fn auth_complete_retries_stashed_prompt_after_mid_session_login() {
+fn auth_complete_without_write_receipt_does_not_retry_stashed_prompt() {
     use crate::scrollback::block::RenderBlock;
     let mut app = test_app_with_agent();
     let id = AgentId(0);
@@ -1562,6 +1573,14 @@ fn auth_complete_retries_stashed_prompt_after_mid_session_login() {
         agent.reauth_stashed_prompt = Some(crate::app::agent::ProviderScopedStashedPrompt {
             provider_id: "xai".into(),
             credential_generation: 1,
+            incarnation: None,
+            registry_generation: 0,
+            binding_generation: 0,
+            host_fallback: false,
+            binding_complete: true,
+            credential_route: "api_key".into(),
+            route_authority: "authoritative".into(),
+            correlation_token: String::new(),
             prompt: crate::app::agent::InFlightPrompt {
                 text: "retry me".into(),
                 images: Vec::new(),
@@ -1586,21 +1605,22 @@ fn auth_complete_retries_stashed_prompt_after_mid_session_login() {
             request_seq: seq,
             meta: None,
             repair,
+            credential_write_receipt: None,
         }),
         &mut app,
     );
     assert_eq!(app.active_view, ActiveView::Agent(id));
     let agent = &app.agents[&id];
     assert!(
-        agent.reauth_stashed_prompt.is_none(),
-        "stashed prompt must be consumed on re-auth"
+        agent.reauth_stashed_prompt.is_some(),
+        "xAI AuthComplete without write receipt must leave stash"
     );
     assert!(
-        effects.iter().any(|e| matches!(
+        !effects.iter().any(|e| matches!(
             e,
-            Effect::SendPrompt { text, .. } if text == "retry me"
+            Effect::SendPrompt { .. } | Effect::SendPromptBlocks { .. }
         )),
-        "the stashed prompt must be auto-resubmitted, got: {effects:?}"
+        "missing write receipt must not auto-resubmit, got: {effects:?}"
     );
 }
 #[test]

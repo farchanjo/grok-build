@@ -1107,7 +1107,7 @@
     /// subagent-completion / notification-drain / goal turns) emit no
     /// `prompt_complete`, so a re-attach must NOT adopt them (adoption would
     /// strand the viewer in `TurnRunning`). Scheduler-fired (`/loop`) turns are
-    /// synthetic but client-driven with a real `prompt_complete`, and plain user
+    //// synthetic but client-driven with a real `prompt_complete`, and plain user
     /// turns are always adoptable.
     #[test]
     fn should_adopt_running_prompt_skips_synthetic_non_scheduler() {
@@ -1121,7 +1121,12 @@
             "notifications-019e0000-0000-7000-8000-0000000000aa"
         ));
         assert!(!should_adopt_running_prompt("goal-summary-019e2d3e"));
-        assert!(!should_adopt_running_prompt(
+        // The obsolete `GoalClassifierNudge` prompt-origin variant was removed
+        // (it had no producer anywhere in the codebase); a legacy id now
+        // decodes to `Unknown` and, like any unclassified prompt, renders and
+        // adopts as a normal user-facing turn (prime eligibility stays gated
+        // server-side by the typed origin).
+        assert!(should_adopt_running_prompt(
             "goal-classifier-nudge-019e2d3e"
         ));
     }
@@ -1487,6 +1492,7 @@
                 text: "ls -la".to_string(),
                 position: 0,
                 combined_texts: None,
+                origin: None,
             }],
             running_prompt_id: None,
             running_text: None,

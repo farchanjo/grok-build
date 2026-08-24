@@ -117,6 +117,8 @@ pub(crate) struct AgentRebuildSpec {
     pub plugin_registry: Option<Arc<xai_grok_agent::plugins::PluginRegistry>>,
     pub api_key_provider: Option<SharedApiKeyProvider>,
     pub attribution_callback: Option<xai_grok_tools::SharedAttributionCallback>,
+    /// Exact-route web_search 401 attribution (never the session sibling).
+    pub web_search_attribution_callback: Option<xai_grok_tools::SharedAttributionCallback>,
     pub tool_params_json: ResolvedToolParamsJson,
     pub subagent_event_tx: Option<UnboundedSender<SubagentEvent>>,
     pub subagent_admission:
@@ -218,6 +220,7 @@ impl AgentRebuildSpec {
             plugin_registry,
             api_key_provider,
             attribution_callback,
+            web_search_attribution_callback,
             tool_params_json,
             subagent_event_tx,
             subagent_admission,
@@ -298,6 +301,9 @@ impl AgentRebuildSpec {
         }
         if let Some(attribution_callback) = attribution_callback.clone() {
             builder = builder.with_attribution_callback(attribution_callback);
+        }
+        if let Some(web_search_attribution_callback) = web_search_attribution_callback.clone() {
+            builder = builder.with_web_search_attribution_callback(web_search_attribution_callback);
         }
         if let Some(bash_params_json) = tool_params_json.bash.clone() {
             builder = builder.with_bash_params(bash_params_json);
@@ -437,6 +443,7 @@ pub(crate) fn test_rebuild_spec_default() -> Arc<AgentRebuildSpec> {
         plugin_registry: None,
         api_key_provider: None,
         attribution_callback: None,
+        web_search_attribution_callback: None,
         tool_params_json: ResolvedToolParamsJson::default(),
         subagent_event_tx: None,
         subagent_admission: Arc::new(

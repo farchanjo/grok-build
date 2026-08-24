@@ -503,6 +503,22 @@ impl SkillManager {
         }
     }
 
+    /// Authoritative read-only snapshot of skills eligible for native model
+    /// invocation under the current post-precedence/post-shadowing projection.
+    ///
+    /// Mirrors native model-invocation eligibility exactly: `enabled` and not
+    /// `disable_model_invocation`. Skills with `user_invocable = false` remain
+    /// eligible here (they are still loadable programmatically even when not
+    /// offered in the model-facing skill tool). Uses the same runtime projection
+    /// as [`Self::take_pending`], so startup/discovered precedence and
+    /// conditional activation are preserved.
+    pub fn eligible_native_skills(&self) -> Vec<SkillInfo> {
+        dedup_by_canonical_path(&self.discovered_skills, &self.startup_skills)
+            .into_iter()
+            .filter(SkillInfo::is_native_model_invocable)
+            .collect()
+    }
+
     /// Get the current dynamically discovered skills.
     pub fn discovered_skills(&self) -> &[SkillInfo] {
         &self.discovered_skills
@@ -805,6 +821,95 @@ mod tests {
         assert!(tracker.cwd.is_some());
         assert!(tracker.git_root.is_some());
         assert_eq!(tracker.startup_skills().len(), 1);
+    }
+
+    #[test]
+    fn eligible_native_skills_excludes_disabled_and_model_invocation_locked() {
+        let mut mgr = SkillManager::new();
+        mgr.seed(None, None, vec![], None, None, None);
+
+        // Disabled and disable_model_invocation must never be eligible.
+        mgr.add_discovered(vec![
+            SkillInfo {
+                name: "ok".into(),
+                path: "/ok/SKILL.md".into(),
+                enabled: true,
+                disable_model_invocation: false,
+                user_invocable: true,
+                ..SkillInfo::default()
+            },
+            SkillInfo {
+                name: "disabled".into(),
+                path: "/disabled/SKILL.md".into(),
+                enabled: false,
+                disable_model_invocation: false,
+                user_invocable: true,
+                ..SkillInfo::default()
+            },
+            SkillInfo {
+                name: "locked".into(),
+                path: "/locked/SKILL.md".into(),
+                enabled: true,
+                disable_model_invocation: true,
+                user_invocable: true,
+                ..SkillInfo::default()
+            },
+            // user_invocable=false must remain eligible.
+            SkillInfo {
+                name: "auto-only".into(),
+                path: "/auto/SKILL.md".into(),
+                enabled: true,
+                disable_model_invocation: false,
+                user_invocable: false,
+                ..SkillInfo::default()
+            },
+        ]);
+
+        let eligible = mgr.eligible_native_skills();
+        let names: std::collections::HashSet<&str> =
+            eligible.iter().map(|s| s.name.as_str()).collect();
+        assert!(names.contains("ok"));
+        assert!(
+            names.contains("auto-only"),
+            "user_invocable=false stays eligible"
+        );
+        assert!(!names.contains("disabled"), "disabled skill leaked");
+        assert!(!names.contains("locked"), "disable_model_invocation leaked");
+    }
+
+    #[test]
+    fn eligible_native_skills_apply_dynamic_precedence_dedup() {
+        // Discovered skills win over startup on the same canonical path.
+        let tmp = tempfile::tempdir().unwrap();
+        let skill_dir = tmp.path().join("skills").join("alpha");
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        let path = skill_dir.join("SKILL.md");
+        std::fs::write(&path, "---\nname: alpha\n---\n").unwrap();
+        let path_str = path.to_str().unwrap().to_string();
+
+        let mut mgr = SkillManager::new();
+        mgr.seed(
+            None,
+            None,
+            vec![SkillInfo {
+                name: "startup-alpha".into(),
+                path: path_str.clone(),
+                ..SkillInfo::default()
+            }],
+            None,
+            None,
+            None,
+        );
+        // Dynamic discovery of the same canonical path shadows the baseline name.
+        assert!(mgr.add_discovered(vec![SkillInfo {
+            name: "dyn-alpha".into(),
+            path: path_str,
+            ..SkillInfo::default()
+        }]));
+
+        let eligible = mgr.eligible_native_skills();
+        assert_eq!(eligible.len(), 1, "dedup by canonical path");
+        assert_eq!(eligible[0].name, "dyn-alpha", "discovered wins precedence");
     }
 
     #[test]

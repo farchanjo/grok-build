@@ -344,6 +344,7 @@ fn auth_complete_opens_deferred_dashboard() {
             request_seq: 1,
             meta: None,
             repair: None,
+            credential_write_receipt: None,
         }),
         &mut app,
     );
@@ -357,10 +358,11 @@ fn auth_complete_opens_deferred_dashboard() {
         "the deferred-dashboard flag must be consumed",
     );
 }
-/// Provider-scoped re-auth completed from the dashboard still consumes the
-/// exact stash bound to the failing agent.
+/// Provider-scoped re-auth completed from the dashboard restores the
+/// dashboard view. xAI OAuth has no write-receipt contract, so the stash
+/// stays until a store-bound receipt can resume it.
 #[test]
-fn auth_complete_retries_stashed_prompt_from_dashboard() {
+fn auth_complete_from_dashboard_restores_view_without_write_receipt() {
     let mut app = test_app_with_agent();
     let id = AgentId(0);
     let mut image = crate::prompt_images::from_clipboard_data(&crate::clipboard::ImageData {
@@ -372,6 +374,14 @@ fn auth_complete_retries_stashed_prompt_from_dashboard() {
         Some(crate::app::agent::ProviderScopedStashedPrompt {
             provider_id: "xai".into(),
             credential_generation: 1,
+            incarnation: None,
+            registry_generation: 0,
+            binding_generation: 0,
+            host_fallback: false,
+            binding_complete: true,
+            credential_route: "api_key".into(),
+            route_authority: "authoritative".into(),
+            correlation_token: String::new(),
             prompt: crate::app::agent::InFlightPrompt {
                 text: "retry me [Image #1]".into(),
                 images: vec![image],
@@ -397,16 +407,22 @@ fn auth_complete_retries_stashed_prompt_from_dashboard() {
             request_seq: seq,
             meta: None,
             repair,
+            credential_write_receipt: None,
         }),
         &mut app,
     );
     assert_eq!(app.active_view, ActiveView::AgentDashboard);
-    assert!(app.agents[&id].reauth_stashed_prompt.is_none());
+    // xAI OAuth has no store write-receipt contract yet, so AuthComplete
+    // fails closed. The dashboard return view is still restored.
     assert!(
-        effects
+        app.agents[&id].reauth_stashed_prompt.is_some(),
+        "xAI AuthComplete without write receipt must leave stash"
+    );
+    assert!(
+        !effects
             .iter()
             .any(|effect| matches!(effect, Effect::SendPromptBlocks { .. })),
-        "stash must be retried even when login returns to the dashboard, got: {effects:?}"
+        "missing write receipt must not auto-resubmit, got: {effects:?}"
     );
 }
 /// Cancelling a provider-scoped re-auth from the dashboard drops the exact
@@ -419,6 +435,14 @@ fn cancel_login_from_dashboard_drops_reauth_stashed_prompt() {
         Some(crate::app::agent::ProviderScopedStashedPrompt {
             provider_id: "xai".into(),
             credential_generation: 1,
+            incarnation: None,
+            registry_generation: 0,
+            binding_generation: 0,
+            host_fallback: false,
+            binding_complete: true,
+            credential_route: "api_key".into(),
+            route_authority: "authoritative".into(),
+            correlation_token: String::new(),
             prompt: crate::app::agent::InFlightPrompt {
                 text: "stale".into(),
                 images: Vec::new(),

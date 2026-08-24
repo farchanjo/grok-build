@@ -7,6 +7,13 @@ pub use xai_grok_config_types::{
     MemoryGcConfig, MemoryIndexConfig, MemoryInitialInjectionConfig, MemorySearchConfig,
     MemorySessionConfig, MemoryWatcherConfig, MmrConfig, PruningConfig, TemporalDecayConfig,
 };
+// Re-export retrieval graph types for shell consumers.
+pub use xai_grok_config_types::{
+    AgentPrimeConfig, EmbeddingEncoding, EmbeddingModelConfig, EmbeddingProtocol, PrimeConfig,
+    RerankerModelConfig, RerankerProtocol, RetrievalFallbackStrategy, RetrievalGraphConfig,
+    RetrievalProfileConfig, SkillPrimeConfig, clamp_context_fraction, clamp_unit_score,
+    normalize_retrieval_id, validate_relative_endpoint,
+};
 /// Full configuration for the memory system.
 ///
 /// Parsed from the `[memory]` section of `~/.grok/config.toml` or
@@ -38,6 +45,13 @@ pub struct MemoryConfig {
     pub gc: MemoryGcConfig,
     /// autoDream consolidation settings.
     pub dream: MemoryDreamConfig,
+    /// Optional named retrieval profile for memory search/index (PR15).
+    ///
+    /// Additive: when set, references `[retrieval_profiles.<id>]`. Legacy
+    /// `[memory.embedding]` / `[memory.search]` remain fully readable and are
+    /// unchanged when this field is absent. Does not store credentials.
+    #[serde(default)]
+    pub retrieval_profile: Option<String>,
     /// Pre-compaction memory flush settings.
     ///
     /// **Note:** Configured under `[compaction.memory_flush]` in config.toml,

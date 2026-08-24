@@ -294,6 +294,29 @@ pub enum ProviderCommand {
         model_id: String,
         percent: Option<u8>,
     },
+    /// Load shell-authoritative list snapshot (generation-tagged).
+    LoadListSnapshot,
+    /// Open typed editor for selected provider (shell detail).
+    OpenEditor {
+        provider_id: String,
+    },
+    /// Enable selected configured provider.
+    Enable {
+        provider_id: String,
+    },
+    /// Disable selected configured provider.
+    Disable {
+        provider_id: String,
+    },
+    /// Clone selected provider (metadata only).
+    Clone {
+        source_id: String,
+        new_id: String,
+    },
+    /// Editor-originated management ops (generation-tagged in effects).
+    Editor(crate::views::provider_editor::EditorCommand),
+    /// Open `/retrieval-settings` (named retrieval graph editor).
+    OpenRetrievalSettings,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -317,7 +340,7 @@ impl ChatgptFieldEditor {
     }
 }
 
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone)]
 pub(crate) enum ProviderModalMode {
     Browse,
     ChoosingXai {
@@ -335,7 +358,27 @@ pub(crate) enum ProviderModalMode {
         selected: usize,
         editor: Option<ChatgptFieldEditor>,
     },
+    /// Typed multi-page editor for one provider instance.
+    Editor(Box<crate::views::provider_editor::ProviderEditorState>),
+    /// Add-provider wizard (id + base URL + kind).
+    Adding {
+        step: AddStep,
+        id_editor: LineEditor,
+        url_editor: LineEditor,
+        kind_index: usize,
+    },
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AddStep {
+    Id,
+    BaseUrl,
+    Kind,
+    Confirm,
+}
+
+/// Kinds offered when adding unlimited OpenAI/OpenRouter/custom instances.
+pub(crate) const ADD_KINDS: [&str; 3] = ["openai_compatible", "openrouter", "openai"];
 
 impl std::fmt::Debug for ProviderModalMode {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -369,6 +412,16 @@ impl std::fmt::Debug for ProviderModalMode {
                     },
                 )
                 .finish(),
+            Self::Editor(state) => f.debug_tuple("Editor").field(state).finish(),
+            Self::Adding {
+                step, kind_index, ..
+            } => f
+                .debug_struct("Adding")
+                .field("step", step)
+                .field("kind_index", kind_index)
+                .field("id_editor", &"[REDACTED_INPUT]")
+                .field("url_editor", &"[REDACTED_INPUT]")
+                .finish(),
         }
     }
 }
@@ -378,7 +431,10 @@ impl ProviderModalMode {
     pub(crate) fn owns_escape(&self) -> bool {
         matches!(
             self,
-            Self::EditingKey { .. } | Self::ChatgptSubscription { .. }
+            Self::EditingKey { .. }
+                | Self::ChatgptSubscription { .. }
+                | Self::Editor(_)
+                | Self::Adding { .. }
         )
     }
 }
@@ -398,6 +454,24 @@ pub struct ProviderModalState {
     /// A key submitted by the UI but not yet picked up by the integration.
     /// It is cleared on close and never rendered or logged.
     submitted_secret: Option<(ProviderKind, String)>,
+    /// Shell-authoritative list generation (never from raw config.toml).
+    pub list_generation: u64,
+    /// Banner / status from management mutations (secret-free).
+    pub management_message: Option<String>,
+    pub management_error: Option<String>,
+    /// Typed add draft (Issue 13) — not encoded into banner text.
+    pub pending_add: Option<PendingProviderAdd>,
+    /// List-level mutation operation id (Enable/Disable/Clone/Add) for late-async discard.
+    pub pending_list_operation_id: Option<String>,
+}
+
+/// Secret-free add draft carried until the dispatch effect runs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingProviderAdd {
+    pub id: String,
+    pub kind: String,
+    pub base_url: String,
+    pub display_name: Option<String>,
 }
 
 // Deliberately omit the line editor and submitted secret. App state is often
@@ -433,10 +507,15 @@ impl std::fmt::Debug for ProviderModalState {
                         }
                         None => "chatgpt_subscription",
                     },
+                    ProviderModalMode::Editor(_) => "editor",
+                    ProviderModalMode::Adding { .. } => "adding",
                 },
             )
             .field("focus_provider_id", &self.focus_provider_id)
             .field("has_submitted_secret", &self.submitted_secret.is_some())
+            .field("list_generation", &self.list_generation)
+            .field("management_message", &self.management_message)
+            .field("management_error", &self.management_error)
             .finish_non_exhaustive()
     }
 }
@@ -472,6 +551,72 @@ impl ProviderModalState {
             mode: ProviderModalMode::Browse,
             focus_provider_id: None,
             submitted_secret: None,
+            list_generation: 0,
+            management_message: None,
+            management_error: None,
+            pending_add: None,
+            pending_list_operation_id: None,
+        }
+    }
+
+    /// Apply a shell-authored list snapshot (never raw config.toml).
+    pub fn apply_list_snapshot(
+        &mut self,
+        snapshot: &xai_grok_shell::provider_registry::management::dto::ProviderListSnapshot,
+    ) {
+        self.list_generation = snapshot.generation.get();
+        let configured: Vec<String> = snapshot
+            .rows
+            .iter()
+            .filter(|r| r.is_configured)
+            .map(|r| r.id.clone())
+            .collect();
+        self.set_configured_providers(configured);
+        // Overlay shell status labels when present.
+        for row in &snapshot.rows {
+            let kind = if row.is_built_in {
+                match row.id.as_str() {
+                    "xai" => ProviderKind::Xai,
+                    "openai" => ProviderKind::OpenAi,
+                    "openrouter" => ProviderKind::OpenRouter,
+                    "anthropic" => ProviderKind::Anthropic,
+                    _ => ProviderKind::Configured(row.id.clone()),
+                }
+            } else {
+                ProviderKind::Configured(row.id.clone())
+            };
+            let status = if row.credentials.has_application_key || row.credentials.has_oauth {
+                ProviderStatus::Connected {
+                    detail: row.status_detail.clone(),
+                }
+            } else if row.status_label.to_ascii_lowercase().contains("error") {
+                ProviderStatus::Error(row.status_label.clone())
+            } else {
+                ProviderStatus::Missing
+            };
+            self.set_status(&kind, status);
+        }
+        if let Some(w) = snapshot.warnings.first() {
+            self.management_message = Some(w.clone());
+        }
+    }
+
+    /// Open typed editor with shell detail DTO.
+    pub fn open_editor(
+        &mut self,
+        detail: xai_grok_shell::provider_registry::management::dto::ProviderDetailDto,
+    ) {
+        self.mode = ProviderModalMode::Editor(Box::new(
+            crate::views::provider_editor::ProviderEditorState::new(detail),
+        ));
+    }
+
+    pub fn editor_mut(
+        &mut self,
+    ) -> Option<&mut crate::views::provider_editor::ProviderEditorState> {
+        match &mut self.mode {
+            ProviderModalMode::Editor(state) => Some(state),
+            _ => None,
         }
     }
 
@@ -569,6 +714,10 @@ impl ProviderModalState {
 
     pub fn clear_sensitive_input(&mut self) {
         self.submitted_secret = None;
+        if let ProviderModalMode::Editor(ed) = &mut self.mode {
+            let _ = ed.take_app_secret();
+            let _ = ed.take_admin_secret();
+        }
         if !matches!(&self.mode, ProviderModalMode::Browse) {
             self.mode = ProviderModalMode::Browse;
         }
@@ -863,6 +1012,12 @@ pub fn handle_key(state: &mut ProviderModalState, key: &KeyEvent) -> ProviderMod
     if let Some(outcome) = handle_chatgpt_subscription(state, key) {
         return outcome;
     }
+    if let ProviderModalMode::Editor(_) = &state.mode {
+        return handle_editor_mode(state, key);
+    }
+    if let ProviderModalMode::Adding { .. } = &state.mode {
+        return handle_adding_mode(state, key);
+    }
     if let Some(outcome) = handle_xai_choice(state, key) {
         return outcome;
     }
@@ -953,9 +1108,128 @@ pub fn handle_key(state: &mut ProviderModalState, key: &KeyEvent) -> ProviderMod
             ProviderModalOutcome::Changed
         }
         KeyCode::Char('a') if key.modifiers.is_empty() => {
-            ProviderModalOutcome::Command(ProviderCommand::AddConfigured)
+            state.mode = ProviderModalMode::Adding {
+                step: AddStep::Id,
+                id_editor: LineEditor::default(),
+                url_editor: LineEditor::default(),
+                kind_index: 0,
+            };
+            ProviderModalOutcome::Changed
         }
+        KeyCode::Char('e') if key.modifiers.is_empty() => {
+            let id = state.selected_provider().id_str().to_owned();
+            ProviderModalOutcome::Command(ProviderCommand::OpenEditor { provider_id: id })
+        }
+        KeyCode::Char('y') if key.modifiers.is_empty() => {
+            // Enable selected configured provider.
+            let id = state.selected_provider().id_str().to_owned();
+            ProviderModalOutcome::Command(ProviderCommand::Enable { provider_id: id })
+        }
+        KeyCode::Char('n') if key.modifiers.is_empty() => {
+            let id = state.selected_provider().id_str().to_owned();
+            ProviderModalOutcome::Command(ProviderCommand::Disable { provider_id: id })
+        }
+        KeyCode::Char('l') if key.modifiers.is_empty() => {
+            ProviderModalOutcome::Command(ProviderCommand::LoadListSnapshot)
+        }
+        // Browse clone: open editor clone flow with a suggested id suffix.
+        KeyCode::Char('o') if key.modifiers.is_empty() => {
+            let id = state.selected_provider().id_str().to_owned();
+            ProviderModalOutcome::Command(ProviderCommand::OpenEditor { provider_id: id })
+        }
+        // Open named retrieval graph settings (PR15).
+        KeyCode::Char('R') => ProviderModalOutcome::Command(ProviderCommand::OpenRetrievalSettings),
         _ => ProviderModalOutcome::Unchanged,
+    }
+}
+
+fn handle_editor_mode(state: &mut ProviderModalState, key: &KeyEvent) -> ProviderModalOutcome {
+    use crate::views::provider_editor::EditorOutcome;
+    let ProviderModalMode::Editor(editor) = &mut state.mode else {
+        return ProviderModalOutcome::Unchanged;
+    };
+    match crate::views::provider_editor::handle_key(editor, key) {
+        EditorOutcome::Back => {
+            state.mode = ProviderModalMode::Browse;
+            ProviderModalOutcome::Command(ProviderCommand::LoadListSnapshot)
+        }
+        EditorOutcome::Changed => ProviderModalOutcome::Changed,
+        EditorOutcome::Unchanged => ProviderModalOutcome::Unchanged,
+        EditorOutcome::Command(cmd) => ProviderModalOutcome::Command(ProviderCommand::Editor(cmd)),
+    }
+}
+
+fn handle_adding_mode(state: &mut ProviderModalState, key: &KeyEvent) -> ProviderModalOutcome {
+    let ProviderModalMode::Adding {
+        step,
+        id_editor,
+        url_editor,
+        kind_index,
+    } = &mut state.mode
+    else {
+        return ProviderModalOutcome::Unchanged;
+    };
+    match key.code {
+        KeyCode::Esc => {
+            state.mode = ProviderModalMode::Browse;
+            ProviderModalOutcome::Changed
+        }
+        KeyCode::Up | KeyCode::Char('k') if *step == AddStep::Kind && key.modifiers.is_empty() => {
+            *kind_index = kind_index.saturating_sub(1);
+            ProviderModalOutcome::Changed
+        }
+        KeyCode::Down | KeyCode::Char('j')
+            if *step == AddStep::Kind && key.modifiers.is_empty() =>
+        {
+            *kind_index = (*kind_index + 1).min(ADD_KINDS.len() - 1);
+            ProviderModalOutcome::Changed
+        }
+        KeyCode::Enter => match *step {
+            AddStep::Id => {
+                if id_editor.text().trim().is_empty() {
+                    return ProviderModalOutcome::Unchanged;
+                }
+                *step = AddStep::BaseUrl;
+                ProviderModalOutcome::Changed
+            }
+            AddStep::BaseUrl => {
+                if url_editor.text().trim().is_empty() {
+                    return ProviderModalOutcome::Unchanged;
+                }
+                *step = AddStep::Kind;
+                ProviderModalOutcome::Changed
+            }
+            AddStep::Kind => {
+                *step = AddStep::Confirm;
+                ProviderModalOutcome::Changed
+            }
+            AddStep::Confirm => {
+                let id = id_editor.text().trim().to_owned();
+                let base_url = url_editor.text().trim().to_owned();
+                let kind = ADD_KINDS[*kind_index].to_owned();
+                state.pending_add = Some(PendingProviderAdd {
+                    id,
+                    kind,
+                    base_url,
+                    display_name: None,
+                });
+                state.mode = ProviderModalMode::Browse;
+                ProviderModalOutcome::Command(ProviderCommand::AddConfigured)
+            }
+        },
+        _ => {
+            let editor = match *step {
+                AddStep::Id => id_editor,
+                AddStep::BaseUrl => url_editor,
+                AddStep::Kind | AddStep::Confirm => return ProviderModalOutcome::Unchanged,
+            };
+            match editor.handle_key(key) {
+                LineEditOutcome::TextChanged
+                | LineEditOutcome::CursorChanged
+                | LineEditOutcome::HandledNoChange => ProviderModalOutcome::Changed,
+                LineEditOutcome::Unhandled => ProviderModalOutcome::Unchanged,
+            }
+        }
     }
 }
 
@@ -995,6 +1269,26 @@ fn line_edit_outcome(outcome: LineEditOutcome) -> ProviderModalOutcome {
 }
 
 pub fn handle_paste(state: &mut ProviderModalState, text: &str) -> ProviderModalOutcome {
+    if let ProviderModalMode::Editor(editor) = &mut state.mode {
+        return match crate::views::provider_editor::handle_paste(editor, text) {
+            crate::views::provider_editor::EditorOutcome::Changed => ProviderModalOutcome::Changed,
+            _ => ProviderModalOutcome::Unchanged,
+        };
+    }
+    if let ProviderModalMode::Adding {
+        step,
+        id_editor,
+        url_editor,
+        ..
+    } = &mut state.mode
+    {
+        let editor = match *step {
+            AddStep::Id => id_editor,
+            AddStep::BaseUrl => url_editor,
+            AddStep::Kind | AddStep::Confirm => return ProviderModalOutcome::Unchanged,
+        };
+        return line_edit_outcome(editor.insert_paste_with_byte_limit(text, 16_384));
+    }
     let editor = match &mut state.mode {
         ProviderModalMode::EditingKey { editor, .. } => editor,
         ProviderModalMode::ChatgptSubscription {
@@ -1077,6 +1371,26 @@ pub fn render_modal(buf: &mut Buffer, area: Rect, state: &mut ProviderModalState
                     clickable: false,
                     id: 0,
                 },
+                Shortcut {
+                    label: "e edit",
+                    clickable: false,
+                    id: 0,
+                },
+                Shortcut {
+                    label: "a add",
+                    clickable: false,
+                    id: 0,
+                },
+                Shortcut {
+                    label: "y/n enable",
+                    clickable: false,
+                    id: 0,
+                },
+                Shortcut {
+                    label: "R retrieval",
+                    clickable: false,
+                    id: 0,
+                },
             ];
             if chatgpt_subscription_available(state) {
                 items.push(Shortcut {
@@ -1114,13 +1428,88 @@ pub fn render_modal(buf: &mut Buffer, area: Rect, state: &mut ProviderModalState
         return;
     };
     let mut y = content.content.y;
-    put_line(
-        buf,
-        content.content,
-        &mut y,
-        "Configure model providers. Keys are masked and are never written to config.toml.",
-        Style::default().fg(theme.gray),
-    );
+    if let ProviderModalMode::Editor(editor) = &state.mode {
+        crate::views::provider_editor::render_editor(buf, content.content, editor, &mut y);
+        return;
+    }
+    if let ProviderModalMode::Adding {
+        step,
+        id_editor,
+        url_editor,
+        kind_index,
+    } = &state.mode
+    {
+        put_line(
+            buf,
+            content.content,
+            &mut y,
+            "Add OpenAI / OpenRouter / custom provider instance",
+            Style::default()
+                .fg(theme.text_primary)
+                .add_modifier(Modifier::BOLD),
+        );
+        put_line(
+            buf,
+            content.content,
+            &mut y,
+            &format!("Step: {:?} · generation {}", step, state.list_generation),
+            Style::default().fg(theme.gray),
+        );
+        put_line(
+            buf,
+            content.content,
+            &mut y,
+            &format!(
+                "{} Id: {}",
+                if *step == AddStep::Id { "›" } else { " " },
+                id_editor.text()
+            ),
+            Style::default().fg(theme.gray),
+        );
+        put_line(
+            buf,
+            content.content,
+            &mut y,
+            &format!(
+                "{} Base URL: {}",
+                if *step == AddStep::BaseUrl {
+                    "›"
+                } else {
+                    " "
+                },
+                url_editor.text()
+            ),
+            Style::default().fg(theme.gray),
+        );
+        for (i, kind) in ADD_KINDS.iter().enumerate() {
+            let mark = if *step == AddStep::Kind && *kind_index == i {
+                "›"
+            } else {
+                " "
+            };
+            put_line(
+                buf,
+                content.content,
+                &mut y,
+                &format!("{mark} kind: {kind}"),
+                Style::default().fg(if *kind_index == i {
+                    theme.accent_user
+                } else {
+                    theme.gray
+                }),
+            );
+        }
+        if *step == AddStep::Confirm {
+            put_line(
+                buf,
+                content.content,
+                &mut y,
+                "Enter confirms add · Esc cancels",
+                Style::default().fg(theme.accent_user),
+            );
+        }
+        return;
+    }
     if let ProviderModalMode::ChatgptSubscription { selected, editor } = &state.mode {
         put_line(
             buf,
@@ -1221,6 +1610,34 @@ pub fn render_modal(buf: &mut Buffer, area: Rect, state: &mut ProviderModalState
             );
         }
         return;
+    }
+    put_line(
+        buf,
+        content.content,
+        &mut y,
+        &format!(
+            "Configure model providers (gen {}). Keys are masked and never written to config.toml.",
+            state.list_generation
+        ),
+        Style::default().fg(theme.gray),
+    );
+    if let Some(msg) = &state.management_message {
+        put_line(
+            buf,
+            content.content,
+            &mut y,
+            msg,
+            Style::default().fg(theme.accent_success),
+        );
+    }
+    if let Some(err) = &state.management_error {
+        put_line(
+            buf,
+            content.content,
+            &mut y,
+            &format!("Error: {err}"),
+            Style::default().fg(theme.accent_error),
+        );
     }
     for (idx, provider) in state.rows.iter().enumerate() {
         let show_claude_cli = provider == &ProviderKind::Anthropic
@@ -2347,5 +2764,70 @@ mod tests {
             state_debug.contains("editing_chatgpt_auto_compact_threshold"),
             "state debug must name the threshold editor, got {state_debug}"
         );
+    }
+
+    #[test]
+    fn configured_add_enable_disable_edit_keyboard_flow() {
+        let mut state = ProviderModalState::new();
+        state.set_configured_providers(vec!["openai_work".into()]);
+        state.focus_provider("openai_work");
+        assert_eq!(
+            handle_key(&mut state, &key(KeyCode::Char('e'))),
+            ProviderModalOutcome::Command(ProviderCommand::OpenEditor {
+                provider_id: "openai_work".into()
+            })
+        );
+        assert_eq!(
+            handle_key(&mut state, &key(KeyCode::Char('y'))),
+            ProviderModalOutcome::Command(ProviderCommand::Enable {
+                provider_id: "openai_work".into()
+            })
+        );
+        assert_eq!(
+            handle_key(&mut state, &key(KeyCode::Char('n'))),
+            ProviderModalOutcome::Command(ProviderCommand::Disable {
+                provider_id: "openai_work".into()
+            })
+        );
+
+        // Add configured: a → id → base url → kind → confirm.
+        assert_eq!(
+            handle_key(&mut state, &key(KeyCode::Char('a'))),
+            ProviderModalOutcome::Changed
+        );
+        assert!(matches!(state.mode, ProviderModalMode::Adding { .. }));
+        {
+            let ProviderModalMode::Adding { id_editor, .. } = &mut state.mode else {
+                panic!("expected Adding mode");
+            };
+            id_editor.insert_paste("lab_vllm");
+        }
+        assert_eq!(
+            handle_key(&mut state, &key(KeyCode::Enter)),
+            ProviderModalOutcome::Changed
+        );
+        {
+            let ProviderModalMode::Adding { url_editor, .. } = &mut state.mode else {
+                panic!("expected Adding mode");
+            };
+            url_editor.insert_paste("http://127.0.0.1:8000/v1");
+        }
+        assert_eq!(
+            handle_key(&mut state, &key(KeyCode::Enter)),
+            ProviderModalOutcome::Changed
+        );
+        // Kind step → Confirm.
+        assert_eq!(
+            handle_key(&mut state, &key(KeyCode::Enter)),
+            ProviderModalOutcome::Changed
+        );
+        assert_eq!(
+            handle_key(&mut state, &key(KeyCode::Enter)),
+            ProviderModalOutcome::Command(ProviderCommand::AddConfigured)
+        );
+        let pending = state.pending_add.expect("pending add");
+        assert_eq!(pending.id, "lab_vllm");
+        assert_eq!(pending.base_url, "http://127.0.0.1:8000/v1");
+        assert!(!format!("{pending:?}").contains("sk-"));
     }
 }

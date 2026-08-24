@@ -134,6 +134,7 @@ async fn test_agent_from_config(
         api_key_provider: None,
         auth_provider: None,
         attribution_callback: None,
+        web_search_attribution_callback: None,
         system_reminder_tag: xai_grok_tools::reminders::DEFAULT_REMINDER_TAG,
     };
     let tool_bridge = crate::tools::bridge::ToolBridge::finalize_builder(builder, config, ctx)
@@ -335,10 +336,15 @@ pub(crate) async fn create_test_actor_ex(
         last_reported_branch: std::sync::Arc::new(parking_lot::Mutex::new(None)),
         git_head_enabled: false,
         models_manager: Default::default(),
+        selection_model_id: std::cell::RefCell::new(acp::ModelId::new(
+            crate::test_support::TEST_MODEL,
+        )),
+        route_context: std::cell::RefCell::new(None),
         display_cwd: std::sync::OnceLock::new(),
         active_agent_type: parking_lot::Mutex::new(None),
         queue_exit_reminder_on_approved_exit: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         active_skill: parking_lot::Mutex::new(None),
+        prime_cache: crate::session::prime::inventory::InventoryCache::new(),
         current_prompt_mode: Arc::new(parking_lot::Mutex::new(PromptMode::Agent)),
         turn_start_prompt_mode: parking_lot::Mutex::new(PromptMode::Agent),
         turn_prompt_mode: Arc::new(parking_lot::Mutex::new(PromptMode::Agent)),

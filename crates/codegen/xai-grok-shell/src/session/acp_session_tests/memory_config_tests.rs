@@ -19,6 +19,9 @@ fn initial_injection_backend_params_use_override_min_score() {
         stale_claim_secs: 60,
         search_source: "tool",
         embedding_credentials: crate::session::memory::EndpointScopedCredentials::none(),
+        retrieval: None,
+        index_config: crate::config::MemoryIndexConfig::default(),
+        rebuild_backoff_secs: 0,
     };
     let initial_injection = crate::config::MemoryInitialInjectionConfig {
         enabled: true,
@@ -47,6 +50,9 @@ fn initial_injection_backend_params_preserve_default_zero_min_score() {
         stale_claim_secs: 60,
         search_source: "tool",
         embedding_credentials: crate::session::memory::EndpointScopedCredentials::none(),
+        retrieval: None,
+        index_config: crate::config::MemoryIndexConfig::default(),
+        rebuild_backoff_secs: 0,
     };
     let (adjusted, effective_min_score) = build_initial_injection_backend_params(
         &params,
@@ -234,10 +240,15 @@ async fn create_test_actor_with_memory(
         last_reported_branch: std::sync::Arc::new(parking_lot::Mutex::new(None)),
         git_head_enabled: false,
         models_manager: Default::default(),
+        selection_model_id: std::cell::RefCell::new(acp::ModelId::new(
+            crate::test_support::TEST_MODEL,
+        )),
+        route_context: std::cell::RefCell::new(None),
         display_cwd: std::sync::OnceLock::new(),
         active_agent_type: parking_lot::Mutex::new(None),
         queue_exit_reminder_on_approved_exit: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         active_skill: parking_lot::Mutex::new(None),
+        prime_cache: crate::session::prime::inventory::InventoryCache::new(),
         current_prompt_mode: Arc::new(parking_lot::Mutex::new(PromptMode::Agent)),
         turn_start_prompt_mode: parking_lot::Mutex::new(PromptMode::Agent),
         turn_prompt_mode: Arc::new(parking_lot::Mutex::new(PromptMode::Agent)),
@@ -558,6 +569,9 @@ async fn create_injection_ready_actor(
         stale_claim_secs: 60,
         search_source: "tool",
         embedding_credentials: crate::session::memory::EndpointScopedCredentials::none(),
+        retrieval: None,
+        index_config: crate::config::MemoryIndexConfig::default(),
+        rebuild_backoff_secs: 0,
     });
     actor
         .chat_state_handle
@@ -688,4 +702,311 @@ async fn test_idle_flush_timeout_from_config() {
             assert_eq!(actor2.idle_flush_timeout, None);
         })
         .await;
+}
+
+/// Flush and Dream embedding use the named facade through the shared factory.
+#[tokio::test]
+async fn facade_powers_flush_and_dream_embedding_emitters() {
+    let dims = 4;
+    let fake = std::sync::Arc::new(crate::session::memory::retrieval::FakeMemoryRetrieval::new(
+        dims,
+        "pinned-model",
+    ));
+    // What spawn sets under a named retrieval profile: embed_config = None,
+    // retrieval = facade.
+    let params = crate::session::memory::MemoryBackendParams {
+        session_id: "t".into(),
+        embed_config: None,
+        embed_base_url: "http://chat.example/v1".into(),
+        embed_api_key: Some("chat-key".into()),
+        search_config: crate::config::MemorySearchConfig::default(),
+        watcher: None,
+        stale_claim_secs: 60,
+        search_source: "tool",
+        embedding_credentials: crate::session::memory::EndpointScopedCredentials::none(),
+        retrieval: Some(fake.clone()),
+        index_config: crate::config::MemoryIndexConfig::default(),
+        rebuild_backoff_secs: 0,
+    };
+    let provider = params.make_embedding_provider().await;
+    assert!(
+        provider.is_some(),
+        "a named facade must power flush/Dream embedding emitters"
+    );
+    assert_eq!(
+        provider.unwrap().model_name(),
+        "pinned-model",
+        "flush/Dream must use the named facade"
+    );
+
+    // Unresolved named profile ⇒ FTS-only for these emitters too.
+    let unresolved = crate::session::memory::MemoryBackendParams {
+        retrieval: None,
+        embed_config: None,
+        ..params
+    };
+    assert!(
+        unresolved.make_embedding_provider().await.is_none(),
+        "unresolved named profile must leave flush/Dream emitters FTS-only"
+    );
+}
+
+/// Startup reindex backfill uses the resolved named-profile facade.
+#[tokio::test]
+#[allow(clippy::field_reassign_with_default)]
+async fn startup_reindex_backfill_mixed_config_uses_facade_only() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let global_dir = tmp.path().join("memory");
+    let workspace_dir = global_dir.join("test_ws");
+    std::fs::create_dir_all(&workspace_dir).unwrap();
+    let storage =
+        crate::session::memory::MemoryStorage::with_paths(global_dir, workspace_dir.clone());
+    crate::session::memory::index::init_sqlite_vec();
+    let db_path = workspace_dir.join("index.sqlite");
+
+    // Keep a conflicting legacy config and active-chat key in the fixture.
+    let facade_dims = 6usize;
+    let fake = std::sync::Arc::new(crate::session::memory::retrieval::FakeMemoryRetrieval::new(
+        facade_dims,
+        "pinned-model",
+    ));
+    let mut memory_config = crate::config::MemoryConfig::default();
+    memory_config.enabled = true;
+    memory_config.retrieval_profile = Some("prof-a".to_string());
+    memory_config.embedding = crate::config::MemoryEmbeddingConfig {
+        model: Some("legacy-model".into()),
+        dimensions: 1024,
+        ..Default::default()
+    };
+
+    // Exactly what the detached startup task computes at session scope.
+    let (embed_config, dims) = super::spawn::startup_reindex_embedding_inputs(
+        true,
+        Some(&memory_config),
+        Some(facade_dims),
+    );
+    assert!(
+        embed_config.is_none(),
+        "a named profile must disable the legacy config"
+    );
+    assert_eq!(
+        dims, facade_dims,
+        "startup index must open in the facade space"
+    );
+
+    // Install a fingerprint in the facade space.
+    let small = tmp.path().join("small.md");
+    std::fs::write(&small, "# Small\n\nRust small content.").unwrap();
+    {
+        let mut idx = crate::session::memory::index::MemoryIndex::open_or_create(
+            &db_path,
+            storage.clone(),
+            crate::config::MemoryIndexConfig::default(),
+            dims,
+        )
+        .unwrap();
+        idx.reindex_file(&small, "workspace").unwrap();
+    }
+    let install_embedder: Option<
+        std::sync::Arc<dyn xai_grok_memory::embedding::EmbeddingProvider>,
+    > = Some(std::sync::Arc::new(
+        xai_grok_memory::embedding::RetrievalEmbeddingProvider::new(fake.clone()),
+    ));
+    let readiness = xai_grok_memory::rebuild::ensure_vectors_ready(
+        &db_path,
+        storage.clone(),
+        crate::config::MemoryIndexConfig::default(),
+        &xai_grok_memory::retrieval::stub_spec(facade_dims, "pinned-model"),
+        install_embedder,
+        60,
+        0,
+        Some(usize::MAX),
+        tokio_util::sync::CancellationToken::new(),
+    )
+    .await;
+    assert!(
+        matches!(
+            readiness,
+            xai_grok_memory::rebuild::VectorReadiness::Ready
+                | xai_grok_memory::rebuild::VectorReadiness::ReadyMissing { .. }
+        ),
+        "facade-space fingerprint must install, got {readiness:?}"
+    );
+
+    // Add chunks without vectors for startup backfill.
+    let mut idx = crate::session::memory::index::MemoryIndex::open_or_create(
+        &db_path,
+        storage.clone(),
+        crate::config::MemoryIndexConfig::default(),
+        dims,
+    )
+    .unwrap();
+    for name in ["a.md", "b.md"] {
+        let f = tmp.path().join(name);
+        std::fs::write(&f, format!("# {name}\n\nRust {name} content.")).unwrap();
+        idx.reindex_file(&f, "workspace").unwrap();
+    }
+    let missing_before = idx.chunks_without_embeddings().unwrap().len();
+    assert!(missing_before > 0, "the new chunks must lack vectors");
+
+    // Run backfill with the named facade and conflicting chat credentials.
+    let credentials = crate::session::memory::EndpointScopedCredentials::none();
+    let embed_calls_before = fake.embed_calls();
+    let embedded = super::spawn::startup_reindex_backfill(
+        &db_path,
+        storage.clone(),
+        Some(fake.clone()),
+        embed_config,
+        crate::config::MemoryIndexConfig::default(),
+        &credentials,
+        Some("chat-secret"),
+        "http://chat.example/v1",
+        60,
+    )
+    .await;
+    assert_eq!(
+        embedded, missing_before,
+        "startup back-fill must embed every missing chunk through the facade"
+    );
+    assert!(
+        fake.embed_calls() > embed_calls_before,
+        "the facade must be the only embedding route consulted"
+    );
+    assert!(
+        idx.chunks_without_embeddings().unwrap().is_empty(),
+        "the vec gap must be closed in the facade's pinned dimensions"
+    );
+}
+
+/// An unresolved named profile leaves startup backfill FTS-only.
+#[tokio::test]
+#[allow(clippy::field_reassign_with_default)]
+async fn startup_reindex_backfill_unresolved_named_is_fts_only() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let global_dir = tmp.path().join("memory");
+    let workspace_dir = global_dir.join("test_ws");
+    std::fs::create_dir_all(&workspace_dir).unwrap();
+    let storage =
+        crate::session::memory::MemoryStorage::with_paths(global_dir, workspace_dir.clone());
+    crate::session::memory::index::init_sqlite_vec();
+    let db_path = workspace_dir.join("index.sqlite");
+    let dims = 1024usize;
+
+    // The unresolved named profile disables the legacy config.
+    let mut memory_config = crate::config::MemoryConfig::default();
+    memory_config.enabled = true;
+    memory_config.retrieval_profile = Some("never-resolves".to_string());
+    memory_config.embedding = crate::config::MemoryEmbeddingConfig {
+        model: Some("legacy-model".into()),
+        dimensions: 1024,
+        ..Default::default()
+    };
+    let (embed_config, dims_from_inputs) =
+        super::spawn::startup_reindex_embedding_inputs(true, Some(&memory_config), None);
+    assert!(embed_config.is_none(), "unresolved named ⇒ legacy disabled");
+    assert_eq!(dims_from_inputs, 1024);
+
+    // Install a prior fingerprint so backfill is otherwise available.
+    let small = tmp.path().join("small.md");
+    std::fs::write(&small, "# Small\n\nRust small content.").unwrap();
+    {
+        let mut idx = crate::session::memory::index::MemoryIndex::open_or_create(
+            &db_path,
+            storage.clone(),
+            crate::config::MemoryIndexConfig::default(),
+            dims,
+        )
+        .unwrap();
+        idx.reindex_file(&small, "workspace").unwrap();
+    }
+    let install_embedder: Option<
+        std::sync::Arc<dyn xai_grok_memory::embedding::EmbeddingProvider>,
+    > = Some(std::sync::Arc::new(
+        xai_grok_memory::embedding::RetrievalEmbeddingProvider::new(std::sync::Arc::new(
+            crate::session::memory::retrieval::FakeMemoryRetrieval::new(dims, "prior-model"),
+        )),
+    ));
+    let readiness = xai_grok_memory::rebuild::ensure_vectors_ready(
+        &db_path,
+        storage.clone(),
+        crate::config::MemoryIndexConfig::default(),
+        &xai_grok_memory::retrieval::stub_spec(dims, "prior-model"),
+        install_embedder,
+        60,
+        0,
+        Some(usize::MAX),
+        tokio_util::sync::CancellationToken::new(),
+    )
+    .await;
+    assert!(
+        matches!(
+            readiness,
+            xai_grok_memory::rebuild::VectorReadiness::Ready
+                | xai_grok_memory::rebuild::VectorReadiness::ReadyMissing { .. }
+        ),
+        "fingerprint must install, got {readiness:?}"
+    );
+
+    // New chunks so there is back-fill work that must be skipped.
+    let mut idx = crate::session::memory::index::MemoryIndex::open_or_create(
+        &db_path,
+        storage.clone(),
+        crate::config::MemoryIndexConfig::default(),
+        dims,
+    )
+    .unwrap();
+    let f = tmp.path().join("fresh.md");
+    std::fs::write(&f, "# Fresh\n\nRust fresh content.").unwrap();
+    idx.reindex_file(&f, "workspace").unwrap();
+    assert!(
+        idx.vectors_safe_to_backfill(),
+        "precondition: steady-state fingerprint present"
+    );
+    let missing = idx.chunks_without_embeddings().unwrap().len();
+    assert!(missing > 0);
+
+    // No provider is available for the unresolved profile.
+    let credentials = crate::session::memory::EndpointScopedCredentials::none();
+    let embedded = super::spawn::startup_reindex_backfill(
+        &db_path,
+        storage.clone(),
+        None,
+        None,
+        crate::config::MemoryIndexConfig::default(),
+        &credentials,
+        Some("chat-secret"),
+        "http://chat.example/v1",
+        60,
+    )
+    .await;
+    assert_eq!(
+        embedded, 0,
+        "unresolved named profile must not embed at startup"
+    );
+    assert_eq!(
+        idx.chunks_without_embeddings().unwrap().len(),
+        missing,
+        "no vector rows may be written under an unresolved named profile"
+    );
+}
+
+/// Without a named profile, startup inputs keep the legacy embedding config.
+#[test]
+#[allow(clippy::field_reassign_with_default)]
+fn startup_reindex_embedding_inputs_legacy_only_when_no_named_profile() {
+    let mut memory_config = crate::config::MemoryConfig::default();
+    memory_config.enabled = true;
+    memory_config.embedding = crate::config::MemoryEmbeddingConfig {
+        model: Some("legacy-model".into()),
+        dimensions: 768,
+        ..Default::default()
+    };
+    let (embed_config, dims) =
+        super::spawn::startup_reindex_embedding_inputs(false, Some(&memory_config), None);
+    let cfg = embed_config.expect("no named profile ⇒ legacy config stays");
+    assert_eq!(cfg.model.as_deref(), Some("legacy-model"));
+    assert_eq!(
+        dims, 768,
+        "index must open in the legacy space when no named profile"
+    );
 }

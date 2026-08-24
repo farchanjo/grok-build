@@ -2,28 +2,52 @@ use super::*;
 use serde::Deserialize;
 
 /// Handle `x.ai/models/update` — model list changed (etag-triggered refresh).
+///
+/// Updates are generation-gated: stale or equal-generation notifications are
+/// rejected so catalog content and generation stay coherent on both
+/// `app.models` and per-agent state. Each agent's current selection is
+/// preserved by exact canonical catalog id when still present; removed
+/// catalog keys fall back to the shell current (sibling keys are not
+/// auto-selected).
 pub(super) fn handle_models_update(notif: &acp::ExtNotification, app: &mut AppView) -> bool {
     if let Ok(model_state) = serde_json::from_str::<acp::SessionModelState>(notif.params.get()) {
         use crate::acp::model_state::ModelState;
         let new_models = ModelState::from(Some(model_state));
+        let generation = new_models.catalog_generation;
         tracing::info!(
             count = new_models.available.len(),
+            catalog_generation = generation,
             "models updated via x.ai/models/update"
         );
 
         let shell_fallback_current = new_models.current.clone();
+        let generation_opt = (generation > 0).then_some(generation);
 
-        // Override app-level default with the active agent's model.
-        let mut app_models = new_models.clone();
+        // App-level catalog: versioned apply (never wholesale replace — a
+        // delayed lower-generation update must not roll generation backward).
+        let app_applied = app.models.update_catalog_versioned(
+            new_models.available.clone(),
+            shell_fallback_current.clone(),
+            generation_opt,
+        );
+        if !app_applied {
+            tracing::debug!(
+                catalog_generation = generation,
+                app_generation = app.models.catalog_generation,
+                "models/update rejected as stale for app.models; skipping agent fan-out"
+            );
+            return true;
+        }
+
+        // After a successful app apply, prefer the active agent's exact
+        // canonical id when it is still in the new catalog.
         if let ActiveView::Agent(id) = app.active_view
             && let Some(agent) = app.agents.get(&id)
             && let Some(ref agent_model) = agent.session.models.current
-            && app_models.available.contains_key(agent_model)
+            && app.models.available.contains_key(agent_model)
         {
-            app_models.current = Some(agent_model.clone());
+            app.models.current = Some(agent_model.clone());
         }
-
-        app.models = app_models;
 
         for agent in app.agents.values_mut() {
             // Log when an update drops the agent's active model — this is the
@@ -36,24 +60,27 @@ pub(super) fn handle_models_update(notif: &acp::ExtNotification, app: &mut AppVi
                     current_model = %current.0,
                     fallback = ?shell_fallback_current.as_ref().map(|m| m.0.as_ref()),
                     available_count = new_models.available.len(),
-                    "models update removed this agent's current model; falling back"
+                    catalog_generation = generation,
+                    "models update removed this agent's current catalog key; falling back"
                 );
             }
-            agent
-                .session
-                .models
-                .update_catalog(new_models.available.clone(), shell_fallback_current.clone());
-            // `/model` arguments are cached in the open slash snapshot. Rebuild
-            // it from the shell-authoritative catalog so provider changes are
-            // visible without closing and reopening the picker.
-            agent.prompt.refresh_slash(&agent.session.models);
-            let catalog = agent.session.models.clone();
-            if let Some(crate::views::modal::ActiveModal::Providers { state }) =
-                agent.active_modal.as_mut()
-                && let Some(status) =
-                    state.status_mut(&crate::views::providers_modal::ProviderKind::OpenAi)
-            {
-                status.overlay_chatgpt_windows(|id| catalog.context_window_tokens_for(id));
+            let applied = agent.session.models.update_catalog_versioned(
+                new_models.available.clone(),
+                shell_fallback_current.clone(),
+                generation_opt,
+            );
+            if applied {
+                // Rebuild slash snapshot only from an applied catalog so open
+                // pickers never mix pre/post-refresh rows from a rejected gen.
+                agent.prompt.refresh_slash(&agent.session.models);
+                let catalog = agent.session.models.clone();
+                if let Some(crate::views::modal::ActiveModal::Providers { state }) =
+                    agent.active_modal.as_mut()
+                    && let Some(status) =
+                        state.status_mut(&crate::views::providers_modal::ProviderKind::OpenAi)
+                {
+                    status.overlay_chatgpt_windows(|id| catalog.context_window_tokens_for(id));
+                }
             }
         }
         // The shell emits this notification after config/model reload. Refresh
@@ -69,6 +96,129 @@ pub(super) fn handle_models_update(notif: &acp::ExtNotification, app: &mut AppVi
         tracing::warn!("Failed to parse x.ai/models/update");
         false
     }
+}
+
+/// Handle `x.ai/providers/update` — registry generation broadcast.
+///
+/// Version-tolerant: unknown optional fields are ignored. Clean `/providers`
+/// list reloads the shell snapshot; a dirty open editor enters conflict mode
+/// without clobbering local drafts.
+pub(super) fn handle_providers_update(notif: &acp::ExtNotification, app: &mut AppView) -> bool {
+    #[derive(Deserialize, Default)]
+    struct ProvidersUpdate {
+        #[serde(default)]
+        schema_version: u32,
+        #[serde(default)]
+        generation: u64,
+        #[serde(default)]
+        changed_ids: Vec<String>,
+        #[serde(default)]
+        changed_fields: Vec<String>,
+    }
+    let update: ProvidersUpdate = serde_json::from_str(notif.params.get()).unwrap_or_default();
+    tracing::info!(
+        generation = update.generation,
+        schema_version = update.schema_version,
+        changed = ?update.changed_ids,
+        "providers updated via x.ai/providers/update"
+    );
+    let mut effects = Vec::new();
+    for (agent_id, agent) in app.agents.iter_mut() {
+        let Some(crate::views::modal::ActiveModal::Providers { state }) =
+            agent.active_modal.as_mut()
+        else {
+            continue;
+        };
+        if let Some(ed) = state.editor_mut() {
+            let targets_this = update.changed_ids.is_empty()
+                || update.changed_ids.iter().any(|id| id == &ed.detail.id);
+            let gen_advanced = update.generation > ed.detail.generation.get();
+            if targets_this && gen_advanced {
+                if ed.is_dirty() {
+                    // Dirty-only conflict: keep drafts intact.
+                    ed.enter_conflict(
+                        xai_grok_shell::provider_registry::management::dto::ProviderConflictInfo {
+                            provider_id: ed.detail.id.clone(),
+                            client_generation: ed.detail.generation,
+                            live_generation:
+                                xai_grok_shell::provider_registry::management::dto::RegistryGeneration(
+                                    update.generation,
+                                ),
+                            changed_fields: update.changed_fields.clone(),
+                            guidance: "Registry generation advanced. Reload to discard local edits, or Clone into a new id.".into(),
+                        },
+                    );
+                } else {
+                    // Clean editor: auto reload detail.
+                    effects.push(crate::app::actions::Effect::ProviderOperation {
+                        agent_id: *agent_id,
+                        operation: crate::app::actions::ProviderOperation::LoadEditorDetail {
+                            provider_id: ed.detail.id.clone(),
+                        },
+                        repair: None,
+                    });
+                }
+            }
+        } else {
+            // Clean list: auto LoadListSnapshot.
+            effects.push(crate::app::actions::Effect::ProviderOperation {
+                agent_id: *agent_id,
+                operation: crate::app::actions::ProviderOperation::LoadListSnapshot,
+                repair: None,
+            });
+        }
+        if update.generation > 0 {
+            state.list_generation = update.generation;
+        }
+    }
+    app.pending_effects.extend(effects);
+    true
+}
+
+/// Handle `x.ai/retrieval/update` — retrieval graph generation broadcast (PR15).
+///
+/// Version-tolerant: unknown optional fields are ignored. Empty params tolerated.
+/// Dirty modal preserves draft and enters conflict; clean open modal enqueues
+/// `LoadSnapshot`. No raw config/content in the payload.
+pub(super) fn handle_retrieval_update(notif: &acp::ExtNotification, app: &mut AppView) -> bool {
+    #[derive(Deserialize, Default)]
+    struct RetrievalUpdate {
+        #[serde(default)]
+        schema_version: u32,
+        #[serde(default)]
+        generation: u64,
+        #[serde(default)]
+        changed_fields: Vec<String>,
+    }
+    let update: RetrievalUpdate = serde_json::from_str(notif.params.get()).unwrap_or_default();
+    tracing::info!(
+        generation = update.generation,
+        schema_version = update.schema_version,
+        changed = ?update.changed_fields,
+        "retrieval graph updated via x.ai/retrieval/update"
+    );
+    if update.generation == 0 {
+        return true;
+    }
+    let mut effects = Vec::new();
+    for (agent_id, agent) in app.agents.iter_mut() {
+        let Some(crate::views::modal::ActiveModal::RetrievalSettings { state }) =
+            agent.active_modal.as_mut()
+        else {
+            continue;
+        };
+        let live = xai_grok_shell::provider_registry::management::dto::RegistryGeneration(
+            update.generation,
+        );
+        if state.on_remote_generation(live, &update.changed_fields) {
+            effects.push(crate::app::actions::Effect::RetrievalOperation {
+                agent_id: *agent_id,
+                operation: crate::app::actions::RetrievalOperation::LoadSnapshot,
+            });
+        }
+    }
+    app.pending_effects.extend(effects);
+    true
 }
 
 /// Handle `x.ai/settings/update` — remote settings refreshed on `/new`.
@@ -589,5 +739,173 @@ mod presence_aware_dto_tests {
             Some(Some("always-approve".into())),
             "string must be Some(Some(_))"
         );
+    }
+}
+
+#[cfg(test)]
+mod providers_update_handler_tests {
+    use super::handle_providers_update;
+    use crate::app::agent::AgentId;
+    use crate::app::app_view::AppView;
+    use crate::views::modal::ActiveModal;
+    use crate::views::providers_modal::{ProviderModalMode, ProviderModalState};
+    use agent_client_protocol as acp;
+    use xai_grok_shell::provider_registry::management::dto::{
+        CredentialPresence, ProviderDetailDto, RegistryGeneration,
+    };
+
+    fn minimal_detail(id: &str, generation: u64) -> ProviderDetailDto {
+        ProviderDetailDto {
+            id: id.into(),
+            display_name: Some("Lab".into()),
+            kind: "openai_compatible".into(),
+            enabled: true,
+            is_built_in: false,
+            is_configured: true,
+            is_editable: true,
+            base_url: Some("http://127.0.0.1:9/v1".into()),
+            admin_base_url: None,
+            default_backend: None,
+            auth_scheme: None,
+            env_key: None,
+            admin_env_key: None,
+            catalog_enabled: false,
+            capability_mode: None,
+            catalog_ttl_secs: None,
+            request_timeout_secs: None,
+            organization: None,
+            project: None,
+            api_surface: None,
+            credential_route: None,
+            api_backend: None,
+            auth_provider: None,
+            extra_headers: Default::default(),
+            capabilities: Default::default(),
+            openrouter_fallback_models: vec![],
+            openrouter_data_collection: None,
+            openrouter_require_parameters: None,
+            openrouter_allow_fallbacks: None,
+            openrouter_zdr: None,
+            openrouter_order: vec![],
+            openrouter_only: vec![],
+            openrouter_ignore: vec![],
+            openrouter_quantizations: vec![],
+            openrouter_sort: None,
+            openrouter_pacing: false,
+            openrouter_plugin_ids: vec![],
+            credentials: CredentialPresence::default(),
+            generation: RegistryGeneration(generation),
+            warnings: vec![],
+            unsupported_edit_reason: None,
+            incarnation: None,
+            tombstone_blocks_readd: false,
+        }
+    }
+
+    fn notif(generation: u64, changed_ids: &[&str]) -> acp::ExtNotification {
+        let params = serde_json::json!({
+            "schema_version": 1,
+            "generation": generation,
+            "changed_ids": changed_ids,
+            "changed_fields": ["enabled"],
+        });
+        let raw = serde_json::value::to_raw_value(&params).unwrap();
+        acp::ExtNotification::new("x.ai/providers/update", raw.into())
+    }
+
+    #[test]
+    fn dirty_editor_conflicts_clean_list_auto_loads() {
+        use crate::acp::model_state::ModelState;
+        use crate::app::agent::{AgentSession, AgentState};
+        use crate::app::agent_view::AgentView;
+        use crate::scrollback::state::ScrollbackState;
+        use std::path::PathBuf;
+
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = AppView::new(tx.clone(), ModelState::default(), Vec::new());
+        let agent_id = AgentId(0);
+        let session = AgentSession {
+            id: agent_id,
+            acp_tx: tx,
+            session_id: Some(acp::SessionId::new("sess-providers")),
+            models: ModelState::default(),
+            state: AgentState::Idle,
+            tracker: crate::acp::tracker::AcpUpdateTracker::new(),
+            cwd: PathBuf::from("/tmp"),
+            is_worktree: false,
+            forked_from: None,
+            pending_prompts: std::collections::VecDeque::new(),
+            next_queue_id: 0,
+            yolo_mode: false,
+            auto_mode: false,
+            prompt_history: Vec::new(),
+            prompt_history_loading: false,
+            loading_replay: false,
+            restore_degree: None,
+            rate_limited: false,
+            model_incompatible: false,
+            credit_limit_blocked: false,
+            free_usage_blocked: false,
+            available_commands: Vec::new(),
+            available_commands_generation: 0,
+            available_tools: None,
+            model_switch_pending: false,
+            user_model_preference: None,
+            deferred_model_switch: None,
+            bg_tasks: std::collections::BTreeMap::new(),
+            bg_tool_call_to_task: std::collections::HashMap::new(),
+            scheduled_tasks: std::collections::HashMap::new(),
+            in_flight_prompt: None,
+            compact_held_prompt: None,
+            current_prompt_id: None,
+            created_via_new: false,
+        };
+        let mut agent = AgentView::new(session, ScrollbackState::new());
+        agent.active_modal = Some(ActiveModal::Providers {
+            state: Box::new(ProviderModalState::new()),
+        });
+        app.agents.insert(agent_id, agent);
+        crate::app::dispatch::switch_to_agent(
+            &mut app,
+            agent_id,
+            crate::app::dispatch::SwitchCause::New,
+        );
+        app.pending_effects.clear();
+        assert!(handle_providers_update(&notif(5, &["lab"]), &mut app));
+        assert!(
+            app.pending_effects.iter().any(|e| matches!(
+                e,
+                crate::app::actions::Effect::ProviderOperation {
+                    operation: crate::app::actions::ProviderOperation::LoadListSnapshot,
+                    ..
+                }
+            )),
+            "clean list must auto LoadListSnapshot"
+        );
+
+        // Dirty editor → conflict, drafts preserved.
+        {
+            let agent = app.agents.get_mut(&agent_id).unwrap();
+            let mut state = ProviderModalState::new();
+            state.open_editor(minimal_detail("lab", 1));
+            if let Some(ed) = state.editor_mut() {
+                ed.clone_id_draft = "dirty-draft".into();
+                assert!(ed.is_dirty());
+            }
+            agent.active_modal = Some(ActiveModal::Providers {
+                state: Box::new(state),
+            });
+        }
+        app.pending_effects.clear();
+        assert!(handle_providers_update(&notif(9, &["lab"]), &mut app));
+        let agent = app.agents.get(&agent_id).unwrap();
+        let ActiveModal::Providers { state } = agent.active_modal.as_ref().unwrap() else {
+            panic!("providers modal");
+        };
+        let ProviderModalMode::Editor(ed) = &state.mode else {
+            panic!("editor mode");
+        };
+        assert!(ed.conflict.is_some(), "dirty editor must enter conflict");
+        assert_eq!(ed.clone_id_draft, "dirty-draft", "drafts must stay intact");
     }
 }

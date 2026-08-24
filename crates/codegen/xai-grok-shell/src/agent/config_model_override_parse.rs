@@ -69,6 +69,43 @@ pub enum WarningTarget {
         #[serde(skip_serializing_if = "Option::is_none")]
         field: Option<String>,
     },
+    /// The `[embedding_models]` section as a whole.
+    EmbeddingModelsSection,
+    /// An `[embedding_models.<id>]` entry.
+    EmbeddingModel {
+        id: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        field: Option<String>,
+    },
+    /// The `[reranker_models]` section as a whole.
+    RerankerModelsSection,
+    /// An `[reranker_models.<id>]` entry.
+    RerankerModel {
+        id: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        field: Option<String>,
+    },
+    /// The `[retrieval_profiles]` section as a whole.
+    RetrievalProfilesSection,
+    /// A `[retrieval_profiles.<id>]` entry.
+    RetrievalProfile {
+        id: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        field: Option<String>,
+    },
+    /// The `[prime]` section as a whole.
+    PrimeSection,
+    /// A nested prime consumer (`skills` / `agents`).
+    Prime {
+        consumer: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        field: Option<String>,
+    },
+    /// Memory retrieval-profile selection (`[memory] retrieval_profile`).
+    MemoryRetrieval {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        field: Option<String>,
+    },
 }
 
 impl WarningTarget {
@@ -81,6 +118,15 @@ impl WarningTarget {
             Self::AuthProvider { name, .. } => format!("auth_provider.\"{name}\""),
             Self::ModelProviderSection => "model_providers".to_owned(),
             Self::ModelProvider { id, .. } => format!("model_providers.\"{id}\""),
+            Self::EmbeddingModelsSection => "embedding_models".to_owned(),
+            Self::EmbeddingModel { id, .. } => format!("embedding_models.\"{id}\""),
+            Self::RerankerModelsSection => "reranker_models".to_owned(),
+            Self::RerankerModel { id, .. } => format!("reranker_models.\"{id}\""),
+            Self::RetrievalProfilesSection => "retrieval_profiles".to_owned(),
+            Self::RetrievalProfile { id, .. } => format!("retrieval_profiles.\"{id}\""),
+            Self::PrimeSection => "prime".to_owned(),
+            Self::Prime { consumer, .. } => format!("prime.{consumer}"),
+            Self::MemoryRetrieval { .. } => "memory".to_owned(),
         }
     }
 
@@ -88,8 +134,19 @@ impl WarningTarget {
         match self {
             Self::Model { field, .. }
             | Self::AuthProvider { field, .. }
-            | Self::ModelProvider { field, .. } => field.as_deref(),
-            Self::ModelSection | Self::AuthProviderSection | Self::ModelProviderSection => None,
+            | Self::ModelProvider { field, .. }
+            | Self::EmbeddingModel { field, .. }
+            | Self::RerankerModel { field, .. }
+            | Self::RetrievalProfile { field, .. }
+            | Self::Prime { field, .. }
+            | Self::MemoryRetrieval { field } => field.as_deref(),
+            Self::ModelSection
+            | Self::AuthProviderSection
+            | Self::ModelProviderSection
+            | Self::EmbeddingModelsSection
+            | Self::RerankerModelsSection
+            | Self::RetrievalProfilesSection
+            | Self::PrimeSection => None,
         }
     }
 }
@@ -174,6 +231,116 @@ impl ConfigWarning {
     pub(crate) fn model_provider_section(kind: ConfigWarningKind, reason: String) -> Self {
         Self {
             target: WarningTarget::ModelProviderSection,
+            kind,
+            reason,
+        }
+    }
+
+    pub(crate) fn embedding_model(
+        id: &str,
+        field: Option<&str>,
+        kind: ConfigWarningKind,
+        reason: String,
+    ) -> Self {
+        Self {
+            target: WarningTarget::EmbeddingModel {
+                id: id.to_owned(),
+                field: field.map(str::to_owned),
+            },
+            kind,
+            reason,
+        }
+    }
+
+    pub(crate) fn embedding_models_section(kind: ConfigWarningKind, reason: String) -> Self {
+        Self {
+            target: WarningTarget::EmbeddingModelsSection,
+            kind,
+            reason,
+        }
+    }
+
+    pub(crate) fn reranker_model(
+        id: &str,
+        field: Option<&str>,
+        kind: ConfigWarningKind,
+        reason: String,
+    ) -> Self {
+        Self {
+            target: WarningTarget::RerankerModel {
+                id: id.to_owned(),
+                field: field.map(str::to_owned),
+            },
+            kind,
+            reason,
+        }
+    }
+
+    pub(crate) fn reranker_models_section(kind: ConfigWarningKind, reason: String) -> Self {
+        Self {
+            target: WarningTarget::RerankerModelsSection,
+            kind,
+            reason,
+        }
+    }
+
+    pub(crate) fn retrieval_profile(
+        id: &str,
+        field: Option<&str>,
+        kind: ConfigWarningKind,
+        reason: String,
+    ) -> Self {
+        Self {
+            target: WarningTarget::RetrievalProfile {
+                id: id.to_owned(),
+                field: field.map(str::to_owned),
+            },
+            kind,
+            reason,
+        }
+    }
+
+    pub(crate) fn retrieval_profiles_section(kind: ConfigWarningKind, reason: String) -> Self {
+        Self {
+            target: WarningTarget::RetrievalProfilesSection,
+            kind,
+            reason,
+        }
+    }
+
+    pub(crate) fn prime(
+        consumer: &str,
+        field: Option<&str>,
+        kind: ConfigWarningKind,
+        reason: String,
+    ) -> Self {
+        Self {
+            target: WarningTarget::Prime {
+                consumer: consumer.to_owned(),
+                field: field.map(str::to_owned),
+            },
+            kind,
+            reason,
+        }
+    }
+
+    pub(crate) fn prime_section(kind: ConfigWarningKind, reason: String) -> Self {
+        Self {
+            target: WarningTarget::PrimeSection,
+            kind,
+            reason,
+        }
+    }
+
+    pub(crate) fn memory_retrieval(
+        field: Option<&str>,
+        kind: ConfigWarningKind,
+        reason: String,
+    ) -> Self {
+        Self {
+            target: WarningTarget::MemoryRetrieval {
+                field: field.map(str::to_owned),
+            },
             kind,
             reason,
         }

@@ -296,7 +296,7 @@ impl SessionActor {
                 let tool_overrides_update = front.tool_overrides_update.take();
 
                 self.apply_tool_overrides_update(tool_overrides_update);
-                if matches!(origin, super::PromptOrigin::User) {
+                if origin.prime_eligible() {
                     if let Some(gate) = &self.tool_context.task_wake_suppressed {
                         gate.set(false);
                     }
@@ -335,6 +335,7 @@ impl SessionActor {
                 state.running_task = Some(AgentTask::new_prompt(
                     self.clone(),
                     prompt_id,
+                    origin,
                     prompt_blocks,
                     prompt_mode,
                     trace_gcs_config,

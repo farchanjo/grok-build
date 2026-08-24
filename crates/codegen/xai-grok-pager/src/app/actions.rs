@@ -633,6 +633,10 @@ pub enum Action {
     OpenSettings,
     /// Open the provider manager (`/providers`, command palette).
     OpenProviders,
+    /// Open the retrieval graph settings (`/retrieval-settings`).
+    OpenRetrievalSettings,
+    /// Command from the retrieval settings modal.
+    RetrievalCommand(crate::views::retrieval_settings_modal::RetrievalCommand),
     /// Credential-free request emitted by the provider modal. The provider
     /// bridge reads a submitted key from the ephemeral modal state instead of
     /// carrying it through this debug-printable action.
@@ -1442,6 +1446,117 @@ pub enum ProviderOperation {
     Disconnect(crate::views::providers_modal::ProviderKind),
     LoginCodex,
     LogoutCodex,
+    /// Shell-authoritative list snapshot (generation-tagged, secret-free).
+    LoadListSnapshot,
+    /// Load typed editor detail for one provider id.
+    LoadEditorDetail {
+        provider_id: String,
+    },
+    /// Add configured instance (metadata only).
+    AddConfigured {
+        id: String,
+        kind: String,
+        base_url: String,
+        display_name: Option<String>,
+        expected_generation: u64,
+        operation_id: Option<String>,
+    },
+    /// Save typed patch + optional credential slots (secrets redacted).
+    SaveEditor {
+        id: String,
+        expected_generation: u64,
+        patch: xai_grok_shell::provider_registry::management::dto::ProviderSavePatch,
+        credential_update: xai_grok_shell::provider_registry::management::dto::CredentialSlotUpdate,
+        application_key: Option<ProviderApiKey>,
+        admin_key: Option<ProviderApiKey>,
+        operation_id: Option<String>,
+    },
+    Enable {
+        provider_id: String,
+        expected_generation: u64,
+        operation_id: Option<String>,
+    },
+    Disable {
+        provider_id: String,
+        expected_generation: u64,
+        operation_id: Option<String>,
+    },
+    CloneProvider {
+        source_id: String,
+        new_id: String,
+        expected_generation: u64,
+        operation_id: Option<String>,
+    },
+    RefreshCatalogId {
+        provider_id: String,
+    },
+    RefreshCapabilitiesId {
+        provider_id: String,
+    },
+    TestId {
+        provider_id: String,
+    },
+    CreditsId {
+        provider_id: String,
+    },
+    LoadReferences {
+        provider_id: String,
+    },
+    ForceRemove {
+        provider_id: String,
+        typed_id: String,
+        expected_generation: u64,
+        expected_incarnation: Option<String>,
+        clear_app: bool,
+        clear_admin: bool,
+        clear_oauth: bool,
+        clear_cache: bool,
+        operation_id: Option<String>,
+    },
+}
+
+/// Shell-authoritative retrieval graph operations (PR15; secret-free).
+#[derive(Debug)]
+pub enum RetrievalOperation {
+    LoadSnapshot,
+    Preview {
+        kind: String,
+        id: String,
+        operation_id: Option<String>,
+    },
+    /// Opaque command routed through the management service.
+    Command(crate::views::retrieval_settings_modal::RetrievalCommand),
+}
+
+/// Secret-free retrieval management result for the reducer.
+#[derive(Debug, Clone)]
+pub enum RetrievalManagementResult {
+    Snapshot(xai_grok_shell::retrieval_config::dto::RetrievalGraphSnapshot),
+    Mutation(xai_grok_shell::retrieval_config::dto::RetrievalMutationResult),
+    Preview(xai_grok_shell::retrieval_config::dto::RetrievalPreviewResult),
+    Error(String),
+}
+
+/// Typed origin tag a client may attach to a structured prompt it sends over
+/// ACP (additive `_meta.promptOrigin`). Tag-only and small: today it exists so
+/// the pager's `/loop` scheduler can stamp `scheduler_fired` so the shell
+/// never primes a cron turn. Absent tag on the ACP prompt path means a real
+/// user prompt; unknown tags fail closed server-side.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PromptOriginTag {
+    /// A scheduled `/loop` cron turn fired by the pager scheduler.
+    SchedulerFired,
+}
+
+impl PromptOriginTag {
+    /// The additive `_meta.promptOrigin` wire tag (snake_case).
+    pub fn as_meta_tag(&self) -> &'static str {
+        match self {
+            PromptOriginTag::SchedulerFired => {
+                xai_grok_shell::session::PROMPT_ORIGIN_SCHEDULER_FIRED
+            }
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -1484,6 +1599,11 @@ pub enum Effect {
         agent_id: AgentId,
         model_id: String,
         percent: Option<u8>,
+    },
+    /// Shell-authoritative retrieval graph management (PR15; secret-free).
+    RetrievalOperation {
+        agent_id: AgentId,
+        operation: RetrievalOperation,
     },
     /// Create a git worktree and then create or load an ACP session in it.
     /// When `load_session_id` is `Some`, loads that session in the new worktree
@@ -1716,6 +1836,10 @@ pub enum Effect {
         blocks: Vec<acp::ContentBlock>,
         /// See [`Effect::SendPrompt::prompt_id`].
         prompt_id: String,
+        /// Optional typed origin tag stamped into `_meta.promptOrigin` (e.g.
+        /// `scheduler_fired` for `/loop` cron turns). `None` = a real user
+        /// prompt on the ACP input path.
+        prompt_origin: Option<PromptOriginTag>,
     },
     /// Cancel-and-send: `session/prompt` stamped with `_meta.sendNow`, so the
     /// shell cancels the running turn and runs this prompt next (background
@@ -1727,6 +1851,8 @@ pub enum Effect {
         blocks: Vec<acp::ContentBlock>,
         /// See [`Effect::SendPrompt::prompt_id`].
         prompt_id: String,
+        /// See [`Effect::SendPromptBlocks::prompt_origin`].
+        prompt_origin: Option<PromptOriginTag>,
     },
     /// Toggle plan mode — fire-and-forget signal to the shell.
     TogglePlanMode { session_id: acp::SessionId },
@@ -2506,6 +2632,17 @@ pub enum TaskResult {
         /// Echo of the repair scope attached when the op started (`None` for
         /// status refresh / unbound connect).
         repair: Option<crate::app::agent::CredentialRepairScope>,
+        /// Operation-bound write receipt from the store/connect that committed
+        /// the credential (`None` when the op did not write a durable binding
+        /// generation — resume fails closed).
+        credential_write_receipt: Option<crate::app::agent::CredentialWriteReceipt>,
+        /// Optional shell management result payload (secret-free).
+        management: Option<ProviderManagementResult>,
+    },
+    /// Retrieval graph management result (secret-free).
+    RetrievalOperationComplete {
+        agent_id: AgentId,
+        result: RetrievalManagementResult,
     },
     /// Changelog fetched from CDN (both formats).
     ChangelogFetched {
@@ -2532,6 +2669,10 @@ pub enum TaskResult {
         meta: Option<serde_json::Value>,
         /// Echo of the repair scope from [`Effect::Authenticate`], if any.
         repair: Option<crate::app::agent::CredentialRepairScope>,
+        /// Operation-bound write receipt when authenticate committed a durable
+        /// binding generation. xAI session OAuth has no generation contract yet
+        /// and always yields `None` (fail closed for automatic resume).
+        credential_write_receipt: Option<crate::app::agent::CredentialWriteReceipt>,
     },
     /// Authentication failed.
     AuthFailed {
@@ -2976,6 +3117,20 @@ pub enum TaskResult {
         shell: crate::diagnostics::ShellKind,
         result: Result<crate::diagnostics::FixOutcome, String>,
     },
+}
+
+/// Secret-free management result applied by the reducer after async work.
+#[derive(Debug, Clone)]
+pub enum ProviderManagementResult {
+    List(xai_grok_shell::provider_registry::management::dto::ProviderListSnapshot),
+    Detail(xai_grok_shell::provider_registry::management::dto::ProviderDetailDto),
+    Mutation(xai_grok_shell::provider_registry::management::dto::ProviderMutationResult),
+    Status(xai_grok_shell::provider_registry::management::dto::ProviderStatusSnapshot),
+    Catalog(xai_grok_shell::provider_registry::management::dto::CatalogStatusSnapshot),
+    Capabilities(xai_grok_shell::provider_registry::management::dto::CapabilityStatusSnapshot),
+    Credits(xai_grok_shell::provider_registry::management::dto::ProviderCreditsSnapshot),
+    References(xai_grok_shell::provider_registry::management::dto::ReferenceImpactSnapshot),
+    Error(String),
 }
 #[cfg(test)]
 mod tests {

@@ -4,6 +4,50 @@ use serde::{Deserialize, Serialize};
 /// follow-ups were combined (length ≥ 2). Empty / absent = not combined.
 pub const COMBINED_DISPLAY_TEXTS_META: &str = "combinedDisplayTexts";
 
+/// Typed wire tag describing who originated a queue row / running turn.
+///
+/// Additive and default-compatible: a legacy wire entry without an `origin`
+/// deserializes to `None`, which consumers map fail-closed to an
+/// "unknown / unclassified" origin — never to a real `User` turn. Tag-only
+/// (no payloads): completion/task ids ride the prompt-id string. New variants
+/// are additive; the JSON form uses snake_case.
+///
+/// **Display metadata only.** The shell writes this tag for clients to render
+/// (e.g. distinguish a cron row); it is NEVER read back into lifecycle or
+/// prime decisions. Cross-boundary origins that gate security/lifecycle are
+/// carried by the typed in-memory value or the ACP prompt-request origin meta
+/// tag instead.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum QueueOrigin {
+    /// A real user-initiated prompt.
+    User,
+    /// A stranded user interjection promoted to its own turn (side-channel).
+    Interjection,
+    /// Auto-wake from a completed background task.
+    TaskCompleted,
+    /// Auto-wake from a completed subagent.
+    SubagentCompleted,
+    /// Auto-wake from a completed workflow.
+    WorkflowCompleted,
+    /// Idle-gated notification drain.
+    NotificationDrain,
+    /// Orchestrator summary turn.
+    GoalSummary,
+    /// Scheduled task (`/loop`) prompt.
+    SchedulerFired,
+    /// Injected plan-resume follow-up turn.
+    PlanResume,
+    /// Legacy / wire entry without an explicit origin. Fail-closed: never a
+    /// real user turn. Tag-only `Unknown` also absorbs any future/unknown tag
+    /// (`#[serde(other)]`), so an old binary that meets an arbitrary new tag
+    /// still deserializes to a safe, never-priming value instead of erroring.
+    /// MUST remain the last variant (serde `other` requires a trailing catch-all).
+    #[default]
+    #[serde(other)]
+    Unknown,
+}
+
 /// Per-item queue metadata the session actor attaches to user-originated inputs; synthetic
 /// inputs (auto-wake, nudges) carry none and never appear in the visible queue. Held in
 /// actor state, never serialized itself.
@@ -45,6 +89,9 @@ pub struct QueueEntryWire {
     /// See [`QueueEntryMeta::combined_texts`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub combined_texts: Option<Vec<String>>,
+    /// Typed display origin. Omitted when `None` for the legacy wire shape.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin: Option<QueueOrigin>,
     /// 0-based position among queued, not-yet-running prompts.
     #[serde(default)]
     pub position: usize,
@@ -93,6 +140,7 @@ mod tests {
                     text: "fix the bug".into(),
                     position: 0,
                     combined_texts: None,
+                    origin: None,
                 },
                 QueueEntryWire {
                     id: "p2".into(),
@@ -103,6 +151,7 @@ mod tests {
                     text: "ls -la".into(),
                     position: 1,
                     combined_texts: None,
+                    origin: None,
                 },
             ],
             running_prompt_id: Some("p0".into()),
@@ -135,6 +184,7 @@ mod tests {
                 text: "hi".into(),
                 position: 0,
                 combined_texts: None,
+                origin: None,
             }],
             running_prompt_id: Some("p0".into()),
 
@@ -198,6 +248,78 @@ mod tests {
         assert_eq!(d.session_id, "");
         assert!(d.entries.is_empty());
         assert!(d.running_prompt_id.is_none());
+    }
+
+    #[test]
+    fn queue_entry_origin_round_trips_and_absent_means_none() {
+        // Additive wire: a typed origin round-trips.
+        let entry = QueueEntryWire {
+            id: "p1".into(),
+            version: 0,
+            owner: None,
+            last_editor: None,
+            kind: "prompt".into(),
+            text: "hi".into(),
+            position: 0,
+            combined_texts: None,
+            origin: Some(QueueOrigin::TaskCompleted),
+        };
+        let json = serde_json::to_value(&entry).unwrap();
+        assert_eq!(json["origin"], "task_completed");
+        let round: QueueEntryWire = serde_json::from_value(json).unwrap();
+        assert_eq!(round.origin, Some(QueueOrigin::TaskCompleted));
+
+        // Legacy wire without `origin` deserializes to `None` (fail-closed
+        // unknown on the consumer side, never a real `User` turn).
+        let legacy = serde_json::json!({
+            "id": "p1", "version": 0, "kind": "prompt", "text": "hi", "position": 0
+        });
+        let parsed: QueueEntryWire = serde_json::from_value(legacy).unwrap();
+        assert_eq!(parsed.origin, None);
+
+        // Omitted when None (keeps the golden wire shape for legacy clients).
+        let entry_none = QueueEntryWire {
+            origin: None,
+            ..entry
+        };
+        let json_none = serde_json::to_value(&entry_none).unwrap();
+        assert!(json_none.get("origin").is_none());
+    }
+
+    #[test]
+    fn queue_origin_json_unknown_default() {
+        assert_eq!(QueueOrigin::default(), QueueOrigin::Unknown);
+        let v: QueueOrigin = serde_json::from_value(serde_json::json!("unknown")).unwrap();
+        assert_eq!(v, QueueOrigin::Unknown);
+    }
+
+    #[test]
+    fn queue_origin_unknown_tag_absorbs_arbitrary_future_tag() {
+        // An old binary meeting an unknown future tag must not error: it
+        // degrades to the safe, never-priming `Unknown` via `#[serde(other)]`.
+        for tag in [
+            "subagent_assignment",
+            "agent_prime_assignment",
+            "future_tag",
+            "bogus",
+        ] {
+            let v: QueueOrigin = serde_json::from_value(serde_json::json!(tag)).unwrap();
+            assert_eq!(
+                v,
+                QueueOrigin::Unknown,
+                "unknown tag {tag} must degrade to Unknown"
+            );
+            assert_ne!(v, QueueOrigin::User);
+        }
+        // Recognized tags still resolve (exact wire names preserved).
+        assert_eq!(
+            serde_json::from_value::<QueueOrigin>(serde_json::json!("scheduler_fired")).unwrap(),
+            QueueOrigin::SchedulerFired
+        );
+        assert_eq!(
+            serde_json::from_value::<QueueOrigin>(serde_json::json!("user")).unwrap(),
+            QueueOrigin::User
+        );
     }
 
     #[test]

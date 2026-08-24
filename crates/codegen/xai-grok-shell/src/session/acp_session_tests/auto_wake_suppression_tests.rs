@@ -31,6 +31,14 @@ fn notification_drain_input(prompt_id: &str) -> InputItem {
 fn goal_summary_input(prompt_id: &str) -> InputItem {
     input_with_origin(prompt_id, crate::session::PromptOrigin::GoalSummary)
 }
+fn workflow_completed_input(completion_id: &str) -> InputItem {
+    input_with_origin(
+        &format!("workflow-completed-{completion_id}"),
+        crate::session::PromptOrigin::WorkflowCompleted {
+            completion_id: completion_id.to_string(),
+        },
+    )
+}
 fn user_input(prompt_id: &str) -> InputItem {
     input_with_origin(prompt_id, crate::session::PromptOrigin::User)
 }
@@ -399,6 +407,7 @@ async fn task_completion_wake_is_admitted_without_cancel_barrier() {
                 .queue_input(
                     vec![],
                     "task-completed-bg-normal".to_string(),
+                    crate::session::PromptOrigin::TaskCompleted { task_id: "bg-normal".into() },
                     PromptMode::Agent,
                     None,
                     None,
@@ -443,6 +452,7 @@ async fn task_completion_wake_is_admitted_without_cancel_barrier() {
                 actor_for_turn
                     .handle_prompt(
                         "task-completed-bg-normal",
+                        crate::session::PromptOrigin::TaskCompleted { task_id: "bg-normal".into() },
                         vec![acp::ContentBlock::Text(acp::TextContent::new("done"))],
                         PromptMode::Agent,
                         None,
@@ -550,6 +560,7 @@ async fn genuine_user_start_consumes_deferred_completions_without_notification_t
                 actor_for_turn
                     .handle_prompt(
                         "user-deferred-completions",
+                        crate::session::PromptOrigin::User,
                         vec![acp::ContentBlock::Text(acp::TextContent::new("continue"))],
                         PromptMode::Agent,
                         None,
@@ -641,6 +652,7 @@ async fn accepted_reservation_survives_user_start() {
                 actor_for_turn
                     .handle_prompt(
                         "user-accepted-race",
+                        crate::session::PromptOrigin::User,
                         vec![acp::ContentBlock::Text(acp::TextContent::new("continue"))],
                         PromptMode::Agent,
                         None,
@@ -850,6 +862,7 @@ async fn user_prompt_preempt_keeps_running_synthetic_slot() {
                 .queue_input(
                     vec![],
                     "user-clarify".to_string(),
+                    crate::session::PromptOrigin::User,
                     PromptMode::Agent,
                     None,
                     None,
@@ -1224,6 +1237,24 @@ async fn shutdown_drops_pending_synthetic_inputs() {
                     .pending_inputs
                     .push_back(goal_summary_input("goal-summary-019e2d3e"));
                 state
+                    .pending_inputs
+                    .push_back(workflow_completed_input("workflow-1"));
+                state.pending_inputs.push_back(input_with_origin(
+                    "scheduler-fired-1",
+                    crate::session::PromptOrigin::SchedulerFired,
+                ));
+                state.pending_inputs.push_back(input_with_origin(
+                    "plan-resume-1",
+                    crate::session::PromptOrigin::PlanResume,
+                ));
+                state.pending_inputs.push_back(input_with_origin(
+                    "interject-fallback-1",
+                    crate::session::PromptOrigin::Interjection,
+                ));
+                state
+                    .pending_inputs
+                    .push_back(input_with_origin("unknown-1", crate::session::PromptOrigin::Unknown));
+                state
                     .pending_notifications
                     .push(bash_completed_notification("bg-2"));
                 state
@@ -1241,8 +1272,8 @@ async fn shutdown_drops_pending_synthetic_inputs() {
                 remaining_ids,
                 vec!["user-1", "user-2"],
                 "real user inputs must be preserved; every synthetic origin \
-                     (TaskCompleted, SubagentCompleted, NotificationDrain, GoalSummary) \
-                     must be dropped"
+                     (TaskCompleted, SubagentCompleted, WorkflowCompleted, NotificationDrain, \
+                     GoalSummary, SchedulerFired, PlanResume, Interjection, Unknown) must be dropped"
             );
             assert!(
                 state.pending_notifications.is_empty(),

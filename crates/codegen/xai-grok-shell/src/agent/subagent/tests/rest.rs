@@ -353,6 +353,7 @@ fn resumable_source_returns_info_for_completed_subagent() {
                 parent_session_id: "parent-1".into(),
                 parent_prompt_id: Some("prompt-1".into()),
                 owner: SubagentOwner::Task,
+                assigned_meta_owner: None,
                 child_session_id: "child-resume".into(),
                 description: "resumable task".into(),
                 subagent_type: "general-purpose".into(),
@@ -617,6 +618,9 @@ fn update_subagent_meta_snapshot_ref_persists_to_disk() {
     assert!(
             update_subagent_meta_snapshot_ref(
                 dir.path(),
+                dir.path(),
+                "sa-write",
+                None,
                 "refs/grok/subagents/sa-write",
                 "completed"
             ),
@@ -641,6 +645,9 @@ fn update_subagent_meta_snapshot_ref_reports_failure_when_meta_missing() {
     let dir = tempfile::TempDir::new().unwrap();
     assert!(!update_subagent_meta_snapshot_ref(
             dir.path(),
+            dir.path(),
+            "sa-missing",
+            None,
             "refs/grok/subagents/sa-missing",
             "completed"
         ));
@@ -656,6 +663,9 @@ fn snapshot_ref_write_promotes_nonterminal_status_to_terminal() {
     assert!(write_subagent_meta(dir.path(), &meta));
     assert!(update_subagent_meta_snapshot_ref(
             dir.path(),
+            dir.path(),
+            "sa-promote",
+            None,
             "refs/grok/subagents/x",
             "completed"
         ));
@@ -855,6 +865,9 @@ async fn completion_snapshot_sequence_persists_ref_then_removes_worktree() {
         .unwrap();
     assert!(update_subagent_meta_snapshot_ref(
             &meta_dir,
+            &meta_dir,
+            "glue-1",
+            None,
             &snapshot_ref,
             "completed"
         ));
@@ -968,6 +981,9 @@ async fn disposal_completes_before_subagent_is_observable() {
         .unwrap();
     assert!(update_subagent_meta_snapshot_ref(
             &meta_dir,
+            &meta_dir,
+            "order-1",
+            None,
             &snapshot_ref,
             "completed"
         ));
@@ -1519,6 +1535,7 @@ fn resumable_source_rejects_cross_session_lookup() {
                 parent_session_id: "session-A".into(),
                 parent_prompt_id: None,
                 owner: SubagentOwner::Task,
+                assigned_meta_owner: None,
                 child_session_id: "child-other".into(),
                 description: "other task".into(),
                 subagent_type: "explore".into(),
@@ -1871,6 +1888,7 @@ fn reconcile_orphan_skips_pending_ids_in_live_registry() {
             surface_completion: true,
             color: None,
             cancel_token: CancellationToken::new(),
+            assigned_meta_owner: None,
         });
     reconcile_orphaned_subagents(
         &[],
@@ -2423,6 +2441,7 @@ fn completed_subagent_propagates_resumed_from() {
                 parent_session_id: "parent".into(),
                 parent_prompt_id: Some("prompt-1".into()),
                 owner: SubagentOwner::Task,
+                assigned_meta_owner: None,
                 child_session_id: "child-prov".into(),
                 description: "provenance test".into(),
                 subagent_type: "general-purpose".into(),
@@ -2567,6 +2586,7 @@ async fn outstanding_for_prompt_includes_pending_and_active() {
             surface_completion: true,
             color: None,
             cancel_token: CancellationToken::new(),
+            assigned_meta_owner: None,
         });
     let mut tracker = dummy_tracker("sub-a1", "session-1", "plan", "active for X");
     tracker.parent_prompt_id = Some("prompt-X".to_string());
@@ -2682,6 +2702,7 @@ fn outstanding_for_prompt_returns_sorted_ids() {
             surface_completion: true,
             color: None,
             cancel_token: CancellationToken::new(),
+            assigned_meta_owner: None,
         });
     coordinator
         .insert_pending(PendingSubagent {
@@ -2697,6 +2718,7 @@ fn outstanding_for_prompt_returns_sorted_ids() {
             surface_completion: true,
             color: None,
             cancel_token: CancellationToken::new(),
+            assigned_meta_owner: None,
         });
     let ids = coordinator.outstanding_for_prompt("p");
     assert_eq!(ids, vec!["aaa", "zzz"]);

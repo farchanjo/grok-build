@@ -29,6 +29,7 @@ mod tests {
                 text: "hello".to_string(),
                 position: 0,
                 combined_texts: None,
+                origin: None,
             }],
             running_prompt_id: None,
 
@@ -74,6 +75,7 @@ mod tests {
             text: "hello".to_string(),
             position: 0,
             combined_texts: None,
+            origin: None,
         };
         let json = serde_json::to_value(&entry).unwrap();
         assert_eq!(json["lastEditor"], "grok-vscode");

@@ -230,22 +230,86 @@ impl SubagentCoordinator {
     /// before any blocking work like worktree creation, so that
     /// `get_task_output` can report the subagent as initializing instead
     /// of "not found".
-    pub fn insert_pending(&mut self, entry: PendingSubagent) {
+    pub fn insert_pending(&mut self, entry: PendingSubagent) -> bool {
+        if self
+            .pending
+            .get(&entry.subagent_id)
+            .is_some_and(|current| current.assigned_meta_owner.is_some())
+            || self
+                .active
+                .get(&entry.subagent_id)
+                .is_some_and(|current| current.assigned_meta_owner.is_some())
+            || self
+                .completed
+                .get(&entry.subagent_id)
+                .is_some_and(|current| current.assigned_meta_owner.is_some())
+        {
+            return false;
+        }
         self.pending.insert(entry.subagent_id.clone(), entry);
         self.sync_running_gauge();
+        true
+    }
+    pub(crate) fn install_pending_assigned_owner(
+        &mut self,
+        id: &str,
+        owner: identity_store::AssignedMetaOwner,
+    ) -> bool {
+        let Some(pending) = self.pending.get_mut(id) else {
+            return false;
+        };
+        if pending.assigned_meta_owner.is_some() {
+            return false;
+        }
+        pending.assigned_meta_owner = Some(owner);
+        true
+    }
+    fn assigned_owner_matches(
+        actual: Option<&identity_store::AssignedMetaOwner>,
+        expected: Option<&identity_store::AssignedMetaOwner>,
+    ) -> bool {
+        match (actual, expected) {
+            (None, None) => true,
+            (Some(actual), Some(expected)) => actual.matches(expected),
+            _ => false,
+        }
     }
     /// Remove a pending subagent without recording a failure.
     /// Used by cancel flows where the subagent was intentionally stopped.
     #[cfg(test)]
     pub fn remove_pending(&mut self, id: &str) {
+        self.remove_pending_owned(id, None);
+    }
+    pub(crate) fn remove_pending_owned(
+        &mut self,
+        id: &str,
+        expected_owner: Option<&identity_store::AssignedMetaOwner>,
+    ) -> bool {
+        if !self.pending.get(id).is_some_and(|pending| {
+            Self::assigned_owner_matches(pending.assigned_meta_owner.as_ref(), expected_owner)
+        }) {
+            return false;
+        }
         self.pending.remove(id);
         self.sync_running_gauge();
+        true
     }
     /// Move a pending subagent directly to `completed` so it stays queryable via
     /// `get_task_output`. `cancelled` stamps `"cancelled"` vs `"failed"`.
-    fn move_pending_to_terminal(&mut self, id: &str, error: &str, cancelled: bool) {
+    fn move_pending_to_terminal(
+        &mut self,
+        id: &str,
+        error: &str,
+        cancelled: bool,
+        expected_owner: Option<&identity_store::AssignedMetaOwner>,
+    ) -> bool {
+        if !self.pending.get(id).is_some_and(|pending| {
+            Self::assigned_owner_matches(pending.assigned_meta_owner.as_ref(), expected_owner)
+        }) {
+            return false;
+        }
         let Some(pending) = self.pending.remove(id) else {
-            return;
+            return false;
         };
         self.record_failure_completion(FailureCompletion {
             subagent_id: pending.subagent_id,
@@ -254,22 +318,40 @@ impl SubagentCoordinator {
             parent_prompt_id: pending.parent_prompt_id,
             parent_session_id: pending.parent_session_id,
             owner: pending.owner,
+            assigned_meta_owner: pending.assigned_meta_owner,
             persona: pending.persona,
             started_at: pending.started_at,
             error,
             surface_completion: pending.surface_completion,
             cancelled,
         });
+        true
     }
     /// Move a pending subagent to `completed` as a failure so it stays queryable
     /// via `get_task_output`.
     pub fn move_pending_to_failed(&mut self, id: &str, error: &str) {
-        self.move_pending_to_terminal(id, error, false);
+        let _ = self.move_pending_to_failed_owned(id, error, None);
+    }
+    pub fn move_pending_to_failed_owned(
+        &mut self,
+        id: &str,
+        error: &str,
+        expected_owner: Option<&identity_store::AssignedMetaOwner>,
+    ) -> bool {
+        self.move_pending_to_terminal(id, error, false, expected_owner)
     }
     /// Like [`Self::move_pending_to_failed`] but stamps `"cancelled"` — a pending
     /// subagent killed while initializing.
     pub fn move_pending_to_cancelled(&mut self, id: &str, error: &str) {
-        self.move_pending_to_terminal(id, error, true);
+        let _ = self.move_pending_to_cancelled_owned(id, error, None);
+    }
+    pub fn move_pending_to_cancelled_owned(
+        &mut self,
+        id: &str,
+        error: &str,
+        expected_owner: Option<&identity_store::AssignedMetaOwner>,
+    ) -> bool {
+        self.move_pending_to_terminal(id, error, true, expected_owner)
     }
     /// Complete a provider-backed agent that does not own an in-process
     /// [`SubagentTracker`] (currently the Codex app-server bridge).
@@ -313,6 +395,7 @@ impl SubagentCoordinator {
                 parent_session_id: pending.parent_session_id,
                 parent_prompt_id: pending.parent_prompt_id,
                 owner: pending.owner,
+                assigned_meta_owner: pending.assigned_meta_owner,
                 child_session_id,
                 description: pending.description,
                 subagent_type: pending.subagent_type,
@@ -353,6 +436,7 @@ impl SubagentCoordinator {
             parent_prompt_id,
             parent_session_id,
             owner,
+            assigned_meta_owner: None,
             persona: None,
             started_at: std::time::Instant::now(),
             error,
@@ -373,6 +457,7 @@ impl SubagentCoordinator {
             parent_prompt_id,
             parent_session_id,
             owner,
+            assigned_meta_owner,
             persona,
             started_at,
             error,
@@ -396,6 +481,7 @@ impl SubagentCoordinator {
                     parent_session_id,
                     parent_prompt_id,
                     owner,
+                    assigned_meta_owner,
                     child_session_id: String::new(),
                     description: description.clone(),
                     subagent_type: subagent_type.clone(),
@@ -432,10 +518,40 @@ impl SubagentCoordinator {
         }
         self.completion_notify.notify_waiters();
     }
+    #[cfg(test)]
     pub fn insert(&mut self, tracker: SubagentTracker) {
-        self.pending.remove(&tracker.subagent_id);
-        self.active.insert(tracker.subagent_id.clone(), tracker);
+        let id = tracker.subagent_id.clone();
+        let expected_owner = tracker.assigned_meta_owner.clone();
+        if !self.pending.contains_key(&id) && expected_owner.is_none() {
+            self.active.insert(id, tracker);
+            self.sync_running_gauge();
+            return;
+        }
+        self.insert_owned(tracker, expected_owner.as_ref())
+            .unwrap_or_else(|error| panic!("failed to promote subagent {id}: {error}"));
+    }
+    #[must_use]
+    pub(crate) fn insert_owned(
+        &mut self,
+        tracker: SubagentTracker,
+        expected_owner: Option<&identity_store::AssignedMetaOwner>,
+    ) -> Result<(), PromoteError> {
+        let id = tracker.subagent_id.clone();
+        let Some(pending) = self.pending.get(&id) else {
+            return Err(PromoteError::MissingPending);
+        };
+        if !Self::assigned_owner_matches(pending.assigned_meta_owner.as_ref(), expected_owner)
+            || !Self::assigned_owner_matches(
+                tracker.assigned_meta_owner.as_ref(),
+                expected_owner,
+            )
+        {
+            return Err(PromoteError::OwnerMismatch);
+        }
+        self.pending.remove(&id);
+        self.active.insert(id, tracker);
         self.sync_running_gauge();
+        Ok(())
     }
     /// Move a finished subagent from `active` to `completed`.
     /// Returns the tracker if it was active.
@@ -447,6 +563,32 @@ impl SubagentCoordinator {
         result: SubagentResult,
         persisted_output_dir: Option<PathBuf>,
     ) -> Option<SubagentTracker> {
+        self.move_to_completed_owned(
+            id,
+            None,
+            description,
+            subagent_type,
+            result,
+            persisted_output_dir,
+        )
+    }
+    pub fn move_to_completed_owned(
+        &mut self,
+        id: &str,
+        expected_owner: Option<&identity_store::AssignedMetaOwner>,
+        description: String,
+        subagent_type: String,
+        result: SubagentResult,
+        persisted_output_dir: Option<PathBuf>,
+    ) -> Option<SubagentTracker> {
+        if self.active.get(id).is_some_and(|tracker| {
+            !Self::assigned_owner_matches(
+                tracker.assigned_meta_owner.as_ref(),
+                expected_owner,
+            )
+        }) {
+            return None;
+        }
         let tracker = self.active.remove(id);
         self.loop_owned.remove(id);
         self.sync_running_gauge();
@@ -464,6 +606,9 @@ impl SubagentCoordinator {
             .unwrap_or_default();
         let parent_prompt_id = tracker.as_ref().and_then(|t| t.parent_prompt_id.clone());
         let owner = tracker.as_ref().map(|t| t.owner.clone()).unwrap_or_default();
+        let assigned_meta_owner = tracker
+            .as_ref()
+            .and_then(|t| t.assigned_meta_owner.clone());
         let persona = tracker.as_ref().and_then(|t| t.persona.clone());
         let child_cwd = tracker
             .as_ref()
@@ -486,6 +631,7 @@ impl SubagentCoordinator {
             parent_session_id,
             parent_prompt_id,
             owner,
+            assigned_meta_owner,
             child_session_id,
             description,
             subagent_type,
@@ -560,7 +706,20 @@ impl SubagentCoordinator {
     /// in-memory `resume_from` resolution can rehydrate the disposed worktree.
     /// No-op if the entry was already evicted (the on-disk meta.json still has it).
     pub fn set_completed_snapshot_ref(&mut self, id: &str, snapshot_ref: String) {
-        if let Some(completed) = self.completed.get_mut(id) {
+        self.set_completed_snapshot_ref_owned(id, None, snapshot_ref);
+    }
+    pub fn set_completed_snapshot_ref_owned(
+        &mut self,
+        id: &str,
+        expected_owner: Option<&identity_store::AssignedMetaOwner>,
+        snapshot_ref: String,
+    ) {
+        if let Some(completed) = self.completed.get_mut(id)
+            && Self::assigned_owner_matches(
+                completed.assigned_meta_owner.as_ref(),
+                expected_owner,
+            )
+        {
             completed.snapshot_ref = Some(snapshot_ref);
         }
     }

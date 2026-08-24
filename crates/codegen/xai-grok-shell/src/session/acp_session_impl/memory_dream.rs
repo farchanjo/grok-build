@@ -517,13 +517,15 @@ impl SessionActor {
                         // Semantic dedup: check if this content overlaps with
                         // existing memory chunks before writing.
                         let is_sem_dup = if let Some(storage) = self.memory.storage() {
-                            if let Some(index) = self.memory.open_index(&storage) {
-                                let provider = if let Some(ref params) = self.memory.backend_params
-                                {
-                                    params.make_embedding_provider().await
-                                } else {
-                                    None
-                                };
+                            if let Some((index, provider, readiness)) =
+                                self.memory.reconcile_vectors(&storage).await
+                            {
+                                let provider = matches!(
+                                    readiness,
+                                    xai_grok_memory::rebuild::VectorReadiness::Ready
+                                        | xai_grok_memory::rebuild::VectorReadiness::ReadyMissing { .. }
+                                )
+                                .then_some(provider);
                                 let threshold = self
                                     .memory
                                     .flush_config
@@ -532,9 +534,7 @@ impl SessionActor {
                                 is_semantically_duplicate(
                                     &content,
                                     &index,
-                                    provider.as_ref().map(|p| {
-                                        p as &dyn crate::session::memory::embedding::EmbeddingProvider
-                                    }),
+                                    provider.as_deref(),
                                     threshold,
                                 )
                                 .await

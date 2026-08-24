@@ -59,6 +59,55 @@ pub enum HostError {
     Failed(String),
 }
 
+/// Contextual private host envelope. `assignment_seq` is allocated before a
+/// request is accepted, so parallel branches cannot consume a global FIFO.
+/// The legacy request enum remains unchanged for source/serde compatibility.
+#[derive(Debug)]
+pub struct WorkflowHostEnvelope {
+    pub request: WorkflowHostRequest,
+    pub assignment_seq: u64,
+}
+
+impl WorkflowHostEnvelope {
+    pub fn stable_assignment_key(&self, run_id: &str) -> String {
+        format!("wf-{run_id}-seq-{}", self.assignment_seq)
+    }
+}
+
+/// Transport between the deterministic workflow engine and its host. Public
+/// request shapes remain unchanged; only agent calls carry trusted assignment
+/// context.
+#[derive(Debug)]
+pub enum WorkflowHostMessage {
+    Request(WorkflowHostRequest),
+    AssignedSpawn(WorkflowHostEnvelope),
+}
+
+#[cfg(test)]
+mod envelope_tests {
+    use super::*;
+
+    #[test]
+    fn stable_assignment_key_does_not_depend_on_delivery_order() {
+        let first = WorkflowHostEnvelope {
+            request: WorkflowHostRequest::Phase {
+                title: "a".into(),
+                replayed: false,
+            },
+            assignment_seq: 4,
+        };
+        let later = WorkflowHostEnvelope {
+            request: WorkflowHostRequest::Phase {
+                title: "b".into(),
+                replayed: false,
+            },
+            assignment_seq: 5,
+        };
+        assert_eq!(first.stable_assignment_key("run"), "wf-run-seq-4");
+        assert_eq!(later.stable_assignment_key("run"), "wf-run-seq-5");
+    }
+}
+
 #[derive(Debug)]
 pub enum WorkflowHostRequest {
     ReserveAgentCalls {

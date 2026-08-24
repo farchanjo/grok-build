@@ -790,7 +790,7 @@ async fn reconstruct_full_config_wires_bearer_resolver_for_session_method_despit
             )
             .await;
 
-            let cfg = actor.reconstruct_full_config().await;
+            let cfg = actor.reconstruct_full_config().await.expect("reconstruct");
 
             assert!(
                 cfg.bearer_resolver.is_some(),
@@ -816,7 +816,7 @@ async fn reconstruct_full_config_no_bearer_resolver_for_api_key_method() {
             )
             .await;
 
-            let cfg = actor.reconstruct_full_config().await;
+            let cfg = actor.reconstruct_full_config().await.expect("reconstruct");
 
             assert!(
                 cfg.bearer_resolver.is_none(),
@@ -862,7 +862,7 @@ async fn reconstruct_full_config_strips_reasoning_effort_for_unsupported_model()
             entry.info.reasoning_effort = Some(ReasoningEffort::High);
             actor.models_manager.insert_test_entry("test", entry);
 
-            let cfg = actor.reconstruct_full_config().await;
+            let cfg = actor.reconstruct_full_config().await.expect("reconstruct");
 
             assert_eq!(
                 cfg.reasoning_effort,
@@ -907,7 +907,7 @@ async fn reconstruct_full_config_honors_reasoning_effort_when_support_unknown() 
             entry.info.supports_reasoning_effort = None;
             actor.models_manager.insert_test_entry("test", entry);
 
-            let cfg = actor.reconstruct_full_config().await;
+            let cfg = actor.reconstruct_full_config().await.expect("reconstruct");
 
             assert_eq!(
                 cfg.reasoning_effort,
@@ -974,6 +974,7 @@ async fn session_born_on_api_key_recovers_after_oidc_login_without_restart() {
                 actor
                     .reconstruct_full_config()
                     .await
+                    .expect("reconstruct")
                     .bearer_resolver
                     .is_none(),
                 "api-key session must not use the live resolver before login"
@@ -992,6 +993,7 @@ async fn session_born_on_api_key_recovers_after_oidc_login_without_restart() {
                 actor
                     .reconstruct_full_config()
                     .await
+                    .expect("reconstruct")
                     .bearer_resolver
                     .is_some(),
                 "flipping the shared handle activates the resolver on the next turn"
@@ -1090,7 +1092,7 @@ async fn reconstruct_full_config_no_bearer_resolver_for_byok_model_on_session_me
                     provider: None,
                 }));
 
-            let cfg = actor.reconstruct_full_config().await;
+            let cfg = actor.reconstruct_full_config().await.expect("reconstruct");
 
             assert!(
                 cfg.bearer_resolver.is_none(),
@@ -1185,6 +1187,7 @@ async fn set_session_model_invalidates_byok_memo_for_same_model_id() {
             };
             let _ = actor
                 .handle_set_session_model(
+                    acp::ModelId::new(cfg.model.clone()),
                     cfg,
                     false,
                     false,
@@ -1297,6 +1300,7 @@ async fn switch_to_first_party_model_drops_minted_provider_token() {
             };
             let _ = actor
                 .handle_set_session_model(
+                    acp::ModelId::new(cfg.model.clone()),
                     cfg,
                     false,
                     false,
@@ -2181,7 +2185,7 @@ async fn reconstruct_openrouter_vault_model_no_xai_bearer_resolver() {
             settings.base_url = "https://openrouter.ai/api/v1".to_string();
             actor.chat_state_handle.update_inference_settings(settings);
 
-            let cfg = actor.reconstruct_full_config().await;
+            let cfg = actor.reconstruct_full_config().await.expect("reconstruct");
             assert!(
                 cfg.bearer_resolver.is_none(),
                 "OpenRouter vault model must not install xAI bearer_resolver"
@@ -2234,7 +2238,7 @@ async fn reconstruct_openai_api_vault_model_no_xai_bearer_resolver() {
             settings.base_url = "https://api.openai.com/v1".to_string();
             actor.chat_state_handle.update_inference_settings(settings);
 
-            let cfg = actor.reconstruct_full_config().await;
+            let cfg = actor.reconstruct_full_config().await.expect("reconstruct");
             assert!(cfg.bearer_resolver.is_none());
             assert_eq!(cfg.api_key.as_deref(), Some("openai-api-key-on-wire"));
             assert_eq!(
@@ -2269,7 +2273,7 @@ async fn reconstruct_catalog_miss_openrouter_host_no_xai_bearer_resolver() {
             settings.base_url = "https://openrouter.ai/api/v1".to_string();
             actor.chat_state_handle.update_inference_settings(settings);
 
-            let cfg = actor.reconstruct_full_config().await;
+            let cfg = actor.reconstruct_full_config().await.expect("reconstruct");
             assert!(
                 cfg.bearer_resolver.is_none(),
                 "catalog miss on openrouter.ai must not install xAI bearer_resolver"
@@ -2305,7 +2309,7 @@ async fn reconstruct_catalog_miss_codex_url_is_openai_not_xai() {
             settings.base_url = crate::auth::chatgpt_oauth::CODEX_RESPONSES_BASE_URL.to_string();
             actor.chat_state_handle.update_inference_settings(settings);
 
-            let cfg = actor.reconstruct_full_config().await;
+            let cfg = actor.reconstruct_full_config().await.expect("reconstruct");
             assert!(cfg.bearer_resolver.is_none());
             assert_eq!(
                 cfg.provider_identity,
@@ -2330,7 +2334,7 @@ async fn reconstruct_first_party_xai_still_wires_bearer_resolver() {
             )
             .await;
             // Default test model is first-party xAI.
-            let cfg = actor.reconstruct_full_config().await;
+            let cfg = actor.reconstruct_full_config().await.expect("reconstruct");
             assert!(
                 cfg.bearer_resolver.is_some(),
                 "first-party xAI session method must wire live bearer_resolver"

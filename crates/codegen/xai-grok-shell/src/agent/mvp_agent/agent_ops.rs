@@ -61,8 +61,6 @@ impl MvpAgent {
     ) -> Result<(OaiCompatClient, String), acp::Error> {
         let slug = self.resolve_session_summary_model();
         let session_key = self.auth_manager.current_or_expired().map(|a| a.key.clone());
-        let models = self.models_manager.models();
-        let endpoints = self.models_manager.endpoints();
         let (disable_api_key_auth, alpha_test_key, client_version) = {
             let cfg = self.cfg.borrow();
             (
@@ -71,32 +69,71 @@ impl MvpAgent {
                 cfg.client_version.clone(),
             )
         };
-        let config = match crate::agent::config::resolve_aux_model_inference_config(
-            &slug,
-            &models,
-            &endpoints,
-            session_key.as_deref(),
-            disable_api_key_auth,
-            alpha_test_key,
-            client_version,
+        // Production seam: exact session route freeze (not legacy_from_config)
+        // + SessionTitleSamplerPairing; soft-fallback keeps primary route+purpose.
+        let selection_id = self.models_manager.current_model_id().0.to_string();
+        let frozen = match crate::session::route_context::resolve_for_models_manager_with_selection(
+            primary,
+            &self.models_manager,
+            selection_id.as_str(),
+            Some(self.auth_manager.grok_home()),
         ) {
-            Some(mut cfg) => {
-                crate::agent::config::stamp_session_local_sampler_fields(
-                    &mut cfg,
-                    primary,
-                    primary.client_identifier.clone(),
-                    primary.max_retries,
-                );
-                cfg
-            }
-            None => {
-                let mut fallback = primary.clone();
-                fallback.model = slug;
-                fallback
+            Ok(r) => r,
+            Err(e) => {
+                return Err(acp::Error::internal_error().data(format!(
+                    "provider route unusable for session title: {e}"
+                )));
             }
         };
-        let model = config.model.clone();
-        let client = OaiCompatClient::new(config).map_err(map_sampling_err_to_acp)?;
+        let pair = crate::session::auxiliary_route::SessionTitleSamplerPairing::for_session_new(
+            crate::session::auxiliary_route::AuxiliaryRouteInputs {
+                purpose: crate::session::auxiliary_route::AuxiliaryPurpose::SessionTitle,
+                requested: &slug,
+                models_manager: &self.models_manager,
+                frozen_session_route: Some(&frozen),
+                frozen_session_inference: primary,
+                frozen_session_selection_id: selection_id.as_str(),
+                grok_home: Some(self.auth_manager.grok_home()),
+                session_key: session_key.as_deref(),
+                disable_api_key_auth,
+                alpha_test_key: alpha_test_key.as_deref(),
+                client_version: client_version.as_deref(),
+                client_identifier: primary.client_identifier.as_deref(),
+                max_retries: primary.max_retries,
+                allow_cross_account_fallback: false,
+                explicit_pin_fail_closed: false,
+            },
+        );
+        let (config, model, route_ctx) = match pair {
+            Ok(mut pair) => {
+                pair.route
+                    .bind_attribution(Some(&self.auth_manager), None);
+                (
+                    pair.route.inference.clone(),
+                    pair.route.upstream_model_id.clone(),
+                    Some(pair.route.route.clone()),
+                )
+            }
+            Err(err) => {
+                // Soft-fallback: true primary upstream + exact primary route
+                // with SessionTitle purpose (never drop route context).
+                tracing::debug!(error = %err, "session title aux route soft-fallback to primary");
+                let mut fallback =
+                    crate::session::auxiliary_route::session_title_soft_fallback_route(
+                        &frozen,
+                        primary,
+                        selection_id.as_str(),
+                    );
+                fallback.bind_attribution(Some(&self.auth_manager), None);
+                (
+                    fallback.inference.clone(),
+                    fallback.upstream_model_id.clone(),
+                    Some(fallback.route.clone()),
+                )
+            }
+        };
+        let client = OaiCompatClient::new_with_route_context(config, route_ctx)
+            .map_err(map_sampling_err_to_acp)?;
         Ok((client, model))
     }
     fn has_proxy_credentials(&self) -> bool {
@@ -1113,36 +1150,42 @@ impl MvpAgent {
                 .await;
         }
     }
-    /// Pure id → entry resolver (the `allowed_models` gate lives in `set_session_model`).
+    /// Pure id → (canonical catalog key, entry) resolver.
+    /// Origin-aware: gated additional accounts resolve as Missing when the
+    /// multi-account gate is closed. (`allowed_models` lives in `set_session_model`).
     pub(crate) fn resolve_model_id(
         &self,
         requested: &acp::ModelId,
-    ) -> Result<ModelEntry, acp::Error> {
+    ) -> Result<(acp::ModelId, ModelEntry), acp::Error> {
         let requested_str = requested.0.as_ref();
         let models = self.models_manager.models();
-        let Some(catalog_key) = resolve_catalog_key(&models, requested) else {
+        let origins = self.models_manager.catalog_origins();
+        let Some(catalog_key) =
+            crate::agent::models::resolve_catalog_key_with_origins(&models, &origins, requested)
+        else {
             tracing::debug!(
                 requested = %requested_str,
                 model_count = models.len(),
-                "resolve_model_id: unknown model id (not in models() by key or .model field)"
+                "resolve_model_id: unknown or gated model id"
             );
             return Err(acp::Error::invalid_params().data("unknown model id"));
         };
         let entry = models
             .get(catalog_key.0.as_ref())
-            .expect("resolve_catalog_key returns a key present in models");
+            .expect("resolve_catalog_key_with_origins returns a key present in models");
         let match_kind = if catalog_key.0.as_ref() == requested_str {
-            "map key"
+            "exact canonical"
         } else {
-            "model field scan"
+            "deterministic alias"
         };
         tracing::debug!(
-            "resolve_model_id: matched by {}: requested={} model={}",
+            "resolve_model_id: matched by {}: requested={} catalog_key={} upstream={}",
             match_kind,
             requested_str,
+            catalog_key.0,
             entry.info.model
         );
-        Ok(entry.clone())
+        Ok((catalog_key, entry.clone()))
     }
     pub(crate) fn prepare_inference_config_for_model(
         &self,
@@ -1217,14 +1260,32 @@ impl MvpAgent {
             .current_or_expired()
             .filter(|a| a.is_xai_auth())
             .map(|a| a.user_id);
-        let mut config = crate::agent::config::inference_config_for_model(
+        let mut config = crate::agent::config::try_inference_config_for_model(
             model,
             credentials,
             alpha_test_key,
             client_version,
             deployment_id,
             user_id,
-        );
+        )
+        .unwrap_or_else(|e| {
+            tracing::warn!(error = %e, "try_inference_config_for_model failed; compatibility fallback");
+            let session = self.auth_manager.current_or_expired();
+            let session_key = session.as_ref().map(|a| a.key.clone());
+            let fallback_user_id = session
+                .as_ref()
+                .filter(|a| a.is_xai_auth())
+                .map(|a| a.user_id.clone());
+            let cfg = self.cfg.borrow();
+            crate::agent::config::inference_config_for_model(
+                model,
+                resolve_credentials(model, session_key.as_deref()),
+                cfg.endpoints.alpha_test_key.clone(),
+                cfg.client_version.clone(),
+                crate::managed_config::resolve_deployment_id(cfg.endpoints.deployment_key.as_deref()),
+                fallback_user_id,
+            )
+        });
         config.origin_client = origin_client;
         config
     }
@@ -1237,7 +1298,7 @@ impl MvpAgent {
         model_id: &acp::ModelId,
         origin_client: Option<crate::http::OriginClientInfo>,
     ) -> InferenceConfig {
-        if let Ok(model) = self.resolve_model_id(model_id) {
+        if let Ok((_key, model)) = self.resolve_model_id(model_id) {
             self.prepare_inference_config_for_model(&model, origin_client.clone())
         } else {
             let mut c = self.inference_config.borrow().clone();
@@ -1392,28 +1453,63 @@ impl MvpAgent {
             tier_restricted,
         }
     }
-    pub(super) fn prepare_web_search_inference_config(&self) -> Option<InferenceConfig> {
+    pub(super) fn prepare_web_search_inference_config(
+        &self,
+    ) -> Option<(InferenceConfig, xai_grok_inference::ProviderRouteContext)> {
         let model_id = self.cfg.borrow().web_search_model.clone();
-        let models = self.models_manager.models();
         let session = self.current_or_buffered_auth();
         let alpha_test_key = self.cfg.borrow().endpoints.alpha_test_key.clone();
         let client_version = self.cfg.borrow().client_version.clone();
-        let mut cfg = config::resolve_web_search_inference_config(
-            &model_id,
-            &models,
-            session.as_ref().map(|a| a.key.as_str()),
-            self.cfg.borrow().grok_com_config.api_key_auth_disabled(),
-            alpha_test_key.clone(),
-            client_version,
-            &self.cfg.borrow().endpoints,
-        )?;
+        let primary = self.inference_config.borrow().clone();
+        let selection_id = self.models_manager.current_model_id().0.to_string();
+        // Exact production freeze (instance/incarnation/generations), not
+        // legacy_from_config host-fallback identity.
+        let frozen = crate::session::route_context::resolve_for_models_manager_with_selection(
+            &primary,
+            &self.models_manager,
+            selection_id.as_str(),
+            Some(self.auth_manager.grok_home()),
+        )
+        .map_err(|e| {
+            tracing::warn!(error = %e, "web search: provider route unusable");
+        })
+        .ok()?;
+        let disable_api_key_auth = self.cfg.borrow().grok_com_config.api_key_auth_disabled();
+        let mut resolved = crate::session::auxiliary_route::resolve_auxiliary_route(
+            crate::session::auxiliary_route::AuxiliaryRouteInputs {
+                purpose: crate::session::auxiliary_route::AuxiliaryPurpose::WebSearch,
+                requested: &model_id,
+                models_manager: &self.models_manager,
+                frozen_session_route: Some(&frozen),
+                frozen_session_inference: &primary,
+                frozen_session_selection_id: selection_id.as_str(),
+                grok_home: Some(self.auth_manager.grok_home()),
+                session_key: session.as_ref().map(|a| a.key.as_str()),
+                disable_api_key_auth,
+                alpha_test_key: alpha_test_key.as_deref(),
+                client_version: client_version.as_deref(),
+                client_identifier: primary.client_identifier.as_deref(),
+                max_retries: primary.max_retries,
+                allow_cross_account_fallback: false,
+                explicit_pin_fail_closed: true,
+            },
+        )
+        .map_err(|err| {
+            tracing::warn!(error = %err, web_search_model = %model_id, "web search route closed");
+        })
+        .ok()?;
+        // Exact aux route attribution — never the primary session sibling.
+        resolved.bind_attribution(Some(&self.auth_manager), None);
+        // Preserve sampling overrides (token/temperature) on the exact route.
+        let mut cfg = crate::tools::config::web_search_inference_config(resolved.inference.clone());
         inject_proxy_headers(
             &mut cfg.extra_headers,
             cfg.client_version.as_deref(),
             alpha_test_key.as_deref(),
             &cfg.base_url,
         );
-        Some(cfg)
+        cfg.attribution_callback = resolved.inference.attribution_callback.clone();
+        Some((cfg, resolved.route))
     }
     /// Returns `Err` with a user-facing message on invalid config; the caller at
     /// the process boundary prints it and exits.
@@ -1477,6 +1573,49 @@ impl MvpAgent {
         models_manager: crate::agent::models::ModelsManager,
     ) -> Self {
         models_manager.set_gateway(gateway.clone());
+        // Install shell-owned PR17 retrieval registry first (race-safe vs
+        // early notify). Home-keyed map supports multi-home composition.
+        let retrieval_home = xai_grok_config::grok_home();
+        {
+            let registry =
+                crate::retrieval::RetrievalRegistry::load_from_home(retrieval_home.clone());
+            crate::retrieval::install_registry_for_home(retrieval_home.clone(), registry);
+        }
+        // Machine-wide provider registry broadcasts (PR13). Use register_
+        // so multi-agent composition chains subscribers. Provider generation
+        // advances also rebuild the home's PR17 snapshot (M1).
+        {
+            let gw = gateway.clone();
+            crate::provider_registry::notify::register_providers_update_forwarder(Box::new(
+                move |notif| {
+                    gw.forward_fire_and_forget(notif);
+                },
+            ));
+            let home = retrieval_home.clone();
+            crate::provider_registry::notify::register_providers_update_forwarder(Box::new(
+                move |_notif| {
+                    // Invoked after gateway list lock release (snapshot fanout).
+                    let _ = crate::retrieval::reload_registry_for_home(&home);
+                },
+            ));
+        }
+        // Machine-wide retrieval graph broadcasts (PR15). Gateway fanout and
+        // registry reload are separate registered subscribers; reload runs
+        // after the notify lock is released (H2).
+        {
+            let gw = gateway.clone();
+            crate::retrieval_config::notify::register_retrieval_update_forwarder(Box::new(
+                move |notif| {
+                    gw.forward_fire_and_forget(notif);
+                },
+            ));
+            let home = retrieval_home.clone();
+            crate::retrieval_config::notify::register_retrieval_update_forwarder(Box::new(
+                move |_notif| {
+                    let _ = crate::retrieval::reload_registry_for_home(&home);
+                },
+            ));
+        }
         let inference_config = models_manager.inference_config();
         if !cfg.grok_com_config.api_key_auth_disabled() {
             let models = models_manager.models();
@@ -1532,6 +1671,7 @@ impl MvpAgent {
             );
         }
         let (subagent_event_tx, subagent_event_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (assigned_spawn_tx, assigned_spawn_rx) = crate::agent::subagent::assigned_spawn::channel();
         let activity = crate::agent::activity::AgentActivity::default();
         let mut subagent_coordinator = crate::agent::subagent::SubagentCoordinator::new();
         subagent_coordinator.set_running_gauge(activity.subagent_gauge());
@@ -1602,6 +1742,8 @@ impl MvpAgent {
             ),
             model_unavailable_sessions: RefCell::new(std::collections::HashMap::new()),
             subagent_event_tx,
+            assigned_spawn_tx,
+            assigned_spawn_rx: RefCell::new(Some(assigned_spawn_rx)),
             subagent_event_rx: RefCell::new(Some(subagent_event_rx)),
             subagent_coordinator: RefCell::new(subagent_coordinator),
             monitor_event_buffer: xai_grok_tools::implementations::grok_build::task::types::MonitorEventBuffer::default(),
@@ -1812,7 +1954,7 @@ impl MvpAgent {
         model_id: &acp::ModelId,
     ) -> crate::agent::execution_backend::ExecutionBackend {
         self.resolve_model_id(model_id)
-            .map(|e| e.info.execution_backend)
+            .map(|(_key, e)| e.info.execution_backend)
             .unwrap_or_default()
     }
 
@@ -2358,17 +2500,15 @@ impl MvpAgent {
         &self,
         session_id: Option<&acp::SessionId>,
     ) -> acp::SessionModelState {
+        // One coherent catalog + generation stamp (Issue 7): never pair
+        // unlocked available() with a separate catalog_generation() load.
+        let snap = self.models_manager.catalog_publication_snapshot();
         let model_id = lookup_session_model(
             &self.sessions.borrow(),
             session_id,
-            &self.models_manager.current_model_id(),
+            &snap.current_model_id,
         );
-        let mut available_models: Vec<acp::ModelInfo> = self
-            .models_manager
-            .available()
-            .values()
-            .cloned()
-            .collect();
+        let mut available_models: Vec<acp::ModelInfo> = snap.available.values().cloned().collect();
         let override_effort = session_id
             .and_then(|sid| self.sessions.borrow().get(sid).map(|h| h.reasoning_effort))
             .flatten()
@@ -2389,7 +2529,12 @@ impl MvpAgent {
             );
             info.meta = Some(map);
         }
-        acp::SessionModelState::new(model_id, available_models)
+        let mut meta = acp::Meta::new();
+        meta.insert(
+            crate::agent::config::META_CATALOG_GENERATION.to_string(),
+            serde_json::Value::Number(snap.generation.into()),
+        );
+        acp::SessionModelState::new(model_id, available_models).meta(Some(meta))
     }
     pub(super) fn session_config_options(
         &self,
@@ -3190,6 +3335,7 @@ impl MvpAgent {
                     )
             })?;
         tool_ctx.subagent_event_tx = Some(self.subagent_event_tx.clone());
+        tool_ctx.assigned_spawn_sender = Some(self.assigned_spawn_tx.trusted_sender());
         tool_ctx.synthetic_trace_tx = self
             .subagent_coordinator
             .borrow()
@@ -3304,7 +3450,7 @@ impl MvpAgent {
             xai_grok_agent::config::ModelOverride::Override(id) => {
                 let mid = acp::ModelId::new(Arc::from(id.as_str()));
                 match self.resolve_model_id(&mid) {
-                    Ok(entry) => Some((mid, entry)),
+                    Ok((key, entry)) => Some((key, entry)),
                     Err(_) => {
                         tracing::warn!(
                             agent = %agent_definition.name,
@@ -3436,7 +3582,23 @@ impl MvpAgent {
             .find(|entry| entry.info.model == inference_config.model)
             .and_then(|entry| entry.info.max_retries);
         let origin_client = self.origin_client_info_from_meta(init.meta.as_ref());
-        let web_search_inference_config = self.prepare_web_search_inference_config();
+        let (web_search_inference_config, web_search_attribution_callback) =
+            match self.prepare_web_search_inference_config() {
+                Some((cfg, route)) => {
+                    // Exact-route tool attribution when the route supports
+                    // route-bound identity (incl. Unverified BYOK). Truly
+                    // non-authoritative HostFallback/legacy → None (no
+                    // sibling session fallback at tool registration).
+                    let cb = crate::session::auxiliary_route::web_search_tool_attribution_for_route(
+                        &self.auth_manager,
+                        None,
+                        &route,
+                        crate::session::auxiliary_route::AuxiliaryRouteKind::Explicit,
+                    );
+                    (Some(cfg), cb)
+                }
+                None => (None, None),
+            };
         let image_gen_config = self.prepare_image_gen_config();
         let video_gen_config = self.prepare_video_gen_config();
         let app_builder_deployer_config = self.prepare_app_builder_deployer_config();
@@ -3582,6 +3744,8 @@ impl MvpAgent {
             // A loaded session's summary is already durable and authoritative;
             // do not seed a catalog-derived execution mode before load restores
             // it. New sessions still need their initial mode persisted here.
+            // `route_provenance: None` is the leave path: do not rewrite an
+            // existing secret-free companion on this seed write.
             if !is_load {
                 let seed_execution_backend =
                     self.execution_backend_for_model_id(&session_model_id);
@@ -3601,6 +3765,7 @@ impl MvpAgent {
                         reasoning_effort: initial_reasoning_effort,
                         execution_backend: Some(seed_execution_backend),
                         external_runtime: Some(seed_external_runtime.clone()),
+                        route_provenance: None,
                     });
             }
             let acp_mcp_servers = crate::session::acp_mcp::parse_acp_mcp_servers(
@@ -3685,6 +3850,7 @@ impl MvpAgent {
                     inference_idle_timeout_secs,
                     model_max_retries,
                     web_search_inference_config,
+                    web_search_attribution_callback,
                     web_fetch_config,
                     image_gen_config,
                     video_gen_config,

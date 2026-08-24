@@ -574,11 +574,38 @@ impl SessionActor {
         // `AgentMessageChunk` → the pager UI renders mid-classifier
         // reasoning + text deltas. `conversation_collect` does NOT
         // publish on that channel, so the client sees nothing.
-        let sampling_client = match self.prepare_chat_completion(false).await {
-            Ok(c) => c,
+        // Exact @session inherit with LazinessClassifier purpose (route-bound).
+        let sampling_client = match self
+            .resolve_aux_route(
+                crate::session::auxiliary_route::AuxiliaryPurpose::LazinessClassifier,
+                crate::session::auxiliary_route::SESSION_ROUTE_SENTINEL,
+            )
+            .await
+        {
+            Ok(route) => match route.client() {
+                Ok(c) => c,
+                Err(err) => {
+                    let detail = err.to_string();
+                    tracing::debug!(error = %detail, "laziness classifier: route client failed");
+                    let elapsed_ms = started.elapsed().as_millis() as u64;
+                    self.maybe_write_laziness_debug_log(
+                        meta.take(),
+                        &model_id,
+                        items_count_after_trim,
+                        elapsed_ms,
+                        LazinessFireOutcome::Aborted {
+                            reason: LazinessAbortReason::ClassifierError,
+                            error_detail: Some(detail),
+                        },
+                    )
+                    .await;
+                    self.emit_laziness_abort(LazinessAbortReason::ClassifierError);
+                    return;
+                }
+            },
             Err(err) => {
                 let detail = err.to_string();
-                tracing::debug!(error = %detail, "laziness classifier: prepare_chat_completion failed");
+                tracing::debug!(error = %detail, "laziness classifier: aux route unavailable");
                 let elapsed_ms = started.elapsed().as_millis() as u64;
                 self.maybe_write_laziness_debug_log(
                     meta.take(),

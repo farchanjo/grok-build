@@ -34,7 +34,11 @@ pub mod metrics;
 /// Reusable OpenAI / OpenRouter platform client (Changes 7–13).
 pub mod openai_platform;
 pub mod openrouter_baseline;
+/// Provider-scoped typed embedding and reranker adapters (PR16).
+pub mod retrieval;
 pub mod retry;
+/// Credential-free provider route context for sampler partitioning and repair.
+pub mod route_context;
 mod shared_http;
 pub mod stream;
 pub mod types;
@@ -82,9 +86,26 @@ pub use openrouter_baseline::{
     OpenRouterEndpoint, OpenRouterEndpointInventory, coding_agent_priority_endpoints,
     inventory_has_endpoint, openrouter_endpoint_inventory, schema_field_names,
 };
+pub use retrieval::{
+    DEFAULT_EMBEDDINGS_PATH, DEFAULT_RERANK_PATH, EmbeddingAdapter, EmbeddingEncodingFormat,
+    EmbeddingRequest, EmbeddingResult, EmbeddingVector, OpenRouterRerankAdapter,
+    OpenaiCompatibleEmbeddings, RerankAdapter, RerankHit, RerankRequest, RerankResult,
+    RetrievalAuthScheme, RetrievalCredential, RetrievalError, RetrievalErrorCategory,
+    RetrievalPurpose, RetrievalResult, RetrievalRouteContext, RetrievalTransport,
+    RetrievalTransportPolicy, VllmRerankAdapter, decode_base64_f32, normalize_endpoint_path,
+    parse_embedding_response_for_test, parse_vllm_rerank_response, validate_embedding_request,
+    validate_relative_endpoint_path, validate_rerank_request,
+};
+// Prefer `xai_grok_inference::retrieval::...` for retrieval-only constants that
+// would collide with sampler retry exports (e.g. DEFAULT_MAX_RETRIES).
 pub use retry::{
     DEFAULT_MAX_RETRIES, RATE_LIMIT_RETRY_THRESHOLD, RetryDecision, classify_error,
     format_inference_error, resolve_max_retries, retry_backoff_with_jitter,
+};
+pub use route_context::{
+    NormalizedOrigin, ProviderRouteContext, ProviderRouteContextBuilder, RouteApiSurface,
+    RouteAuthority, RouteContextUpdate, RouteCredentialRoute, RoutePacingOverride,
+    RouteProviderKind,
 };
 pub use stream::{collect_response, stream_chat_completions, stream_messages, stream_responses};
 pub use types::RequestId;

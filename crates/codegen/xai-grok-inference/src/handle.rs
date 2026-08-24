@@ -75,10 +75,24 @@ impl InferenceHandle {
 
     /// Update the default sampling config (e.g., after model switch
     /// or auth refresh). The next request submitted without an
-    /// override will use it.
+    /// override will use it. Clears any explicit route context.
     pub fn update_config(&self, config: InferenceConfig) {
+        self.update_config_with_route_context(
+            config,
+            crate::route_context::RouteContextUpdate::DeriveLegacy,
+        );
+    }
+
+    /// Atomically update config and route context together so a stale
+    /// explicit account context cannot survive a bare config refresh.
+    pub fn update_config_with_route_context(
+        &self,
+        config: InferenceConfig,
+        route: crate::route_context::RouteContextUpdate,
+    ) {
         let _ = self.cmd_tx.send(InferenceCommand::UpdateConfig {
             config: Box::new(config),
+            route,
         });
     }
 

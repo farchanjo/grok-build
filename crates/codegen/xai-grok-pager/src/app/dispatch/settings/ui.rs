@@ -199,29 +199,119 @@ pub(in crate::app::dispatch) fn dispatch_open_providers(app: &mut AppView) -> Ve
         return effects;
     }
     let mut state = ProviderModalState::new();
-    // Load configured provider rows from config.toml (best effort).
-    let path = xai_grok_config::grok_home().join("config.toml");
-    if let Ok(raw) = std::fs::read_to_string(path)
-        && let Ok(val) = raw.parse::<toml::Value>()
-        && let Some(table) = val.get("model_providers").and_then(|v| v.as_table())
-    {
-        let configured: Vec<String> = table.keys().cloned().collect();
-        state.set_configured_providers(configured);
-    }
     // Focus xAI row so connect/disconnect is one Enter away from welcome.
+    // Configured rows come only from the shell management list snapshot —
+    // never from a direct config.toml read in the pager.
     state.selected = 0;
-    let refresh_rows = state.rows.clone();
     agent.active_modal = Some(ActiveModal::Providers {
         state: Box::new(state),
     });
-    effects.extend(refresh_rows.into_iter().map(|provider| {
-        Effect::ProviderOperation {
-            agent_id: id,
-            operation: crate::app::actions::ProviderOperation::Refresh(provider),
-            repair: None, // status refresh never resumes a stash
-        }
-    }));
+    // Shell-authoritative list (generation-tagged) + per-row status refresh.
+    effects.push(Effect::ProviderOperation {
+        agent_id: id,
+        operation: crate::app::actions::ProviderOperation::LoadListSnapshot,
+        repair: None,
+    });
     effects
+}
+
+/// Open `/retrieval-settings` (shell-authoritative graph snapshot).
+/// Welcome/sessionless mode follows providers placeholder-session compatibility.
+pub(in crate::app::dispatch) fn dispatch_open_retrieval_settings(app: &mut AppView) -> Vec<Effect> {
+    use crate::views::modal::ActiveModal;
+    use crate::views::retrieval_settings_modal::RetrievalSettingsState;
+
+    let mut effects = Vec::new();
+    let id = match app.active_view {
+        ActiveView::Agent(id) => id,
+        _ => {
+            if let Some(existing) = app.agents.keys().next().copied() {
+                crate::app::dispatch::ctx::switch_to_agent(
+                    app,
+                    existing,
+                    crate::app::dispatch::ctx::SwitchCause::Picker,
+                );
+                existing
+            } else {
+                let (new_id, create_effects) =
+                    crate::app::dispatch::session::lifecycle::dispatch_new_session_inner_with_id(
+                        app, None,
+                    );
+                effects.extend(create_effects);
+                new_id
+            }
+        }
+    };
+    let Some(agent) = app.agents.get_mut(&id) else {
+        return effects;
+    };
+    if let Some(ActiveModal::RetrievalSettings { .. }) = agent.active_modal.as_ref() {
+        agent.active_modal = None;
+        return effects;
+    }
+    agent.active_modal = Some(ActiveModal::RetrievalSettings {
+        state: Box::new(RetrievalSettingsState::new()),
+    });
+    effects.push(Effect::RetrievalOperation {
+        agent_id: id,
+        operation: crate::app::actions::RetrievalOperation::LoadSnapshot,
+    });
+    effects
+}
+
+/// Route a retrieval modal command to a shell management effect.
+pub(in crate::app::dispatch) fn dispatch_retrieval_command(
+    app: &mut AppView,
+    command: crate::views::retrieval_settings_modal::RetrievalCommand,
+) -> Vec<Effect> {
+    use crate::views::modal::ActiveModal;
+    use crate::views::retrieval_settings_modal::RetrievalCommand;
+
+    let ActiveView::Agent(agent_id) = app.active_view else {
+        return vec![];
+    };
+    let Some(agent) = app.agents.get_mut(&agent_id) else {
+        return vec![];
+    };
+    let Some(ActiveModal::RetrievalSettings { state }) = agent.active_modal.as_mut() else {
+        return vec![];
+    };
+
+    match command {
+        RetrievalCommand::Reload
+        | RetrievalCommand::ValidateAndReload
+        | RetrievalCommand::DismissConflictReload => {
+            state.loading = true;
+            state.conflict = None;
+            state.dirty = false;
+            vec![Effect::RetrievalOperation {
+                agent_id,
+                operation: crate::app::actions::RetrievalOperation::LoadSnapshot,
+            }]
+        }
+        RetrievalCommand::DismissConflictKeepDraft => {
+            state.conflict = None;
+            vec![]
+        }
+        RetrievalCommand::ValidatePreview {
+            kind,
+            id,
+            operation_id,
+            ..
+        } => vec![Effect::RetrievalOperation {
+            agent_id,
+            operation: crate::app::actions::RetrievalOperation::Preview {
+                kind,
+                id,
+                operation_id: Some(operation_id),
+            },
+        }],
+        // Mutations already carry expected_generation + operation_id from modal.
+        other => vec![Effect::RetrievalOperation {
+            agent_id,
+            operation: crate::app::actions::RetrievalOperation::Command(other),
+        }],
+    }
 }
 
 /// Move a provider command from the modal into an async native-provider
@@ -241,6 +331,9 @@ pub(in crate::app::dispatch) fn dispatch_provider_command(
     }
     if command == ProviderCommand::LogoutXai {
         return crate::app::dispatch::auth::dispatch_logout(app);
+    }
+    if command == ProviderCommand::OpenRetrievalSettings {
+        return dispatch_open_retrieval_settings(app);
     }
 
     let ActiveView::Agent(agent_id) = app.active_view else {
@@ -299,15 +392,190 @@ pub(in crate::app::dispatch) fn dispatch_provider_command(
             ProviderCommand::Disconnect(provider) => ProviderOperation::Disconnect(provider),
             ProviderCommand::LoginCodex => ProviderOperation::LoginCodex,
             ProviderCommand::LogoutCodex => ProviderOperation::LogoutCodex,
-            ProviderCommand::LoginXai | ProviderCommand::LogoutXai => unreachable!(),
-            ProviderCommand::RefreshStatus(provider) => ProviderOperation::Refresh(provider),
-            ProviderCommand::AddConfigured
-            | ProviderCommand::RefreshCatalog(_)
-            | ProviderCommand::RefreshCapabilities(_)
+            ProviderCommand::LoginXai
+            | ProviderCommand::LogoutXai
+            | ProviderCommand::OpenRetrievalSettings
             | ProviderCommand::SetChatgptContextWindow { .. }
-            | ProviderCommand::SetChatgptAutoCompactThreshold { .. } => {
-                // Config editor / capability refresh: no secret path.
-                return vec![];
+            | ProviderCommand::SetChatgptAutoCompactThreshold { .. } => unreachable!(),
+            ProviderCommand::RefreshStatus(provider) => ProviderOperation::Refresh(provider),
+            ProviderCommand::LoadListSnapshot => ProviderOperation::LoadListSnapshot,
+            ProviderCommand::OpenEditor { provider_id } => {
+                ProviderOperation::LoadEditorDetail { provider_id }
+            }
+            ProviderCommand::Enable { provider_id } => {
+                let op_id = uuid::Uuid::new_v4().to_string();
+                state.pending_list_operation_id = Some(op_id.clone());
+                ProviderOperation::Enable {
+                    provider_id,
+                    expected_generation: state.list_generation,
+                    operation_id: Some(op_id),
+                }
+            }
+            ProviderCommand::Disable { provider_id } => {
+                let op_id = uuid::Uuid::new_v4().to_string();
+                state.pending_list_operation_id = Some(op_id.clone());
+                ProviderOperation::Disable {
+                    provider_id,
+                    expected_generation: state.list_generation,
+                    operation_id: Some(op_id),
+                }
+            }
+            ProviderCommand::Clone { source_id, new_id } => {
+                let op_id = uuid::Uuid::new_v4().to_string();
+                state.pending_list_operation_id = Some(op_id.clone());
+                ProviderOperation::CloneProvider {
+                    source_id,
+                    new_id,
+                    expected_generation: state.list_generation,
+                    operation_id: Some(op_id),
+                }
+            }
+            ProviderCommand::AddConfigured => {
+                let Some(pending) = state.pending_add.take() else {
+                    state.management_error =
+                        Some("Add provider requires id, kind, and base URL".into());
+                    return vec![];
+                };
+                let op_id = uuid::Uuid::new_v4().to_string();
+                state.pending_list_operation_id = Some(op_id.clone());
+                ProviderOperation::AddConfigured {
+                    id: pending.id,
+                    kind: pending.kind,
+                    base_url: pending.base_url,
+                    display_name: pending.display_name,
+                    expected_generation: state.list_generation,
+                    operation_id: Some(op_id),
+                }
+            }
+            ProviderCommand::RefreshCatalog(provider) => ProviderOperation::RefreshCatalogId {
+                provider_id: provider.id_str().to_owned(),
+            },
+            ProviderCommand::RefreshCapabilities(provider) => {
+                ProviderOperation::RefreshCapabilitiesId {
+                    provider_id: provider.id_str().to_owned(),
+                }
+            }
+            ProviderCommand::Editor(cmd) => {
+                use crate::views::provider_editor::EditorCommand;
+                let Some(editor) = state.editor_mut() else {
+                    return vec![];
+                };
+                match cmd {
+                    EditorCommand::Save => {
+                        let id = editor.detail.id.clone();
+                        let expected_generation = editor.generation().get();
+                        let patch = editor.dirty_save_patch();
+                        let credential_update = editor.credential_slot_update();
+                        let application_key = editor
+                            .take_app_secret()
+                            .map(crate::app::actions::ProviderApiKey::new);
+                        let admin_key = editor
+                            .take_admin_secret()
+                            .map(crate::app::actions::ProviderApiKey::new);
+                        let op_id = uuid::Uuid::new_v4().to_string();
+                        editor.pending_operation_id = Some(op_id.clone());
+                        ProviderOperation::SaveEditor {
+                            id,
+                            expected_generation,
+                            patch,
+                            credential_update,
+                            application_key,
+                            admin_key,
+                            operation_id: Some(op_id),
+                        }
+                    }
+                    EditorCommand::Test => ProviderOperation::TestId {
+                        provider_id: editor.detail.id.clone(),
+                    },
+                    EditorCommand::RefreshCatalog => ProviderOperation::RefreshCatalogId {
+                        provider_id: editor.detail.id.clone(),
+                    },
+                    EditorCommand::RefreshCapabilities => {
+                        ProviderOperation::RefreshCapabilitiesId {
+                            provider_id: editor.detail.id.clone(),
+                        }
+                    }
+                    EditorCommand::Credits => ProviderOperation::CreditsId {
+                        provider_id: editor.detail.id.clone(),
+                    },
+                    EditorCommand::ToggleEnabled => {
+                        let id = editor.detail.id.clone();
+                        let expected = editor.generation().get();
+                        let op_id = uuid::Uuid::new_v4().to_string();
+                        editor.pending_operation_id = Some(op_id.clone());
+                        if editor.detail.enabled {
+                            ProviderOperation::Disable {
+                                provider_id: id,
+                                expected_generation: expected,
+                                operation_id: Some(op_id),
+                            }
+                        } else {
+                            ProviderOperation::Enable {
+                                provider_id: id,
+                                expected_generation: expected,
+                                operation_id: Some(op_id),
+                            }
+                        }
+                    }
+                    EditorCommand::Clone { new_id } => {
+                        let op_id = uuid::Uuid::new_v4().to_string();
+                        editor.pending_operation_id = Some(op_id.clone());
+                        ProviderOperation::CloneProvider {
+                            source_id: editor.detail.id.clone(),
+                            new_id,
+                            expected_generation: editor.generation().get(),
+                            operation_id: Some(op_id),
+                        }
+                    }
+                    EditorCommand::LoadReferences => ProviderOperation::LoadReferences {
+                        provider_id: editor.detail.id.clone(),
+                    },
+                    EditorCommand::ForceRemove {
+                        typed_id,
+                        clear_app,
+                        clear_admin,
+                        clear_oauth,
+                        clear_cache,
+                    } => {
+                        let op_id = uuid::Uuid::new_v4().to_string();
+                        editor.pending_operation_id = Some(op_id.clone());
+                        ProviderOperation::ForceRemove {
+                            provider_id: editor.detail.id.clone(),
+                            typed_id,
+                            expected_generation: editor.generation().get(),
+                            expected_incarnation: editor.detail.incarnation.clone(),
+                            clear_app,
+                            clear_admin,
+                            clear_oauth,
+                            clear_cache,
+                            operation_id: Some(op_id),
+                        }
+                    }
+                    EditorCommand::ConflictReload => {
+                        let id = editor.detail.id.clone();
+                        editor.conflict = None;
+                        ProviderOperation::LoadEditorDetail { provider_id: id }
+                    }
+                    EditorCommand::ConflictClone { new_id } => {
+                        editor.conflict = None;
+                        let op_id = uuid::Uuid::new_v4().to_string();
+                        editor.pending_operation_id = Some(op_id.clone());
+                        ProviderOperation::CloneProvider {
+                            source_id: editor.detail.id.clone(),
+                            new_id,
+                            expected_generation: editor.generation().get(),
+                            operation_id: Some(op_id),
+                        }
+                    }
+                    EditorCommand::ClearAppKey => {
+                        editor.clear_app_key = true;
+                        return vec![];
+                    }
+                    EditorCommand::ClearAdminKey => {
+                        editor.clear_admin_key = true;
+                        return vec![];
+                    }
+                }
             }
         }
     };

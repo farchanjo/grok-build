@@ -124,10 +124,21 @@ impl SessionActor {
         };
 
         // Restore may change backend; drop any retained runtime only after all
-        // validation succeeds. Reconstructing the current route is read-only.
+        // validation succeeds. Reconstructing the current route is read-only
+        // except when the live provider is unusable — then image budget is
+        // cleared rather than aborting a validated envelope restore.
         self.shutdown_external_agent_runtime().await;
-        let route = self.reconstruct_full_config().await;
-        let image_budget = image_budget_for_route(&route, execution_backend);
+        let image_budget = match self.reconstruct_full_config().await {
+            Ok(route) => image_budget_for_route(&route, execution_backend),
+            Err(error) => {
+                tracing::warn!(
+                    session_id = %self.session_info.id.0,
+                    error = %error,
+                    "RestoreExecutionMode: live provider route unusable; restoring with no image budget"
+                );
+                None
+            }
+        };
         self.execution_backend.set(execution_backend);
         *self.external_runtime.borrow_mut() = validated_external_runtime;
         self.chat_state_handle.update_image_budget(image_budget);
@@ -195,7 +206,15 @@ mod execution_mode_image_budget_tests {
                 config.base_url = "http://localhost".into();
                 config.context_window = 128_000;
                 actor
-                    .handle_set_session_model(config, false, false, true, 85, backend)
+                    .handle_set_session_model(
+                        acp::ModelId::new(config.model.clone()),
+                        config,
+                        false,
+                        false,
+                        true,
+                        85,
+                        backend,
+                    )
                     .await
                     .expect("load-specific model application must succeed");
 
@@ -990,8 +1009,9 @@ pub(super) async fn run_session(
                         SessionCommand::SetToolOverrides { overrides } => {
                             session.set_tool_overrides(overrides);
                         }
-                        SessionCommand::Prompt { prompt_id, prompt_blocks, prompt_mode, artifact_upload_ctx, client_identifier, screen_mode, verbatim, traceparent, json_schema, send_now, admission, tool_overrides_update, respond_to, persist_ack, parsed_prompt_tx } => {
-                            let origin = super::PromptOrigin::from_prompt_id(&prompt_id);
+                        SessionCommand::Prompt { prompt_id, prompt_blocks, origin, prompt_mode, artifact_upload_ctx, client_identifier, screen_mode, verbatim, traceparent, json_schema, send_now, admission, tool_overrides_update, respond_to, persist_ack, parsed_prompt_tx } => {
+                            // The typed `origin` is carried by the producer
+                            // (PR19); it is never re-inferred here from the id.
                             let (actor_admitted, task_wake_fallback) = match admission {
                                 Some(admission) => {
                                     let fallback = session
@@ -1010,7 +1030,7 @@ pub(super) async fn run_session(
                             // Clear suppression -- user is re-engaging
                             // (skip for synthetic auto-wake prompts; the user hasn't
                             // actually re-engaged, so post-cancel suppression must hold)
-                            if !origin.is_synthetic() {
+                            if origin.is_client_user_prompt() {
                                 if let Some(gate) = &session.tool_context.task_wake_suppressed {
                                     gate.set(false);
                                 }
@@ -1063,7 +1083,7 @@ pub(super) async fn run_session(
                                 None => (None, None),
                             };
                             let cancel_for_send_now = session
-                                .queue_input(prompt_blocks, prompt_id, prompt_mode, trace_gcs_config, artifact_tracker, client_identifier, screen_mode, verbatim, json_schema, send_now, task_wake_fallback, tool_overrides_update, respond_to, persist_ack, parsed_prompt_tx)
+                                .queue_input(prompt_blocks, prompt_id, origin, prompt_mode, trace_gcs_config, artifact_tracker, client_identifier, screen_mode, verbatim, json_schema, send_now, task_wake_fallback, tool_overrides_update, respond_to, persist_ack, parsed_prompt_tx)
                                 .await;
                             if cancel_for_send_now {
                                 session.cancel_turn_for_send_now(&mut replay_buffer).await;
@@ -1074,8 +1094,8 @@ pub(super) async fn run_session(
                             session.handle_session_mode(session_mode).await;
                             let _ = responds_to.send(());
                         }
-                        SessionCommand::SetSessionModel { inference_config, use_concise, apply_prompt_override, skip_prompt_rewrite, auto_compact_threshold_percent, execution_backend, responds_to } => {
-                            let updated_model_id = session.handle_set_session_model(inference_config, use_concise, apply_prompt_override, skip_prompt_rewrite, auto_compact_threshold_percent, execution_backend).await;
+                        SessionCommand::SetSessionModel { selection_model_id, inference_config, use_concise, apply_prompt_override, skip_prompt_rewrite, auto_compact_threshold_percent, execution_backend, responds_to } => {
+                            let updated_model_id = session.handle_set_session_model(selection_model_id, inference_config, use_concise, apply_prompt_override, skip_prompt_rewrite, auto_compact_threshold_percent, execution_backend).await;
                             let _ = responds_to.send(updated_model_id);
                         }
                         SessionCommand::GetExecutionBackend { responds_to } => {

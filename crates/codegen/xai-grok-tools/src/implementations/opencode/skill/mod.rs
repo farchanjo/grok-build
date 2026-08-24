@@ -92,6 +92,13 @@ enum FindSkillResult<'a> {
 /// Supports both fully-qualified names (`"local:commit"`) and
 /// short names (`"commit"`).
 ///
+/// This is the **model-facing** skill-tool gate: it only returns skills that
+/// are eligible for native model invocation ([`SkillInfo::is_native_model_invocable`],
+/// i.e. enabled and not `disable_model_invocation`). A
+/// `disable_model_invocation` skill is deliberately not invocable through this
+/// tool (the model cannot auto-invoke it); user slash-command execution uses a
+/// separate path that is not subject to this gate.
+///
 /// When a short name matches multiple skills across scopes, returns
 /// `Ambiguous` with the qualified names so the caller can ask for
 /// disambiguation instead of silently picking first-match.
@@ -99,15 +106,15 @@ fn find_skill<'a>(name: &str, skills: &'a [SkillInfo]) -> FindSkillResult<'a> {
     // First try exact match with fully qualified name -- always unambiguous.
     if let Some(skill) = skills
         .iter()
-        .find(|s| s.enabled && format_skill_name(s) == name)
+        .find(|s| s.is_native_model_invocable() && format_skill_name(s) == name)
     {
         return FindSkillResult::Found(skill);
     }
 
-    // Short-name lookup: collect all matching skills (only enabled ones).
+    // Short-name lookup: collect all matching skills (only invocable ones).
     let matches: Vec<&SkillInfo> = skills
         .iter()
-        .filter(|s| s.enabled && s.name == name)
+        .filter(|s| s.is_native_model_invocable() && s.name == name)
         .collect();
     match matches.len() {
         0 => FindSkillResult::NotFound,
@@ -396,6 +403,44 @@ mod tests {
             find_skill("nonexistent", &skills),
             FindSkillResult::NotFound
         ));
+    }
+
+    #[test]
+    fn find_skill_excludes_disable_model_invocation() {
+        let mut locked = make_test_skill("locked", SkillScope::Local, "/path/locked");
+        locked.disable_model_invocation = true;
+        let skills = vec![
+            locked,
+            make_test_skill("commit", SkillScope::User, "/path/a"),
+        ];
+
+        // A disable_model_invocation skill is not invocable via the model tool.
+        assert!(matches!(
+            find_skill("locked", &skills),
+            FindSkillResult::NotFound
+        ));
+        assert!(matches!(
+            find_skill("local:locked", &skills),
+            FindSkillResult::NotFound
+        ));
+        // Unrelated eligible skills still resolve.
+        assert!(matches!(
+            find_skill("commit", &skills),
+            FindSkillResult::Found(s) if s.name == "commit"
+        ));
+    }
+
+    #[test]
+    fn find_skill_keeps_user_invocable_false_eligible() {
+        // `user_invocable = false` skills remain eligible for model invocation
+        // (they are not shown in the skill tool listing, but the tool gate only
+        // checks the native-model-invocable predicate).
+        let mut auto = make_test_skill("auto", SkillScope::Local, "/path/auto");
+        auto.user_invocable = false;
+        let skills = vec![auto];
+        assert!(
+            matches!(find_skill("auto", &skills), FindSkillResult::Found(s) if s.name == "auto")
+        );
     }
 
     #[test]

@@ -240,6 +240,7 @@ fn auth_complete_triggers_bundle_status_fetch() {
             request_seq: 1,
             meta: None,
             repair: None,
+            credential_write_receipt: None,
         }),
         &mut app,
     );
@@ -275,6 +276,7 @@ fn auth_complete_with_deferred_load_also_fetches_status() {
             request_seq: 1,
             meta: None,
             repair: None,
+            credential_write_receipt: None,
         }),
         &mut app,
     );
@@ -441,19 +443,20 @@ fn e2e_compact_auth_failure_holds_prompt_and_resubmits_after_login() {
             request_seq: seq,
             meta: None,
             repair,
+            credential_write_receipt: None,
         }),
         &mut app,
     );
     assert!(
-        app.agents[&id].reauth_stashed_prompt.is_none(),
-        "stash consumed on AuthComplete"
+        app.agents[&id].reauth_stashed_prompt.is_some(),
+        "xAI AuthComplete without write receipt must leave stash"
     );
     assert!(
-        effects.iter().any(|e| matches!(
+        !effects.iter().any(|e| matches!(
             e,
             Effect::SendPrompt { .. } | Effect::SendPromptBlocks { .. }
         )),
-        "AuthComplete must resubmit the prompt so compact runs again with valid auth, got: {effects:?}"
+        "xAI session AuthComplete must not auto-resubmit without receipt: {effects:?}"
     );
 }
 
@@ -547,6 +550,14 @@ fn second_auth_failure_does_not_clobber_reauth_stash() {
         agent.reauth_stashed_prompt = Some(crate::app::agent::ProviderScopedStashedPrompt {
             provider_id: "xai".into(),
             credential_generation: 0,
+            incarnation: None,
+            registry_generation: 0,
+            binding_generation: 0,
+            host_fallback: false,
+            binding_complete: true,
+            credential_route: "api_key".into(),
+            route_authority: "authoritative".into(),
+            correlation_token: String::new(),
             prompt: crate::app::agent::InFlightPrompt {
                 text: "first prompt".into(),
                 images: Vec::new(),
@@ -593,6 +604,14 @@ fn cancel_login_drops_reauth_stashed_prompt() {
         Some(crate::app::agent::ProviderScopedStashedPrompt {
             provider_id: "xai".into(),
             credential_generation: 1,
+            incarnation: None,
+            registry_generation: 0,
+            binding_generation: 0,
+            host_fallback: false,
+            binding_complete: true,
+            credential_route: "api_key".into(),
+            route_authority: "authoritative".into(),
+            correlation_token: String::new(),
             prompt: crate::app::agent::InFlightPrompt {
                 text: "stale".into(),
                 images: Vec::new(),
@@ -629,6 +648,14 @@ fn cancel_login_strips_reauth_prompt_from_scrollback() {
         agent.reauth_stashed_prompt = Some(crate::app::agent::ProviderScopedStashedPrompt {
             provider_id: "xai".into(),
             credential_generation: 1,
+            incarnation: None,
+            registry_generation: 0,
+            binding_generation: 0,
+            host_fallback: false,
+            binding_complete: true,
+            credential_route: "api_key".into(),
+            route_authority: "authoritative".into(),
+            correlation_token: String::new(),
             prompt: crate::app::agent::InFlightPrompt {
                 text: "stale".into(),
                 images: Vec::new(),
@@ -786,6 +813,7 @@ fn stale_auth_complete_after_relogin_is_ignored() {
             request_seq: first_seq,
             meta: None,
             repair: None,
+            credential_write_receipt: None,
         }),
         &mut app,
     );
@@ -892,6 +920,11 @@ fn provider_operation_complete_token_race_safety() {
             token: CredentialRepairToken(token),
             provider_id: provider_id.into(),
             credential_generation: generation,
+            incarnation: None,
+            registry_generation: 0,
+            failed_binding_generation: 0,
+            credential_route: "api_key".into(),
+            correlation_token: String::new(),
         }
     }
     fn connected(detail: &str) -> ProviderStatus {
@@ -910,6 +943,14 @@ fn provider_operation_complete_token_race_safety() {
         agent.reauth_stashed_prompt = Some(crate::app::agent::ProviderScopedStashedPrompt {
             provider_id: provider_id.into(),
             credential_generation: generation,
+            incarnation: None,
+            registry_generation: 0,
+            binding_generation: 0,
+            host_fallback: false,
+            binding_complete: true,
+            credential_route: "api_key".into(),
+            route_authority: "authoritative".into(),
+            correlation_token: String::new(),
             prompt: crate::app::agent::InFlightPrompt {
                 text: text.into(),
                 images: Vec::new(),
@@ -946,6 +987,8 @@ fn provider_operation_complete_token_race_safety() {
             status: connected("a"),
             claude_cli_status: None,
             repair: Some(scope(10, "openrouter", 1)),
+            credential_write_receipt: None,
+            management: None,
         }),
         &mut app,
     );
@@ -975,6 +1018,8 @@ fn provider_operation_complete_token_race_safety() {
             status: connected("openai"),
             claude_cli_status: None,
             repair: Some(sibling),
+            credential_write_receipt: None,
+            management: None,
         }),
         &mut app,
     );
@@ -992,6 +1037,8 @@ fn provider_operation_complete_token_race_safety() {
             status: connected("refresh"),
             claude_cli_status: None,
             repair: None,
+            credential_write_receipt: None,
+            management: None,
         }),
         &mut app,
     );
@@ -1004,7 +1051,7 @@ fn provider_operation_complete_token_race_safety() {
         "unbound Test/Refresh must not resubmit"
     );
 
-    // Exact completion B resumes once.
+    // Exact completion B without live source fails closed.
     app.agents.get_mut(&id).unwrap().in_flight_repair = Some(scope(20, "openrouter", 2));
     let b = scope(20, "openrouter", 2);
     let effects = dispatch(
@@ -1014,17 +1061,21 @@ fn provider_operation_complete_token_race_safety() {
             status: connected("b"),
             claude_cli_status: None,
             repair: Some(b.clone()),
+            credential_write_receipt: Some(b.write_receipt(1)),
+            management: None,
         }),
         &mut app,
     );
-    assert!(app.agents[&id].reauth_stashed_prompt.is_none());
-    assert!(app.agents[&id].in_flight_repair.is_none());
     assert!(
-        effects.iter().any(|e| matches!(
+        app.agents[&id].reauth_stashed_prompt.is_some(),
+        "receipt without live source must fail closed"
+    );
+    assert!(
+        !effects.iter().any(|e| matches!(
             e,
             Effect::SendPrompt { .. } | Effect::SendPromptBlocks { .. }
         )),
-        "exact B must resume once: {effects:?}"
+        "unresolved exact source must not resume: {effects:?}"
     );
 
     // Duplicate B must not resubmit.
@@ -1035,6 +1086,8 @@ fn provider_operation_complete_token_race_safety() {
             status: connected("b-dup"),
             claude_cli_status: None,
             repair: Some(b),
+            credential_write_receipt: None,
+            management: None,
         }),
         &mut app,
     );
@@ -1059,6 +1112,11 @@ fn openai_repair_token_does_not_resume_other_providers() {
         token: CredentialRepairToken(7),
         provider_id: "openai".into(),
         credential_generation: 3,
+        incarnation: None,
+        registry_generation: 0,
+        failed_binding_generation: 0,
+        credential_route: "api_key".into(),
+        correlation_token: String::new(),
     };
     {
         let agent = app.agents.get_mut(&id).unwrap();
@@ -1067,6 +1125,14 @@ fn openai_repair_token_does_not_resume_other_providers() {
         agent.reauth_stashed_prompt = Some(crate::app::agent::ProviderScopedStashedPrompt {
             provider_id: "openrouter".into(),
             credential_generation: 3,
+            incarnation: None,
+            registry_generation: 0,
+            binding_generation: 0,
+            host_fallback: false,
+            binding_complete: true,
+            credential_route: "api_key".into(),
+            route_authority: "authoritative".into(),
+            correlation_token: String::new(),
             prompt: crate::app::agent::InFlightPrompt {
                 text: "or".into(),
                 images: Vec::new(),
@@ -1088,6 +1154,8 @@ fn openai_repair_token_does_not_resume_other_providers() {
             },
             claude_cli_status: None,
             repair: Some(openai_scope.clone()),
+            credential_write_receipt: None,
+            management: None,
         }),
         &mut app,
     );
@@ -1106,6 +1174,14 @@ fn openai_repair_token_does_not_resume_other_providers() {
         agent.reauth_stashed_prompt = Some(crate::app::agent::ProviderScopedStashedPrompt {
             provider_id: "openai".into(),
             credential_generation: 3,
+            incarnation: None,
+            registry_generation: 0,
+            binding_generation: 0,
+            host_fallback: false,
+            binding_complete: true,
+            credential_route: "api_key".into(),
+            route_authority: "authoritative".into(),
+            correlation_token: String::new(),
             prompt: crate::app::agent::InFlightPrompt {
                 text: "openai prompt".into(),
                 images: Vec::new(),
@@ -1127,16 +1203,21 @@ fn openai_repair_token_does_not_resume_other_providers() {
             },
             claude_cli_status: None,
             repair: Some(openai_scope),
+            credential_write_receipt: None,
+            management: None,
         }),
         &mut app,
     );
-    assert!(app.agents[&id].reauth_stashed_prompt.is_none());
     assert!(
-        effects.iter().any(|e| matches!(
+        app.agents[&id].reauth_stashed_prompt.is_some(),
+        "OpenAI receipt without live source must fail closed"
+    );
+    assert!(
+        !effects.iter().any(|e| matches!(
             e,
             Effect::SendPrompt { .. } | Effect::SendPromptBlocks { .. }
         )),
-        "exact OpenAI repair must resume once: {effects:?}"
+        "no live source must not resume: {effects:?}"
     );
 }
 
@@ -1150,6 +1231,14 @@ fn unbound_auth_complete_does_not_resubmit_stash() {
         agent.reauth_stashed_prompt = Some(crate::app::agent::ProviderScopedStashedPrompt {
             provider_id: "xai".into(),
             credential_generation: 1,
+            incarnation: None,
+            registry_generation: 0,
+            binding_generation: 0,
+            host_fallback: false,
+            binding_complete: true,
+            credential_route: "api_key".into(),
+            route_authority: "authoritative".into(),
+            correlation_token: String::new(),
             prompt: crate::app::agent::InFlightPrompt {
                 text: "keep".into(),
                 images: Vec::new(),
@@ -1171,7 +1260,8 @@ fn unbound_auth_complete_does_not_resubmit_stash() {
         Action::TaskComplete(TaskResult::AuthComplete {
             request_seq: 1,
             meta: None,
-            repair: None, // startup / unbound
+            repair: None,
+            credential_write_receipt: None, // startup / unbound
         }),
         &mut app,
     );
@@ -1210,11 +1300,21 @@ fn auth_complete_xai_repair_token_resumes_once() {
         token: CredentialRepairToken(5),
         provider_id: "xai".into(),
         credential_generation: 5,
+        incarnation: None,
+        registry_generation: 0,
+        failed_binding_generation: 0,
+        credential_route: "api_key".into(),
+        correlation_token: String::new(),
     };
     let or_scope = CredentialRepairScope {
         token: CredentialRepairToken(50),
         provider_id: "openrouter".into(),
         credential_generation: 7,
+        incarnation: None,
+        registry_generation: 0,
+        failed_binding_generation: 0,
+        credential_route: "api_key".into(),
+        correlation_token: String::new(),
     };
     {
         let agent = app.agents.get_mut(&id).unwrap();
@@ -1223,6 +1323,14 @@ fn auth_complete_xai_repair_token_resumes_once() {
         agent.reauth_stashed_prompt = Some(crate::app::agent::ProviderScopedStashedPrompt {
             provider_id: "xai".into(),
             credential_generation: 5,
+            incarnation: None,
+            registry_generation: 0,
+            binding_generation: 0,
+            host_fallback: false,
+            binding_complete: true,
+            credential_route: "api_key".into(),
+            route_authority: "authoritative".into(),
+            correlation_token: String::new(),
             prompt: crate::app::agent::InFlightPrompt {
                 text: "xai prompt".into(),
                 images: Vec::new(),
@@ -1241,6 +1349,14 @@ fn auth_complete_xai_repair_token_resumes_once() {
         agent.reauth_stashed_prompt = Some(crate::app::agent::ProviderScopedStashedPrompt {
             provider_id: "openrouter".into(),
             credential_generation: 7,
+            incarnation: None,
+            registry_generation: 0,
+            binding_generation: 0,
+            host_fallback: false,
+            binding_complete: true,
+            credential_route: "api_key".into(),
+            route_authority: "authoritative".into(),
+            correlation_token: String::new(),
             prompt: crate::app::agent::InFlightPrompt {
                 text: "sibling-openrouter".into(),
                 images: Vec::new(),
@@ -1273,26 +1389,31 @@ fn auth_complete_xai_repair_token_resumes_once() {
             request_seq: 3,
             meta: None,
             repair: Some(scope.clone()),
+            credential_write_receipt: None,
         }),
         &mut app,
     );
-    assert!(app.agents[&id].reauth_stashed_prompt.is_none());
-    assert!(app.agents[&id].in_flight_repair.is_none());
-    // xAI CTA stripped only on the matched target.
-    let xai_cta_gone = !(0..app.agents[&id].scrollback.len()).any(|i| {
+    assert!(
+        app.agents[&id].reauth_stashed_prompt.is_some(),
+        "xAI AuthComplete without write receipt must not consume stash"
+    );
+    // in_flight may remain until explicit cancel or successful receipt resume
+
+    // Fail-closed complete leaves CTA; sibling still intact.
+    let xai_cta = (0..app.agents[&id].scrollback.len()).any(|i| {
         matches!(
             app.agents[&id].scrollback.entry(i).map(|e| &e.block),
             Some(RenderBlock::SessionEvent(ev))
                 if matches!(ev.event, SessionEvent::ReAuthRequired)
         )
     });
-    assert!(xai_cta_gone, "exact xAI complete must strip only its CTA");
+    assert!(xai_cta, "fail-closed xAI complete must leave CTA");
     assert!(
-        effects.iter().any(|e| matches!(
+        !effects.iter().any(|e| matches!(
             e,
             Effect::SendPrompt { .. } | Effect::SendPromptBlocks { .. }
         )),
-        "xAI repair token must resume once: {effects:?}"
+        "xAI session AuthComplete without receipt must not resume: {effects:?}"
     );
 
     let sibling = &app.agents[&sibling_id];
@@ -1333,6 +1454,7 @@ fn auth_complete_xai_repair_token_resumes_once() {
             request_seq: 4,
             meta: None,
             repair: Some(scope),
+            credential_write_receipt: None,
         }),
         &mut app,
     );
@@ -1369,6 +1491,7 @@ fn auth_complete_extracts_show_resolved_model_from_meta() {
             request_seq: 1,
             meta: Some(serde_json::json!({ "show_resolved_model": false })),
             repair: None,
+            credential_write_receipt: None,
         }),
         &mut app,
     );
@@ -1392,6 +1515,7 @@ fn auth_complete_preserves_show_resolved_model_when_absent() {
             request_seq: 1,
             meta: Some(serde_json::to_value(xai_grok_shell::auth::AuthMeta::default()).unwrap()),
             repair: None,
+            credential_write_receipt: None,
         }),
         &mut app,
     );
@@ -1419,11 +1543,21 @@ fn cancel_xai_repair_preserves_openrouter_stash_and_cta() {
         token: CredentialRepairToken(11),
         provider_id: "xai".into(),
         credential_generation: 1,
+        incarnation: None,
+        registry_generation: 0,
+        failed_binding_generation: 0,
+        credential_route: "api_key".into(),
+        correlation_token: String::new(),
     };
     let or_scope = CredentialRepairScope {
         token: CredentialRepairToken(12),
         provider_id: "openrouter".into(),
         credential_generation: 9,
+        incarnation: None,
+        registry_generation: 0,
+        failed_binding_generation: 0,
+        credential_route: "api_key".into(),
+        correlation_token: String::new(),
     };
     let or_stash_bytes = "openrouter keep";
     {
@@ -1432,6 +1566,14 @@ fn cancel_xai_repair_preserves_openrouter_stash_and_cta() {
         agent.reauth_stashed_prompt = Some(crate::app::agent::ProviderScopedStashedPrompt {
             provider_id: "openrouter".into(),
             credential_generation: 9,
+            incarnation: None,
+            registry_generation: 0,
+            binding_generation: 0,
+            host_fallback: false,
+            binding_complete: true,
+            credential_route: "api_key".into(),
+            route_authority: "authoritative".into(),
+            correlation_token: String::new(),
             prompt: crate::app::agent::InFlightPrompt {
                 text: or_stash_bytes.into(),
                 images: Vec::new(),
@@ -1457,6 +1599,14 @@ fn cancel_xai_repair_preserves_openrouter_stash_and_cta() {
         agent.reauth_stashed_prompt = Some(crate::app::agent::ProviderScopedStashedPrompt {
             provider_id: "openrouter".into(),
             credential_generation: 9,
+            incarnation: None,
+            registry_generation: 0,
+            binding_generation: 0,
+            host_fallback: false,
+            binding_complete: true,
+            credential_route: "api_key".into(),
+            route_authority: "authoritative".into(),
+            correlation_token: String::new(),
             prompt: crate::app::agent::InFlightPrompt {
                 text: "sibling-or".into(),
                 images: Vec::new(),
@@ -1560,11 +1710,21 @@ fn cancel_xai_token_blocks_delayed_auth_complete_resume() {
         token: CredentialRepairToken(22),
         provider_id: "xai".into(),
         credential_generation: 4,
+        incarnation: None,
+        registry_generation: 0,
+        failed_binding_generation: 0,
+        credential_route: "api_key".into(),
+        correlation_token: String::new(),
     };
     let or_scope = CredentialRepairScope {
         token: CredentialRepairToken(23),
         provider_id: "openrouter".into(),
         credential_generation: 2,
+        incarnation: None,
+        registry_generation: 0,
+        failed_binding_generation: 0,
+        credential_route: "api_key".into(),
+        correlation_token: String::new(),
     };
     {
         let agent = app.agents.get_mut(&id).unwrap();
@@ -1573,6 +1733,14 @@ fn cancel_xai_token_blocks_delayed_auth_complete_resume() {
         agent.reauth_stashed_prompt = Some(crate::app::agent::ProviderScopedStashedPrompt {
             provider_id: "xai".into(),
             credential_generation: 4,
+            incarnation: None,
+            registry_generation: 0,
+            binding_generation: 0,
+            host_fallback: false,
+            binding_complete: true,
+            credential_route: "api_key".into(),
+            route_authority: "authoritative".into(),
+            correlation_token: String::new(),
             prompt: crate::app::agent::InFlightPrompt {
                 text: "xai-stashed".into(),
                 images: Vec::new(),
@@ -1588,6 +1756,14 @@ fn cancel_xai_token_blocks_delayed_auth_complete_resume() {
         agent.reauth_stashed_prompt = Some(crate::app::agent::ProviderScopedStashedPrompt {
             provider_id: "openrouter".into(),
             credential_generation: 2,
+            incarnation: None,
+            registry_generation: 0,
+            binding_generation: 0,
+            host_fallback: false,
+            binding_complete: true,
+            credential_route: "api_key".into(),
+            route_authority: "authoritative".into(),
+            correlation_token: String::new(),
             prompt: crate::app::agent::InFlightPrompt {
                 text: "or-sibling-keep".into(),
                 images: Vec::new(),
@@ -1634,6 +1810,14 @@ fn cancel_xai_token_blocks_delayed_auth_complete_resume() {
         Some(crate::app::agent::ProviderScopedStashedPrompt {
             provider_id: "xai".into(),
             credential_generation: 4,
+            incarnation: None,
+            registry_generation: 0,
+            binding_generation: 0,
+            host_fallback: false,
+            binding_complete: true,
+            credential_route: "api_key".into(),
+            route_authority: "authoritative".into(),
+            correlation_token: String::new(),
             prompt: crate::app::agent::InFlightPrompt {
                 text: "should-not-resume".into(),
                 images: Vec::new(),
@@ -1647,6 +1831,7 @@ fn cancel_xai_token_blocks_delayed_auth_complete_resume() {
             request_seq: 6,
             meta: None,
             repair: Some(scope),
+            credential_write_receipt: None,
         }),
         &mut app,
     );
@@ -1688,17 +1873,35 @@ fn mismatched_auth_complete_preserves_sibling_stashes_and_ctas() {
         token: CredentialRepairToken(30),
         provider_id: "xai".into(),
         credential_generation: 1,
+        incarnation: None,
+        registry_generation: 0,
+        failed_binding_generation: 0,
+        credential_route: "api_key".into(),
+        correlation_token: String::new(),
     };
     let wrong = CredentialRepairScope {
         token: CredentialRepairToken(31),
         provider_id: "xai".into(),
         credential_generation: 1,
+        incarnation: None,
+        registry_generation: 0,
+        failed_binding_generation: 0,
+        credential_route: "api_key".into(),
+        correlation_token: String::new(),
     };
     {
         let agent = app.agents.get_mut(&id).unwrap();
         agent.reauth_stashed_prompt = Some(crate::app::agent::ProviderScopedStashedPrompt {
             provider_id: "xai".into(),
             credential_generation: 1,
+            incarnation: None,
+            registry_generation: 0,
+            binding_generation: 0,
+            host_fallback: false,
+            binding_complete: true,
+            credential_route: "api_key".into(),
+            route_authority: "authoritative".into(),
+            correlation_token: String::new(),
             prompt: crate::app::agent::InFlightPrompt {
                 text: "xai".into(),
                 images: Vec::new(),
@@ -1726,6 +1929,7 @@ fn mismatched_auth_complete_preserves_sibling_stashes_and_ctas() {
             request_seq: 1,
             meta: None,
             repair: Some(wrong),
+            credential_write_receipt: None,
         }),
         &mut app,
     );
@@ -1754,6 +1958,14 @@ fn unbound_auth_complete_preserves_all_stashes_and_ctas() {
         agent.reauth_stashed_prompt = Some(crate::app::agent::ProviderScopedStashedPrompt {
             provider_id: "openrouter".into(),
             credential_generation: 2,
+            incarnation: None,
+            registry_generation: 0,
+            binding_generation: 0,
+            host_fallback: false,
+            binding_complete: true,
+            credential_route: "api_key".into(),
+            route_authority: "authoritative".into(),
+            correlation_token: String::new(),
             prompt: crate::app::agent::InFlightPrompt {
                 text: "keep-or".into(),
                 images: Vec::new(),
@@ -1785,6 +1997,7 @@ fn unbound_auth_complete_preserves_all_stashes_and_ctas() {
             request_seq: 1,
             meta: None,
             repair: None,
+            credential_write_receipt: None,
         }),
         &mut app,
     );
@@ -1907,5 +2120,573 @@ fn set_chatgpt_auto_compact_threshold_emits_save_effect() {
             [Effect::SaveChatgptAutoCompactThreshold { percent: None, .. }]
         ),
         "clear must emit percent: None, got {clear:?}"
+    );
+}
+
+/// Store-bound API-key repair resume under an injectable tempfile auth home.
+#[test]
+fn store_bound_api_key_repair_resumes_once_with_temp_home() {
+    use crate::app::agent::{CredentialRepairScope, CredentialRepairToken};
+    use crate::views::providers_modal::{ProviderKind, ProviderStatus};
+    use xai_grok_shell::auth::{OPENROUTER_API_KEY_SCOPE, store_provider_api_key};
+
+    let dir = tempfile::tempdir().expect("temp auth home");
+    let home = dir.path().to_path_buf();
+
+    let failed_gen =
+        store_provider_api_key(&home, OPENROUTER_API_KEY_SCOPE, "or-key-failed-AAAAAAAA")
+            .expect("seed key");
+    assert_eq!(failed_gen, 1);
+
+    let post_gen =
+        store_provider_api_key(&home, OPENROUTER_API_KEY_SCOPE, "or-key-repaired-BBBBBBBB")
+            .expect("repair store");
+    assert_eq!(post_gen, 2);
+    assert!(post_gen > failed_gen);
+
+    let mut app = test_app_with_agent();
+    app.auth_home_override = Some(home.clone());
+    let id = AgentId(0);
+
+    let scope = CredentialRepairScope {
+        token: CredentialRepairToken(42),
+        provider_id: "openrouter".into(),
+        credential_generation: 9,
+        incarnation: None,
+        registry_generation: 0,
+        failed_binding_generation: failed_gen,
+        credential_route: "api_key".into(),
+        correlation_token: "9".into(),
+    };
+    {
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent.session.session_id = Some(acp::SessionId::new("sess-store-bound"));
+        agent.session.state = crate::app::agent::AgentState::Idle;
+        agent.reauth_stashed_prompt = Some(crate::app::agent::ProviderScopedStashedPrompt {
+            provider_id: "openrouter".into(),
+            credential_generation: 9,
+            incarnation: None,
+            registry_generation: 0,
+            binding_generation: failed_gen,
+            host_fallback: false,
+            binding_complete: true,
+            credential_route: "api_key".into(),
+            route_authority: "authoritative".into(),
+            correlation_token: "9".into(),
+            prompt: crate::app::agent::InFlightPrompt {
+                text: "store-bound prompt".into(),
+                images: Vec::new(),
+                scrollback_entry: crate::scrollback::EntryId::new(0),
+                combined_scrollback_entries: Vec::new(),
+                chip_elements: Vec::new(),
+            },
+        });
+        agent.in_flight_repair = Some(scope.clone());
+    }
+
+    // Missing receipt fails closed.
+    let effects = dispatch(
+        Action::TaskComplete(TaskResult::ProviderOperationComplete {
+            agent_id: id,
+            provider: ProviderKind::OpenRouter,
+            status: ProviderStatus::Connected {
+                detail: Some("connected".into()),
+                chatgpt_account_email: None,
+                chatgpt_models: Vec::new(),
+                },
+            claude_cli_status: None,
+            repair: Some(scope.clone()),
+            credential_write_receipt: None,
+            management: None,
+        }),
+        &mut app,
+    );
+    assert!(app.agents[&id].reauth_stashed_prompt.is_some());
+    assert!(!effects.iter().any(|e| matches!(
+        e,
+        Effect::SendPrompt { .. } | Effect::SendPromptBlocks { .. }
+    )));
+
+    // Sibling provider receipt cannot resume.
+    {
+        let mut sibling = scope.clone();
+        sibling.provider_id = "openai".into();
+        app.agents.get_mut(&id).unwrap().in_flight_repair = Some(scope.clone());
+        let effects = dispatch(
+            Action::TaskComplete(TaskResult::ProviderOperationComplete {
+                agent_id: id,
+                provider: ProviderKind::OpenAi,
+                status: ProviderStatus::Connected {
+                    detail: Some("sibling".into()),
+                    chatgpt_account_email: None,
+                    chatgpt_models: Vec::new(),
+                    },
+                claude_cli_status: None,
+                repair: Some(sibling.clone()),
+                credential_write_receipt: Some(sibling.write_receipt(post_gen)),
+                management: None,
+            }),
+            &mut app,
+        );
+        assert!(app.agents[&id].reauth_stashed_prompt.is_some());
+        assert!(!effects.iter().any(|e| matches!(
+            e,
+            Effect::SendPrompt { .. } | Effect::SendPromptBlocks { .. }
+        )));
+    }
+
+    // Stale incarnation / registry cannot resume.
+    {
+        let mut stale = scope.clone();
+        stale.incarnation = Some("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa".into());
+        stale.registry_generation = 99;
+        app.agents.get_mut(&id).unwrap().in_flight_repair = Some(scope.clone());
+        let effects = dispatch(
+            Action::TaskComplete(TaskResult::ProviderOperationComplete {
+                agent_id: id,
+                provider: ProviderKind::OpenRouter,
+                status: ProviderStatus::Connected {
+                    detail: Some("stale".into()),
+                    chatgpt_account_email: None,
+                    chatgpt_models: Vec::new(),
+                    },
+                claude_cli_status: None,
+                repair: Some(stale.clone()),
+                credential_write_receipt: Some(stale.write_receipt(post_gen)),
+                management: None,
+            }),
+            &mut app,
+        );
+        assert!(app.agents[&id].reauth_stashed_prompt.is_some());
+        assert!(!effects.iter().any(|e| matches!(
+            e,
+            Effect::SendPrompt { .. } | Effect::SendPromptBlocks { .. }
+        )));
+    }
+
+    // External rotation below the store-bound post fails closed (live != post).
+    {
+        let _ = store_provider_api_key(&home, OPENROUTER_API_KEY_SCOPE, "or-key-external-CCCCCCCC")
+            .expect("external rotate");
+        // post_gen was 2; live is now 3 — receipt claiming post=2 is rejected.
+        app.agents.get_mut(&id).unwrap().in_flight_repair = Some(scope.clone());
+        let effects = dispatch(
+            Action::TaskComplete(TaskResult::ProviderOperationComplete {
+                agent_id: id,
+                provider: ProviderKind::OpenRouter,
+                status: ProviderStatus::Connected {
+                    detail: Some("stale live".into()),
+                    chatgpt_account_email: None,
+                    chatgpt_models: Vec::new(),
+                    },
+                claude_cli_status: None,
+                repair: Some(scope.clone()),
+                credential_write_receipt: Some(scope.write_receipt(post_gen)),
+                management: None,
+            }),
+            &mut app,
+        );
+        assert!(
+            app.agents[&id].reauth_stashed_prompt.is_some(),
+            "external rotation must fail closed when live != post"
+        );
+        assert!(!effects.iter().any(|e| matches!(
+            e,
+            Effect::SendPrompt { .. } | Effect::SendPromptBlocks { .. }
+        )));
+        // Restore exact post generation for the success path.
+        let restored =
+            store_provider_api_key(&home, OPENROUTER_API_KEY_SCOPE, "or-key-repaired-BBBBBBBB")
+                .expect("restore");
+        // Generations are monotonic — capture the live post for a fresh receipt.
+        let live_post = restored;
+        assert!(live_post > failed_gen);
+
+        // Exact store-bound receipt + live re-resolve resumes once.
+        app.agents.get_mut(&id).unwrap().in_flight_repair = Some(scope.clone());
+        let mut receipt = scope.write_receipt(live_post);
+        // The receipt must carry the actual store-returned post generation.
+        receipt.post_generation = live_post;
+        let effects = dispatch(
+            Action::TaskComplete(TaskResult::ProviderOperationComplete {
+                agent_id: id,
+                provider: ProviderKind::OpenRouter,
+                status: ProviderStatus::Connected {
+                    detail: Some("connected".into()),
+                    chatgpt_account_email: None,
+                    chatgpt_models: Vec::new(),
+                    },
+                claude_cli_status: None,
+                repair: Some(scope.clone()),
+                credential_write_receipt: Some(receipt),
+                management: None,
+            }),
+            &mut app,
+        );
+        assert!(
+            app.agents[&id].reauth_stashed_prompt.is_none(),
+            "store-bound receipt must consume stash once"
+        );
+        let send_count = effects
+            .iter()
+            .filter(|e| {
+                matches!(
+                    e,
+                    Effect::SendPrompt { .. } | Effect::SendPromptBlocks { .. }
+                )
+            })
+            .count();
+        assert_eq!(
+            send_count, 1,
+            "store-bound repair must send prompt exactly once: {effects:?}"
+        );
+
+        // Duplicate is a no-op.
+        let effects = dispatch(
+            Action::TaskComplete(TaskResult::ProviderOperationComplete {
+                agent_id: id,
+                provider: ProviderKind::OpenRouter,
+                status: ProviderStatus::Connected {
+                    detail: Some("dup".into()),
+                    chatgpt_account_email: None,
+                    chatgpt_models: Vec::new(),
+                    },
+                claude_cli_status: None,
+                repair: Some(scope.clone()),
+                credential_write_receipt: Some(scope.write_receipt(live_post)),
+                management: None,
+            }),
+            &mut app,
+        );
+        assert!(!effects.iter().any(|e| matches!(
+            e,
+            Effect::SendPrompt { .. } | Effect::SendPromptBlocks { .. }
+        )));
+    }
+}
+
+/// Clear-and-replace after freeze fails closed until a matching store receipt
+/// carries the real post generation.
+#[test]
+fn store_bound_clear_and_replace_rejects_stale_receipt() {
+    use crate::app::agent::{CredentialRepairScope, CredentialRepairToken};
+    use crate::views::providers_modal::{ProviderKind, ProviderStatus};
+    use xai_grok_shell::auth::{
+        OPENROUTER_API_KEY_SCOPE, clear_provider_api_key, store_provider_api_key,
+    };
+
+    let dir = tempfile::tempdir().expect("temp auth home");
+    let home = dir.path().to_path_buf();
+    let failed_gen =
+        store_provider_api_key(&home, OPENROUTER_API_KEY_SCOPE, "or-key-before-clear-AAA")
+            .expect("seed");
+    assert_eq!(failed_gen, 1);
+
+    let mut app = test_app_with_agent();
+    app.auth_home_override = Some(home.clone());
+    let id = AgentId(0);
+    let scope = CredentialRepairScope {
+        token: CredentialRepairToken(7),
+        provider_id: "openrouter".into(),
+        credential_generation: 2,
+        incarnation: None,
+        registry_generation: 0,
+        failed_binding_generation: failed_gen,
+        credential_route: "api_key".into(),
+        correlation_token: "2".into(),
+    };
+    {
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent.session.session_id = Some(acp::SessionId::new("sess-clear-replace"));
+        agent.session.state = crate::app::agent::AgentState::Idle;
+        agent.reauth_stashed_prompt = Some(crate::app::agent::ProviderScopedStashedPrompt {
+            provider_id: "openrouter".into(),
+            credential_generation: 2,
+            incarnation: None,
+            registry_generation: 0,
+            binding_generation: failed_gen,
+            host_fallback: false,
+            binding_complete: true,
+            credential_route: "api_key".into(),
+            route_authority: "authoritative".into(),
+            correlation_token: "2".into(),
+            prompt: crate::app::agent::InFlightPrompt {
+                text: "clear-replace".into(),
+                images: Vec::new(),
+                scrollback_entry: crate::scrollback::EntryId::new(0),
+                combined_scrollback_entries: Vec::new(),
+                chip_elements: Vec::new(),
+            },
+        });
+        agent.in_flight_repair = Some(scope.clone());
+    }
+
+    // Clear removes the key (live binding None) — receipt claiming post==2 fails.
+    clear_provider_api_key(&home, OPENROUTER_API_KEY_SCOPE).expect("clear");
+    let effects = dispatch(
+        Action::TaskComplete(TaskResult::ProviderOperationComplete {
+            agent_id: id,
+            provider: ProviderKind::OpenRouter,
+            status: ProviderStatus::Connected {
+                detail: Some("after clear".into()),
+                chatgpt_account_email: None,
+                chatgpt_models: Vec::new(),
+                },
+            claude_cli_status: None,
+            repair: Some(scope.clone()),
+            credential_write_receipt: Some(scope.write_receipt(2)),
+            management: None,
+        }),
+        &mut app,
+    );
+    assert!(
+        app.agents[&id].reauth_stashed_prompt.is_some(),
+        "clear leaves live None — must not resume"
+    );
+    assert!(!effects.iter().any(|e| matches!(
+        e,
+        Effect::SendPrompt { .. } | Effect::SendPromptBlocks { .. }
+    )));
+
+    // Replace stores a new key (post gen advances). Matching receipt resumes once.
+    let post = store_provider_api_key(&home, OPENROUTER_API_KEY_SCOPE, "or-key-after-clear-BBB")
+        .expect("replace");
+    assert!(post > failed_gen);
+    app.agents.get_mut(&id).unwrap().in_flight_repair = Some(scope.clone());
+    let effects = dispatch(
+        Action::TaskComplete(TaskResult::ProviderOperationComplete {
+            agent_id: id,
+            provider: ProviderKind::OpenRouter,
+            status: ProviderStatus::Connected {
+                detail: Some("after replace".into()),
+                chatgpt_account_email: None,
+                chatgpt_models: Vec::new(),
+                },
+            claude_cli_status: None,
+            repair: Some(scope.clone()),
+            credential_write_receipt: Some(scope.write_receipt(post)),
+            management: None,
+        }),
+        &mut app,
+    );
+    assert!(app.agents[&id].reauth_stashed_prompt.is_none());
+    assert_eq!(
+        effects
+            .iter()
+            .filter(|e| matches!(
+                e,
+                Effect::SendPrompt { .. } | Effect::SendPromptBlocks { .. }
+            ))
+            .count(),
+        1
+    );
+}
+
+/// Dual-store hermetic: OpenAI Platform API-key and ChatGPT OAuth coexist.
+/// An API-key repair receipt must not satisfy an OAuth-scoped failure and
+/// vice versa — live re-resolve is keyed by exact credential_route.
+#[test]
+fn oauth_and_api_key_routes_do_not_crossover_on_resume_handler() {
+    use crate::app::agent::{CredentialRepairScope, CredentialRepairToken};
+    use crate::views::providers_modal::{ProviderKind, ProviderStatus};
+    use xai_grok_shell::auth::{OPENAI_API_KEY_SCOPE, store_provider_api_key};
+
+    // Dual-store under one tempfile home: Platform API-key present; OAuth
+    // absent. Live re-resolve is exact-route keyed so crossover fails closed.
+    let dir = tempfile::tempdir().expect("temp auth home");
+    let home = dir.path().to_path_buf();
+
+    // Platform API-key store for openai instance.
+    let api_failed =
+        store_provider_api_key(&home, OPENAI_API_KEY_SCOPE, "sk-openai-failed-AAAAAAAA")
+            .expect("api key seed");
+    let api_post =
+        store_provider_api_key(&home, OPENAI_API_KEY_SCOPE, "sk-openai-repaired-BBBBBBBB")
+            .expect("api key repair");
+    assert!(api_post > api_failed);
+
+    // OAuth live generation for built-in openai (no tokens → None).
+    // Ensure API-key live re-resolve does not answer chatgpt_oauth.
+    assert!(
+        xai_grok_shell::session::route_context::live_binding_generation_for_route(
+            &home,
+            "openai",
+            "chatgpt_oauth",
+            None,
+        )
+        .is_none(),
+        "OAuth source must be absent when only API-key is stored"
+    );
+    assert_eq!(
+        xai_grok_shell::session::route_context::live_binding_generation_for_route(
+            &home, "openai", "api_key", None,
+        ),
+        Some(api_post)
+    );
+    assert_eq!(
+        xai_grok_shell::session::route_context::live_binding_generation_for_route(
+            &home,
+            "openai",
+            "openai_platform",
+            None,
+        ),
+        Some(api_post)
+    );
+
+    let mut app = test_app_with_agent();
+    app.auth_home_override = Some(home.clone());
+    let id = AgentId(0);
+
+    // OAuth-scoped failure with API-key receipt: exact source live re-resolve
+    // returns None for chatgpt_oauth → resume rejected.
+    let oauth_scope = CredentialRepairScope {
+        token: CredentialRepairToken(11),
+        provider_id: "openai".into(),
+        credential_generation: 5,
+        incarnation: None,
+        registry_generation: 0,
+        failed_binding_generation: 0,
+        credential_route: "chatgpt_oauth".into(),
+        correlation_token: "5".into(),
+    };
+    {
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent.session.session_id = Some(acp::SessionId::new("sess-crossover"));
+        agent.session.state = crate::app::agent::AgentState::Idle;
+        agent.reauth_stashed_prompt = Some(crate::app::agent::ProviderScopedStashedPrompt {
+            provider_id: "openai".into(),
+            credential_generation: 5,
+            incarnation: None,
+            registry_generation: 0,
+            binding_generation: 0,
+            host_fallback: false,
+            binding_complete: true,
+            credential_route: "chatgpt_oauth".into(),
+            route_authority: "authoritative".into(),
+            correlation_token: "5".into(),
+            prompt: crate::app::agent::InFlightPrompt {
+                text: "oauth failure".into(),
+                images: Vec::new(),
+                scrollback_entry: crate::scrollback::EntryId::new(0),
+                combined_scrollback_entries: Vec::new(),
+                chip_elements: Vec::new(),
+            },
+        });
+        agent.in_flight_repair = Some(oauth_scope.clone());
+    }
+    // API-key store receipt cannot satisfy OAuth live source.
+    let mut api_key_receipt = oauth_scope.write_receipt(api_post);
+    api_key_receipt.credential_route = "api_key".into();
+    let effects = dispatch(
+        Action::TaskComplete(TaskResult::ProviderOperationComplete {
+            agent_id: id,
+            provider: ProviderKind::OpenAi,
+            status: ProviderStatus::Connected {
+                detail: Some("api key write".into()),
+                chatgpt_account_email: None,
+                chatgpt_models: Vec::new(),
+                },
+            claude_cli_status: None,
+            repair: Some(oauth_scope.clone()),
+            credential_write_receipt: Some(api_key_receipt),
+            management: None,
+        }),
+        &mut app,
+    );
+    assert!(
+        app.agents[&id].reauth_stashed_prompt.is_some(),
+        "API-key receipt fields mismatch OAuth scope → no resume"
+    );
+    assert!(!effects.iter().any(|e| matches!(
+        e,
+        Effect::SendPrompt { .. } | Effect::SendPromptBlocks { .. }
+    )));
+
+    // Symmetric: API-key failure, OAuth-spelled receipt rejected.
+    let api_scope = CredentialRepairScope {
+        token: CredentialRepairToken(12),
+        provider_id: "openai".into(),
+        credential_generation: 6,
+        incarnation: None,
+        registry_generation: 0,
+        failed_binding_generation: api_failed,
+        credential_route: "api_key".into(),
+        correlation_token: "6".into(),
+    };
+    {
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent.reauth_stashed_prompt = Some(crate::app::agent::ProviderScopedStashedPrompt {
+            provider_id: "openai".into(),
+            credential_generation: 6,
+            incarnation: None,
+            registry_generation: 0,
+            binding_generation: api_failed,
+            host_fallback: false,
+            binding_complete: true,
+            credential_route: "api_key".into(),
+            route_authority: "authoritative".into(),
+            correlation_token: "6".into(),
+            prompt: crate::app::agent::InFlightPrompt {
+                text: "api key failure".into(),
+                images: Vec::new(),
+                scrollback_entry: crate::scrollback::EntryId::new(0),
+                combined_scrollback_entries: Vec::new(),
+                chip_elements: Vec::new(),
+            },
+        });
+        agent.in_flight_repair = Some(api_scope.clone());
+    }
+    let mut oauth_receipt = api_scope.write_receipt(api_post);
+    oauth_receipt.credential_route = "chatgpt_oauth".into();
+    let effects = dispatch(
+        Action::TaskComplete(TaskResult::ProviderOperationComplete {
+            agent_id: id,
+            provider: ProviderKind::OpenAi,
+            status: ProviderStatus::Connected {
+                detail: Some("oauth write".into()),
+                chatgpt_account_email: None,
+                chatgpt_models: Vec::new(),
+                },
+            claude_cli_status: None,
+            repair: Some(api_scope.clone()),
+            credential_write_receipt: Some(oauth_receipt),
+            management: None,
+        }),
+        &mut app,
+    );
+    assert!(app.agents[&id].reauth_stashed_prompt.is_some());
+    assert!(!effects.iter().any(|e| matches!(
+        e,
+        Effect::SendPrompt { .. } | Effect::SendPromptBlocks { .. }
+    )));
+
+    // Matching API-key receipt + live re-resolve resumes once.
+    app.agents.get_mut(&id).unwrap().in_flight_repair = Some(api_scope.clone());
+    let effects = dispatch(
+        Action::TaskComplete(TaskResult::ProviderOperationComplete {
+            agent_id: id,
+            provider: ProviderKind::OpenAi,
+            status: ProviderStatus::Connected {
+                detail: Some("api key exact".into()),
+                chatgpt_account_email: None,
+                chatgpt_models: Vec::new(),
+                },
+            claude_cli_status: None,
+            repair: Some(api_scope.clone()),
+            credential_write_receipt: Some(api_scope.write_receipt(api_post)),
+            management: None,
+        }),
+        &mut app,
+    );
+    assert!(app.agents[&id].reauth_stashed_prompt.is_none());
+    assert_eq!(
+        effects
+            .iter()
+            .filter(|e| matches!(
+                e,
+                Effect::SendPrompt { .. } | Effect::SendPromptBlocks { .. }
+            ))
+            .count(),
+        1
     );
 }

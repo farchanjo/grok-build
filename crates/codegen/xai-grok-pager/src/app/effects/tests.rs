@@ -96,6 +96,19 @@ fn prompt_request_meta_omits_screen_mode_when_unset() {
     let meta = prompt_request_meta("p-2", None);
     assert_eq!(meta, serde_json::json!({ "promptId": "p-2" }));
 }
+
+#[test]
+fn stamp_prompt_origin_meta_writes_scheduler_tag() {
+    let mut meta = prompt_request_meta("p-3", None);
+    stamp_prompt_origin_meta(
+        &mut meta,
+        Some(crate::app::actions::PromptOriginTag::SchedulerFired),
+    );
+    assert_eq!(
+        meta["promptOrigin"],
+        xai_grok_shell::session::PROMPT_ORIGIN_SCHEDULER_FIRED
+    );
+}
 /// Text-only interjections must omit the `content` key entirely — the
 /// legacy `x.ai/interject` wire shape stays byte-identical.
 #[test]

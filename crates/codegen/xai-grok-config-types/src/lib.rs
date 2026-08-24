@@ -9,6 +9,8 @@ mod flags;
 pub use flags::*;
 mod memory;
 pub use memory::*;
+mod retrieval;
+pub use retrieval::*;
 mod mcp;
 pub use mcp::*;
 mod permission;

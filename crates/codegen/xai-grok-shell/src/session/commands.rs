@@ -147,6 +147,9 @@ pub enum SessionCommand {
     Prompt {
         prompt_id: String,
         prompt_blocks: Vec<acp::ContentBlock>,
+        /// Typed origin of this prompt (PR19). Every producer sets an explicit
+        /// variant; the live pipeline never infers it from `prompt_id`.
+        origin: crate::session::PromptOrigin,
         /// Prompt mode parsed from request `_meta.mode`.
         prompt_mode: PromptMode,
         #[allow(private_interfaces)]
@@ -187,6 +190,8 @@ pub enum SessionCommand {
         responds_to: oneshot::Sender<()>,
     },
     SetSessionModel {
+        /// Canonical catalog selection id (never the upstream wire slug).
+        selection_model_id: acp::ModelId,
         inference_config: xai_grok_inference::InferenceConfig,
         use_concise: bool,
         /// When `false`, skip the system prompt rewrite (concise/default swap).

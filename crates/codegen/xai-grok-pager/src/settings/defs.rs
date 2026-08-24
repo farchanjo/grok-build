@@ -1612,6 +1612,29 @@ pub fn default_settings() -> Vec<SettingMeta> {
             restart_required: false,
             hidden_in_minimal: false,
         },
+        // Deep-link action row: opens `/retrieval-settings` (graph editor).
+        // Status kind keeps it non-editable; Enter is special-cased in the
+        // settings modal to dispatch `Action::OpenRetrievalSettings`.
+        SettingMeta {
+            key: "open_retrieval_settings",
+            category: SettingCategory::Models,
+            owner: SettingOwner::Pager,
+            label: "Retrieval settings",
+            description: "Open the retrieval graph editor (/retrieval-settings). Manage embedding models, rerankers, retrieval profiles, prime, and memory selection.",
+            keywords: &[
+                "retrieval",
+                "embedding",
+                "reranker",
+                "profile",
+                "prime",
+                "memory",
+                "graph",
+                "settings",
+            ],
+            kind: SettingKind::Status,
+            restart_required: false,
+            hidden_in_minimal: false,
+        },
         // ── Media understanding (Models category) ─────────────────────
         //
         // SHELL-owned: persisted under `[media]` in config.toml.

@@ -696,6 +696,13 @@ impl AuthManager {
     }
 
     /// Cached in-memory token if outside the early-invalidation buffer.
+    /// Grok home directory that owns this manager's `auth.json`.
+    pub fn grok_home(&self) -> &std::path::Path {
+        self.path
+            .parent()
+            .unwrap_or_else(|| std::path::Path::new("."))
+    }
+
     pub(crate) fn current(&self) -> Option<GrokAuth> {
         let auth = self
             .inner

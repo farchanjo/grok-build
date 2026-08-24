@@ -259,6 +259,9 @@ pub(crate) struct ChannelSpawner {
     pub(crate) event_tx: tokio::sync::mpsc::UnboundedSender<
         xai_grok_tools::implementations::grok_build::task::types::SubagentEvent,
     >,
+    /// Trusted ACP-boundary capability. `None` is retained only for legacy unit fixtures.
+    pub(crate) assigned_sender:
+        Option<crate::agent::subagent::assigned_spawn::GoalAssignedSpawnSender>,
     pub(crate) parent_session_id: String,
     pub(crate) parent_prompt_id: Option<String>,
     pub(crate) cwd: Option<String>,
@@ -360,14 +363,25 @@ impl ChannelSpawner {
             cancel_token: tokio_util::sync::CancellationToken::new(),
             result_tx,
         };
-        if self
-            .event_tx
-            .send(SubagentEvent::Spawn(Box::new(request)))
-            .is_err()
-        {
-            return Err(SpawnError::Transport(
-                "subagent coordinator channel closed".to_string(),
-            ));
+        match &self.assigned_sender {
+            Some(sender) => sender
+                .send("planner", None, request)
+                .map_err(SpawnError::Transport)?,
+            // Unit fixtures retain the legacy event assertion. Production
+            // sessions always receive the ACP-minted private capability.
+            #[cfg(test)]
+            None => self
+                .event_tx
+                .send(SubagentEvent::Spawn(Box::new(request)))
+                .map_err(|_| {
+                    SpawnError::Transport("subagent coordinator channel closed".to_string())
+                })?,
+            #[cfg(not(test))]
+            None => {
+                return Err(SpawnError::Transport(
+                    "assigned spawn capability unavailable".to_string(),
+                ));
+            }
         }
         let result = result_rx
             .await
@@ -640,6 +654,7 @@ mod tests {
 
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         let spawner = ChannelSpawner {
+            assigned_sender: None,
             event_tx: tx,
             parent_session_id: "parent".into(),
             parent_prompt_id: None,
@@ -1242,6 +1257,7 @@ mod tests {
         };
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         let spawner = ChannelSpawner {
+            assigned_sender: None,
             event_tx: tx,
             parent_session_id: "parent".into(),
             parent_prompt_id: None,
@@ -1567,6 +1583,7 @@ mod tests {
             }
         });
         let spawner = Arc::new(ChannelSpawner {
+            assigned_sender: None,
             event_tx: tx,
             parent_session_id: "p".into(),
             parent_prompt_id: None,
@@ -1631,6 +1648,7 @@ mod tests {
             }
         });
         let spawner = Arc::new(ChannelSpawner {
+            assigned_sender: None,
             event_tx: tx,
             parent_session_id: "p".into(),
             parent_prompt_id: None,

@@ -420,18 +420,28 @@ pub fn resolve_skill_internal_links(body: &str, skill_dir: &std::path::Path) -> 
         match link_type {
             LinkType::Inline => {
                 let event_src = &body[event_range.clone()];
-                if let Some(rel) = event_src.rfind(url_str) {
-                    let start = event_range.start + rel;
-                    edits.push((start..start + url_str.len(), resolved_str));
+                // Only rewrite the **destination** of the link (the part after
+                // the last `](`), never the label/title text. This prevents a
+                // URL string that also appears in the link text from being
+                // corrupted.
+                if let Some(open) = event_src.rfind("](") {
+                    let after = &event_src[open + 2..];
+                    if let Some(rel) = after.find(url_str) {
+                        let start = event_range.start + open + 2 + rel;
+                        push_edit(&mut edits, start..start + url_str.len(), resolved_str);
+                    }
                 }
             }
             LinkType::Reference | LinkType::Collapsed | LinkType::Shortcut => {
                 if let Some(def_span) = ref_def_spans.get(id) {
                     let def_src = &body[def_span.clone()];
-                    if let Some(rel) = def_src.rfind(url_str) {
-                        let start = def_span.start + rel;
-                        if !edits.iter().any(|(r, _)| r.start == start) {
-                            edits.push((start..start + url_str.len(), resolved_str));
+                    // Only rewrite the URL portion (`[label]: url`), never a URL
+                    // string that also appears in the label.
+                    if let Some(col) = def_src.find("]:") {
+                        let url_region = &def_src[col + 2..];
+                        if let Some(rel) = url_region.find(url_str) {
+                            let start = def_span.start + col + 2 + rel;
+                            push_edit(&mut edits, start..start + url_str.len(), resolved_str);
                         }
                     }
                 }
@@ -450,6 +460,22 @@ pub fn resolve_skill_internal_links(body: &str, skill_dir: &std::path::Path) -> 
         result.replace_range(range, &replacement);
     }
     result
+}
+
+/// Queue an edit, skipping any edit whose range would overlap an already-queued
+/// edit (pulldown spans are normally disjoint, but a guard prevents a
+/// `replace_range` panic if they ever overlap).
+fn push_edit(
+    edits: &mut Vec<(std::ops::Range<usize>, String)>,
+    range: std::ops::Range<usize>,
+    replacement: String,
+) {
+    let overlaps = edits
+        .iter()
+        .any(|(r, _)| r.start < range.end && range.start < r.end);
+    if !overlaps {
+        edits.push((range, replacement));
+    }
 }
 
 /// Extract the body of a skill file (everything after the YAML frontmatter).
@@ -1275,5 +1301,45 @@ Review code.
         let body = "See [escape](../../secret.md) here.";
         let result = resolve_skill_internal_links(body, &skill_dir);
         assert_eq!(result, body);
+    }
+
+    #[test]
+    fn resolve_internal_links_rewrites_only_destination_not_label() {
+        let tmp = tempfile::tempdir().unwrap();
+        let skill_dir = tmp.path().join("skills").join("my-skill");
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        std::fs::write(skill_dir.join("notes.md"), "content").unwrap();
+
+        // The label contains the same URL string as the destination.
+        let body = "See [notes.md here](notes.md).";
+        let result = resolve_skill_internal_links(body, &skill_dir);
+        let abs = skill_dir.join("notes.md").to_string_lossy().to_string();
+        // The destination is rewritten to the absolute path...
+        assert!(
+            result.contains(&format!("]({abs})")),
+            "dest not rewritten: {result}"
+        );
+        // ...and the label's "notes.md" is left untouched (still relative).
+        assert!(
+            result.contains("[notes.md here]"),
+            "label corrupted: {result}"
+        );
+    }
+
+    #[test]
+    fn resolve_internal_links_leaves_title_text_untouched() {
+        let tmp = tempfile::tempdir().unwrap();
+        let skill_dir = tmp.path().join("skills").join("my-skill");
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        std::fs::write(skill_dir.join("guide.md"), "content").unwrap();
+
+        let body = "Do [the thing](guide.md \"see guide.md\").";
+        let result = resolve_skill_internal_links(body, &skill_dir);
+        let abs = skill_dir.join("guide.md").to_string_lossy().to_string();
+        // Destination rewritten.
+        assert!(
+            result.contains(&format!("]({abs} \"see guide.md\")")),
+            "dest/title corrupted: {result}"
+        );
     }
 }

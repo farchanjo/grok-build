@@ -43,6 +43,23 @@ impl ChatStateHandle {
         let _ = self.cmd_tx.send(ChatStateCommand::PushUserMessage { item });
     }
 
+    /// Push several consecutive user-role items atomically in order (e.g. a
+    /// hidden prime `<system_reminder>` directly before the real user message).
+    pub fn push_message_batch(&self, items: Vec<ConversationItem>) {
+        let _ = self
+            .cmd_tx
+            .send(ChatStateCommand::PushMessageBatch { items });
+    }
+
+    /// Push several consecutive user-role items in order and await
+    /// acknowledgement (see [`Self::push_message_batch`]).
+    pub async fn push_message_batch_and_ack(&self, items: Vec<ConversationItem>) -> Option<()> {
+        self.query("PushMessageBatchAndAck", |reply| {
+            ChatStateCommand::PushMessageBatchAndAck { items, reply }
+        })
+        .await
+    }
+
     /// Push a user message and await acknowledgement that the chat-state actor
     /// has accepted and processed it.
     pub async fn push_user_message_and_ack(&self, item: ConversationItem) -> Option<()> {

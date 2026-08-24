@@ -584,8 +584,7 @@ pub fn format_announcement_xml(
         skills
             .iter()
             .filter(|s| {
-                s.enabled
-                    && !s.disable_model_invocation
+                s.is_native_model_invocable()
                     // Compat mode renders all skills verbatim; only the grok
                     // build path drops description-less plugin skills.
                     && (verbatim || is_listable(s))
@@ -623,10 +622,7 @@ pub(super) fn format_announcement(
         skills
             .iter()
             .filter(|s| {
-                s.enabled
-                    && !s.disable_model_invocation
-                    && is_listable(s)
-                    && announced.insert(s.dedup_key())
+                s.is_native_model_invocable() && is_listable(s) && announced.insert(s.dedup_key())
             })
             .map(|s| build_skill_entry(s, real_prefix, display_prefix, true))
             .collect(),

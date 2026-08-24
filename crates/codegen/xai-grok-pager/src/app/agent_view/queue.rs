@@ -885,6 +885,7 @@ mod queue_edit_routing_tests {
             kind: "prompt".into(),
             text: format!("server {id}"),
             combined_texts: None,
+            origin: None,
             position,
         }
     }
@@ -1355,6 +1356,7 @@ mod queue_edit_routing_tests {
                 text: "first".into(),
                 position: 0,
                 combined_texts: None,
+                origin: None,
             },
             QueueEntryWire {
                 id: "p2".into(),
@@ -1365,6 +1367,7 @@ mod queue_edit_routing_tests {
                 text: "second".into(),
                 position: 1,
                 combined_texts: None,
+                origin: None,
             },
         ];
         agent.session.pending_prompts.clear();

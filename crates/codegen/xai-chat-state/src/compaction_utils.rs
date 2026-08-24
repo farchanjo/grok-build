@@ -4380,4 +4380,67 @@ The user asked to read main.rs and lib.rs. main.rs prints hello world, lib.rs ha
             "recent turn must survive"
         );
     }
+
+    /// PR19: a hidden prime `<skill_prime>` `SystemReminder` immediately before
+    /// its real user item compacts safely — it is dropped/folded (never
+    /// re-injected) and its body never resurfaces as a duplicate reminder or
+    /// as a plain (non-reminder) user prompt. Compaction never calls
+    /// `maybe_inject_prime_reminder` (a single `handle_prompt` call site), so
+    /// compaction can never duplicate the prime reminder.
+    #[tokio::test]
+    async fn prime_system_reminder_compacts_without_body_reinjection() {
+        let prime_body = "<skill_prime>\n<skill_source name=\"deploy\">PRIME-SKILL-BODY deploy steps</skill_source>\n</skill_prime>";
+        let conversation = vec![
+            ConversationItem::system("sys"),
+            ConversationItem::system_reminder(prime_body),
+            ConversationItem::user("deploy the release now"),
+            ConversationItem::assistant("On it."),
+        ];
+        let state_context =
+            CompactionStateContext::build(&conversation, CompactionInputs::default()).await;
+        let compacted = build_compacted_history(CompactedHistoryInput {
+            system_message: ConversationItem::system("sys"),
+            user_message_prefix: "<user_info>OS: linux</user_info>".to_string(),
+            agents_md_reminder: None,
+            state_context: &state_context,
+            compaction_summary: "Summary: user asked to deploy.".to_string(),
+            system_reminder: None,
+            summary_before_recent: false,
+            transcript_hint: None,
+            summary_count: 1,
+        });
+
+        // The prime body appears at most once (never duplicated by
+        // compaction) and never as a plain (non-reminder) user prompt.
+        let body_carriers: Vec<_> = compacted
+            .iter()
+            .filter(|i| i.text_content().contains("PRIME-SKILL-BODY"))
+            .cloned()
+            .collect();
+        assert!(
+            body_carriers.len() <= 1,
+            "the prime body must never be duplicated by compaction"
+        );
+        for item in &body_carriers {
+            assert!(
+                matches!(
+                    item,
+                    xai_grok_inference_types::ConversationItem::User(u)
+                        if u.synthetic_reason
+                            == Some(xai_grok_inference_types::SyntheticReason::SystemReminder)
+                ),
+                "if the prime reminder survives compaction it must stay a hidden SystemReminder, \
+                 never a plain user prompt"
+            );
+        }
+        // The prime body never leaks into the compacted history as a plain
+        // (non-reminder) item.
+        assert!(
+            !compacted.iter().any(|i| {
+                i.text_content().contains("PRIME-SKILL-BODY")
+                    && !i.text_content().contains("<skill_prime>")
+            }),
+            "the prime body must not be re-injected as a plain user prompt"
+        );
+    }
 }

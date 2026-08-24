@@ -34,7 +34,11 @@ pub(crate) enum InferenceCommand {
     Cancel { request_id: RequestId },
 
     /// Update the default sampling config (model switch, auth refresh).
-    UpdateConfig { config: Box<InferenceConfig> },
+    UpdateConfig {
+        config: Box<InferenceConfig>,
+        /// Optional route-context update applied atomically with config.
+        route: crate::route_context::RouteContextUpdate,
+    },
 
     /// Query: is a specific request still in flight?
     IsActive {

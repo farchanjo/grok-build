@@ -31,7 +31,7 @@ const OPENROUTER_CATALOG_TTL_ENV: &str = "GROK_OPENROUTER_CATALOG_TTL_SECS";
 const ANTHROPIC_CATALOG_DEFAULT_TTL_SECS: u64 = 6 * 60 * 60;
 const ANTHROPIC_CATALOG_TTL_ENV: &str = "GROK_ANTHROPIC_CATALOG_TTL_SECS";
 /// Direct Anthropic Messages base used by InferenceClient (`…/v1` + `/messages`).
-const ANTHROPIC_INFERENCE_BASE_URL: &str = "https://api.anthropic.com/v1";
+use super::model_providers::ANTHROPIC_INFERENCE_BASE_URL;
 
 /// A provider understood by the built-in provider screen.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
@@ -635,58 +635,20 @@ impl ProviderManager {
         config_models: &mut indexmap::IndexMap<String, super::config::ConfigModelOverride>,
     ) {
         use super::config::ConfigModelOverride;
-        use super::model_providers::ModelProviderConfig;
+        use super::model_providers::{
+            grok_build_anthropic_config, grok_build_openai_config, grok_build_openrouter_config,
+        };
         use crate::inference::ApiBackend;
 
         model_providers
             .entry("grok_build_openai".to_owned())
-            .or_insert_with(|| ModelProviderConfig {
-                kind: ModelProviderKind::OpenAi,
-                base_url: Some("https://api.openai.com/v1".to_owned()),
-                api_backend: Some(ApiBackend::Responses),
-                ..Default::default()
-            });
+            .or_insert_with(grok_build_openai_config);
         model_providers
             .entry("grok_build_openrouter".to_owned())
-            .or_insert_with(|| {
-                use super::model_providers::OpenRouterProviderPreferences;
-                let mut extra_headers = indexmap::IndexMap::<String, String>::new();
-                extra_headers
-                    .entry("X-OpenRouter-Title".to_owned())
-                    .or_insert("Grok Build".to_owned());
-                ModelProviderConfig {
-                    kind: ModelProviderKind::OpenRouter,
-                    base_url: Some("https://openrouter.ai/api/v1".to_owned()),
-                    api_backend: Some(ApiBackend::ChatCompletions),
-                    provider_preferences: Some(OpenRouterProviderPreferences {
-                        data_collection: Some("deny".to_owned()),
-                        require_parameters: Some(true),
-                        ..Default::default()
-                    }),
-                    extra_headers,
-                    ..Default::default()
-                }
-            });
+            .or_insert_with(grok_build_openrouter_config);
         model_providers
             .entry("grok_build_anthropic".to_owned())
-            .or_insert_with(|| {
-                let mut extra_headers = indexmap::IndexMap::<String, String>::new();
-                // Required for direct Anthropic identity only. Custom Messages
-                // backends never inherit this provider entry.
-                extra_headers.insert(
-                    "anthropic-version".to_owned(),
-                    xai_grok_inference::ANTHROPIC_VERSION.to_owned(),
-                );
-                ModelProviderConfig {
-                    kind: ModelProviderKind::Anthropic,
-                    base_url: Some(ANTHROPIC_INFERENCE_BASE_URL.to_owned()),
-                    // snake_case AuthScheme wire form (`x_api_key`).
-                    auth_scheme: Some("x_api_key".to_owned()),
-                    api_backend: Some(ApiBackend::Messages),
-                    extra_headers,
-                    ..Default::default()
-                }
-            });
+            .or_insert_with(grok_build_anthropic_config);
         // First-class Z.ai Model API profile (credentials never inlined).
         super::zai::install_zai_provider(model_providers);
         let openrouter_configured = credential_lookup_manager()
@@ -1047,18 +1009,36 @@ impl ProviderManager {
     /// display (true headless). macOS/Windows never have `DISPLAY`, so the old
     /// "no DISPLAY" heuristic incorrectly forced device auth and hid the code.
     pub async fn chatgpt_oauth_login(&self) -> Result<(), ProviderError> {
+        self.chatgpt_oauth_login_binding_generation()
+            .await
+            .map(|_| ())
+    }
+
+    /// Like [`Self::chatgpt_oauth_login`], but returns the exact durable
+    /// binding generation committed by the OAuth token store.
+    pub async fn chatgpt_oauth_login_binding_generation(&self) -> Result<u64, ProviderError> {
         use crate::auth::chatgpt_oauth;
         let result = if prefer_chatgpt_device_auth() {
-            chatgpt_oauth::login_device(&self.grok_home).await
+            chatgpt_oauth::login_device_route_generation(
+                &self.grok_home,
+                &chatgpt_oauth::ChatGptOAuthRoute::BuiltIn,
+            )
+            .await
+            .map(|(_, generation)| generation)
         } else {
-            chatgpt_oauth::login_browser(&self.grok_home).await
+            chatgpt_oauth::login_browser_route_generation(
+                &self.grok_home,
+                &chatgpt_oauth::ChatGptOAuthRoute::BuiltIn,
+            )
+            .await
+            .map(|(_, generation)| generation)
         };
-        result.map_err(|e| {
+        let generation = result.map_err(|e| {
             tracing::warn!(error = %e, "ChatGPT OAuth login failed");
             ProviderError::CodexFailed
         })?;
         let _ = save_codex_catalog_cache(&self.grok_home, &static_chatgpt_oauth_presets());
-        Ok(())
+        Ok(generation)
     }
 
     /// Clear ChatGPT OAuth credentials for OpenAI.
@@ -1076,8 +1056,35 @@ impl ProviderManager {
     pub async fn codex_login(&self) -> Result<(), ProviderError> {
         self.chatgpt_oauth_login().await
     }
+    /// ChatGPT OAuth login returning the exact store-committed binding generation.
+    pub async fn codex_login_binding_generation(&self) -> Result<u64, ProviderError> {
+        self.chatgpt_oauth_login_binding_generation().await
+    }
     pub async fn codex_logout(&self) -> Result<(), ProviderError> {
         self.chatgpt_oauth_logout().await
+    }
+
+    /// Store an API key and return the exact durable binding generation when
+    /// the store can name one. Built-in xAI has no generation contract yet and
+    /// returns `Ok(None)` so automatic repair fails closed for that route.
+    pub fn set_api_key_binding_generation(
+        &self,
+        provider: ProviderId,
+        api_key: &str,
+    ) -> Result<Option<u64>, ProviderError> {
+        let api_key = api_key.trim();
+        if api_key.is_empty() || api_key.len() > MAX_API_KEY_BYTES {
+            return Err(ProviderError::InvalidApiKey);
+        }
+        if provider == ProviderId::Xai {
+            crate::auth::store_api_key(&self.grok_home, api_key)
+                .map_err(|_| ProviderError::CredentialStore)?;
+            return Ok(None);
+        }
+        let generation =
+            crate::auth::store_provider_api_key(&self.grok_home, provider.auth_scope()?, api_key)
+                .map_err(|_| ProviderError::CredentialStore)?;
+        Ok(Some(generation))
     }
 
     pub fn set_api_key(&self, provider: ProviderId, api_key: &str) -> Result<(), ProviderError> {
@@ -1094,6 +1101,7 @@ impl ProviderManager {
                 .map_err(|_| ProviderError::CredentialStore);
         }
         crate::auth::store_provider_api_key(&self.grok_home, provider.auth_scope()?, api_key)
+            .map(|_| ())
             .map_err(|_| ProviderError::CredentialStore)
     }
 
@@ -1275,28 +1283,16 @@ impl ProviderManager {
     /// Fetch the complete authenticated OpenRouter catalog and update the
     /// local owner-only cache. On a transport/server/parse failure, return the
     /// last valid cache if present; with no cache, fail closed.
+    ///
+    /// Live fetch uses the OpenRouter catalog adapter (bounded body, same-origin
+    /// pagination, secret-safe errors). Legacy singleton cache format is preserved.
     pub async fn refresh_openrouter_catalog(&self) -> Result<OpenRouterCatalog, ProviderError> {
         let Some(key) = self.api_key(ProviderId::OpenRouter)? else {
             return Err(ProviderError::OpenRouterCatalogUnavailable);
         };
-        let response =
-            xai_grok_tools::extra_ca::with_extra_root_certificates(reqwest::Client::builder())
-                .timeout(CONNECTION_TIMEOUT)
-                .build()
-                .map_err(|_| ProviderError::OpenRouterCatalogUnavailable)?
-                .get(&self.openrouter_catalog_url)
-                .bearer_auth(key)
-                .send()
-                .await;
-        let live = match response {
-            Ok(response) if response.status().is_success() => response
-                .bytes()
-                .await
-                .ok()
-                .and_then(|body| parse_openrouter_catalog(&body).ok()),
-            _ => None,
-        };
-        if let Some(models) = live {
+        if let Some(models) =
+            fetch_openrouter_catalog_via_adapter(&self.openrouter_catalog_url, &key).await
+        {
             let catalog = OpenRouterCatalog {
                 source: OpenRouterCatalogSource::Live,
                 models,
@@ -1313,28 +1309,15 @@ impl ProviderManager {
 
     /// Fetch the authenticated OpenAI model list, merge it with the curated
     /// agent-safe presets, and persist a credential-free owner-only cache.
+    ///
+    /// Live fetch uses the OpenAI catalog adapter (bounded body, explicit
+    /// has_more pagination only). Legacy singleton cache format is preserved.
     pub async fn refresh_openai_catalog(&self) -> Result<OpenAiCatalog, ProviderError> {
         let Some(key) = self.api_key(ProviderId::OpenAi)? else {
             return Err(ProviderError::OpenAiCatalogUnavailable);
         };
-        let response =
-            xai_grok_tools::extra_ca::with_extra_root_certificates(reqwest::Client::builder())
-                .timeout(CONNECTION_TIMEOUT)
-                .build()
-                .map_err(|_| ProviderError::OpenAiCatalogUnavailable)?
-                .get(&self.openai_models_url)
-                .bearer_auth(key)
-                .send()
-                .await;
-        let live = match response {
-            Ok(response) if response.status().is_success() => response
-                .bytes()
-                .await
-                .ok()
-                .and_then(|body| parse_openai_catalog(&body).ok()),
-            _ => None,
-        };
-        if let Some(models) = live {
+        if let Some(models) = fetch_openai_catalog_via_adapter(&self.openai_models_url, &key).await
+        {
             let catalog = OpenAiCatalog {
                 source: OpenAiCatalogSource::Live,
                 models,
@@ -2005,6 +1988,96 @@ struct OpenAiModel {
 struct OpenAiCatalogCache {
     version: u8,
     models: Vec<ProviderModelPreset>,
+}
+
+/// Production OpenAI live fetch via the bounded adapter. Maps discovered
+/// upstream ids into the existing curated+experimental preset merge.
+async fn fetch_openai_catalog_via_adapter(
+    models_url: &str,
+    bearer: &str,
+) -> Option<Vec<ProviderModelPreset>> {
+    use crate::agent::provider_catalog::{
+        CatalogFetchBounds, build_account_identity, fetch_openai_catalog,
+    };
+    use crate::provider_registry::{
+        ApiSurface, CredentialBindingId, CredentialRoute, ProviderIncarnation, ProviderKind,
+    };
+    use tokio_util::sync::CancellationToken;
+
+    // Ephemeral identity for the network hop only. Built-in openai cache still
+    // uses the legacy singleton file path below; no synthetic PR7 write here.
+    let incarnation = ProviderIncarnation::new(uuid::Uuid::new_v4().to_string()).ok()?;
+    let binding = CredentialBindingId::generate();
+    let origin = crate::provider_registry::normalize_endpoint_origin(models_url).ok()?;
+    // Identity base must match origin; use models_url's origin as base.
+    let identity = build_account_identity(
+        "openai",
+        ProviderKind::OpenAi,
+        ApiSurface::OpenAiPlatform,
+        CredentialRoute::ApiKey,
+        &origin,
+        None,
+        None,
+        incarnation,
+        binding,
+    )
+    .ok()?;
+    let bounds = CatalogFetchBounds::default()
+        .with_request_timeout(CONNECTION_TIMEOUT)
+        .with_max_duration(CONNECTION_TIMEOUT);
+    let result = fetch_openai_catalog(
+        models_url,
+        bearer,
+        &identity,
+        &indexmap::IndexMap::new(),
+        bounds,
+        0,
+        0,
+        &CancellationToken::new(),
+    )
+    .await
+    .ok()?;
+    if !result.is_complete_live() {
+        return None;
+    }
+    // Rebuild the OpenAI identity-list body shape so curated merge stays shared.
+    let ids: Vec<serde_json::Value> = result
+        .models
+        .iter()
+        .map(|m| serde_json::json!({"id": m.upstream_model_id}))
+        .collect();
+    let body = serde_json::to_vec(&serde_json::json!({"object": "list", "data": ids})).ok()?;
+    parse_openai_catalog(&body).ok()
+}
+
+/// Production OpenRouter live fetch via the bounded adapter body path.
+///
+/// HTTP pagination / size / cancel bounds come from the adapter. The complete
+/// assembled body is projected by the **authoritative**
+/// [`parse_openrouter_catalog`] so nested effort selection (Unknown /
+/// Unrestricted / Exact / Unsupported), tools, modalities, and context
+/// metadata match the pre-adapter live path bit-for-bit.
+async fn fetch_openrouter_catalog_via_adapter(
+    models_url: &str,
+    bearer: &str,
+) -> Option<Vec<ProviderModelPreset>> {
+    use crate::agent::provider_catalog::{CatalogFetchBounds, fetch_openrouter_bounded_list_body};
+    use tokio_util::sync::CancellationToken;
+
+    let origin = crate::provider_registry::normalize_endpoint_origin(models_url).ok()?;
+    let bounds = CatalogFetchBounds::default()
+        .with_request_timeout(CONNECTION_TIMEOUT)
+        .with_max_duration(CONNECTION_TIMEOUT);
+    let body = fetch_openrouter_bounded_list_body(
+        models_url,
+        bearer,
+        &origin,
+        bounds,
+        &CancellationToken::new(),
+    )
+    .await
+    .ok()?;
+    parse_openrouter_catalog(&body).ok()
 }
 
 fn parse_openai_catalog(body: &[u8]) -> Result<Vec<ProviderModelPreset>, ()> {
@@ -4211,6 +4284,132 @@ mod tests {
             Some(xai_grok_inference_types::ReasoningEffortSelection::Unsupported)
         );
         assert!(none_only.reasoning_efforts.is_empty());
+    }
+
+    /// Production wrapper must feed the bounded adapter body through
+    /// `parse_openrouter_catalog` so nested effort selection is not lost.
+    #[tokio::test]
+    async fn openrouter_adapter_production_wrapper_preserves_effort_selection_semantics() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+
+        let fixture = r#"{
+          "data": [
+            {
+              "id": "acme/omitted",
+              "supported_parameters": ["reasoning"],
+              "reasoning": {"default_effort": "high"}
+            },
+            {
+              "id": "acme/unrestricted",
+              "supported_parameters": ["reasoning"],
+              "reasoning": {"supported_efforts": null, "default_effort": "max"}
+            },
+            {
+              "id": "acme/exact",
+              "supported_parameters": ["reasoning"],
+              "reasoning": {
+                "supported_efforts": ["minimal", "low", "high", "future"],
+                "default_effort": "low"
+              }
+            },
+            {
+              "id": "acme/tools",
+              "context_length": 8192,
+              "architecture": {"input_modalities": ["text", "image"]},
+              "supported_parameters": ["tools", "tool_choice"]
+            }
+          ]
+        }"#;
+        let legacy = parse_openrouter_catalog(fixture.as_bytes()).unwrap();
+
+        let home = tempfile::tempdir().unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let body = fixture.to_owned();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0_u8; 4096];
+            let read = stream.read(&mut request).unwrap();
+            let request = std::str::from_utf8(&request[..read]).unwrap();
+            assert!(
+                request.contains("authorization: Bearer effort-key")
+                    || request.contains("Authorization: Bearer effort-key")
+            );
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            )
+            .unwrap();
+        });
+
+        // Direct production wrapper (same path refresh_openrouter_catalog uses).
+        let via_adapter =
+            fetch_openrouter_catalog_via_adapter(&format!("http://{address}/models"), "effort-key")
+                .await
+                .expect("adapter production wrapper must return models");
+        server.join().unwrap();
+
+        assert_eq!(
+            via_adapter, legacy,
+            "production adapter wrapper must match parse_openrouter_catalog bit-for-bit"
+        );
+
+        // End-to-end ProviderManager refresh installs the same semantics.
+        let listener2 = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address2 = listener2.local_addr().unwrap();
+        let body2 = fixture.to_owned();
+        let server2 = std::thread::spawn(move || {
+            let (mut stream, _) = listener2.accept().unwrap();
+            let mut request = [0_u8; 4096];
+            let _ = stream.read(&mut request);
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body2.len(),
+                body2
+            )
+            .unwrap();
+        });
+        let manager = ProviderManager::new(home.path())
+            .with_openrouter_catalog_url(format!("http://{address2}/models"));
+        manager
+            .set_api_key(ProviderId::OpenRouter, "effort-key")
+            .unwrap();
+        let live = manager.refresh_openrouter_catalog().await.unwrap();
+        server2.join().unwrap();
+        assert_eq!(live.source, OpenRouterCatalogSource::Live);
+        assert_eq!(live.models, legacy);
+
+        let by_model = live
+            .models
+            .iter()
+            .map(|m| (m.model.as_str(), m))
+            .collect::<std::collections::HashMap<_, _>>();
+        assert_eq!(
+            by_model["acme/omitted"].reasoning_effort_selection,
+            Some(xai_grok_inference_types::ReasoningEffortSelection::Unknown)
+        );
+        assert_eq!(
+            by_model["acme/unrestricted"].reasoning_effort_selection,
+            Some(xai_grok_inference_types::ReasoningEffortSelection::Unrestricted)
+        );
+        assert_eq!(
+            by_model["acme/exact"].reasoning_effort_selection,
+            Some(xai_grok_inference_types::ReasoningEffortSelection::Exact)
+        );
+        assert_eq!(
+            by_model["acme/exact"].reasoning_efforts,
+            ["minimal", "low", "high"]
+        );
+        assert!(by_model["acme/tools"].supports_tools);
+        assert_eq!(by_model["acme/tools"].supports_image_input, Some(true));
+
+        // Cached singleton must persist the full selection (not None/LegacyFallback).
+        let cached = manager.cached_openrouter_catalog().unwrap();
+        assert_eq!(cached.models, legacy);
     }
 
     #[test]

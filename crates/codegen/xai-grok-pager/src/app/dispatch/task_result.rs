@@ -742,7 +742,8 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             request_seq,
             meta,
             repair,
-        } => handle_auth_complete(app, request_seq, meta, repair),
+            credential_write_receipt,
+        } => handle_auth_complete(app, request_seq, meta, repair, credential_write_receipt),
         TaskResult::AuthFailed { request_seq, error } => {
             if let AuthState::Authenticating {
                 request_seq: current_seq,
@@ -1362,9 +1363,12 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             status,
             claude_cli_status,
             repair,
+            credential_write_receipt,
+            management,
         } => {
             use super::auth::strip_trailing_auth_error_blocks;
             use super::queue::{maybe_drain_queue, note_peek_page_flip};
+            use crate::app::actions::ProviderManagementResult;
             use crate::scrollback::block::RenderBlock;
             use crate::views::providers_modal::ProviderStatus;
 
@@ -1374,6 +1378,7 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             };
             let connected = matches!(status, ProviderStatus::Connected { .. });
             let catalog_windows = app.models.clone();
+            let mut follow_up: Vec<crate::app::actions::Effect> = Vec::new();
             let applied = app.agents.get_mut(&agent_id).is_some_and(|agent| {
                 let Some(crate::views::modal::ActiveModal::Providers { state }) =
                     agent.active_modal.as_mut()
@@ -1386,10 +1391,193 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
                 if let Some(cli_status) = claude_cli_status {
                     state.set_claude_cli_status(cli_status);
                 }
+                if let Some(mgmt) = management {
+                    match mgmt {
+                        ProviderManagementResult::List(snap) => {
+                            state.apply_list_snapshot(&snap);
+                            state.management_error = None;
+                        }
+                        ProviderManagementResult::Detail(detail) => {
+                            // If editor already open for same id, reload in place (Issue 3).
+                            if let Some(ed) = state.editor_mut() {
+                                if ed.detail.id == detail.id {
+                                    ed.reload_from_detail(detail);
+                                } else {
+                                    state.open_editor(detail);
+                                }
+                            } else {
+                                state.open_editor(detail);
+                            }
+                        }
+                        ProviderManagementResult::Mutation(result) => {
+                            // Strict op-id correlation: exact match required when the
+                            // result carries an operation id. No `None => accept` for
+                            // historical/late results (PR13 Gate E).
+                            let editor_matches = state.editor_mut().is_some_and(|ed| {
+                                if ed.detail.id != result.id {
+                                    return false;
+                                }
+                                mutation_operation_matches(
+                                    result.operation_id.as_deref(),
+                                    ed.pending_operation_id.as_deref(),
+                                )
+                            });
+                            let list_matches = mutation_operation_matches(
+                                result.operation_id.as_deref(),
+                                state.pending_list_operation_id.as_deref(),
+                            );
+                            // Uncorrelated late/historical result: discard completely.
+                            if !editor_matches && !list_matches {
+                                // no-op
+                            } else if result.ok {
+                                state.list_generation = result.generation.get();
+                                let partial = if result.partial_commit {
+                                    " (reload required)"
+                                } else {
+                                    ""
+                                };
+                                state.management_message = Some(format!(
+                                    "Saved `{}` (gen {}){partial}",
+                                    result.id,
+                                    result.generation.get()
+                                ));
+                                state.management_error = None;
+                                if editor_matches {
+                                    if let Some(ed) = state.editor_mut() {
+                                        ed.conflict = None;
+                                        ed.pending_operation_id = None;
+                                    }
+                                    follow_up.push(
+                                        crate::app::actions::Effect::ProviderOperation {
+                                            agent_id,
+                                            operation: crate::app::actions::ProviderOperation::LoadEditorDetail {
+                                                provider_id: result.id.clone(),
+                                            },
+                                            repair: None,
+                                        },
+                                    );
+                                }
+                                if list_matches {
+                                    state.pending_list_operation_id = None;
+                                }
+                                follow_up.push(crate::app::actions::Effect::ProviderOperation {
+                                    agent_id,
+                                    operation:
+                                        crate::app::actions::ProviderOperation::LoadListSnapshot,
+                                    repair: None,
+                                });
+                            } else {
+                                let msg = result
+                                    .error
+                                    .clone()
+                                    .unwrap_or_else(|| "mutation failed".into());
+                                let guidance = result.guidance.clone().unwrap_or_default();
+                                let full = if guidance.is_empty() {
+                                    msg
+                                } else {
+                                    format!("{msg} — {guidance}")
+                                };
+                                state.management_error = Some(full.clone());
+                                if editor_matches {
+                                    if let Some(ed) = state.editor_mut() {
+                                        ed.error = Some(full);
+                                        ed.pending_operation_id = None;
+                                        if let Some(conflict) = result.conflict.clone() {
+                                            if conflict.provider_id == ed.detail.id {
+                                                ed.enter_conflict(conflict);
+                                            }
+                                        }
+                                    }
+                                }
+                                if list_matches {
+                                    state.pending_list_operation_id = None;
+                                }
+                            }
+                        }
+                        // Issue 5: ignore late results for wrong provider / older generation.
+                        ProviderManagementResult::Status(snap) => {
+                            if let Some(ed) = state.editor_mut() {
+                                if management_result_is_fresh(
+                                    &ed.detail.id,
+                                    ed.detail.generation.get(),
+                                    &snap.provider_id,
+                                    snap.generation.get(),
+                                ) {
+                                    ed.status = Some(snap.clone());
+                                    ed.message = Some(snap.label.clone());
+                                    ed.error = snap.error.clone();
+                                }
+                            }
+                        }
+                        ProviderManagementResult::Catalog(snap) => {
+                            if let Some(ed) = state.editor_mut() {
+                                if management_result_is_fresh(
+                                    &ed.detail.id,
+                                    ed.detail.generation.get(),
+                                    &snap.provider_id,
+                                    snap.generation.get(),
+                                ) {
+                                    ed.catalog = Some(snap.clone());
+                                    ed.message = Some("Catalog updated".into());
+                                    ed.error = snap.error.clone();
+                                }
+                            }
+                        }
+                        ProviderManagementResult::Capabilities(snap) => {
+                            if let Some(ed) = state.editor_mut() {
+                                if management_result_is_fresh(
+                                    &ed.detail.id,
+                                    ed.detail.generation.get(),
+                                    &snap.provider_id,
+                                    snap.generation.get(),
+                                ) {
+                                    ed.capabilities = Some(snap.clone());
+                                    ed.message = Some("Capabilities updated".into());
+                                    ed.error = snap.error.clone();
+                                }
+                            }
+                        }
+                        ProviderManagementResult::Credits(snap) => {
+                            if let Some(ed) = state.editor_mut() {
+                                if management_result_is_fresh(
+                                    &ed.detail.id,
+                                    ed.detail.generation.get(),
+                                    &snap.provider_id,
+                                    snap.generation.get(),
+                                ) {
+                                    ed.credits = Some(snap.clone());
+                                    ed.message = snap.summary.clone();
+                                    ed.error = snap.error.clone();
+                                }
+                            }
+                        }
+                        ProviderManagementResult::References(snap) => {
+                            if let Some(ed) = state.editor_mut() {
+                                if management_result_is_fresh(
+                                    &ed.detail.id,
+                                    ed.detail.generation.get(),
+                                    &snap.provider_id,
+                                    snap.generation.get(),
+                                ) {
+                                    ed.references = Some(snap);
+                                }
+                            }
+                        }
+                        ProviderManagementResult::Error(err) => {
+                            state.management_error = Some(err.clone());
+                            if let Some(ed) = state.editor_mut() {
+                                ed.error = Some(err);
+                            }
+                        }
+                    }
+                }
                 true
             });
             if !applied && let Some(error) = fallback_error {
                 app.show_toast(&format!("Provider action failed: {error}"));
+            }
+            if !follow_up.is_empty() {
+                return follow_up;
             }
 
             // Resume only when completion echoes the immutable repair scope
@@ -1401,6 +1589,7 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             if !connected {
                 return vec![];
             }
+            let auth_home = app.auth_home();
             let mut retry_effects = Vec::new();
             let mut page_flips = Vec::new();
             for agent in app.agents.values_mut() {
@@ -1414,7 +1603,10 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
                     }
                     continue;
                 };
-                if repair_scope.allows_resume(agent.in_flight_repair.as_ref(), &stashed) {
+                let live = super::auth::live_binding_gen_for_resume(&auth_home, &repair_scope);
+                if repair_scope.allows_resume(agent.in_flight_repair.as_ref(), &stashed)
+                    && repair_scope.validate_write_receipt(credential_write_receipt.as_ref(), live)
+                {
                     agent.in_flight_repair = None;
                     strip_trailing_auth_error_blocks(agent);
                     agent.scrollback.push_block(RenderBlock::system(format!(
@@ -1434,5 +1626,96 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             }
             retry_effects
         }
+        TaskResult::RetrievalOperationComplete { agent_id, result } => {
+            use crate::app::actions::RetrievalManagementResult;
+            use crate::views::modal::ActiveModal;
+
+            let Some(agent) = app.agents.get_mut(&agent_id) else {
+                return vec![];
+            };
+            let Some(ActiveModal::RetrievalSettings { state }) = agent.active_modal.as_mut() else {
+                return vec![];
+            };
+            match result {
+                RetrievalManagementResult::Snapshot(snap) => {
+                    state.apply_snapshot(snap);
+                }
+                RetrievalManagementResult::Mutation(m) => {
+                    let need_reload = m.ok && m.snapshot.is_none();
+                    state.apply_mutation_result(m);
+                    if need_reload {
+                        return vec![crate::app::actions::Effect::RetrievalOperation {
+                            agent_id,
+                            operation: crate::app::actions::RetrievalOperation::LoadSnapshot,
+                        }];
+                    }
+                }
+                RetrievalManagementResult::Preview(p) => {
+                    state.apply_preview(p);
+                }
+                RetrievalManagementResult::Error(e) => {
+                    state.loading = false;
+                    state.error = Some(e);
+                }
+            }
+            vec![]
+        }
+    }
+}
+
+/// Accept async management snapshots only for the open editor provider and when
+/// the result generation is not older than the editor's known generation.
+fn management_result_is_fresh(
+    editor_id: &str,
+    editor_generation: u64,
+    result_id: &str,
+    result_generation: u64,
+) -> bool {
+    editor_id == result_id && result_generation >= editor_generation
+}
+
+/// Strict mutation operation correlation (PR13 Gate E).
+///
+/// Exact match of result op-id to pending draft epoch. No `None => accept`
+/// for historical results: missing pending or missing result op discards.
+pub(crate) fn mutation_operation_matches(
+    result_operation_id: Option<&str>,
+    pending_operation_id: Option<&str>,
+) -> bool {
+    match (result_operation_id, pending_operation_id) {
+        (Some(op), Some(pending)) if pending == op => true,
+        (Some(_), Some(_)) => false, // wrong incarnation / late op
+        (Some(_), None) => false,    // pending cleared; discard historical
+        (None, _) => false,          // modern mutations always carry op ids
+    }
+}
+
+#[cfg(test)]
+mod management_result_tests {
+    use super::{management_result_is_fresh, mutation_operation_matches};
+
+    #[test]
+    fn rejects_wrong_provider_and_older_generation() {
+        assert!(management_result_is_fresh("a", 3, "a", 3));
+        assert!(management_result_is_fresh("a", 3, "a", 4));
+        assert!(!management_result_is_fresh("a", 3, "b", 9));
+        assert!(!management_result_is_fresh("a", 5, "a", 4));
+    }
+
+    #[test]
+    fn mutation_op_correlation_exact_match_only() {
+        // Production stamp sites (Enable/Disable/Add/Clone/Save in settings/ui)
+        // set pending_*_operation_id before spawning the async mutation. Result
+        // handling discards via this pure correlator — unit coverage for that
+        // contract (not a full AppView effects harness).
+        // Late same-id equal-gen completion with matching op → accept.
+        assert!(mutation_operation_matches(Some("op-1"), Some("op-1")));
+        // Wrong incarnation / different op id → discard.
+        assert!(!mutation_operation_matches(Some("op-1"), Some("op-2")));
+        // Pending cleared (historical result arrives late) → discard.
+        assert!(!mutation_operation_matches(Some("op-1"), None));
+        // No op-id on result → discard (no None => accept).
+        assert!(!mutation_operation_matches(None, Some("op-1")));
+        assert!(!mutation_operation_matches(None, None));
     }
 }

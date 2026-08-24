@@ -5,7 +5,9 @@ use rhai::{Dynamic, EvalAltResult, Position};
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 
-use crate::host::{AgentOpts, HostError, WorkflowHostRequest};
+use crate::host::{
+    AgentOpts, HostError, WorkflowHostEnvelope, WorkflowHostMessage, WorkflowHostRequest,
+};
 use crate::journal::{Journal, JournalError, request_hash};
 use crate::run::{PauseKind, WorkflowOutcome};
 use crate::{MAX_HOST_CALLS, MAX_PARALLEL};
@@ -14,7 +16,7 @@ pub struct WorkflowRunParams {
     pub script: String,
     pub args: serde_json::Value,
     pub journal: Journal,
-    pub host_tx: mpsc::UnboundedSender<WorkflowHostRequest>,
+    pub host_tx: mpsc::UnboundedSender<crate::host::WorkflowHostMessage>,
     pub cancel: CancellationToken,
     pub max_ops: u64,
 }
@@ -33,7 +35,7 @@ enum ControlToken {
 }
 
 struct Ctx {
-    host_tx: mpsc::UnboundedSender<WorkflowHostRequest>,
+    host_tx: mpsc::UnboundedSender<crate::host::WorkflowHostMessage>,
     journal: Journal,
     seq: u64,
 }
@@ -264,9 +266,19 @@ fn host_call<T>(
     }
 
     let (reply_tx, reply_rx) = oneshot::channel();
+    let request = build(reply_tx);
+    let message = match request {
+        WorkflowHostRequest::SpawnAgent { .. } => {
+            WorkflowHostMessage::AssignedSpawn(WorkflowHostEnvelope {
+                request,
+                assignment_seq: seq,
+            })
+        }
+        request => WorkflowHostMessage::Request(request),
+    };
     ctx.borrow()
         .host_tx
-        .send(build(reply_tx))
+        .send(message)
         .map_err(|_| terminated(ControlToken::Fatal("workflow host channel closed".into())))?;
 
     let reply = reply_rx
@@ -345,7 +357,7 @@ fn host_emit(ctx: &Rc<RefCell<Ctx>>, build: impl FnOnce(bool) -> WorkflowHostReq
         let ctx = ctx.borrow();
         (ctx.replaying(), ctx.host_tx.clone())
     };
-    let _ = tx.send(build(replaying));
+    let _ = tx.send(WorkflowHostMessage::Request(build(replaying)));
 }
 
 fn reserve_agent_calls(ctx: &Rc<RefCell<Ctx>>, count: usize) -> ScriptResult<()> {
@@ -357,10 +369,12 @@ fn reserve_agent_calls(ctx: &Rc<RefCell<Ctx>>, count: usize) -> ScriptResult<()>
     let (reply_tx, reply_rx) = oneshot::channel();
     ctx.borrow()
         .host_tx
-        .send(WorkflowHostRequest::ReserveAgentCalls {
-            count,
-            reply: reply_tx,
-        })
+        .send(WorkflowHostMessage::Request(
+            WorkflowHostRequest::ReserveAgentCalls {
+                count,
+                reply: reply_tx,
+            },
+        ))
         .map_err(|_| terminated(ControlToken::Fatal("workflow host channel closed".into())))?;
     match reply_rx
         .blocking_recv()
@@ -393,10 +407,12 @@ fn release_agent_calls(ctx: &Rc<RefCell<Ctx>>, count: usize) {
     if ctx
         .borrow()
         .host_tx
-        .send(WorkflowHostRequest::ReleaseAgentCalls {
-            count,
-            reply: reply_tx,
-        })
+        .send(WorkflowHostMessage::Request(
+            WorkflowHostRequest::ReleaseAgentCalls {
+                count,
+                reply: reply_tx,
+            },
+        ))
         .is_err()
     {
         return;
@@ -533,10 +549,13 @@ fn register_host_fns(engine: &mut rhai::Engine, ctx: &Rc<RefCell<Ctx>>) {
                         let (reply_tx, reply_rx) = oneshot::channel();
                         if c.borrow()
                             .host_tx
-                            .send(WorkflowHostRequest::SpawnAgent {
-                                opts,
-                                reply: reply_tx,
-                            })
+                            .send(WorkflowHostMessage::AssignedSpawn(WorkflowHostEnvelope {
+                                request: WorkflowHostRequest::SpawnAgent {
+                                    opts,
+                                    reply: reply_tx,
+                                },
+                                assignment_seq: seq,
+                            }))
                             .is_err()
                         {
                             drain_parallel_replies(pending);
@@ -838,11 +857,15 @@ mod tests {
     use crate::host::{AgentResult, BudgetState};
 
     fn spawn_mock_host(
-        mut rx: mpsc::UnboundedReceiver<WorkflowHostRequest>,
+        mut rx: mpsc::UnboundedReceiver<WorkflowHostMessage>,
         mut on_request: impl FnMut(WorkflowHostRequest) + Send + 'static,
     ) -> std::thread::JoinHandle<()> {
         std::thread::spawn(move || {
-            while let Some(req) = rx.blocking_recv() {
+            while let Some(message) = rx.blocking_recv() {
+                let req = match message {
+                    WorkflowHostMessage::Request(req) => req,
+                    WorkflowHostMessage::AssignedSpawn(envelope) => envelope.request,
+                };
                 match req {
                     WorkflowHostRequest::ReserveAgentCalls { reply, .. }
                     | WorkflowHostRequest::ReleaseAgentCalls { reply, .. } => {
@@ -855,12 +878,16 @@ mod tests {
     }
 
     fn spawn_budget_tracking_host(
-        mut rx: mpsc::UnboundedReceiver<WorkflowHostRequest>,
+        mut rx: mpsc::UnboundedReceiver<WorkflowHostMessage>,
         agents_used: std::sync::Arc<std::sync::atomic::AtomicU64>,
         mut on_request: impl FnMut(WorkflowHostRequest) + Send + 'static,
     ) -> std::thread::JoinHandle<()> {
         std::thread::spawn(move || {
-            while let Some(req) = rx.blocking_recv() {
+            while let Some(message) = rx.blocking_recv() {
+                let req = match message {
+                    WorkflowHostMessage::Request(req) => req,
+                    WorkflowHostMessage::AssignedSpawn(envelope) => envelope.request,
+                };
                 match req {
                     WorkflowHostRequest::ReserveAgentCalls { count, reply } => {
                         agents_used.fetch_add(count, std::sync::atomic::Ordering::SeqCst);
@@ -894,7 +921,7 @@ mod tests {
     fn params(
         script: &str,
         journal: Journal,
-        host_tx: mpsc::UnboundedSender<WorkflowHostRequest>,
+        host_tx: mpsc::UnboundedSender<crate::host::WorkflowHostMessage>,
     ) -> WorkflowRunParams {
         WorkflowRunParams {
             script: script.to_string(),
@@ -904,6 +931,83 @@ mod tests {
             cancel: CancellationToken::new(),
             max_ops: WorkflowRunParams::DEFAULT_MAX_OPS,
         }
+    }
+
+    #[test]
+    fn failed_spawn_send_keeps_allocated_sequence_monotonic() {
+        let (closed_tx, closed_rx) = mpsc::unbounded_channel();
+        drop(closed_rx);
+        let ctx = Rc::new(RefCell::new(Ctx {
+            host_tx: closed_tx,
+            journal: Journal::new(None),
+            seq: 0,
+        }));
+        let error = host_call::<AgentResult>(
+            &ctx,
+            "spawn_agent",
+            serde_json::json!({"prompt": "first"}),
+            |reply| WorkflowHostRequest::SpawnAgent {
+                opts: crate::host::AgentOpts {
+                    prompt: "first".into(),
+                    ..Default::default()
+                },
+                reply,
+            },
+            |_| serde_json::Value::Null,
+        )
+        .unwrap_err();
+        assert!(matches!(
+            find_control_token(&error),
+            Some(ControlToken::Fatal(message)) if message == "workflow host channel closed"
+        ));
+        // Allocation happens before send acceptance and is never rewound.
+        assert_eq!(ctx.borrow().seq, 1);
+
+        // Production runs terminate on the fatal above. This unit test bridges
+        // journal density only so a later live spawn can prove the already-
+        // advanced sequence is what the contextual envelope carries.
+        ctx.borrow_mut()
+            .journal
+            .record(
+                0,
+                "spawn_agent",
+                "aborted-before-host-accept".into(),
+                serde_json::Value::Null,
+            )
+            .expect("placeholder for the aborted allocation must be dense");
+
+        let (live_tx, mut live_rx) = mpsc::unbounded_channel();
+        ctx.borrow_mut().host_tx = live_tx;
+        let host = std::thread::spawn(move || {
+            let message = live_rx.blocking_recv().unwrap();
+            let WorkflowHostMessage::AssignedSpawn(envelope) = message else {
+                panic!("spawn must retain its contextual assignment envelope")
+            };
+            assert_eq!(envelope.assignment_seq, 1);
+            let WorkflowHostRequest::SpawnAgent { reply, .. } = envelope.request else {
+                panic!("expected spawn request")
+            };
+            let _ = reply.send(Ok(agent_result("second")));
+        });
+        let value = host_call::<AgentResult>(
+            &ctx,
+            "spawn_agent",
+            serde_json::json!({"prompt": "second"}),
+            |reply| WorkflowHostRequest::SpawnAgent {
+                opts: crate::host::AgentOpts {
+                    prompt: "second".into(),
+                    ..Default::default()
+                },
+                reply,
+            },
+            |result: AgentResult| {
+                serde_json::Value::String(result.output.as_str().unwrap().to_string())
+            },
+        )
+        .unwrap();
+        host.join().unwrap();
+        assert_eq!(value, serde_json::json!("second"));
+        assert_eq!(ctx.borrow().seq, 2);
     }
 
     #[test]
@@ -1302,7 +1406,7 @@ mod tests {
 
         {
             let used = agents_used.clone();
-            let (tx, rx) = mpsc::unbounded_channel();
+            let (tx, rx) = mpsc::unbounded_channel::<WorkflowHostMessage>();
             let host = spawn_budget_tracking_host(rx, used, |req| {
                 if let WorkflowHostRequest::SpawnAgent { reply, .. } = req {
                     let _ = reply.send(Err(HostError::Cancelled));
@@ -1326,7 +1430,7 @@ mod tests {
 
         {
             let used = agents_used.clone();
-            let (tx, rx) = mpsc::unbounded_channel();
+            let (tx, rx) = mpsc::unbounded_channel::<WorkflowHostMessage>();
             let host = spawn_budget_tracking_host(rx, used, |req| {
                 if let WorkflowHostRequest::SpawnAgent { reply, .. } = req {
                     let _ = reply.send(Ok(agent_result("after resume")));
@@ -1367,7 +1471,7 @@ mod tests {
 
         {
             let used = agents_used.clone();
-            let (tx, rx) = mpsc::unbounded_channel();
+            let (tx, rx) = mpsc::unbounded_channel::<WorkflowHostMessage>();
             let host = spawn_budget_tracking_host(rx, used, |req| {
                 if let WorkflowHostRequest::SpawnAgent { reply, .. } = req {
                     let _ = reply.send(Err(HostError::Cancelled));
@@ -1387,7 +1491,7 @@ mod tests {
 
         {
             let used = agents_used.clone();
-            let (tx, rx) = mpsc::unbounded_channel();
+            let (tx, rx) = mpsc::unbounded_channel::<WorkflowHostMessage>();
             let host = spawn_budget_tracking_host(rx, used, |req| {
                 if let WorkflowHostRequest::SpawnAgent { reply, .. } = req {
                     let _ = reply.send(Ok(agent_result("ok")));
@@ -1423,7 +1527,7 @@ mod tests {
 
         {
             let used = agents_used.clone();
-            let (tx, rx) = mpsc::unbounded_channel();
+            let (tx, rx) = mpsc::unbounded_channel::<WorkflowHostMessage>();
             let host = spawn_budget_tracking_host(rx, used, |req| {
                 if let WorkflowHostRequest::SpawnAgent { reply, .. } = req {
                     let _ = reply.send(Err(HostError::BudgetExceeded));
@@ -1443,7 +1547,7 @@ mod tests {
 
         {
             let used = agents_used.clone();
-            let (tx, rx) = mpsc::unbounded_channel();
+            let (tx, rx) = mpsc::unbounded_channel::<WorkflowHostMessage>();
             let host = spawn_budget_tracking_host(rx, used, |req| {
                 if let WorkflowHostRequest::SpawnAgent { reply, .. } = req {
                     let _ = reply.send(Ok(agent_result("after raise")));
@@ -1473,7 +1577,7 @@ mod tests {
     fn parallel_journals_soft_failure_null_and_later_success() {
         let dir = tempfile::tempdir().unwrap();
         let journal_path = dir.path().join("journal.jsonl");
-        let (tx, rx) = mpsc::unbounded_channel();
+        let (tx, rx) = mpsc::unbounded_channel::<WorkflowHostMessage>();
         let mut request_index = 0;
         let host = spawn_mock_host(rx, move |req| {
             if let WorkflowHostRequest::SpawnAgent { reply, .. } = req {
@@ -1545,7 +1649,7 @@ mod tests {
 
     #[test]
     fn parallel_preserves_order_and_nulls_failures() {
-        let (tx, rx) = mpsc::unbounded_channel();
+        let (tx, rx) = mpsc::unbounded_channel::<WorkflowHostMessage>();
         let host = spawn_mock_host(rx, |req| {
             if let WorkflowHostRequest::SpawnAgent { opts, reply } = req {
                 if opts.prompt.contains("fail") {
@@ -1590,7 +1694,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let journal_path = dir.path().join("journal.jsonl");
 
-        let (tx, rx) = mpsc::unbounded_channel();
+        let (tx, rx) = mpsc::unbounded_channel::<WorkflowHostMessage>();
         let host = spawn_mock_host(rx, |req| match req {
             WorkflowHostRequest::SpawnAgent { reply, .. } => {
                 let _ = reply.send(Ok(agent_result("recorded output")));
@@ -1611,7 +1715,7 @@ mod tests {
             panic!("first run should complete");
         };
 
-        let (tx, rx) = mpsc::unbounded_channel();
+        let (tx, rx) = mpsc::unbounded_channel::<WorkflowHostMessage>();
         let host = spawn_mock_host(rx, |req| match req {
             WorkflowHostRequest::SpawnAgent { .. } | WorkflowHostRequest::BudgetQuery { .. } => {
                 panic!("replay must not hit the host")
@@ -1634,7 +1738,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let journal_path = dir.path().join("journal.jsonl");
         std::fs::create_dir(&journal_path).unwrap();
-        let (tx, rx) = mpsc::unbounded_channel();
+        let (tx, rx) = mpsc::unbounded_channel::<WorkflowHostMessage>();
         let host = spawn_mock_host(rx, |req| {
             if let WorkflowHostRequest::SpawnAgent { reply, .. } = req {
                 let _ = reply.send(Ok(agent_result("unpersisted")));
@@ -1663,7 +1767,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let journal_path = dir.path().join("journal.jsonl");
 
-        let (tx, rx) = mpsc::unbounded_channel();
+        let (tx, rx) = mpsc::unbounded_channel::<WorkflowHostMessage>();
         let host = spawn_mock_host(rx, |req| {
             if let WorkflowHostRequest::SpawnAgent { reply, .. } = req {
                 let _ = reply.send(Ok(agent_result("v1")));
@@ -1711,7 +1815,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let journal_path = dir.path().join("journal.jsonl");
 
-        let (tx, rx) = mpsc::unbounded_channel();
+        let (tx, rx) = mpsc::unbounded_channel::<WorkflowHostMessage>();
         let host = spawn_mock_host(rx, |req| {
             if let WorkflowHostRequest::SpawnAgent { reply, .. } = req {
                 let _ = reply.send(Ok(agent_result("y")));
@@ -1720,7 +1824,7 @@ mod tests {
         let _ = run_workflow(params(script, Journal::new(Some(journal_path.clone())), tx));
         drop(host);
 
-        let (tx, rx) = mpsc::unbounded_channel();
+        let (tx, rx) = mpsc::unbounded_channel::<WorkflowHostMessage>();
         let phases = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let phases_in_host = phases.clone();
         let host = spawn_mock_host(rx, move |req| {

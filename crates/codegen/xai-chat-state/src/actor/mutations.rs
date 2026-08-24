@@ -245,6 +245,32 @@ impl ChatStateActor {
         self.prune_retained_conversation();
     }
 
+    /// Push a consecutive batch of user-role items (e.g. a hidden prime
+    /// `<system_reminder>` immediately before the real user message) in order,
+    /// as ONE durable append. Integrity repair, epoch bump, and pruning run
+    /// once for the batch, so the pair can never be interleaved or partially
+    /// persisted in memory or on disk.
+    pub(super) fn push_message_batch(&mut self, items: Vec<ConversationItem>) {
+        if items.is_empty() {
+            return;
+        }
+        self.ensure_conversation_integrity_with_reason(DanglingToolCallReason::UserCancelled);
+        let mut estimated_tokens = 0u64;
+        for item in &items {
+            estimated_tokens += super::state::estimate_item_tokens(item);
+        }
+        self.state.estimated_tokens_since_model += estimated_tokens;
+        tracing::debug!(
+            batch_len = items.len(),
+            estimated_tokens_delta = estimated_tokens,
+            "ChatState: push_message_batch updated estimated_tokens_since_model"
+        );
+        self.persistence.persist_message_batch(&items);
+        self.state.conversation.extend(items);
+        self.bump_structural_epoch();
+        self.prune_retained_conversation();
+    }
+
     /// Eagerly hard-clear tool results from very old turns in the retained
     /// in-memory conversation, freeing the actual string bytes.
     ///

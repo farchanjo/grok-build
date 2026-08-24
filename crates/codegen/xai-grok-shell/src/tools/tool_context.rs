@@ -161,6 +161,10 @@ pub struct ToolContext {
     pub subagent_admission: std::sync::Arc<
         xai_grok_tools::implementations::grok_build::task::admission::SubagentAdmission,
     >,
+    /// Shell-private derived capability for workflow and goal assignments. It
+    /// never changes the public task-event wire payload or exposes keys.
+    pub(crate) assigned_spawn_sender:
+        Option<crate::agent::subagent::assigned_spawn::TrustedAssignedSpawnSender>,
     /// Shared LSP runtime — cloned cheaply (Arc) from parent to child.
     /// Same pattern as `fs` and `terminal`.
     pub lsp: Option<Arc<dyn xai_grok_tools::implementations::lsp::LspBackend>>,
@@ -267,6 +271,7 @@ impl ToolContext {
                     xai_grok_tools::implementations::grok_build::task::admission::SubagentLimits::from_env(),
                 ),
             ),
+            assigned_spawn_sender: None,
             lsp: None,
             lsp_server_names: Vec::new(),
             is_turn_active: None,
@@ -312,6 +317,7 @@ impl ToolContext {
                     xai_grok_tools::implementations::grok_build::task::admission::SubagentLimits::from_env(),
                 ),
             ),
+            assigned_spawn_sender: None,
             lsp: None,
             lsp_server_names: Vec::new(),
             is_turn_active: None,
@@ -410,6 +416,7 @@ mod tests {
                         xai_grok_tools::implementations::grok_build::task::admission::SubagentLimits::default(),
                     ),
                 ),
+                assigned_spawn_sender: None,
                 lsp: None,
                 lsp_server_names: Vec::new(),
                 is_turn_active: None,

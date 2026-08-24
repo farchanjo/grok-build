@@ -177,10 +177,15 @@ async fn create_test_actor(
         last_reported_branch: std::sync::Arc::new(parking_lot::Mutex::new(None)),
         git_head_enabled: false,
         models_manager: Default::default(),
+        selection_model_id: std::cell::RefCell::new(acp::ModelId::new(
+            crate::test_support::TEST_MODEL,
+        )),
+        route_context: std::cell::RefCell::new(None),
         display_cwd: std::sync::OnceLock::new(),
         active_agent_type: parking_lot::Mutex::new(None),
         queue_exit_reminder_on_approved_exit: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         active_skill: parking_lot::Mutex::new(None),
+        prime_cache: crate::session::prime::inventory::InventoryCache::new(),
         plan_mode: Arc::new(parking_lot::Mutex::new(
             crate::session::plan_mode::PlanModeTracker::new(std::path::PathBuf::from(
                 "/tmp/test-session",
@@ -506,6 +511,9 @@ fn initial_injection_backend_params_use_override_min_score() {
         stale_claim_secs: 60,
         search_source: "tool",
         embedding_credentials: crate::session::memory::EndpointScopedCredentials::none(),
+        retrieval: None,
+        index_config: crate::config::MemoryIndexConfig::default(),
+        rebuild_backoff_secs: 0,
     };
     let initial_injection = crate::config::MemoryInitialInjectionConfig {
         enabled: true,
@@ -534,6 +542,9 @@ fn initial_injection_backend_params_preserve_default_zero_min_score() {
         stale_claim_secs: 60,
         search_source: "tool",
         embedding_credentials: crate::session::memory::EndpointScopedCredentials::none(),
+        retrieval: None,
+        index_config: crate::config::MemoryIndexConfig::default(),
+        rebuild_backoff_secs: 0,
     };
     let (adjusted, effective_min_score) = build_initial_injection_backend_params(
         &params,
@@ -724,10 +735,15 @@ async fn create_test_actor_with_memory(
         last_reported_branch: std::sync::Arc::new(parking_lot::Mutex::new(None)),
         git_head_enabled: false,
         models_manager: Default::default(),
+        selection_model_id: std::cell::RefCell::new(acp::ModelId::new(
+            crate::test_support::TEST_MODEL,
+        )),
+        route_context: std::cell::RefCell::new(None),
         display_cwd: std::sync::OnceLock::new(),
         active_agent_type: parking_lot::Mutex::new(None),
         queue_exit_reminder_on_approved_exit: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         active_skill: parking_lot::Mutex::new(None),
+        prime_cache: crate::session::prime::inventory::InventoryCache::new(),
         current_prompt_mode: Arc::new(parking_lot::Mutex::new(PromptMode::Agent)),
         turn_start_prompt_mode: parking_lot::Mutex::new(PromptMode::Agent),
         turn_prompt_mode: Arc::new(parking_lot::Mutex::new(PromptMode::Agent)),
@@ -1528,12 +1544,17 @@ async fn test_e2e_idle_resume_refreshes_model_metadata() {
                 last_reported_branch: std::sync::Arc::new(parking_lot::Mutex::new(None)),
                 git_head_enabled: false,
                 models_manager: Default::default(),
+                selection_model_id: std::cell::RefCell::new(acp::ModelId::new(
+                    crate::test_support::TEST_MODEL,
+                )),
+                route_context: std::cell::RefCell::new(None),
                 display_cwd: std::sync::OnceLock::new(),
                 active_agent_type: parking_lot::Mutex::new(None),
                 queue_exit_reminder_on_approved_exit: Arc::new(std::sync::atomic::AtomicBool::new(
                     false,
                 )),
                 active_skill: parking_lot::Mutex::new(None),
+                prime_cache: crate::session::prime::inventory::InventoryCache::new(),
                 plan_mode: Arc::new(parking_lot::Mutex::new(
                     crate::session::plan_mode::PlanModeTracker::new(std::path::PathBuf::from(
                         "/tmp/test-session",
@@ -1742,6 +1763,7 @@ async fn compactions_remaining_header_flips_after_compaction() {
                 actor
                     .reconstruct_full_config()
                     .await
+                    .expect("reconstruct")
                     .extra_headers
                     .get("x-compactions-remaining")
                     .cloned()
@@ -1754,6 +1776,7 @@ async fn compactions_remaining_header_flips_after_compaction() {
                 actor
                     .reconstruct_full_config()
                     .await
+                    .expect("reconstruct")
                     .extra_headers
                     .get("x-compactions-remaining")
                     .cloned()
@@ -1782,6 +1805,7 @@ async fn compactions_remaining_fixed_does_not_flip_after_compaction() {
                 actor
                     .reconstruct_full_config()
                     .await
+                    .expect("reconstruct")
                     .extra_headers
                     .get("x-compactions-remaining")
                     .cloned()
@@ -1794,6 +1818,7 @@ async fn compactions_remaining_fixed_does_not_flip_after_compaction() {
                 actor
                     .reconstruct_full_config()
                     .await
+                    .expect("reconstruct")
                     .extra_headers
                     .get("x-compactions-remaining")
                     .cloned()
@@ -1823,6 +1848,7 @@ async fn compaction_at_tokens_header_flips_after_compaction() {
                 actor
                     .reconstruct_full_config()
                     .await
+                    .expect("reconstruct")
                     .extra_headers
                     .get("x-compaction-at")
                     .cloned()
@@ -1835,6 +1861,7 @@ async fn compaction_at_tokens_header_flips_after_compaction() {
                 actor
                     .reconstruct_full_config()
                     .await
+                    .expect("reconstruct")
                     .extra_headers
                     .get("x-compaction-at")
                     .is_none(),
@@ -1857,6 +1884,7 @@ async fn compaction_at_tokens_fixed_and_disabled() {
                 actor
                     .reconstruct_full_config()
                     .await
+                    .expect("reconstruct")
                     .extra_headers
                     .get("x-compaction-at")
                     .is_none(),
@@ -1869,6 +1897,7 @@ async fn compaction_at_tokens_fixed_and_disabled() {
                 actor
                     .reconstruct_full_config()
                     .await
+                    .expect("reconstruct")
                     .extra_headers
                     .get("x-compaction-at")
                     .cloned()

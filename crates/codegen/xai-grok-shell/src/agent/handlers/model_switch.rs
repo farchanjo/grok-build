@@ -58,7 +58,7 @@ async fn apply_with_execution_backend(
         .session_handle_waiting_for_load(&session_id)
         .await
         .ok_or_else(|| acp::Error::invalid_params().data("unknown session id"))?;
-    let model = agent.resolve_model_id(&model_id)?;
+    let (selection_model_id, model) = agent.resolve_model_id(&model_id)?;
     let use_concise = model.info().use_concise;
     let target_execution_backend =
         execution_backend_override.unwrap_or(model.info().execution_backend);
@@ -259,7 +259,7 @@ async fn apply_with_execution_backend(
     } else {
         false
     };
-    let model_unchanged = previous_model_id == model_id.0;
+    let model_unchanged = previous_model_id.as_ref() == selection_model_id.0.as_ref();
     let new_threshold = {
         let cfg = agent.cfg.borrow();
         let models = agent.models_manager.models();
@@ -274,6 +274,7 @@ async fn apply_with_execution_backend(
     handle
         .cmd_tx
         .send(SessionCommand::SetSessionModel {
+            selection_model_id: selection_model_id.clone(),
             inference_config: model_sampling,
             use_concise,
             apply_prompt_override,
@@ -289,7 +290,8 @@ async fn apply_with_execution_backend(
         .await
         .map_err(|_| acp::Error::internal_error().data("failed to set session model"))??;
     if let Some(handle) = agent.sessions.borrow_mut().get_mut(&session_id) {
-        handle.model_id = model_id.clone();
+        // Persist the canonical catalog key, never the upstream wire slug.
+        handle.model_id = selection_model_id.clone();
         handle.reasoning_effort = applied_effort;
         handle.agent_name =
             agent_name_after_model_switch(did_rebuild, &required_agent_type, &handle.agent_name);
@@ -297,25 +299,27 @@ async fn apply_with_execution_backend(
     broadcast_model_changed(
         agent,
         &session_id,
-        model_id.0.as_ref(),
+        selection_model_id.0.as_ref(),
         applied_effort.map(|eff| eff.to_string()),
     );
     xai_grok_telemetry::session_ctx::log_event(xai_grok_telemetry::events::ModelSwitched {
         session_id: session_id.0.to_string(),
         previous_model_id: previous_model_id.to_string(),
-        new_model_id: model_id.0.to_string(),
+        new_model_id: selection_model_id.0.to_string(),
         success: true,
         error_code: None,
         required_agent_type: Some(required_agent_type.clone()),
         current_agent_type: None,
     });
     if agent.cfg.borrow().mode != config::AgentMode::Leader {
-        agent.models_manager.set_current_model_id(model_id.clone());
+        agent
+            .models_manager
+            .set_current_model_id(selection_model_id.clone());
         agent
             .models_manager
             .set_current_reasoning_effort(applied_effort);
     }
-    agent.sync_process_static_api_key(Some(model_id.0.as_ref()));
+    agent.sync_process_static_api_key(Some(selection_model_id.0.as_ref()));
     Ok(acp::SetSessionModelResponse::new().meta(
         serde_json::json!({
             "model": updated_model,

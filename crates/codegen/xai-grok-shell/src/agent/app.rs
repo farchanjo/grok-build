@@ -1600,6 +1600,16 @@ pub async fn run_leader(
                         }
                         ConfigUpdate::ModelsChanged => {
                             info!("Model config change detected — reloading agent model list");
+                            // Provider registry generation change invalidates
+                            // exact retrieval pins; rebuild all home-keyed PR17
+                            // snapshots (LKG retained on invalid candidates).
+                            for (home, outcome) in crate::retrieval::reload_all_registries() {
+                                info!(
+                                    ?home,
+                                    ?outcome,
+                                    "retrieval registry reloaded after models change"
+                                );
+                            }
                             let line = internal_reload_request_line(
                                 "config-reload-models",
                                 "x.ai/internal/reload_models",
@@ -1676,6 +1686,14 @@ pub async fn run_leader(
                                 }
                             });
                             let _ = ipc_tx_for_config.send(notification.to_string());
+                        }
+                        ConfigUpdate::RetrievalGraphChanged => {
+                            info!(
+                                "Retrieval graph config change detected — rebuilding PR17 registries"
+                            );
+                            for (home, outcome) in crate::retrieval::reload_all_registries() {
+                                info!(?home, ?outcome, "retrieval registry reload outcome");
+                            }
                         }
                         ConfigUpdate::Compaction(compaction) => {
                             info!("Compaction config change detected — updating active sessions");

@@ -775,6 +775,48 @@ pub struct CredentialRepairScope {
     pub provider_id: String,
     /// Failure-side generation frozen at operation start (not re-read on complete).
     pub credential_generation: u64,
+    /// Optional incarnation frozen at operation start.
+    pub incarnation: Option<String>,
+    /// Registry generation frozen at operation start.
+    pub registry_generation: u64,
+    /// Durable API-key/OAuth binding generation at failure time.
+    pub failed_binding_generation: u64,
+    /// Credential-route spelling frozen at failure.
+    pub credential_route: String,
+    /// Correlation token from the failure notification meta.
+    pub correlation_token: String,
+}
+
+/// Secret-free evidence that a credential **write** committed a specific
+/// durable binding generation. Built only from the store/connect return value
+/// plus the frozen repair scope — never from a post-hoc live lookup.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CredentialWriteReceipt {
+    pub operation_token: CredentialRepairToken,
+    pub provider_id: String,
+    pub credential_route: String,
+    pub incarnation: Option<String>,
+    pub registry_generation: u64,
+    pub failed_binding_generation: u64,
+    pub post_generation: u64,
+    pub session_failure_generation: u64,
+}
+
+impl CredentialRepairScope {
+    /// Build a write receipt from this frozen scope and the exact generation
+    /// returned by the store/connect that committed the credential.
+    pub fn write_receipt(&self, post_generation: u64) -> CredentialWriteReceipt {
+        CredentialWriteReceipt {
+            operation_token: self.token,
+            provider_id: self.provider_id.clone(),
+            credential_route: self.credential_route.clone(),
+            incarnation: self.incarnation.clone(),
+            registry_generation: self.registry_generation,
+            failed_binding_generation: self.failed_binding_generation,
+            post_generation,
+            session_failure_generation: self.credential_generation,
+        }
+    }
 }
 
 /// Issue the next repair token from a monotonic counter starting at 1.
@@ -801,32 +843,122 @@ pub struct ProviderScopedStashedPrompt {
     pub provider_id: String,
     /// Generation from [`ProviderCredentialFailure::credential_generation`].
     pub credential_generation: u64,
+    /// Optional incarnation bound at stash time.
+    pub incarnation: Option<String>,
+    /// Registry generation bound at stash time.
+    pub registry_generation: u64,
+    /// Durable credential binding generation frozen from notification meta.
+    pub binding_generation: u64,
+    /// True when the failure was host-fallback / non-authoritative.
+    pub host_fallback: bool,
+    /// True when notification meta carried a complete exact-route binding.
+    pub binding_complete: bool,
+    /// Credential-route spelling frozen from meta.
+    pub credential_route: String,
+    /// Route authority spelling frozen from meta.
+    pub route_authority: String,
+    /// Correlation token from failure meta.
+    pub correlation_token: String,
     pub prompt: InFlightPrompt,
 }
 
 impl ProviderScopedStashedPrompt {
+    fn is_built_in_legacy_id(provider_id: &str) -> bool {
+        matches!(provider_id, "xai" | "openai" | "openrouter" | "anthropic")
+    }
+
+    /// Whether a repair token may be minted for this stash.
+    pub fn repair_eligible(&self) -> bool {
+        if self.credential_generation == 0 || self.host_fallback {
+            return false;
+        }
+        if self.route_authority == "unverified" || self.route_authority == "host_fallback" {
+            return false;
+        }
+        if self.binding_complete {
+            return true;
+        }
+        Self::is_built_in_legacy_id(&self.provider_id)
+            && self.incarnation.is_none()
+            && self.registry_generation == 0
+    }
+
     /// Whether a successful repair for `provider_id` at exact `generation`
     /// may resubmit this stash. Sibling providers and generation mismatches
     /// never match. Generation `0` is reserved (non-resumable) and never
     /// matches.
     pub fn matches_repair(&self, provider_id: &str, generation: u64) -> bool {
-        generation != 0
+        self.matches_repair_binding(provider_id, generation, None, 0, self.binding_generation)
+    }
+
+    /// Exact failure contract match including durable binding generation.
+    pub fn matches_repair_binding(
+        &self,
+        provider_id: &str,
+        generation: u64,
+        incarnation: Option<&str>,
+        registry_generation: u64,
+        failed_binding_generation: u64,
+    ) -> bool {
+        self.repair_eligible()
+            && generation != 0
             && self.credential_generation != 0
             && self.provider_id == provider_id
             && self.credential_generation == generation
+            && self.incarnation.as_deref() == incarnation
+            && self.registry_generation == registry_generation
+            && self.binding_generation == failed_binding_generation
     }
 }
 
 impl CredentialRepairScope {
     /// Whether this completion may resume `stashed` given the agent's current
-    /// `in_flight_repair`. All of: same token, same provider, same generation.
+    /// `in_flight_repair`. Callers must still re-resolve the exact durable
+    /// binding source and apply [`Self::validate_write_receipt`].
     pub fn allows_resume(
         &self,
         in_flight: Option<&CredentialRepairScope>,
         stashed: &ProviderScopedStashedPrompt,
     ) -> bool {
         in_flight.is_some_and(|f| f == self)
-            && stashed.matches_repair(&self.provider_id, self.credential_generation)
+            && stashed.matches_repair_binding(
+                &self.provider_id,
+                self.credential_generation,
+                self.incarnation.as_deref(),
+                self.registry_generation,
+                self.failed_binding_generation,
+            )
+            // Exact credential route — OAuth vs API-key must not crossover.
+            && (self.credential_route.is_empty()
+                || stashed.credential_route == self.credential_route)
+    }
+
+    /// Accept only an operation-bound write receipt whose frozen fields match
+    /// this scope, whose store-returned generation is a strict rotation
+    /// (`post > failed`), and whose live re-resolve of the **same exact source**
+    /// equals that post-write generation. Missing receipts fail closed.
+    pub fn validate_write_receipt(
+        &self,
+        receipt: Option<&CredentialWriteReceipt>,
+        live_binding_generation: Option<u64>,
+    ) -> bool {
+        let Some(receipt) = receipt else {
+            return false;
+        };
+        if receipt.operation_token != self.token
+            || receipt.provider_id != self.provider_id
+            || receipt.credential_route != self.credential_route
+            || receipt.incarnation != self.incarnation
+            || receipt.registry_generation != self.registry_generation
+            || receipt.failed_binding_generation != self.failed_binding_generation
+            || receipt.session_failure_generation != self.credential_generation
+        {
+            return false;
+        }
+        if receipt.post_generation <= receipt.failed_binding_generation {
+            return false;
+        }
+        live_binding_generation == Some(receipt.post_generation)
     }
 }
 
@@ -835,9 +967,18 @@ mod provider_scoped_stash_tests {
     use super::*;
 
     fn sample(provider_id: &str, generation: u64) -> ProviderScopedStashedPrompt {
+        let built_in = matches!(provider_id, "xai" | "openai" | "openrouter" | "anthropic");
         ProviderScopedStashedPrompt {
             provider_id: provider_id.into(),
             credential_generation: generation,
+            incarnation: None,
+            registry_generation: 0,
+            binding_generation: if built_in { 0 } else { 1 },
+            host_fallback: false,
+            binding_complete: !built_in,
+            credential_route: "api_key".into(),
+            route_authority: "authoritative".into(),
+            correlation_token: generation.to_string(),
             prompt: InFlightPrompt {
                 text: "hi".into(),
                 images: Vec::new(),
@@ -846,6 +987,28 @@ mod provider_scoped_stash_tests {
                 chip_elements: Vec::new(),
             },
         }
+    }
+
+    #[test]
+    fn write_receipt_accepts_strict_rotation_only() {
+        let scope = CredentialRepairScope {
+            token: CredentialRepairToken(1),
+            provider_id: "openrouter".into(),
+            credential_generation: 3,
+            incarnation: None,
+            registry_generation: 0,
+            failed_binding_generation: 5,
+            credential_route: "api_key".into(),
+            correlation_token: "3".into(),
+        };
+        let ok = scope.write_receipt(6);
+        assert!(scope.validate_write_receipt(Some(&ok), Some(6)));
+        assert!(!scope.validate_write_receipt(Some(&ok), Some(5)));
+        assert!(!scope.validate_write_receipt(Some(&ok), Some(7)));
+        let equal = scope.write_receipt(5);
+        assert!(!scope.validate_write_receipt(Some(&equal), Some(5)));
+        assert!(!scope.validate_write_receipt(None, Some(6)));
+        assert!(!scope.validate_write_receipt(Some(&ok), None));
     }
 
     #[test]
@@ -895,6 +1058,133 @@ mod provider_scoped_stash_tests {
         // Zero is reserved and never issued.
         let mut zero = 0u64;
         assert!(mint_credential_repair_token(&mut zero).is_none());
+    }
+
+    #[test]
+    fn host_fallback_stash_is_not_repair_eligible() {
+        let mut stash = sample("openrouter_work", 3);
+        stash.host_fallback = true;
+        stash.binding_complete = true;
+        stash.route_authority = "host_fallback".into();
+        assert!(!stash.repair_eligible());
+        assert!(!stash.matches_repair("openrouter_work", 3));
+    }
+
+    #[test]
+    fn configured_route_without_complete_meta_fails_closed() {
+        let mut stash = sample("openrouter_work", 3);
+        stash.binding_complete = false;
+        stash.binding_generation = 0;
+        stash.route_authority = "authoritative".into();
+        assert!(
+            !stash.repair_eligible(),
+            "configured id without complete meta must fail closed"
+        );
+    }
+
+    #[test]
+    fn built_in_legacy_incomplete_meta_remains_eligible() {
+        let mut stash = sample("openrouter", 3);
+        stash.binding_complete = false;
+        stash.binding_generation = 0;
+        stash.incarnation = None;
+        stash.registry_generation = 0;
+        assert!(stash.repair_eligible());
+    }
+
+    #[test]
+    fn stale_incarnation_or_registry_cannot_resume() {
+        let mut stash = sample("openrouter_work", 5);
+        stash.incarnation = Some("11111111-1111-1111-1111-111111111111".into());
+        stash.registry_generation = 2;
+        stash.binding_generation = 7;
+        stash.binding_complete = true;
+        assert!(stash.matches_repair_binding(
+            "openrouter_work",
+            5,
+            Some("11111111-1111-1111-1111-111111111111"),
+            2,
+            7
+        ));
+        assert!(!stash.matches_repair_binding(
+            "openrouter_work",
+            5,
+            Some("22222222-2222-2222-2222-222222222222"),
+            2,
+            7
+        ));
+        assert!(!stash.matches_repair_binding(
+            "openrouter_work",
+            5,
+            Some("11111111-1111-1111-1111-111111111111"),
+            3,
+            7
+        ));
+        assert!(!stash.matches_repair_binding(
+            "openrouter_work",
+            5,
+            Some("11111111-1111-1111-1111-111111111111"),
+            2,
+            8
+        ));
+    }
+
+    #[test]
+    fn write_receipt_rejects_field_mismatch() {
+        let scope = CredentialRepairScope {
+            token: CredentialRepairToken(1),
+            provider_id: "openrouter".into(),
+            credential_generation: 3,
+            incarnation: None,
+            registry_generation: 0,
+            failed_binding_generation: 5,
+            credential_route: "api_key".into(),
+            correlation_token: "3".into(),
+        };
+        let ok = scope.write_receipt(6);
+        // Wrong route spelling.
+        let mut wrong_route = ok.clone();
+        wrong_route.credential_route = "chatgpt_oauth".into();
+        assert!(!scope.validate_write_receipt(Some(&wrong_route), Some(6)));
+        // Wrong provider.
+        let mut wrong_provider = ok.clone();
+        wrong_provider.provider_id = "openai".into();
+        assert!(!scope.validate_write_receipt(Some(&wrong_provider), Some(6)));
+        // Wrong token.
+        let mut wrong_token = ok.clone();
+        wrong_token.operation_token = CredentialRepairToken(99);
+        assert!(!scope.validate_write_receipt(Some(&wrong_token), Some(6)));
+    }
+
+    #[test]
+    fn oauth_and_api_key_routes_do_not_crossover_on_resume() {
+        let api_key_stash = {
+            let mut s = sample("openai", 4);
+            s.credential_route = "api_key".into();
+            s.binding_generation = 2;
+            s.binding_complete = true;
+            s
+        };
+        let oauth_scope = CredentialRepairScope {
+            token: CredentialRepairToken(7),
+            provider_id: "openai".into(),
+            credential_generation: 4,
+            incarnation: None,
+            registry_generation: 0,
+            failed_binding_generation: 2,
+            credential_route: "chatgpt_oauth".into(),
+            correlation_token: "4".into(),
+        };
+        // Same provider + generation but different credential route must not resume.
+        assert!(!oauth_scope.allows_resume(Some(&oauth_scope), &api_key_stash));
+        let oauth_stash = {
+            let mut s = sample("openai", 4);
+            s.credential_route = "chatgpt_oauth".into();
+            s.binding_generation = 2;
+            s.binding_complete = true;
+            s
+        };
+        assert!(oauth_scope.allows_resume(Some(&oauth_scope), &oauth_stash));
     }
 }
 /// Snapshot of a textarea chip element for rewind restore.

@@ -94,9 +94,25 @@ use mcp::{
     handle_mcp_tools_changed, push_server_status_enabled,
 };
 use settings::{
-    handle_announcements_update, handle_models_update, handle_sessions_changed,
-    handle_settings_update,
+    handle_announcements_update, handle_models_update, handle_providers_update,
+    handle_retrieval_update, handle_sessions_changed, handle_settings_update,
 };
+
+/// Local/`--no-leader` delivery of `x.ai/providers/update` (notify-file poll).
+pub(crate) fn deliver_providers_update_notification(
+    notif: &acp::ExtNotification,
+    app: &mut AppView,
+) -> bool {
+    handle_providers_update(notif, app)
+}
+
+/// Local/`--no-leader` delivery of `x.ai/retrieval/update` (notify-file poll).
+pub(crate) fn deliver_retrieval_update_notification(
+    notif: &acp::ExtNotification,
+    app: &mut AppView,
+) -> bool {
+    handle_retrieval_update(notif, app)
+}
 
 // Test-only bare-name surface for `tests/*` (`use super::*`).
 #[cfg(test)]
@@ -679,6 +695,8 @@ fn handle_ext_notification(notif: &acp::ExtNotification, app: &mut AppView) -> b
         "x.ai/task_backgrounded" => handle_task_backgrounded(notif, app),
         "x.ai/task_completed" => handle_task_completed(notif, app),
         "x.ai/models/update" => handle_models_update(notif, app),
+        "x.ai/providers/update" => handle_providers_update(notif, app),
+        "x.ai/retrieval/update" => handle_retrieval_update(notif, app),
         "x.ai/settings/update" => handle_settings_update(notif, app),
         "x.ai/sessions/changed" => handle_sessions_changed(notif, app),
         "x.ai/queue/changed" => handle_queue_changed(notif, app),

@@ -264,6 +264,25 @@ impl ToolBridge {
             .and_then(|t| t.listing_snapshot())
     }
 
+    /// Authoritative read-only snapshot of skills eligible for native model
+    /// invocation under the current post-precedence/post-shadowing projection.
+    ///
+    /// Mirrors native invocation eligibility exactly (`enabled` and not
+    /// `disable_model_invocation`; `user_invocable = false` stays eligible). The
+    /// returned snapshot is computed from the `SkillManager` at call time — the
+    /// same projection that is written into `AvailableSkills` on each pending
+    /// skill update — so prime selection observes active
+    /// conditional/startup/dynamic skills without reaching into invocation.
+    pub async fn eligible_native_skills(
+        &self,
+    ) -> Vec<crate::implementations::skills::types::SkillInfo> {
+        let registry = &*self.registry;
+        let res = registry.resources.lock().await;
+        res.get::<crate::types::skill_discovery_tracker::SkillManager>()
+            .map(|t| t.eligible_native_skills())
+            .unwrap_or_default()
+    }
+
     /// Seed the SkillDiscoveryTracker with session context and startup skills.
     ///
     /// Must be called at session start so the `SkillDiscoveryReminder` can
@@ -773,6 +792,14 @@ mod tests {
         assert_eq!(bridge.tool_kind("not_a_registered_tool"), None);
         // Exact client-name lookup is case-sensitive.
         assert_eq!(bridge.tool_kind("write"), None);
+    }
+
+    #[tokio::test]
+    async fn eligible_native_skills_empty_without_tracker() {
+        // No SkillManager seeded → the authoritative snapshot is empty.
+        let bridge = ToolBridge::for_test();
+        let snapshot = bridge.eligible_native_skills().await;
+        assert!(snapshot.is_empty());
     }
 
     // ── drain_between_turn_bash_completions owner scoping (the "While you

@@ -163,6 +163,11 @@ fn external_allowed_keys_are_pinned() {
         "generation_id",
         "served_model",
         "credits_bucket",
+        // PR13: bounded instance slug + purpose enum + generation only.
+        // Never display name, URL, org/project, secrets, or fingerprints.
+        "provider_instance_id",
+        "provider_purpose",
+        "registry_generation",
     ];
     let actual: Vec<&str> = schema::ALL_KEYS.iter().map(|k| k.as_str()).collect();
     assert_eq!(
@@ -238,6 +243,10 @@ fn event_names_are_pinned() {
         // content, no credentials, no exact balances.
         (E::ApiFallbackServed, "grok_code.api_fallback_served"),
         (E::OpenrouterCredits, "grok_code.openrouter_credits"),
+        (
+            E::ProviderRouteGuardFailed,
+            "grok_code.provider_route_guard_failed",
+        ),
     ];
     assert_eq!(expected.len(), <E as strum::EnumCount>::COUNT);
     for (variant, name) in expected {
@@ -509,6 +518,53 @@ fn api_fallback_served_maps_requested_served_provider() {
 
 /// Phase 8: `grok_code.openrouter_credits` carries a bucketed balance (never
 /// exact) + provider attr. The bucket is a closed set of labels.
+#[test]
+fn provider_route_guard_failed_redacts_unsafe_instance_ids() {
+    use crate::events::{ProviderPurpose, ProviderRouteGuardFailed, sanitize_provider_instance_id};
+    use crate::external::schema::{ExternalKey, map_provider_route_guard_failed};
+
+    assert!(sanitize_provider_instance_id("sk-abcdef").is_none());
+    assert!(sanitize_provider_instance_id("https://evil.example").is_none());
+    assert!(sanitize_provider_instance_id("openai_work").is_some());
+
+    let bad = ProviderRouteGuardFailed {
+        provider_instance_id: "sk-secret-key".into(),
+        purpose: ProviderPurpose::Chat,
+        error_category: "disabled".into(),
+        registry_generation: 3,
+        is_retry: true,
+    };
+    assert!(
+        map_provider_route_guard_failed(&bad).is_none(),
+        "unsafe instance id must not export"
+    );
+
+    let ok = ProviderRouteGuardFailed {
+        provider_instance_id: "openai_work".into(),
+        purpose: ProviderPurpose::Management,
+        error_category: "tombstoned".into(),
+        registry_generation: 9,
+        is_retry: false,
+    };
+    let rec = map_provider_route_guard_failed(&ok).expect("safe export");
+    assert!(
+        rec.attrs
+            .iter()
+            .any(|(k, _)| *k == ExternalKey::ProviderInstanceId)
+    );
+    // Never carries display names, secrets, or free-form categories.
+    assert!(
+        map_provider_route_guard_failed(&ProviderRouteGuardFailed {
+            provider_instance_id: "openai_work".into(),
+            purpose: ProviderPurpose::Chat,
+            error_category: "custom free text with secret sk-x".into(),
+            registry_generation: 1,
+            is_retry: false,
+        })
+        .is_none()
+    );
+}
+
 #[test]
 fn openrouter_credits_maps_bucketed_balance() {
     let stream = build(gates_off());

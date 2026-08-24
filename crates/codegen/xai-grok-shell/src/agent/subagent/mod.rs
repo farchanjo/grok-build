@@ -38,10 +38,33 @@ use xai_acp_lib::AcpAgentGatewaySender as GatewaySender;
 use xai_grok_tools::implementations::grok_build::task::types::*;
 use xai_grok_workspace::file_system::AsyncFileSystem;
 use xai_hunk_tracker::HunkTrackerHandle;
+pub(crate) mod assigned_spawn;
+pub(crate) mod assignment;
 mod coordinator_lifecycle;
 mod coordinator_query;
+pub(crate) mod exact_route;
 mod handle_request;
-pub(crate) use handle_request::handle_subagent_request;
+mod identity_store;
+pub(crate) use handle_request::{handle_assigned_subagent_request, handle_subagent_request};
+
+#[derive(Debug)]
+pub(crate) struct AssignedRoute {
+    key: assignment::AssignmentKey,
+    route: exact_route::ExactRoute,
+}
+
+impl AssignedRoute {
+    /// Construct a sealed assigned route. Keys stay inside the subagent module
+    /// seam; trusted receivers assemble this before leaving the private channel.
+    fn new(key: assignment::AssignmentKey, route: exact_route::ExactRoute) -> Self {
+        Self { key, route }
+    }
+
+    #[cfg(test)]
+    fn key_for_test(&self) -> &assignment::AssignmentKey {
+        &self.key
+    }
+}
 /// How the child session's initial context was bootstrapped.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum InitialContextSource {
@@ -95,6 +118,7 @@ pub(crate) struct SubagentTracker {
         reason = "unused in production; remove expect when wired or delete the item"
     )]
     pub color: Option<xai_grok_agent::config::AgentColor>,
+    pub assigned_meta_owner: Option<identity_store::AssignedMetaOwner>,
 }
 /// Captured parent-side tier inputs for resolving
 /// `auto_compact_threshold_percent` once the subagent's actual model id is
@@ -173,6 +197,9 @@ pub(crate) struct SubagentSpawnContext {
     /// Same session-scoped admission pool used by parent and child Task backends.
     pub subagent_admission:
         Arc<xai_grok_tools::implementations::grok_build::task::admission::SubagentAdmission>,
+    /// Derived capability minted by MvpAgent for private exact-route assignments;
+    /// it shares transport state but does not expose assignment keys.
+    pub assigned_spawn_sender: crate::agent::subagent::assigned_spawn::TrustedAssignedSpawnSender,
     pub parent_depth: u32,
     /// Inference idle timeout (secs), resolved from the parent's model config at spawn-context creation time.
     pub inference_idle_timeout_secs: u64,
@@ -220,6 +247,8 @@ pub(crate) struct SubagentSpawnContext {
     pub memory_config: Option<crate::config::MemoryConfig>,
     /// Resolved sampling config for web_search.
     pub web_search_inference_config: Option<xai_grok_inference::InferenceConfig>,
+    /// Exact-route 401 attribution for web_search (never the session sibling).
+    pub web_search_attribution_callback: Option<xai_grok_tools::SharedAttributionCallback>,
     /// Resolved config for web fetch.
     pub web_fetch_config: xai_grok_tools::implementations::grok_build::web_fetch::WebFetchConfig,
     /// Image generation config (parent-inherited).
@@ -488,6 +517,7 @@ pub(crate) struct CompletedSubagent {
     pub parent_session_id: String,
     pub parent_prompt_id: Option<String>,
     pub owner: SubagentOwner,
+    pub assigned_meta_owner: Option<identity_store::AssignedMetaOwner>,
     pub child_session_id: String,
     pub description: String,
     pub subagent_type: String,
@@ -562,6 +592,7 @@ pub(crate) struct PendingSubagent {
     /// Spawn-future cancel token; firing it aborts the spawn at the promote
     /// checkpoint and emits a cancelled `SubagentFinished`.
     pub cancel_token: CancellationToken,
+    pub assigned_meta_owner: Option<identity_store::AssignedMetaOwner>,
 }
 /// Parameter bag for `SubagentCoordinator::record_failure_completion`.
 struct FailureCompletion<'a> {
@@ -571,6 +602,7 @@ struct FailureCompletion<'a> {
     parent_prompt_id: Option<String>,
     parent_session_id: String,
     owner: SubagentOwner,
+    assigned_meta_owner: Option<identity_store::AssignedMetaOwner>,
     persona: Option<String>,
     started_at: std::time::Instant,
     error: &'a str,
@@ -589,6 +621,15 @@ struct FailureCompletion<'a> {
 /// `start_subagent_coordinator`).
 pub(crate) type BlockWaitSlot =
     std::rc::Rc<std::cell::RefCell<Option<oneshot::Sender<Option<SubagentSnapshot>>>>>;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub(crate) enum PromoteError {
+    #[error("pending subagent no longer exists")]
+    MissingPending,
+    #[error("pending assigned owner does not match the live child")]
+    OwnerMismatch,
+}
+
 /// Owns the active-subagent map and completed-result cache.
 /// Stored as a field on `MvpAgent`.
 ///
@@ -774,6 +815,20 @@ pub(crate) async fn resolve_running_list(
     futures::future::join_all(futs).await
 }
 use xai_grok_subagent_resolution::ResumeSourceData;
+
+pub(crate) struct ResolvedResumeSource {
+    pub(crate) source: ResumeSourceData,
+    pub(crate) assigned_owner: Option<identity_store::AssignedMetaOwner>,
+}
+
+impl std::ops::Deref for ResolvedResumeSource {
+    type Target = ResumeSourceData;
+
+    fn deref(&self) -> &Self::Target {
+        &self.source
+    }
+}
+
 /// Resume provenance metadata for a subagent.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct SubagentProvenance {
@@ -1656,6 +1711,7 @@ struct PendingGuard<'a> {
     /// Specific error message set by fail_subagent before returning.
     /// Falls back to a generic message if unset.
     error: Option<String>,
+    assigned_meta_owner: Option<identity_store::AssignedMetaOwner>,
 }
 impl PendingGuard<'_> {
     fn defuse(mut self) {
@@ -1672,12 +1728,181 @@ impl Drop for PendingGuard<'_> {
                 .error
                 .take()
                 .unwrap_or_else(|| "Subagent failed during initialization".to_string());
-            self.coordinator
-                .borrow_mut()
-                .move_pending_to_failed(&self.id, &error);
+            let _ = self.coordinator.borrow_mut().move_pending_to_failed_owned(
+                &self.id,
+                &error,
+                self.assigned_meta_owner.as_ref(),
+            );
         }
     }
 }
+
+/// Cross-thread cancellation backstop for fresh worktree creation. If the
+/// awaiting spawn future disappears, the blocking worker's final clone removes
+/// the destination that did not predate this attempt instead of leaving a
+/// worktree outside coordinator ownership.
+#[derive(Clone)]
+struct FreshWorktreeClaim {
+    state: Arc<FreshWorktreeClaimState>,
+}
+
+struct FreshWorktreeClaimState {
+    subagent_id: String,
+    path: PathBuf,
+    armed: std::sync::atomic::AtomicBool,
+}
+
+impl FreshWorktreeClaim {
+    #[cfg(test)]
+    fn new_for_test(subagent_id: String, path: PathBuf) -> Self {
+        Self::new(subagent_id, path, true)
+    }
+
+    fn new(subagent_id: String, path: PathBuf, armed: bool) -> Self {
+        Self {
+            state: Arc::new(FreshWorktreeClaimState {
+                subagent_id,
+                path,
+                armed: std::sync::atomic::AtomicBool::new(armed),
+            }),
+        }
+    }
+
+    fn arm(&self) {
+        self.state
+            .armed
+            .store(true, std::sync::atomic::Ordering::Release);
+    }
+
+    fn transfer(self) -> PathBuf {
+        let path = self.state.path.clone();
+        self.state
+            .armed
+            .store(false, std::sync::atomic::Ordering::Release);
+        path
+    }
+}
+
+impl Drop for FreshWorktreeClaimState {
+    fn drop(&mut self) {
+        if !self.armed.swap(false, std::sync::atomic::Ordering::AcqRel) {
+            return;
+        }
+        let delegate = crate::session::worktree::btrfs_delegate_from_env();
+        if let Err(error) = xai_fast_worktree::remove_worktree_with_delegate(&self.path, delegate) {
+            tracing::warn!(
+                subagent_id = %self.subagent_id,
+                worktree_path = %self.path.display(),
+                %error,
+                "failed to remove freshly-created worktree from creation claim"
+            );
+        }
+    }
+}
+
+/// Owns every resource created for a child until coordinator promotion commits.
+///
+/// Async abort paths call [`Self::teardown`] for non-blocking worktree removal;
+/// `Drop` is the cancellation/early-return backstop and performs the same
+/// cleanup synchronously. Session-thread initialization also rejects itself if
+/// this owner future is cancelled before it receives the handle. Only a
+/// confirmed `insert_owned` may disarm the guard.
+struct LiveChildUntilPromoted {
+    subagent_id: String,
+    workspace_ops: xai_grok_workspace::WorkspaceOps,
+    fresh_worktree: Option<PathBuf>,
+    child_handle: Option<SessionHandle>,
+    child_session_id: Option<String>,
+    armed: bool,
+}
+
+impl LiveChildUntilPromoted {
+    fn new(
+        subagent_id: String,
+        workspace_ops: xai_grok_workspace::WorkspaceOps,
+        fresh_worktree: Option<PathBuf>,
+    ) -> Self {
+        Self {
+            subagent_id,
+            workspace_ops,
+            fresh_worktree,
+            child_handle: None,
+            child_session_id: None,
+            armed: true,
+        }
+    }
+
+    fn own_child(&mut self, child_handle: SessionHandle) {
+        self.child_handle = Some(child_handle);
+    }
+
+    fn own_session(&mut self, child_session_id: String) {
+        self.child_session_id = Some(child_session_id);
+    }
+
+    #[cfg(test)]
+    fn owns_resources(&self) -> bool {
+        self.fresh_worktree.is_some()
+            || self.child_handle.is_some()
+            || self.child_session_id.is_some()
+    }
+
+    fn shutdown_child(&mut self) {
+        if let Some(child_handle) = self.child_handle.take() {
+            let _ = child_handle.cmd_tx.send(SessionCommand::Shutdown);
+        }
+        if let Some(child_session_id) = self.child_session_id.take() {
+            self.workspace_ops.end_local_session(&child_session_id);
+        }
+    }
+
+    async fn teardown(&mut self) {
+        self.shutdown_child();
+        let Some(worktree) = self.fresh_worktree.as_ref() else {
+            return;
+        };
+        if let Err(error) = crate::session::worktree::remove_subagent_worktree(worktree).await {
+            tracing::warn!(
+                subagent_id = %self.subagent_id,
+                worktree_path = %worktree.display(),
+                %error,
+                "failed to remove freshly-created worktree before child promotion"
+            );
+            return;
+        }
+        self.fresh_worktree = None;
+    }
+
+    fn disarm_after_promotion(&mut self) {
+        debug_assert!(self.armed, "promotion guard disarmed more than once");
+        self.child_handle = None;
+        self.child_session_id = None;
+        self.fresh_worktree = None;
+        self.armed = false;
+    }
+}
+
+impl Drop for LiveChildUntilPromoted {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        self.shutdown_child();
+        let Some(worktree) = self.fresh_worktree.take() else {
+            return;
+        };
+        let delegate = crate::session::worktree::btrfs_delegate_from_env();
+        if let Err(error) = xai_fast_worktree::remove_worktree_with_delegate(&worktree, delegate) {
+            tracing::warn!(
+                subagent_id = %self.subagent_id,
+                worktree_path = %worktree.display(),
+                %error,
+                "failed to remove freshly-created worktree from promotion guard drop"
+            );
+        }
+    }
+}
+
 /// Resolve the effective working directory for a child session.
 ///
 /// Precedence: worktree path > `override_cwd` (non-empty) > parent cwd. The
@@ -1789,7 +2014,7 @@ fn resolve_agent_definition(
 }
 /// Minimal per-session context for `validate_subagent_type`.
 /// Avoids the heavy `SubagentSpawnContext` clone on the validation hot path.
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub(crate) struct SubagentValidationContext {
     pub parent_cwd: PathBuf,
     pub plugin_registry: Option<Arc<xai_grok_agent::plugins::PluginRegistry>>,
@@ -2238,6 +2463,9 @@ fn inject_subagent_completed_prompt(
     if cmd_tx
         .send(SessionCommand::Prompt {
             prompt_id: prompt_id.clone(),
+            origin: crate::session::PromptOrigin::SubagentCompleted {
+                subagent_id: subagent_id.to_string(),
+            },
             prompt_blocks,
             prompt_mode: crate::session::plan_mode::PromptMode::Agent,
             artifact_upload_ctx: None,
@@ -2351,7 +2579,9 @@ fn fail_subagent(
     error: &str,
     subagent_id: &str,
     child_session_id: &acp::SessionId,
+    parent_session_dir: &Path,
     subagent_meta_dir: &Path,
+    assigned_meta_owner: Option<&identity_store::AssignedMetaOwner>,
     gateway: &GatewaySender,
     parent_session_id: &str,
     parent_cmd_tx: Option<&mpsc::UnboundedSender<SessionCommand>>,
@@ -2366,7 +2596,14 @@ fn fail_subagent(
         duration_ms,
         ..Default::default()
     };
-    persist_subagent_completion(subagent_meta_dir, &result, gcs_ctx);
+    persist_subagent_completion(
+        parent_session_dir,
+        subagent_meta_dir,
+        subagent_id,
+        assigned_meta_owner,
+        &result,
+        gcs_ctx,
+    );
     emit_subagent_notification(
         gateway,
         parent_session_id,
@@ -2386,38 +2623,23 @@ fn fail_subagent(
     );
     let _ = request.result_tx.send(result);
 }
-/// Tear down a subagent killed while pending: shut the idle child, dispose its
-/// worktree (only if `worktree_freshly_created` — a resumed subagent's aliases
-/// the source's and must survive), persist + emit a single cancelled
-/// `SubagentFinished`, move the entry to completed-as-cancelled (stays
-/// queryable), and deliver the result. Defuse the `PendingGuard` before calling.
-async fn cancel_pending_subagent_at_promote(
+/// Complete a pending subagent that the promotion checkpoint cancelled after
+/// [`LiveChildUntilPromoted`] has already shut down its child/session and
+/// removed its freshly-created worktree.
+fn cancel_pending_subagent_at_promote(
     request: SubagentRequest,
-    child_handle: &SessionHandle,
+    assigned_meta_owner: Option<&identity_store::AssignedMetaOwner>,
     subagent_id: &str,
     child_session_id: &acp::SessionId,
+    parent_session_dir: &Path,
     subagent_meta_dir: &Path,
     coordinator: &std::cell::RefCell<SubagentCoordinator>,
     gateway: &GatewaySender,
     parent_session_id: &str,
     parent_cmd_tx: Option<&mpsc::UnboundedSender<SessionCommand>>,
-    worktree_path: Option<&Path>,
-    worktree_freshly_created: bool,
     duration_ms: u64,
     gcs_ctx: &GcsUploadContext,
 ) {
-    let _ = child_handle.cmd_tx.send(SessionCommand::Shutdown);
-    if worktree_freshly_created
-        && let Some(wt_path) = worktree_path
-        && let Err(e) = crate::session::worktree::remove_subagent_worktree(wt_path).await
-    {
-        tracing::warn!(
-            subagent_id,
-            worktree_path = %wt_path.display(),
-            error = %e,
-            "failed to remove pristine worktree for killed-while-pending subagent"
-        );
-    }
     let result = SubagentResult {
         success: false,
         cancelled: true,
@@ -2427,7 +2649,14 @@ async fn cancel_pending_subagent_at_promote(
         duration_ms,
         ..Default::default()
     };
-    persist_subagent_completion(subagent_meta_dir, &result, gcs_ctx);
+    persist_subagent_completion(
+        parent_session_dir,
+        subagent_meta_dir,
+        subagent_id,
+        assigned_meta_owner,
+        &result,
+        gcs_ctx,
+    );
     emit_subagent_notification(
         gateway,
         parent_session_id,
@@ -2445,9 +2674,11 @@ async fn cancel_pending_subagent_at_promote(
         },
         parent_cmd_tx,
     );
-    coordinator
-        .borrow_mut()
-        .move_pending_to_cancelled(subagent_id, "Subagent was cancelled");
+    let _ = coordinator.borrow_mut().move_pending_to_cancelled_owned(
+        subagent_id,
+        "Subagent was cancelled",
+        assigned_meta_owner,
+    );
     let _ = request.result_tx.send(result);
 }
 fn emit_subagent_notification(
@@ -2935,42 +3166,103 @@ struct GcsUploadContext {
 /// recoverable ref. Also re-asserts the terminal `status` so a failed
 /// `persist_subagent_completion` write can't leave a non-terminal record that
 /// `resumable_source_for` rejects after the worktree is removed.
-fn update_subagent_meta_snapshot_ref(dir: &Path, snapshot_ref: &str, status: &str) -> bool {
-    let meta_path = dir.join("meta.json");
-    let mut meta = match std::fs::read_to_string(&meta_path) {
-        Ok(data) => match serde_json::from_str::<SubagentMeta>(&data) {
-            Ok(meta) => meta,
-            Err(e) => {
-                tracing::warn!(error = %e, "failed to parse subagent meta; snapshot_ref not persisted (resume pointer lost)");
+fn update_subagent_meta_snapshot_ref(
+    parent_session_dir: &Path,
+    dir: &Path,
+    subagent_id: &str,
+    assigned_meta_owner: Option<&identity_store::AssignedMetaOwner>,
+    snapshot_ref: &str,
+    status: &str,
+) -> bool {
+    let mut meta = if let Some(owner) = assigned_meta_owner {
+        match identity_store::lookup(parent_session_dir, subagent_id) {
+            Ok(identity_store::Lookup::Assigned {
+                meta,
+                owner: current,
+            }) if current.matches(owner) => meta,
+            Ok(_) => return false,
+            Err(error) => {
+                tracing::warn!(%error, subagent_id, "assigned snapshot metadata lookup failed");
                 return false;
             }
-        },
-        Err(e) => {
-            tracing::warn!(error = %e, "failed to read subagent meta; snapshot_ref not persisted (resume pointer lost)");
-            return false;
+        }
+    } else {
+        let meta_path = dir.join("meta.json");
+        match std::fs::read_to_string(&meta_path) {
+            Ok(data) => match serde_json::from_str::<SubagentMeta>(&data) {
+                Ok(meta) => meta,
+                Err(e) => {
+                    tracing::warn!(error = %e, "failed to parse subagent meta; snapshot_ref not persisted (resume pointer lost)");
+                    return false;
+                }
+            },
+            Err(e) => {
+                tracing::warn!(error = %e, "failed to read subagent meta; snapshot_ref not persisted (resume pointer lost)");
+                return false;
+            }
         }
     };
     meta.snapshot_ref = Some(snapshot_ref.to_string());
     meta.status = status.to_string();
-    write_subagent_meta(dir, &meta)
+    match assigned_meta_owner {
+        Some(owner) => {
+            identity_store::update_expected(parent_session_dir, subagent_id, &meta, owner).is_ok()
+        }
+        None => write_subagent_meta(dir, &meta),
+    }
 }
 #[must_use]
 fn persist_subagent_output(dir: &Path, result: &SubagentResult) -> Option<PathBuf> {
     (result.success && !result.output.is_empty() && write_subagent_output(dir, &result.output))
         .then(|| dir.to_path_buf())
 }
-fn persist_subagent_completion(dir: &Path, result: &SubagentResult, gcs_ctx: &GcsUploadContext) {
-    let meta_path = dir.join("meta.json");
-    if let Ok(data) = std::fs::read_to_string(&meta_path)
-        && let Ok(mut meta) = serde_json::from_str::<SubagentMeta>(&data)
-    {
+fn persist_subagent_completion(
+    parent_session_dir: &Path,
+    dir: &Path,
+    subagent_id: &str,
+    assigned_meta_owner: Option<&identity_store::AssignedMetaOwner>,
+    result: &SubagentResult,
+    gcs_ctx: &GcsUploadContext,
+) {
+    let lookup = if let Some(owner) = assigned_meta_owner {
+        match identity_store::lookup(parent_session_dir, subagent_id) {
+            Ok(identity_store::Lookup::Assigned {
+                meta,
+                owner: current,
+            }) if current.matches(owner) => Some((meta, true)),
+            Ok(_) => None,
+            Err(error) => {
+                tracing::warn!(%error, subagent_id, "assigned completion metadata lookup failed");
+                None
+            }
+        }
+    } else {
+        std::fs::read_to_string(dir.join("meta.json"))
+            .ok()
+            .and_then(|data| serde_json::from_str::<SubagentMeta>(&data).ok())
+            .map(|meta| (meta, false))
+    };
+    if let Some((mut meta, assigned)) = lookup {
         meta.status = result.status().to_string();
         meta.completed_at = Some(chrono::Utc::now());
         meta.duration_ms = Some(result.duration_ms);
         meta.tool_calls = Some(result.tool_calls);
         meta.turns = Some(result.turns);
         meta.error = result.error.clone();
-        write_subagent_meta(dir, &meta);
+        let persisted = if assigned {
+            identity_store::update_expected(
+                parent_session_dir,
+                subagent_id,
+                &meta,
+                assigned_meta_owner.expect("assigned owner exists"),
+            )
+            .is_ok()
+        } else {
+            write_subagent_meta(dir, &meta)
+        };
+        if !persisted {
+            return;
+        }
         if let (Some(bucket), Some(method)) = (&gcs_ctx.bucket_url, &gcs_ctx.upload_method) {
             let gcs_meta = SubagentSessionMetadata::from_meta(
                 &meta,
@@ -3016,8 +3308,10 @@ fn cancelled_orphan_finish(
 /// Flip a stale `running` meta to `cancelled` and emit the missing finish.
 /// On meta-write failure returns `false` and skips the notify, so a reload re-heals.
 fn finalize_orphaned_subagent(
+    parent_session_dir: &Path,
     subagent_meta_dir: &Path,
     mut meta: SubagentMeta,
+    assigned_meta_owner: Option<&identity_store::AssignedMetaOwner>,
     gateway: &GatewaySender,
     parent_cmd_tx: Option<&mpsc::UnboundedSender<SessionCommand>>,
 ) -> bool {
@@ -3029,7 +3323,14 @@ fn finalize_orphaned_subagent(
     meta.tool_calls = Some(0);
     meta.turns = Some(0);
     meta.error = Some(ORPHAN_RECONCILE_REASON.to_string());
-    if !write_subagent_meta(subagent_meta_dir, &meta) {
+    let persisted = match assigned_meta_owner {
+        Some(owner) => {
+            identity_store::update_expected(parent_session_dir, &meta.subagent_id, &meta, owner)
+                .is_ok()
+        }
+        None => write_subagent_meta(subagent_meta_dir, &meta),
+    };
+    if !persisted {
         return false;
     }
     emit_subagent_notification(
@@ -3043,12 +3344,16 @@ fn finalize_orphaned_subagent(
 /// Parse `meta_path` and return it only when it is a stale `running` orphan
 /// owned by `parent_session_id` and not tracked live. Malformed metas → `None`.
 fn running_orphan_meta(
-    meta_path: &Path,
+    session_dir: &Path,
+    subagent_id: &str,
     coordinator: &SubagentCoordinator,
     parent_session_id: &str,
 ) -> Option<SubagentMeta> {
-    let data = std::fs::read_to_string(meta_path).ok()?;
-    let meta: SubagentMeta = serde_json::from_str(&data).ok()?;
+    let meta = match identity_store::lookup(session_dir, subagent_id).ok()? {
+        identity_store::Lookup::Missing => return None,
+        identity_store::Lookup::LegacyUnassigned { meta }
+        | identity_store::Lookup::Assigned { meta, .. } => meta,
+    };
     if meta.status != "running" || meta.parent_session_id != parent_session_id {
         return None;
     }
@@ -3083,7 +3388,8 @@ pub(crate) fn reconcile_orphaned_subagents(
         for entry in entries.flatten() {
             let name = entry.file_name();
             if running_orphan_meta(
-                &entry.path().join("meta.json"),
+                session_dir,
+                name.to_str().unwrap_or_default(),
                 coordinator,
                 parent_session_id,
             )
@@ -3099,9 +3405,20 @@ pub(crate) fn reconcile_orphaned_subagents(
             continue;
         }
         let subagent_dir = subagents_dir.join(&subagent_id);
-        let meta = std::fs::read_to_string(subagent_dir.join("meta.json"))
-            .ok()
-            .and_then(|data| serde_json::from_str::<SubagentMeta>(&data).ok());
+        let lookup = identity_store::lookup(session_dir, &subagent_id);
+        let (meta, assigned_meta_owner) = match lookup {
+            Ok(identity_store::Lookup::Missing) => (None, None),
+            Ok(identity_store::Lookup::LegacyUnassigned { meta }) => (Some(meta), None),
+            Ok(identity_store::Lookup::Assigned { meta, owner }) => (Some(meta), Some(owner)),
+            Err(error) => {
+                tracing::warn!(
+                    subagent_id,
+                    %error,
+                    "refusing to reconcile invalid assigned subagent metadata"
+                );
+                continue;
+            }
+        };
         match meta {
             Some(m) if m.parent_session_id != parent_session_id => {}
             Some(m) if m.status == "running" => {
@@ -3118,7 +3435,14 @@ pub(crate) fn reconcile_orphaned_subagents(
                         parent_session_id,
                         "Reconciling orphaned subagent left running by a previous process"
                     );
-                    finalize_orphaned_subagent(&subagent_dir, m, gateway, parent_cmd_tx);
+                    finalize_orphaned_subagent(
+                        session_dir,
+                        &subagent_dir,
+                        m,
+                        assigned_meta_owner.as_ref(),
+                        gateway,
+                        parent_cmd_tx,
+                    );
                 }
             }
             Some(m) => {

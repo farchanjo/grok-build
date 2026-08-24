@@ -234,12 +234,17 @@ async fn persist_ack_waits_for_disk_flush_before_success() {
                 last_reported_branch: std::sync::Arc::new(parking_lot::Mutex::new(None)),
                 git_head_enabled: false,
                 models_manager: Default::default(),
+                selection_model_id: std::cell::RefCell::new(acp::ModelId::new(
+                    crate::test_support::TEST_MODEL,
+                )),
+                route_context: std::cell::RefCell::new(None),
                 display_cwd: std::sync::OnceLock::new(),
                 active_agent_type: parking_lot::Mutex::new(None),
                 queue_exit_reminder_on_approved_exit: Arc::new(std::sync::atomic::AtomicBool::new(
                     false,
                 )),
                 active_skill: parking_lot::Mutex::new(None),
+                prime_cache: crate::session::prime::inventory::InventoryCache::new(),
                 plan_mode: Arc::new(parking_lot::Mutex::new(
                     crate::session::plan_mode::PlanModeTracker::new(std::path::PathBuf::from(
                         "/tmp/test-session",
@@ -346,6 +351,7 @@ async fn persist_ack_waits_for_disk_flush_before_success() {
                 actor_for_prompt
                     .handle_prompt(
                         "persist-ack-test",
+                        crate::session::PromptOrigin::User,
                         prompt_blocks,
                         PromptMode::Agent,
                         None,
@@ -642,6 +648,9 @@ async fn first_turn_memory_injection_disabled_does_not_persist_to_chat_history()
                 stale_claim_secs: 60,
                 search_source: "tool",
                 embedding_credentials: crate::session::memory::EndpointScopedCredentials::none(),
+                retrieval: None,
+                index_config: crate::config::MemoryIndexConfig::default(),
+                rebuild_backoff_secs: 0,
             };
             let (event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel::<SessionEvent>();
             let actor = Arc::new(SessionActor {
@@ -756,12 +765,17 @@ async fn first_turn_memory_injection_disabled_does_not_persist_to_chat_history()
                 last_reported_branch: std::sync::Arc::new(parking_lot::Mutex::new(None)),
                 git_head_enabled: false,
                 models_manager: Default::default(),
+                selection_model_id: std::cell::RefCell::new(acp::ModelId::new(
+                    crate::test_support::TEST_MODEL,
+                )),
+                route_context: std::cell::RefCell::new(None),
                 display_cwd: std::sync::OnceLock::new(),
                 active_agent_type: parking_lot::Mutex::new(None),
                 queue_exit_reminder_on_approved_exit: Arc::new(std::sync::atomic::AtomicBool::new(
                     false,
                 )),
                 active_skill: parking_lot::Mutex::new(None),
+                prime_cache: crate::session::prime::inventory::InventoryCache::new(),
                 plan_mode: Arc::new(parking_lot::Mutex::new(
                     crate::session::plan_mode::PlanModeTracker::new(std::path::PathBuf::from(
                         "/tmp/test-session",
@@ -1063,12 +1077,17 @@ async fn cancel_running_task_teardown_clears_running_and_pending_work() {
                 last_reported_branch: std::sync::Arc::new(parking_lot::Mutex::new(None)),
                 git_head_enabled: false,
                 models_manager: Default::default(),
+                selection_model_id: std::cell::RefCell::new(acp::ModelId::new(
+                    crate::test_support::TEST_MODEL,
+                )),
+                route_context: std::cell::RefCell::new(None),
                 display_cwd: std::sync::OnceLock::new(),
                 active_agent_type: parking_lot::Mutex::new(None),
                 queue_exit_reminder_on_approved_exit: Arc::new(
                     std::sync::atomic::AtomicBool::new(false),
                 ),
                 active_skill: parking_lot::Mutex::new(None),
+        prime_cache: crate::session::prime::inventory::InventoryCache::new(),
                 plan_mode: Arc::new(
                     parking_lot::Mutex::new(
                         crate::session::plan_mode::PlanModeTracker::new(
@@ -1526,6 +1545,7 @@ async fn handle_prompt_injects_interrupt_reminder_before_user_message() {
                 actor_for_prompt
                     .handle_prompt(
                         "interrupt-wiring-test",
+                        crate::session::PromptOrigin::User,
                         prompt_blocks,
                         PromptMode::Agent,
                         None,
@@ -1588,6 +1608,7 @@ async fn handle_prompt_synthetic_origin_preserves_interrupt_reminder() {
                 actor_for_prompt
                     .handle_prompt(
                         "scheduler-fired-test-1",
+                        crate::session::PromptOrigin::SchedulerFired,
                         prompt_blocks,
                         PromptMode::Agent,
                         None,
@@ -2388,12 +2409,17 @@ async fn cancel_propagates_to_sampler_handle_so_no_further_emission() {
                 last_reported_branch: std::sync::Arc::new(parking_lot::Mutex::new(None)),
                 git_head_enabled: false,
                 models_manager: Default::default(),
+                selection_model_id: std::cell::RefCell::new(acp::ModelId::new(
+                    crate::test_support::TEST_MODEL,
+                )),
+                route_context: std::cell::RefCell::new(None),
                 display_cwd: std::sync::OnceLock::new(),
                 active_agent_type: parking_lot::Mutex::new(None),
                 queue_exit_reminder_on_approved_exit: Arc::new(
                     std::sync::atomic::AtomicBool::new(false),
                 ),
                 active_skill: parking_lot::Mutex::new(None),
+        prime_cache: crate::session::prime::inventory::InventoryCache::new(),
                 plan_mode: Arc::new(
                     parking_lot::Mutex::new(
                         crate::session::plan_mode::PlanModeTracker::new(

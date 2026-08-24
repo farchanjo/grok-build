@@ -24,11 +24,20 @@
         assert!(!agent.scrollback.is_empty());
 
         // pending_effects should contain a SendPromptBlocks with system-reminder framing,
-        // displayText/displayAsCron meta, and a scheduler-fired- prompt_id prefix.
+        // displayText/displayAsCron meta, a scheduler-fired- prompt_id prefix,
+        // and the typed `scheduler_fired` origin tag so the shell never primes.
         match &app.pending_effects[0] {
             Effect::SendPromptBlocks {
-                blocks, prompt_id, ..
+                blocks,
+                prompt_id,
+                prompt_origin,
+                ..
             } => {
+                assert_eq!(
+                    *prompt_origin,
+                    Some(crate::app::actions::PromptOriginTag::SchedulerFired),
+                    "a cron turn must carry the scheduler_fired origin tag"
+                );
                 let text = match &blocks[0] {
                     acp::ContentBlock::Text(t) => &t.text,
                     _ => panic!("expected Text block"),

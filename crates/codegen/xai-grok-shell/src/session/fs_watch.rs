@@ -276,6 +276,9 @@ pub(crate) struct FsWatchDeps {
     pub client_fs_config: Option<ClientFsConfig>,
     pub persistence_tx: mpsc::UnboundedSender<PersistenceMsg>,
     pub last_reported_branch: Arc<parking_lot::Mutex<Option<String>>>,
+    /// Session-local prime inventory cache: live and replayed paths mark it
+    /// dirty; head-change and recovery paths invalidate its epoch.
+    pub prime_cache: crate::session::prime::inventory::InventoryCache,
 }
 
 impl FsWatchDeps {
@@ -296,6 +299,7 @@ impl FsWatchDeps {
             client_fs_config,
             persistence_tx: session.notifications.persistence_tx.clone(),
             last_reported_branch: session.last_reported_branch.clone(),
+            prime_cache: session.prime_cache.clone(),
         }
     }
 }
@@ -544,6 +548,8 @@ pub(crate) struct FsWatchPlan {
     git_head: Option<GitHead>,
     fs_config: xai_fsnotify::FsConfig,
     cwd: PathBuf,
+    /// Tracks live/replayed paths and recovery invalidations for prime inventory.
+    prime_cache: crate::session::prime::inventory::InventoryCache,
 }
 
 impl FsWatchPlan {
@@ -594,12 +600,14 @@ impl FsWatchPlan {
             git_head,
             fs_config,
             cwd: deps.cwd,
+            prime_cache: deps.prime_cache,
         }
     }
 
     // Phase subsets differ on purpose — replay excludes hunk (baselines on refresh).
 
     async fn on_files_changed(&self, paths: &[PathBuf], kind: FsEventKind) {
+        mark_prime_paths(&self.prime_cache, paths);
         if let Some(h) = &self.hunk {
             h.on_change(paths, kind);
         }
@@ -645,6 +653,12 @@ impl FsWatchPlan {
 
 // ── op buffer / debounce ──────────────────────────────────────────────────
 
+fn mark_prime_paths(cache: &crate::session::prime::inventory::InventoryCache, paths: &[PathBuf]) {
+    for path in paths {
+        cache.mark_touched(path);
+    }
+}
+
 type FsBatch = (Vec<PathBuf>, FsEventKind);
 
 /// Resolve a completed git op: report the batches to replay plus whether a
@@ -679,7 +693,12 @@ enum Outcome {
     /// Replay these batches, then refresh (rebuild the graph if set).
     Completed { replay: Vec<FsBatch>, rebuild: bool },
     /// Refresh only (rebuild if set) — git-metadata change or a resync.
-    Refresh { rebuild: bool },
+    Refresh {
+        rebuild: bool,
+        invalidate_prime: bool,
+    },
+    /// Completion dropped buffered paths, so refresh after invalidating prime.
+    CompletedInvalidated { rebuild: bool },
 }
 
 fn on_event(ev: FsEvent, in_op: &mut bool, op_buffer: &mut Vec<FsBatch>) -> Outcome {
@@ -691,20 +710,30 @@ fn on_event(ev: FsEvent, in_op: &mut bool, op_buffer: &mut Vec<FsBatch>) -> Outc
         FsEvent::GitOperationCompleted { head_changed } => {
             *in_op = false;
             let (replay, rebuild) = resolve_completed_op(head_changed, op_buffer);
-            Outcome::Completed { replay, rebuild }
+            if head_changed {
+                Outcome::CompletedInvalidated { rebuild }
+            } else {
+                Outcome::Completed { replay, rebuild }
+            }
         }
         FsEvent::FilesChanged { paths, kind } if *in_op => {
             if op_buffer.len() >= MAX_OP_BUFFER {
                 op_buffer.clear();
                 *in_op = false;
-                Outcome::Refresh { rebuild: true }
+                Outcome::Refresh {
+                    rebuild: true,
+                    invalidate_prime: true,
+                }
             } else {
                 op_buffer.push((paths, kind));
                 Outcome::Buffered
             }
         }
         FsEvent::FilesChanged { paths, kind } => Outcome::Forward((paths, kind)),
-        FsEvent::GitMetaChanged { .. } => Outcome::Refresh { rebuild: true },
+        FsEvent::GitMetaChanged { .. } => Outcome::Refresh {
+            rebuild: true,
+            invalidate_prime: true,
+        },
         _ => Outcome::Buffered,
     }
 }
@@ -714,7 +743,10 @@ fn on_event(ev: FsEvent, in_op: &mut bool, op_buffer: &mut Vec<FsBatch>) -> Outc
 fn on_resync(in_op: &mut bool, op_buffer: &mut Vec<FsBatch>) -> Outcome {
     *in_op = false;
     op_buffer.clear();
-    Outcome::Refresh { rebuild: true }
+    Outcome::Refresh {
+        rebuild: true,
+        invalidate_prime: true,
+    }
 }
 
 const REFRESH_DEBOUNCE_QUIET: Duration = Duration::from_millis(500);
@@ -819,6 +851,27 @@ fn on_settle_due(
     *in_op_defers = 0;
     SettleAction::Fire {
         rebuild: std::mem::take(rebuild_flag),
+    }
+}
+
+fn apply_outcome_to_prime_cache(
+    outcome: &Outcome,
+    cache: &crate::session::prime::inventory::InventoryCache,
+) {
+    match outcome {
+        Outcome::Completed { replay, .. } => {
+            for (paths, _) in replay {
+                mark_prime_paths(cache, paths);
+            }
+        }
+        Outcome::CompletedInvalidated { .. }
+        | Outcome::Refresh {
+            invalidate_prime: true,
+            ..
+        } => {
+            cache.invalidate();
+        }
+        Outcome::Buffered | Outcome::Forward(_) | Outcome::Refresh { .. } => {}
     }
 }
 
@@ -951,6 +1004,7 @@ pub(crate) fn spawn(plan: FsWatchPlan) -> FsWatchHandle {
                         }
                         Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                     };
+                    apply_outcome_to_prime_cache(&outcome, &plan.prime_cache);
                     match outcome {
                         Outcome::Buffered => {}
                         Outcome::Forward((paths, kind)) => {
@@ -960,12 +1014,12 @@ pub(crate) fn spawn(plan: FsWatchPlan) -> FsWatchHandle {
                             for (paths, kind) in replay {
                                 plan.on_replayed_change(&paths, kind).await;
                             }
-                            // Always refresh on completion: a same-branch commit
-                            // moves HEAD with no rebuild, but branch/commit still
-                            // need the pass.
                             note_refresh_request(rebuild, &mut debounce, &mut rebuild_codebase_graph);
                         }
-                        Outcome::Refresh { rebuild } => {
+                        Outcome::CompletedInvalidated { rebuild } => {
+                            note_refresh_request(rebuild, &mut debounce, &mut rebuild_codebase_graph);
+                        }
+                        Outcome::Refresh { rebuild, .. } => {
                             note_refresh_request(rebuild, &mut debounce, &mut rebuild_codebase_graph);
                         }
                     }
@@ -1167,6 +1221,7 @@ mod tests {
             client_fs_config: None,
             persistence_tx: tx,
             last_reported_branch: Arc::new(parking_lot::Mutex::new(None)),
+            prime_cache: crate::session::prime::inventory::InventoryCache::new(),
         };
         let plan = FsWatchPlan::build(
             FsWatchCapabilities {
@@ -1194,6 +1249,78 @@ mod tests {
         assert!(replay.is_empty());
         assert!(rebuild);
         assert!(op_buffer.is_empty());
+    }
+
+    #[test]
+    fn outcome_handling_marks_replayed_paths_and_invalidates_recovery_cache() {
+        let cache = crate::session::prime::inventory::InventoryCache::new();
+        let replayed = PathBuf::from("/repo/src/replayed.rs");
+        let replay = Outcome::Completed {
+            replay: vec![(vec![replayed.clone()], FsEventKind::Modified)],
+            rebuild: true,
+        };
+        apply_outcome_to_prime_cache(&replay, &cache);
+        assert_eq!(cache.dirty(), vec![replayed]);
+
+        let mut in_op = true;
+        let mut op_buffer = vec![batch()];
+        let head_change = on_event(
+            FsEvent::GitOperationCompleted { head_changed: true },
+            &mut in_op,
+            &mut op_buffer,
+        );
+        assert!(matches!(
+            head_change,
+            Outcome::CompletedInvalidated { rebuild: true }
+        ));
+        apply_outcome_to_prime_cache(&head_change, &cache);
+        assert_eq!(cache.epoch(), 1);
+        assert!(cache.dirty().is_empty());
+
+        let mut in_op = true;
+        let mut op_buffer: Vec<FsBatch> = (0..MAX_OP_BUFFER).map(|_| batch()).collect();
+        let overflow = on_event(files_changed("/repo/overflow"), &mut in_op, &mut op_buffer);
+        assert!(matches!(
+            overflow,
+            Outcome::Refresh {
+                rebuild: true,
+                invalidate_prime: true
+            }
+        ));
+        apply_outcome_to_prime_cache(&overflow, &cache);
+        assert_eq!(cache.epoch(), 2);
+
+        let mut in_op = true;
+        let mut op_buffer = vec![batch()];
+        let resync = on_resync(&mut in_op, &mut op_buffer);
+        assert!(matches!(
+            resync,
+            Outcome::Refresh {
+                rebuild: true,
+                invalidate_prime: true
+            }
+        ));
+        apply_outcome_to_prime_cache(&resync, &cache);
+        assert_eq!(cache.epoch(), 3);
+
+        let mut in_op = false;
+        let mut op_buffer = Vec::new();
+        let git_meta = on_event(
+            FsEvent::GitMetaChanged {
+                kind: xai_fsnotify::GitMetaKind::RefsChanged,
+            },
+            &mut in_op,
+            &mut op_buffer,
+        );
+        assert!(matches!(
+            git_meta,
+            Outcome::Refresh {
+                rebuild: true,
+                invalidate_prime: true
+            }
+        ));
+        apply_outcome_to_prime_cache(&git_meta, &cache);
+        assert_eq!(cache.epoch(), 4);
     }
 
     #[test]
@@ -1282,7 +1409,7 @@ mod tests {
         let mut in_op = true;
         let mut buf: Vec<FsBatch> = (0..MAX_OP_BUFFER).map(|_| batch()).collect();
         match on_event(files_changed("/r/a"), &mut in_op, &mut buf) {
-            Outcome::Refresh { rebuild } => assert!(rebuild),
+            Outcome::Refresh { rebuild, .. } => assert!(rebuild),
             _ => panic!("expected Refresh recovery"),
         }
         assert!(!in_op);
@@ -1294,7 +1421,7 @@ mod tests {
         let mut in_op = true;
         let mut buf = vec![batch()];
         match on_resync(&mut in_op, &mut buf) {
-            Outcome::Refresh { rebuild } => assert!(rebuild),
+            Outcome::Refresh { rebuild, .. } => assert!(rebuild),
             _ => panic!("expected Refresh"),
         }
         assert!(!in_op);
@@ -1428,7 +1555,8 @@ mod tests {
                     &mut in_op,
                     &mut op_buffer,
                 ) {
-                    Outcome::Completed { rebuild, .. } => {
+                    Outcome::Completed { rebuild, .. }
+                    | Outcome::CompletedInvalidated { rebuild } => {
                         note_refresh_request(rebuild, &mut debounce, &mut rebuild_flag);
                     }
                     other => panic!(
@@ -1598,7 +1726,7 @@ mod tests {
             &mut in_op,
             &mut op_buffer,
         ) {
-            Outcome::Refresh { rebuild } => {
+            Outcome::Refresh { rebuild, .. } => {
                 note_refresh_request(rebuild, &mut debounce, &mut rebuild_flag);
             }
             other => panic!("expected Refresh, got {:?}", std::mem::discriminant(&other)),

@@ -84,6 +84,9 @@ pub(crate) fn reset_test_emit_count() {
 pub(crate) struct ShellAttribution {
     auth_manager: Arc<AuthManager>,
     session_id: Option<String>,
+    /// Live route sidecar updated each turn; used for exact-route current
+    /// credential comparison on 401 attribution (Send+Sync for trait object).
+    route_context: Arc<parking_lot::RwLock<Option<xai_grok_inference::ProviderRouteContext>>>,
 }
 
 // `AuthManager` does not implement `Debug` (it carries a `RwLock` over
@@ -96,6 +99,7 @@ impl std::fmt::Debug for ShellAttribution {
         f.debug_struct("ShellAttribution")
             .field("auth_manager", &"<redacted>")
             .field("session_id", &self.session_id)
+            .field("has_route_context", &self.route_context.read().is_some())
             .finish()
     }
 }
@@ -115,9 +119,25 @@ impl ShellAttribution {
         auth_manager: Arc<AuthManager>,
         session_id: Option<String>,
     ) -> Arc<dyn Auth401AttributionCallback> {
+        Self::new_with_route(
+            auth_manager,
+            session_id,
+            Arc::new(parking_lot::RwLock::new(None)),
+        )
+    }
+
+    /// Same as [`Self::new`] but shares a live route-context cell with the
+    /// session so every turn's exact-route sidecar is visible to 401
+    /// attribution without rebuilding the callback.
+    pub fn new_with_route(
+        auth_manager: Arc<AuthManager>,
+        session_id: Option<String>,
+        route_context: Arc<parking_lot::RwLock<Option<xai_grok_inference::ProviderRouteContext>>>,
+    ) -> Arc<dyn Auth401AttributionCallback> {
         Arc::new(Self {
             auth_manager,
             session_id,
+            route_context,
         })
     }
 
@@ -135,6 +155,20 @@ impl ShellAttribution {
         Arc::new(Self {
             auth_manager,
             session_id,
+            route_context: Arc::new(parking_lot::RwLock::new(None)),
+        })
+    }
+
+    /// Tool-side callback bound to a frozen exact aux route (web search pin).
+    pub fn new_tool_callback_with_route(
+        auth_manager: Arc<AuthManager>,
+        session_id: Option<String>,
+        route: xai_grok_inference::ProviderRouteContext,
+    ) -> Arc<dyn ToolAuth401AttributionCallback> {
+        Arc::new(Self {
+            auth_manager,
+            session_id,
+            route_context: Arc::new(parking_lot::RwLock::new(Some(route))),
         })
     }
 }
@@ -143,12 +177,15 @@ impl Auth401AttributionCallback for ShellAttribution {
     fn record_401(&self, consumer: InferenceConsumer, sent_bearer_tail: Option<&str>) {
         // The inference crate has already scrubbed this to the shared tail.
         // Reapplying `bearer_tail` downstream is intentionally idempotent.
-        record_consumer_401(
+        // Prefer exact-route current credential when a production route
+        // sidecar is installed; otherwise fall back to AuthManager session.
+        let route = self.route_context.read().clone();
+        record_auth_401_for_route(
             self.auth_manager.as_ref(),
             self.session_id.as_deref(),
-            ConsumerKind::OaiCompatClient,
-            consumer.as_endpoint(),
+            &format_consumer(ConsumerKind::OaiCompatClient, consumer.as_endpoint()),
             sent_bearer_tail,
+            route.as_ref(),
         );
     }
 }
@@ -169,13 +206,26 @@ impl ToolAuth401AttributionCallback for ShellAttribution {
             ToolConsumer::VideoGenPoll => (ConsumerKind::VideoGen, "poll"),
             ToolConsumer::WebSearch => (ConsumerKind::WebSearch, ""),
         };
-        record_consumer_401(
-            self.auth_manager.as_ref(),
-            self.session_id.as_deref(),
-            kind,
-            op,
-            sent_bearer_tail,
-        );
+        // Prefer exact-route credential when a production route sidecar is
+        // installed (e.g. web-search aux pin); never fall through to a sibling.
+        let route = self.route_context.read().clone();
+        if route.is_some() {
+            record_auth_401_for_route(
+                self.auth_manager.as_ref(),
+                self.session_id.as_deref(),
+                &format_consumer(kind, op),
+                sent_bearer_tail,
+                route.as_ref(),
+            );
+        } else {
+            record_consumer_401(
+                self.auth_manager.as_ref(),
+                self.session_id.as_deref(),
+                kind,
+                op,
+                sent_bearer_tail,
+            );
+        }
     }
 }
 
@@ -299,52 +349,35 @@ pub(crate) fn record_auth_401(
     consumer: &str,
     sent_bearer: Option<&str>,
 ) {
-    let payload = compute_attribution_payload(auth_manager, consumer, sent_bearer);
+    record_auth_401_for_route(auth_manager, session_id, consumer, sent_bearer, None);
+}
 
-    // Sink 1 -- local file (~/.grok/logs/unified.jsonl) + scrubbed
-    // tracing event. The local file is reliable but only ships to GCS
-    // on OIDC refresh failure (auth/refresh.rs::spawn_diagnostic_upload),
-    // so by itself it does not give visibility into the steady-state
-    // 401 population. Sink 2 below provides that.
+/// Exact-route 401 attribution: `current_key_prefix` is derived from
+/// [`current_credential_for_route`] when a route sidecar is present so a
+/// sibling OAuth/API-key source never participates in the stale check.
+pub(crate) fn record_auth_401_for_route(
+    auth_manager: &AuthManager,
+    session_id: Option<&str>,
+    consumer: &str,
+    sent_bearer: Option<&str>,
+    route: Option<&xai_grok_inference::ProviderRouteContext>,
+) {
+    let payload = compute_attribution_payload(auth_manager, consumer, sent_bearer, route);
+
     xai_grok_telemetry::unified_log::warn(
         "auth 401 attribution",
         session_id,
         Some(payload.clone()),
     );
 
-    // Sink 2 -- discrete OTel span exported via OTLP
-    // (util/otel_layer.rs). Auth 401 attribution schema fields below
-    // become OTel span attributes under `attributes.custom.<name>`
-    // per the tracing-opentelemetry bridge; query by span name
-    // `auth_401_attribution` in the configured telemetry backend.
-    //
-    // Wrapping in a `warn_span!` (vs. plain `tracing::warn!`) ensures
-    // emission even when no parent span is active. The OTel layer
-    // attaches plain events to the currently-entered span only, so a
-    // `tracing::warn!` from a `spawn_blocking` closure (idle-resume
-    // model refresh) or a background sync task is silently dropped.
-    // A `warn_span!` itself is always emitted by the layer's
-    // `on_new_span`/`on_close` hooks regardless of parent context.
-    //
-    // The span carries no body and is dropped immediately at the end
-    // of this function, so its `duration` is a few microseconds and
-    // it is logically a one-shot record (not a wrapping context for
-    // any other work).
     let _attribution_span = tracing::warn_span!(
         "auth_401_attribution",
-        // String fields. tracing flattens Option<&str> via Display, so
-        // we pre-collapse `None` to "" for both prefix fields and for
-        // session_id; downstream queries should treat "" as absent.
         sent_key_prefix = payload["sent_key_prefix"].as_str().unwrap_or(""),
         current_key_prefix = payload["current_key_prefix"].as_str().unwrap_or(""),
         consumer = consumer,
         session_id = session_id.unwrap_or(""),
-        // Numeric fields. The sentinel values from
-        // `compute_attribution_payload` (-1, 0) carry through
-        // unchanged.
         mint_age_seconds = payload["mint_age_seconds"].as_i64().unwrap_or(-1),
         expires_at_seconds_from_now = payload["expires_at_seconds_from_now"].as_i64().unwrap_or(0),
-        // Boolean -- the load-bearing field for stale-vs-live splits.
         is_stale_snapshot = payload["is_stale_snapshot"].as_bool().unwrap_or(false),
     )
     .entered();
@@ -358,19 +391,14 @@ pub(crate) fn record_auth_401(
 /// directly without reaching into `unified_log`'s file writer or the
 /// tracing layer.
 ///
-/// This function performs **exactly one** read-side acquisition of
-/// [`AuthManager`]'s internal `RwLock` -- it calls
-/// [`AuthManager::current`] once and derives both `current_key_prefix`
-/// and the mint/expiry fields from the resulting `GrokAuth`.
-///
-/// `is_stale_snapshot` is `true` only when the live `current()` token
-/// differs from the bearer the client sent. When `current()` returns
-/// `None` (the manager has no active token), the result is `false`:
-/// absence of a live token is "no evidence of staleness," not stale.
+/// When `route` is `Some`, current credential is resolved via
+/// [`current_credential_for_route`] (exact source + generation). When
+/// `None`, falls back to [`AuthManager::current`] (xAI session path).
 fn compute_attribution_payload(
     auth_manager: &AuthManager,
     consumer: &str,
     sent_bearer: Option<&str>,
+    route: Option<&xai_grok_inference::ProviderRouteContext>,
 ) -> JsonValue {
     let now = chrono::Utc::now();
 
@@ -381,37 +409,45 @@ fn compute_attribution_payload(
     // query can break down on this).
     let sent_prefix = sent_bearer.map(bearer_tail).unwrap_or("");
 
-    // Single read-lock acquisition: pull the live `GrokAuth` (or
-    // `None`) once and derive every other field from it.
-    let current_auth = auth_manager.current();
-    let current_prefix_owned: Option<String> = current_auth
-        .as_ref()
-        .map(|a| bearer_tail(&a.key).to_string());
+    let route_snap = current_credential_for_route(auth_manager, route);
+    let (current_prefix_owned, mint_age_seconds, expires_at_seconds_from_now) =
+        if let Some(snap) = route_snap {
+            let prefix = bearer_tail(&snap.key).to_string();
+            let mint_age = now.signed_duration_since(snap.create_time).num_seconds();
+            let expiry = snap.expires_at.unwrap_or(snap.create_time + TOKEN_TTL);
+            (
+                Some(prefix),
+                mint_age,
+                expiry.signed_duration_since(now).num_seconds(),
+            )
+        } else if route.is_some() {
+            // Exact-route lookup failed (stale generation / sibling / missing):
+            // no current key — never fall back to a sibling session token.
+            (None, -1_i64, 0_i64)
+        } else {
+            // Single read-lock acquisition: pull the live `GrokAuth` (or
+            // `None`) once and derive every other field from it.
+            let current_auth = auth_manager.current();
+            match current_auth {
+                Some(auth) => {
+                    let prefix = bearer_tail(&auth.key).to_string();
+                    let mint_age = now.signed_duration_since(auth.create_time).num_seconds();
+                    let expiry = auth.expires_at.unwrap_or(auth.create_time + TOKEN_TTL);
+                    (
+                        Some(prefix),
+                        mint_age,
+                        expiry.signed_duration_since(now).num_seconds(),
+                    )
+                }
+                None => (None, -1_i64, 0_i64),
+            }
+        };
 
     // True-positive staleness only. A generic 401 with no credential on the
     // wire cannot establish ownership of the held credential.
     let is_stale_snapshot = match (sent_prefix, current_prefix_owned.as_deref()) {
         ("", _) | (_, None) => false,
         (sent, Some(current)) => sent != current,
-    };
-
-    // Mint-age + expiry come from the same `current_auth` we already
-    // read; sentinels `-1 / 0` when the manager has no current token.
-    //
-    // TODO: mirror the full External-with-ttl branch from
-    // `AuthManager::is_token_expired` (uses
-    // `grok_com_config.auth_token_ttl` when `expires_at` is `None`
-    // and `auth_mode == External`). The current 2-branch fallback
-    // (`expires_at` if Some else `create_time + TOKEN_TTL`) is good
-    // enough for diagnostic metadata; the External-ttl branch is
-    // worth wiring once a real consumer needs it.
-    let (mint_age_seconds, expires_at_seconds_from_now) = match current_auth {
-        Some(auth) => {
-            let mint_age = now.signed_duration_since(auth.create_time).num_seconds();
-            let expiry = auth.expires_at.unwrap_or(auth.create_time + TOKEN_TTL);
-            (mint_age, expiry.signed_duration_since(now).num_seconds())
-        }
-        None => (-1_i64, 0_i64),
     };
 
     serde_json::json!({
@@ -421,6 +457,153 @@ fn compute_attribution_payload(
         "expires_at_seconds_from_now": expires_at_seconds_from_now,
         "consumer": consumer,
         "is_stale_snapshot": is_stale_snapshot,
+    })
+}
+
+/// Snapshot of the credential a route would send — secret-bearing, never
+/// logged raw. Used only for exact-route attribution equality checks.
+#[derive(Debug, Clone)]
+pub(crate) struct RouteCredentialSnapshot {
+    pub key: String,
+    pub create_time: chrono::DateTime<chrono::Utc>,
+    pub expires_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+/// Resolve the credential for an **exact** provider route. Fail closed on
+/// incarnation / binding-generation mismatch; never falls back to a sibling
+/// account or a different credential route (OAuth vs API-key).
+///
+/// Binding-generation contract: the durable store generation must equal
+/// `route.binding_generation()`. Legacy keys without meta bind only at
+/// generation `0`. A rotated store against a stale sidecar returns `None`.
+pub(crate) fn lookup_route_credential(
+    grok_home: &std::path::Path,
+    route: &xai_grok_inference::ProviderRouteContext,
+) -> Option<RouteCredentialSnapshot> {
+    use crate::auth::{
+        ANTHROPIC_API_KEY_SCOPE, OPENAI_API_KEY_SCOPE, OPENAI_OAUTH_SCOPE,
+        OPENROUTER_API_KEY_SCOPE, lookup_auth, read_auth_json, read_provider_api_key,
+        read_provider_api_key_binding, read_provider_oauth_auth, read_provider_oauth_binding,
+    };
+    use crate::provider_registry::id::ProviderId;
+    use crate::provider_registry::instance::ProviderIncarnation;
+    use crate::provider_registry::secrets::application_key_scope;
+    use xai_grok_inference::{RouteCredentialRoute, RouteProviderKind};
+
+    let instance = route.instance_id();
+    let incarnation = route.incarnation();
+    let expected_generation = route.binding_generation();
+
+    match route.credential_route() {
+        RouteCredentialRoute::ChatGptOauth => {
+            if instance == "openai" && incarnation.is_none() {
+                let path = grok_home.join("auth.json");
+                let store = read_auth_json(&path).ok()?;
+                let auth = lookup_auth(&store, OPENAI_OAUTH_SCOPE)?;
+                let live_gen =
+                    crate::auth::chatgpt_oauth::read_builtin_oauth_binding_generation(grok_home)
+                        .ok()
+                        .flatten()
+                        .unwrap_or(0);
+                if live_gen != expected_generation {
+                    return None;
+                }
+                return Some(snapshot_from_auth(auth));
+            }
+            let id = ProviderId::new(instance).ok()?;
+            let inc = incarnation.and_then(|raw| ProviderIncarnation::new(raw).ok());
+            let binding = read_provider_oauth_binding(grok_home, &id).ok().flatten();
+            if let Some(binding) = binding {
+                if binding.incarnation.as_ref() != inc.as_ref() {
+                    return None;
+                }
+                if binding.generation != expected_generation {
+                    return None;
+                }
+            } else if inc.is_some() || expected_generation != 0 {
+                // Missing binding meta only allowed at generation 0 without incarnation.
+                return None;
+            }
+            read_provider_oauth_auth(grok_home, &id, inc.as_ref())
+                .ok()
+                .flatten()
+                .map(snapshot_from_auth)
+        }
+        RouteCredentialRoute::ApiKey | RouteCredentialRoute::OpenAiPlatform => {
+            // API-key routes do not carry incarnation on the durable store;
+            // any incarnation requirement fails closed.
+            if incarnation.is_some() {
+                return None;
+            }
+            let scope = match (instance, route.provider_kind()) {
+                ("openai", _) => OPENAI_API_KEY_SCOPE.to_owned(),
+                ("openrouter", _) | (_, RouteProviderKind::OpenRouter)
+                    if instance == "openrouter" =>
+                {
+                    OPENROUTER_API_KEY_SCOPE.to_owned()
+                }
+                ("anthropic", _) | (_, RouteProviderKind::Anthropic) if instance == "anthropic" => {
+                    ANTHROPIC_API_KEY_SCOPE.to_owned()
+                }
+                _ => {
+                    let id = ProviderId::new(instance).ok()?;
+                    application_key_scope(&id)
+                }
+            };
+            let key = read_provider_api_key(grok_home, &scope).ok().flatten()?;
+            let live_gen = match read_provider_api_key_binding(grok_home, &scope) {
+                Ok(Some(binding)) => binding.generation,
+                Ok(None) => 0, // legacy key without meta
+                Err(_) => return None,
+            };
+            if live_gen != expected_generation {
+                return None;
+            }
+            Some(RouteCredentialSnapshot {
+                key,
+                create_time: chrono::Utc::now(),
+                expires_at: None,
+            })
+        }
+        RouteCredentialRoute::AuthHelper | RouteCredentialRoute::None => None,
+        RouteCredentialRoute::XaiSession => None,
+    }
+}
+
+fn snapshot_from_auth(auth: crate::auth::GrokAuth) -> RouteCredentialSnapshot {
+    RouteCredentialSnapshot {
+        key: auth.key,
+        create_time: auth.create_time,
+        expires_at: auth.expires_at,
+    }
+}
+
+/// Current credential for a route: xAI session uses the live manager; every
+/// other route uses exact-source lookup only (no sibling fallback).
+pub(crate) fn current_credential_for_route(
+    auth_manager: &AuthManager,
+    route: Option<&xai_grok_inference::ProviderRouteContext>,
+) -> Option<RouteCredentialSnapshot> {
+    use xai_grok_inference::RouteCredentialRoute;
+    if let Some(route) = route
+        && matches!(
+            route.credential_route(),
+            RouteCredentialRoute::XaiSession | RouteCredentialRoute::None
+        )
+    {
+        return auth_manager.current().map(|auth| RouteCredentialSnapshot {
+            key: auth.key,
+            create_time: auth.create_time,
+            expires_at: auth.expires_at,
+        });
+    }
+    if let Some(route) = route {
+        return lookup_route_credential(auth_manager.grok_home(), route);
+    }
+    auth_manager.current().map(|auth| RouteCredentialSnapshot {
+        key: auth.key,
+        create_time: auth.create_time,
+        expires_at: auth.expires_at,
     })
 }
 
@@ -467,7 +650,7 @@ mod tests {
         let sent = "live-token-1234567890abcdef";
         am.hot_swap(fresh_auth(sent));
 
-        let payload = compute_attribution_payload(&am, "Test.live", Some(sent));
+        let payload = compute_attribution_payload(&am, "Test.live", Some(sent), None);
 
         assert_eq!(payload_field(&payload, "is_stale_snapshot"), false);
         assert_eq!(payload_field(&payload, "consumer"), "Test.live");
@@ -506,7 +689,7 @@ mod tests {
         let live = "live-token-different";
         am.hot_swap(fresh_auth(live));
 
-        let payload = compute_attribution_payload(&am, "Test.stale", Some(stale));
+        let payload = compute_attribution_payload(&am, "Test.stale", Some(stale), None);
 
         assert_eq!(payload_field(&payload, "is_stale_snapshot"), true);
         assert_eq!(payload_field(&payload, "sent_key_prefix"), "n-1234567890");
@@ -524,7 +707,7 @@ mod tests {
         let (_dir, am) = empty_auth_manager();
         am.hot_swap(fresh_auth("held-token-1234567890"));
 
-        let payload = compute_attribution_payload(&am, "Test.generic", None);
+        let payload = compute_attribution_payload(&am, "Test.generic", None, None);
 
         assert_eq!(payload_field(&payload, "is_stale_snapshot"), false);
         assert_eq!(payload_field(&payload, "sent_key_prefix"), "");
@@ -544,7 +727,7 @@ mod tests {
         let (_dir, am) = empty_auth_manager();
         // Do NOT inject anything -- manager has no current token.
 
-        let payload = compute_attribution_payload(&am, "Test.absent", Some("any-token"));
+        let payload = compute_attribution_payload(&am, "Test.absent", Some("any-token"), None);
 
         assert_eq!(payload_field(&payload, "is_stale_snapshot"), false);
         assert_eq!(payload_field(&payload, "sent_key_prefix"), "any-token");
@@ -568,7 +751,7 @@ mod tests {
         };
         am.hot_swap(auth);
 
-        let payload = compute_attribution_payload(&am, "Test.legacy", Some("k"));
+        let payload = compute_attribution_payload(&am, "Test.legacy", Some("k"), None);
 
         // mint_age_seconds: ~60.
         let mint = payload_field(&payload, "mint_age_seconds")
@@ -675,6 +858,7 @@ mod tests {
                 am_arc.as_ref(),
                 expected_consumer_str,
                 Some("bearer-1234567890"),
+                None,
             );
             assert_eq!(
                 payload_field(&payload, "consumer"),
@@ -685,6 +869,70 @@ mod tests {
 
         // Each variant bumped the global counter exactly once.
         assert_eq!(test_emit_count() as usize, cases.len());
+    }
+
+    /// Rotated store generation against a stale sidecar binding fails closed.
+    #[test]
+    fn lookup_route_credential_requires_exact_binding_generation() {
+        use crate::auth::{OPENROUTER_API_KEY_SCOPE, store_provider_api_key};
+        use xai_grok_inference::{
+            ProviderRouteContext, RouteApiSurface, RouteAuthority, RouteCredentialRoute,
+            RouteProviderKind,
+        };
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let gen1 = store_provider_api_key(dir.path(), OPENROUTER_API_KEY_SCOPE, "or-key-gen1-AAAA")
+            .expect("store gen1");
+        assert_eq!(gen1, 1);
+
+        let sidecar = ProviderRouteContext::builder()
+            .instance_id("openrouter")
+            .provider_kind(RouteProviderKind::OpenRouter)
+            .api_surface(RouteApiSurface::OpenRouterNative)
+            .credential_route(RouteCredentialRoute::ApiKey)
+            .binding_generation(1)
+            .authority(RouteAuthority::Authoritative)
+            .build()
+            .unwrap();
+        assert!(
+            lookup_route_credential(dir.path(), &sidecar).is_some(),
+            "matching generation must succeed"
+        );
+
+        // External rotation advances live generation.
+        let gen2 = store_provider_api_key(dir.path(), OPENROUTER_API_KEY_SCOPE, "or-key-gen2-BBBB")
+            .expect("store gen2");
+        assert_eq!(gen2, 2);
+        assert!(
+            lookup_route_credential(dir.path(), &sidecar).is_none(),
+            "stale sidecar (gen 1) must fail closed against live gen 2"
+        );
+
+        let live_sidecar = ProviderRouteContext::builder()
+            .instance_id("openrouter")
+            .provider_kind(RouteProviderKind::OpenRouter)
+            .api_surface(RouteApiSurface::OpenRouterNative)
+            .credential_route(RouteCredentialRoute::ApiKey)
+            .binding_generation(2)
+            .authority(RouteAuthority::Authoritative)
+            .build()
+            .unwrap();
+        assert!(lookup_route_credential(dir.path(), &live_sidecar).is_some());
+
+        // Sibling route (OAuth) never returns the API-key.
+        let oauth_sidecar = ProviderRouteContext::builder()
+            .instance_id("openrouter")
+            .provider_kind(RouteProviderKind::OpenRouter)
+            .api_surface(RouteApiSurface::OpenRouterNative)
+            .credential_route(RouteCredentialRoute::ChatGptOauth)
+            .binding_generation(2)
+            .authority(RouteAuthority::Authoritative)
+            .build()
+            .unwrap();
+        assert!(
+            lookup_route_credential(dir.path(), &oauth_sidecar).is_none(),
+            "OAuth route must not fall back to API-key store"
+        );
     }
 
     /// Capture `tracing::Span` `on_new_span` callbacks into a
@@ -943,6 +1191,7 @@ mod tests {
                 InferenceConsumer::MessagesStream.as_endpoint(),
             ),
             Some("test-bearer"),
+            None,
         );
         assert_eq!(
             payload_field(&payload, "consumer"),

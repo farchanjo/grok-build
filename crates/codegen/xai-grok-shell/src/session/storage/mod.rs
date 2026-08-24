@@ -18,6 +18,7 @@ use xai_grok_inference_types::ReasoningEffort;
 use xai_grok_workspace::session::file_state::RewindPoint;
 
 pub mod jsonl;
+pub(crate) mod model_route;
 #[allow(dead_code)] // Transaction APIs remain deferred until later protocol wiring.
 pub(crate) mod relocation;
 pub mod search;
@@ -1219,6 +1220,22 @@ pub trait StorageAdapter: Send + Sync {
     /// Append a chat message and increment counter.
     async fn append_chat_message(&self, info: &Info, message: &ConversationItem) -> io::Result<()>;
 
+    /// Append a consecutive batch of chat messages (e.g. a hidden prime
+    /// `<system_reminder>` directly before the real user message) as ONE
+    /// durable append, then increment the counter by the batch length. The
+    /// default implementation appends each message separately; storage
+    /// backends that can append multiple records in one sync override this.
+    async fn append_chat_messages(
+        &self,
+        info: &Info,
+        messages: &[ConversationItem],
+    ) -> io::Result<()> {
+        for message in messages {
+            self.append_chat_message(info, message).await?;
+        }
+        Ok(())
+    }
+
     /// Append one working-directory switch generation exactly once.
     async fn append_cwd_switch_commit_aware(
         &self,
@@ -1272,6 +1289,40 @@ pub trait StorageAdapter: Send + Sync {
         execution_backend: Option<crate::agent::execution_backend::ExecutionBackend>,
         external_runtime: Option<Option<crate::agent::external_runtime::ExternalRuntimeEnvelope>>,
     ) -> io::Result<()>;
+
+    /// Optional route-provenance companion update (PR4). Default no-op for
+    /// source compatibility with existing StorageAdapter implementors.
+    async fn update_model_route_provenance(
+        &self,
+        _info: &Info,
+        _provenance: Option<&xai_grok_models::ModelRouteProvenance>,
+    ) -> io::Result<()> {
+        Ok(())
+    }
+
+    /// Combined model + agent + execution + optional route companion write.
+    /// Default chains the existing execution update then provenance (best-effort).
+    async fn update_current_model_agent_execution_and_route(
+        &self,
+        info: &Info,
+        model_id: &acp::ModelId,
+        agent_name: Option<&str>,
+        reasoning_effort: Option<Option<ReasoningEffort>>,
+        execution_backend: Option<crate::agent::execution_backend::ExecutionBackend>,
+        external_runtime: Option<Option<crate::agent::external_runtime::ExternalRuntimeEnvelope>>,
+        provenance: Option<&xai_grok_models::ModelRouteProvenance>,
+    ) -> io::Result<()> {
+        self.update_current_model_agent_and_execution(
+            info,
+            model_id,
+            agent_name,
+            reasoning_effort,
+            execution_backend,
+            external_runtime,
+        )
+        .await?;
+        self.update_model_route_provenance(info, provenance).await
+    }
 
     /// Update the collection ID for telemetry tracing
     async fn update_collection_id(&self, info: &Info, collection_id: &str) -> io::Result<()>;

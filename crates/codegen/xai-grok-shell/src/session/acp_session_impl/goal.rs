@@ -124,38 +124,33 @@ impl SessionActor {
             } else {
                 active_model.as_str()
             };
-            let (client, model) = if requested_model == active_model {
-                match self.prepare_chat_completion(false).await {
-                    Ok(client) => (client, active_model.clone()),
-                    Err(error) => {
-                        last_error = format!("could not prepare evaluator client: {error}");
-                        continue;
-                    }
-                }
+            // Always resolve through GoalEvaluator: active session model uses
+            // exact @session inherit; small model is an explicit pin.
+            let eval_slug = if requested_model == active_model {
+                crate::session::auxiliary_route::SESSION_ROUTE_SENTINEL
             } else {
-                let active_config = self.reconstruct_full_config().await;
-                match self.resolve_aux_inference_config(requested_model).await {
-                    Some(mut config) => {
-                        crate::agent::config::stamp_session_local_sampler_fields(
-                            &mut config,
-                            &active_config,
-                            self.client_identifier.clone(),
-                            Some(self.max_retries),
-                        );
-                        let model = config.model.clone();
-                        match xai_grok_inference::InferenceClient::new(config) {
-                            Ok(client) => (client, model),
-                            Err(error) => {
-                                last_error = format!("could not prepare small evaluator: {error}");
-                                continue;
-                            }
+                requested_model
+            };
+            let (client, model) = match self
+                .resolve_aux_route(
+                    crate::session::auxiliary_route::AuxiliaryPurpose::GoalEvaluator,
+                    eval_slug,
+                )
+                .await
+            {
+                Ok(route) => {
+                    let model = route.upstream_model_id.clone();
+                    match route.client() {
+                        Ok(client) => (client, model),
+                        Err(error) => {
+                            last_error = format!("could not prepare evaluator client: {error}");
+                            continue;
                         }
                     }
-                    None => {
-                        last_error =
-                            format!("small evaluator model `{requested_model}` unavailable");
-                        continue;
-                    }
+                }
+                Err(error) => {
+                    last_error = format!("goal evaluator route `{eval_slug}` unavailable: {error}");
+                    continue;
                 }
             };
             let request = build_goal_evaluator_request(
@@ -515,6 +510,7 @@ impl SessionActor {
         };
 
         let (
+            goal_id,
             objective,
             verifier_id,
             baseline_commit,
@@ -534,6 +530,7 @@ impl SessionActor {
                 };
             };
             (
+                o.goal_id.clone(),
                 o.objective.clone(),
                 o.verifier_id.clone(),
                 o.changes_baseline_commit.clone(),
@@ -561,12 +558,17 @@ impl SessionActor {
             (composed.to_send, composed.to_persist)
         };
 
-        let model_id = self
-            .chat_state_handle
-            .get_inference_settings()
-            .await
-            .map(|c| c.model)
-            .unwrap_or_default();
+        let inference_config = match self.reconstruct_full_config().await {
+            Ok(cfg) => cfg,
+            Err(e) => {
+                tracing::warn!(error = %e, "verification stage: provider route unusable");
+                return GoalClassifierOutcome::FailOpenAchieved {
+                    reason: GoalClassifierFailOpenReason::InferenceError,
+                    details_path: String::new(),
+                };
+            }
+        };
+        let model_id = inference_config.model.clone();
 
         let Some(event_tx) = self.tool_context.subagent_event_tx.clone() else {
             tracing::warn!("verification stage: no subagent coordinator channel; failing open");
@@ -641,6 +643,8 @@ impl SessionActor {
 
         let spawner: std::sync::Arc<dyn crate::session::goal_classifier::GoalClassifierSpawner> =
             std::sync::Arc::new(ChannelSpawner {
+                assigned_sender: self
+                    .trusted_goal_assigned_sender(goal_id.clone(), inference_config),
                 event_tx,
                 parent_session_id: self.session_id_string(),
                 parent_prompt_id,
@@ -1434,13 +1438,11 @@ impl SessionActor {
         };
         {
             let state = self.state.lock().await;
-            if state.pending_inputs.iter().any(|i| {
-                matches!(
-                    i.origin,
-                    super::super::PromptOrigin::GoalSummary
-                        | super::super::PromptOrigin::GoalClassifierNudge,
-                )
-            }) {
+            if state
+                .pending_inputs
+                .iter()
+                .any(|i| i.origin == super::super::PromptOrigin::GoalSummary)
+            {
                 return;
             }
         }
@@ -1450,13 +1452,11 @@ impl SessionActor {
         let (respond_to, _) = tokio::sync::oneshot::channel();
         {
             let mut state = self.state.lock().await;
-            if state.pending_inputs.iter().any(|i| {
-                matches!(
-                    i.origin,
-                    super::super::PromptOrigin::GoalSummary
-                        | super::super::PromptOrigin::GoalClassifierNudge,
-                )
-            }) {
+            if state
+                .pending_inputs
+                .iter()
+                .any(|i| i.origin == super::super::PromptOrigin::GoalSummary)
+            {
                 tracing::debug!("continuation reminder already pending; skipping duplicate");
                 return;
             }

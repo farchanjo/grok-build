@@ -77,6 +77,134 @@ mod cli_catchall_drop_tests {
         assert!(dropped.is_empty());
     }
 }
+
+#[cfg(test)]
+mod memory_embedding_input_tests {
+    use super::memory_embedding_inputs;
+    use crate::session::memory::EndpointScopedCredentials;
+
+    #[test]
+    fn named_profile_strips_legacy_embedding_inputs() {
+        let credentials = EndpointScopedCredentials::none();
+        let (embedding_credentials, embed_api_key, embed_base_url) = memory_embedding_inputs(
+            true,
+            &credentials,
+            Some(&"chat-key".to_owned()),
+            "http://chat.example/v1",
+        );
+        assert!(embedding_credentials.is_empty());
+        assert!(embed_api_key.is_none());
+        assert!(embed_base_url.is_empty());
+    }
+}
+
+/// Resolve startup-reindex inputs using the memory profile pinned at spawn.
+/// Profile changes take effect for memory on the next session.
+/// Returns `(embed_config, index_open_dimensions)`.
+pub(crate) fn startup_reindex_embedding_inputs(
+    memory_named_profile_set: bool,
+    memory_config: Option<&crate::config::MemoryConfig>,
+    facade_dimensions: Option<usize>,
+) -> (Option<crate::config::MemoryEmbeddingConfig>, usize) {
+    let embed_config = if memory_named_profile_set {
+        None
+    } else {
+        memory_config.map(|mc| mc.embedding.clone())
+    };
+    let dims = facade_dimensions
+        .or_else(|| embed_config.as_ref().map(|c| c.dimensions))
+        .unwrap_or(1024);
+    (embed_config, dims)
+}
+
+const MEMORY_REBUILD_BACKOFF_SECS: i64 = 60;
+
+/// Return memory embedding inputs without leaking active-chat credentials into
+/// named-profile parameters.
+fn memory_embedding_inputs(
+    named_profile: bool,
+    credentials: &crate::session::memory::EndpointScopedCredentials,
+    api_key: Option<&String>,
+    base_url: &str,
+) -> (
+    crate::session::memory::EndpointScopedCredentials,
+    Option<String>,
+    String,
+) {
+    if named_profile {
+        (
+            crate::session::memory::EndpointScopedCredentials::none(),
+            None,
+            String::new(),
+        )
+    } else {
+        (credentials.clone(), api_key.cloned(), base_url.to_owned())
+    }
+}
+
+/// Backfill startup-reindex chunks only when the vector state is stable.
+/// Returns the number of chunks embedded.
+pub(crate) async fn startup_reindex_backfill(
+    db_path: &std::path::Path,
+    storage: crate::session::memory::MemoryStorage,
+    facade: Option<std::sync::Arc<dyn xai_grok_memory::MemoryRetrieval>>,
+    embed_config: Option<crate::config::MemoryEmbeddingConfig>,
+    index_config: crate::config::MemoryIndexConfig,
+    credentials: &crate::session::memory::EndpointScopedCredentials,
+    static_api_key: Option<&str>,
+    base_url: &str,
+    rebuild_backoff_secs: i64,
+) -> usize {
+    let Some(provider) = xai_grok_memory::resolve_embedding_provider(
+        facade.clone(),
+        embed_config.clone(),
+        credentials,
+        static_api_key,
+        base_url,
+    )
+    .await
+    else {
+        return 0;
+    };
+    let spec = facade.as_ref().map(|f| f.source_spec()).or_else(|| {
+        embed_config
+            .as_ref()
+            .and_then(|c| xai_grok_memory::backend::legacy_embedding_source_spec(c, base_url))
+    });
+    let Some(spec) = spec else {
+        return 0;
+    };
+    let readiness = xai_grok_memory::rebuild::ensure_vectors_ready(
+        db_path,
+        storage.clone(),
+        index_config.clone(),
+        &spec,
+        Some(provider.clone()),
+        60,
+        rebuild_backoff_secs,
+        Some(4),
+        tokio_util::sync::CancellationToken::new(),
+    )
+    .await;
+    if !matches!(
+        readiness,
+        xai_grok_memory::rebuild::VectorReadiness::Ready
+            | xai_grok_memory::rebuild::VectorReadiness::ReadyMissing { .. }
+    ) {
+        return 0;
+    }
+    let Some(index) = crate::session::memory::MemoryIndex::open_or_create(
+        db_path,
+        storage,
+        index_config,
+        spec.dimensions,
+    )
+    .ok() else {
+        return 0;
+    };
+    crate::session::memory::embed_missing_chunks(&index, &*provider).await
+}
+
 /// Spawns a session actor and returns the session handle plus a receiver for permission events.
 ///
 /// The permission events receiver should be used to collect telemetry about permission
@@ -160,6 +288,7 @@ pub(crate) async fn spawn_session_actor(
     inference_idle_timeout_secs: u64,
     max_retries: Option<u32>,
     web_search_inference_config: Option<xai_grok_inference::InferenceConfig>,
+    web_search_attribution_callback: Option<xai_grok_tools::SharedAttributionCallback>,
     web_fetch_config: xai_grok_tools::implementations::grok_build::web_fetch::WebFetchConfig,
     image_gen_config: xai_grok_tools::implementations::grok_build::image_gen::ImageGenConfig,
     video_gen_config: xai_grok_tools::implementations::grok_build::video_gen::VideoGenConfig,
@@ -733,6 +862,34 @@ pub(crate) async fn spawn_session_actor(
     let memory_initial_injection_config = memory_config
         .as_ref()
         .map_or_else(Default::default, |mc| mc.initial_injection.clone());
+    // Resolve the named profile once so all session memory consumers agree.
+    let memory_named_profile_set: bool = memory_config
+        .as_ref()
+        .and_then(|mc| mc.retrieval_profile.as_ref())
+        .is_some();
+    let memory_facade_for_session: Option<std::sync::Arc<dyn xai_grok_memory::MemoryRetrieval>> =
+        if memory_named_profile_set {
+            memory_config
+                .as_ref()
+                .and_then(|mc| mc.retrieval_profile.clone())
+                .as_deref()
+                .and_then(|pid| {
+                    let home = xai_grok_config::grok_home();
+                    let registry = crate::retrieval::registry_for_home(home)?;
+                    crate::retrieval::facade_for_profile(&registry.service(), pid)
+                })
+        } else {
+            None
+        };
+    let memory_embedding_credentials = if memory_named_profile_set {
+        crate::session::memory::EndpointScopedCredentials::none()
+    } else {
+        crate::auth::credential_provider::embedding_session_credentials(
+            &embed_base_url,
+            auth_manager.as_ref(),
+            api_key_provider.clone(),
+        )
+    };
     let mut memory_backend_params_for_session: Option<crate::session::memory::MemoryBackendParams> =
         None;
     let mut memory_search_counter: Option<std::sync::Arc<std::sync::atomic::AtomicU64>> = None;
@@ -778,16 +935,28 @@ pub(crate) async fn spawn_session_actor(
         } else {
             None
         };
-        let embed_credentials = crate::auth::credential_provider::embedding_session_credentials(
-            &embed_base_url,
-            auth_manager.as_ref(),
-            api_key_provider.clone(),
-        );
+        // Named profile is authoritative (resolved once at session scope
+        // above): facade when resolvable, FTS-only when not; legacy
+        // `[memory.embedding]` only when no named profile is set.
+        let memory_retrieval_facade = memory_facade_for_session.clone();
+        let embed_config = if memory_named_profile_set {
+            None
+        } else {
+            memory_config.as_ref().map(|mc| mc.embedding.clone())
+        };
+        // Keep active-chat credentials out of named-profile memory params.
+        let (embed_credentials, embed_api_key_for_memory, embed_base_url_for_memory) =
+            memory_embedding_inputs(
+                memory_named_profile_set,
+                &memory_embedding_credentials,
+                embed_api_key.as_ref(),
+                &embed_base_url,
+            );
         let params = crate::session::memory::MemoryBackendParams {
             session_id: session_info.id.to_string(),
-            embed_config: memory_config.as_ref().map(|mc| mc.embedding.clone()),
-            embed_base_url: embed_base_url.clone(),
-            embed_api_key: embed_api_key.clone(),
+            embed_config,
+            embed_base_url: embed_base_url_for_memory,
+            embed_api_key: embed_api_key_for_memory,
             search_config: memory_config
                 .as_ref()
                 .map_or_else(Default::default, |mc| mc.search.clone()),
@@ -795,6 +964,15 @@ pub(crate) async fn spawn_session_actor(
             stale_claim_secs: watcher_config.stale_claim_secs,
             search_source: "tool",
             embedding_credentials: embed_credentials,
+            retrieval: memory_retrieval_facade,
+            // The actual `[memory.index]` config every chunk writer uses drives
+            // both fingerprint doc-prep identity and chunking.
+            index_config: memory_config
+                .as_ref()
+                .map_or_else(Default::default, |mc| mc.index.clone()),
+            // Throttle failed vector rebuilds so pending searches stay
+            // FTS-only instead of rebuilding on every query.
+            rebuild_backoff_secs: MEMORY_REBUILD_BACKOFF_SECS,
         };
         let backend = crate::session::memory::MemoryBackendImpl::from_session_params(
             storage.clone(),
@@ -923,6 +1101,7 @@ pub(crate) async fn spawn_session_actor(
         plugin_registry: plugin_registry.clone(),
         api_key_provider: api_key_provider.clone(),
         attribution_callback: attribution_callback_for_spec,
+        web_search_attribution_callback: web_search_attribution_callback.clone(),
         tool_params_json: tool_params_json.clone(),
         subagent_event_tx: tool_context.subagent_event_tx.clone(),
         subagent_admission: tool_context.subagent_admission.clone(),
@@ -1146,10 +1325,26 @@ pub(crate) async fn spawn_session_actor(
     };
     let (sampler_event_tx, sampler_event_rx) =
         tokio::sync::mpsc::unbounded_channel::<xai_grok_inference::InferenceEvent>();
-    let sampler_handle = xai_grok_inference::InferenceActor::spawn(
+    let initial_route_context = {
+        let grok_home = auth_manager.as_ref().map(|am| am.grok_home());
+        crate::session::route_context::resolve_for_models_manager_with_selection(
+            &inference_config_initial,
+            &models_manager,
+            session_model_id.0.as_ref(),
+            grok_home,
+        )
+        .map_err(|e| {
+            xai_grok_agent::AgentBuildError::InvalidConfig(format!(
+                "provider route unusable at session spawn: {e}"
+            ))
+        })?
+    };
+    let workflow_inference_config = inference_config_initial.clone();
+    let sampler_handle = xai_grok_inference::InferenceActor::spawn_with_route_context(
         inference_config_initial,
         sampler_retry_policy,
         sampler_event_tx,
+        Some(initial_route_context.clone()),
     );
     let attribution_callback_for_handle = attribution_callback.clone();
     let agent_name_for_handle = initial_agent_type
@@ -1230,6 +1425,12 @@ pub(crate) async fn spawn_session_actor(
                 );
                 tokio::sync::mpsc::unbounded_channel().0
             }),
+            tool_context.assigned_spawn_sender.clone(),
+            models_manager.clone(),
+            workflow_inference_config,
+            auth_manager
+                .as_ref()
+                .map(|manager| manager.grok_home().to_path_buf()),
             Arc::new(|name: &str, fields: &serde_json::Value, replayed: bool| {
                 if !replayed {
                     tracing::info!(event = name, %fields, "workflow telemetry");
@@ -1581,6 +1782,8 @@ pub(crate) async fn spawn_session_actor(
         last_reported_branch: Arc::new(Mutex::new(None)),
         git_head_enabled: fs_watch_caps.git_head,
         models_manager,
+        selection_model_id: std::cell::RefCell::new(session_model_id.clone()),
+        route_context: std::cell::RefCell::new(Some(initial_route_context)),
         display_cwd: {
             let lock = std::sync::OnceLock::new();
             if let Some(ref cwd) = prompt_display_cwd {
@@ -1591,6 +1794,7 @@ pub(crate) async fn spawn_session_actor(
         active_agent_type: parking_lot::Mutex::new(initial_agent_type),
         queue_exit_reminder_on_approved_exit,
         active_skill: parking_lot::Mutex::new(None),
+        prime_cache: crate::session::prime::inventory::InventoryCache::new(),
         current_prompt_mode: current_prompt_mode.clone(),
         turn_start_prompt_mode: parking_lot::Mutex::new(PromptMode::Agent),
         turn_prompt_mode: turn_prompt_mode.clone(),
@@ -1823,13 +2027,20 @@ pub(crate) async fn spawn_session_actor(
         let index_config = memory_config
             .as_ref()
             .map_or_else(Default::default, |mc| mc.index.clone());
-        let embed_config = memory_config
-            .as_ref()
-            .map(|mc| mc.embedding.clone())
-            .unwrap_or_default();
-        let embed_dims = embed_config.dimensions;
-        let sampling_base_url = embed_base_url.clone();
-        let sampling_api_key = embed_api_key.clone();
+        // Startup reindex shares the session-scoped provider decision with search.
+        let (startup_embed_config, startup_embed_dims) = startup_reindex_embedding_inputs(
+            memory_named_profile_set,
+            memory_config.as_ref(),
+            memory_facade_for_session
+                .as_ref()
+                .map(|f| f.source_spec().dimensions),
+        );
+        let (startup_credentials, startup_api_key, startup_base_url) = memory_embedding_inputs(
+            memory_named_profile_set,
+            &memory_embedding_credentials,
+            embed_api_key.as_ref(),
+            &embed_base_url,
+        );
         let session_id_for_reindex = session_info.id.to_string();
         let chunks_added_counter = session.memory.chunks_added.clone();
         tokio::task::spawn_local(async move {
@@ -1837,8 +2048,8 @@ pub(crate) async fn spawn_session_actor(
             if let Ok(mut index) = crate::session::memory::MemoryIndex::open_or_create(
                 &db_path,
                 storage.clone(),
-                index_config,
-                embed_dims,
+                index_config.clone(),
+                startup_embed_dims,
             ) && let Ok(files) = storage.list_memory_files()
             {
                 let reindex_start = std::time::Instant::now();
@@ -1856,21 +2067,19 @@ pub(crate) async fn spawn_session_actor(
                     files = files.len(),
                     "MEMORY_REINDEX: background reindex complete"
                 );
-                let embedded_count = if let Some(api_key) = sampling_api_key {
-                    if let Some(provider) =
-                        crate::session::memory::embedding::ApiEmbeddingProvider::from_session(
-                            &embed_config,
-                            sampling_base_url,
-                            api_key,
-                        )
-                    {
-                        crate::session::memory::embed_missing_chunks(&index, &provider).await
-                    } else {
-                        0
-                    }
-                } else {
-                    0
-                };
+                // Backfill only after the index has reached a stable vector state.
+                let embedded_count = startup_reindex_backfill(
+                    &db_path,
+                    storage.clone(),
+                    memory_facade_for_session.clone(),
+                    startup_embed_config,
+                    index_config.clone(),
+                    &startup_credentials,
+                    startup_api_key.as_deref(),
+                    &startup_base_url,
+                    MEMORY_REBUILD_BACKOFF_SECS,
+                )
+                .await;
                 xai_grok_telemetry::session_ctx::log_event(
                     xai_grok_telemetry::memory_telemetry::MemoryReindex {
                         session_id: session_id_for_reindex.clone(),
@@ -2100,6 +2309,38 @@ struct SessionInitResult {
     permission_events_rx: mpsc::UnboundedReceiver<PermissionEvent>,
     system_prompt: String,
 }
+
+fn deliver_session_init(
+    init_tx: tokio::sync::oneshot::Sender<
+        Result<SessionInitResult, xai_grok_agent::AgentBuildError>,
+    >,
+    init: SessionInitResult,
+) -> bool {
+    deliver_session_init_with(init_tx, init, |init| {
+        let _ = init.handle.cmd_tx.send(SessionCommand::Shutdown);
+    })
+}
+
+fn deliver_session_init_with<T, E>(
+    init_tx: tokio::sync::oneshot::Sender<Result<T, E>>,
+    init: T,
+    reject: impl FnOnce(T),
+) -> bool {
+    match init_tx.send(Ok(init)) {
+        Ok(()) => true,
+        Err(Ok(init)) => {
+            // The caller's pre-promotion future was cancelled after this actor
+            // started. Without this branch the dedicated session thread would
+            // wait forever with no owner able to send Shutdown.
+            reject(init);
+            false
+        }
+        Err(Err(_)) => {
+            unreachable!("deliver_session_init_with only sends successful init results")
+        }
+    }
+}
+
 /// Spawn a session actor on a dedicated thread with its own tokio runtime and `LocalSet`.
 ///
 /// The entire `spawn_session_actor` body runs on the session thread — the `!Send`
@@ -2174,6 +2415,7 @@ pub(crate) async fn spawn_session_on_thread(
     inference_idle_timeout_secs: u64,
     max_retries: Option<u32>,
     web_search_inference_config: Option<xai_grok_inference::InferenceConfig>,
+    web_search_attribution_callback: Option<xai_grok_tools::SharedAttributionCallback>,
     web_fetch_config: xai_grok_tools::implementations::grok_build::web_fetch::WebFetchConfig,
     image_gen_config: xai_grok_tools::implementations::grok_build::image_gen::ImageGenConfig,
     video_gen_config: xai_grok_tools::implementations::grok_build::video_gen::VideoGenConfig,
@@ -2339,6 +2581,7 @@ pub(crate) async fn spawn_session_on_thread(
                         inference_idle_timeout_secs,
                         max_retries,
                         web_search_inference_config,
+                        web_search_attribution_callback,
                         web_fetch_config,
                         image_gen_config,
                         video_gen_config,
@@ -2385,11 +2628,16 @@ pub(crate) async fn spawn_session_on_thread(
                             return;
                         }
                     };
-                let _ = init_tx.send(Ok(SessionInitResult {
-                    handle,
-                    permission_events_rx,
-                    system_prompt,
-                }));
+                if !deliver_session_init(
+                    init_tx,
+                    SessionInitResult {
+                        handle,
+                        permission_events_rx,
+                        system_prompt,
+                    },
+                ) {
+                    return;
+                }
                 let _ = session_done_rx.await;
             });
         })
@@ -2523,6 +2771,31 @@ fn resumed_prefix_carries_fallback_date(
         contains("<user_info>") && contains(crate::session::user_message::USER_INFO_DATE_MARKER)
     })
 }
+#[cfg(test)]
+mod session_init_delivery_tests {
+    use super::deliver_session_init_with;
+
+    #[test]
+    fn dropped_pre_promotion_receiver_rejects_started_session() {
+        let (tx, rx) = tokio::sync::oneshot::channel::<Result<&'static str, ()>>();
+        drop(rx);
+        let rejected = std::cell::Cell::new(None);
+        assert!(!deliver_session_init_with(tx, "started", |value| {
+            rejected.set(Some(value));
+        }));
+        assert_eq!(rejected.get(), Some("started"));
+    }
+
+    #[test]
+    fn live_pre_promotion_receiver_accepts_started_session() {
+        let (tx, rx) = tokio::sync::oneshot::channel::<Result<&'static str, ()>>();
+        assert!(deliver_session_init_with(tx, "started", |_| {
+            panic!("live receiver must not reject session init");
+        }));
+        assert_eq!(rx.blocking_recv().unwrap(), Ok("started"));
+    }
+}
+
 #[cfg(test)]
 mod resumed_prefix_fallback_tests {
     use super::resumed_prefix_carries_fallback_date;

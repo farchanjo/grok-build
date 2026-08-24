@@ -151,6 +151,7 @@ fn test_app() -> AppView {
         auth_code_input: Default::default(),
         next_auth_request_seq: 1,
         next_credential_repair_token: 1,
+        auth_home_override: None,
         auth_url_poll_handle: None,
         deferred_startup: Default::default(),
         auth_use_oauth: false,

@@ -22,6 +22,61 @@ fn tool_overrides_capability() -> serde_json::Value {
     serde_json::to_value(TOOL_OVERRIDES_CAPABILITY)
         .expect("ToolOverridesCapability is always serializable")
 }
+
+fn classify_acp_prompt_origin(
+    meta: Option<&agent_client_protocol::Meta>,
+    prompt_id: &str,
+) -> crate::session::PromptOrigin {
+    match meta.and_then(|meta| meta.get(crate::session::PROMPT_ORIGIN_META_KEY)) {
+        None => match crate::session::PromptOrigin::from_prompt_id(prompt_id) {
+            crate::session::PromptOrigin::Unknown => crate::session::PromptOrigin::User,
+            origin => origin,
+        },
+        Some(serde_json::Value::String(tag)) => {
+            crate::session::PromptOrigin::from_prompt_origin_meta(Some(tag))
+        }
+        Some(_) => crate::session::PromptOrigin::Unknown,
+    }
+}
+
+#[cfg(test)]
+mod prompt_origin_tests {
+    use super::classify_acp_prompt_origin;
+    use crate::session::{PROMPT_ORIGIN_META_KEY, PROMPT_ORIGIN_SCHEDULER_FIRED, PromptOrigin};
+
+    #[test]
+    fn prompt_origin_metadata_boundary_fails_closed_for_non_strings() {
+        for value in [
+            serde_json::json!(123),
+            serde_json::Value::Null,
+            serde_json::json!({ "tag": "scheduler_fired" }),
+            serde_json::json!(["scheduler_fired"]),
+        ] {
+            let mut meta = agent_client_protocol::Meta::new();
+            meta.insert(PROMPT_ORIGIN_META_KEY.into(), value);
+            let origin = classify_acp_prompt_origin(Some(&meta), "plain-user-id");
+            assert_eq!(origin, PromptOrigin::Unknown);
+            assert!(!origin.prime_eligible());
+        }
+    }
+
+    #[test]
+    fn prompt_origin_metadata_boundary_handles_absent_and_scheduler_tags() {
+        assert_eq!(
+            classify_acp_prompt_origin(None, "scheduler-fired-legacy"),
+            PromptOrigin::SchedulerFired
+        );
+        let mut meta = agent_client_protocol::Meta::new();
+        meta.insert(
+            PROMPT_ORIGIN_META_KEY.into(),
+            serde_json::Value::String(PROMPT_ORIGIN_SCHEDULER_FIRED.into()),
+        );
+        assert_eq!(
+            classify_acp_prompt_origin(Some(&meta), "plain-user-id"),
+            PromptOrigin::SchedulerFired
+        );
+    }
+}
 async fn read_applied_tool_overrides(
     cmd_tx: &tokio::sync::mpsc::UnboundedSender<SessionCommand>,
 ) -> Option<xai_grok_inference_types::ToolOverrides> {
@@ -1092,14 +1147,14 @@ impl acp::Agent for MvpAgent {
             .and_then(|custom_model| match self
                 .resolve_model_id(&acp::ModelId::new(custom_model))
             {
-                Ok(model) if model.info.user_selectable => {
+                Ok((selection_key, model)) if model.info.user_selectable => {
                     model_agent_type = Some(model.info().agent_type.clone());
                     let origin_client = self
                         .origin_client_info_from_meta(arguments.meta.as_ref());
                     session_inference_override = Some(
                         self.prepare_inference_config_for_model(&model, origin_client),
                     );
-                    Some(custom_model)
+                    Some(selection_key.0.to_string())
                 }
                 Ok(_) => {
                     tracing::warn!(
@@ -1119,7 +1174,7 @@ impl acp::Agent for MvpAgent {
                 }
             });
         if model_agent_type.is_none() && custom_model_id.is_none()
-            && let Ok(default_model) = self
+            && let Ok((_key, default_model)) = self
                 .resolve_model_id(&self.models_manager.current_model_id())
         {
             model_agent_type = Some(default_model.info().agent_type.clone());
@@ -1163,11 +1218,10 @@ impl acp::Agent for MvpAgent {
         };
         let model_id = match &session_initial_model {
             Some(chat_model) => acp::ModelId::new(chat_model.clone()),
-            None => {
-                resolved_custom_model
-                    .map(acp::ModelId::new)
-                    .unwrap_or_else(|| self.models_manager.current_model_id())
-            }
+            None => resolved_custom_model
+                .as_ref()
+                .map(|id| acp::ModelId::new(id.clone()))
+                .unwrap_or_else(|| self.models_manager.current_model_id()),
         };
         let session_model_id = model_id.clone();
         let persistence = if is_chat_kind {
@@ -1791,7 +1845,7 @@ impl acp::Agent for MvpAgent {
                     self
                         .resolve_model_id(&summary.current_model_id)
                         .ok()
-                        .map(|m| m.info().agent_type.clone())
+                        .map(|(_k, m)| m.info().agent_type.clone())
                 });
             self.spawn_and_register_session(
                     init,
@@ -1933,29 +1987,146 @@ impl acp::Agent for MvpAgent {
         }
         let persisted_model = summary.current_model_id.clone();
         let models = self.models_manager.models();
+        let origins = self.models_manager.catalog_origins();
         let available = self.models_manager.available();
         self.model_unavailable_sessions.borrow_mut().remove(session_id.0.as_ref());
-        let resolved_catalog_key = resolve_catalog_key(&models, &persisted_model);
+        // Load optional route companion. Old summaries without companions remain
+        // compatible (Ok(None) — no rewrite-on-read). Integrity Err is fail-closed
+        // (never treated as legacy absence): no same-family sibling fallback.
+        let resume_session_dir = crate::session::persistence::session_dir(&SessionInfo {
+            id: session_id.clone(),
+            cwd: cwd.as_str().to_owned(),
+        });
+        let companion_load = crate::session::storage::model_route::load_route_companion(
+            &resume_session_dir,
+            &summary,
+        );
+        let (route_companion, companion_integrity_failed) = match companion_load {
+            Ok(companion) => (companion, false),
+            Err(error) => {
+                tracing::warn!(
+                    session_id = %session_id.0,
+                    error = %error,
+                    "load_session: model route companion integrity failed; refusing sibling fallback"
+                );
+                (None, true)
+            }
+        };
+        let exact_route_pinned = route_companion
+            .as_ref()
+            .is_some_and(|p| p.requires_exact_route())
+            || companion_integrity_failed;
+        let resolved_catalog_key = resolve_catalog_key_with_origins(
+            &models,
+            &origins,
+            &persisted_model,
+        );
         tracing::debug!(
             session_id = %session_id.0,
             persisted = %persisted_model.0,
             resolved_catalog_key = ?resolved_catalog_key.as_ref().map(|k| k.0.as_ref()),
             available_count = available.len(),
             contains_persisted = available.contains_key(&persisted_model),
+            exact_route_pinned,
+            companion_integrity_failed,
             available_keys = ?available.keys().take(10).collect::<Vec<_>>(),
             "load_session: restoring persisted model (debug)"
         );
         let is_grok_build = persisted_model.0.starts_with("grok-build");
-        let same_family_fallback = if is_grok_build {
+        let same_family_fallback = if exact_route_pinned {
+            // Exact-route sessions never silently adopt a sibling account /
+            // same-family slug when the pinned incarnation is gone.
+            None
+        } else if is_grok_build {
             available.keys().find(|id| id.0.starts_with("grok-build")).cloned()
         } else {
             available.keys().find(|id| !id.0.starts_with("grok-build")).cloned()
         };
-        let selectable_catalog_key = selectable_catalog_key_for_persisted(
+        // Origin-aware selectable resolution (Issue 6): never alias onto a
+        // reserved sibling when origins gate rejects additional-account keys.
+        let selectable_catalog_key = selectable_catalog_key_for_persisted_with_origins(
             &models,
             &available,
+            &origins,
             &persisted_model,
         );
+        // When a companion is present (or integrity failed), validate against
+        // the live ProviderService freeze before accepting the selection.
+        let home = crate::util::grok_home::grok_home();
+        let selectable_catalog_key = if companion_integrity_failed {
+            None
+        } else {
+            selectable_catalog_key.filter(|key| {
+                let Some(companion) = route_companion.as_ref() else {
+                    return true;
+                };
+                if let Some(canon) = companion.canonical_model.as_deref() {
+                    if key.0.as_ref() != canon && persisted_model.0.as_ref() != canon {
+                        tracing::warn!(
+                            session_id = %session_id.0,
+                            selected = %key.0,
+                            companion_canonical = %canon,
+                            "load_session: rejecting selectable key that does not match route companion"
+                        );
+                        return false;
+                    }
+                }
+                let Some(entry) = models.get(key.0.as_ref()) else {
+                    return false;
+                };
+                // Resolve live route for this exact selection (instance, incarnation,
+                // surface, registry generation) and require_exact_route.
+                let origin_client = self
+                    .sessions
+                    .borrow()
+                    .get(&session_id)
+                    .and_then(|h| h.origin_client.clone());
+                let inference =
+                    self.prepare_inference_config_for_model(entry, origin_client);
+                let live =
+                    match crate::session::route_context::resolve_for_models_manager_with_selection(
+                        &inference,
+                        &self.models_manager,
+                        key.0.as_ref(),
+                        Some(home.as_path()),
+                    ) {
+                        Ok(r) => r,
+                        Err(e) => {
+                            tracing::warn!(
+                                session_id = %session_id.0,
+                                error = %e,
+                                "load_session: provider route unusable; companion not accepted"
+                            );
+                            return false;
+                        }
+                    };
+                let live_upstream = inference.model.as_str();
+                match crate::agent::model_identity::validate_companion_against_live_route(
+                    companion,
+                    &live,
+                    live_upstream,
+                ) {
+                    Ok(()) => true,
+                    Err(err) => {
+                        tracing::warn!(
+                            session_id = %session_id.0,
+                            error = %err,
+                            companion_instance = %companion.provider_instance_id,
+                            live_instance = %live.instance_id(),
+                            companion_incarnation = ?companion.incarnation,
+                            live_incarnation = ?live.incarnation(),
+                            companion_registry_generation = companion.registry_generation,
+                            live_registry_generation = live.registry_generation(),
+                            "load_session: exact route companion rejected live ProviderService freeze"
+                        );
+                        false
+                    }
+                }
+            })
+        };
+        // When exact-route validation fails, refuse model_switch apply so we
+        // never rewrite the companion with a recreated live provenance.
+        let mut skip_model_apply = false;
         let model_id = if let Some(catalog_key) = selectable_catalog_key {
             if catalog_key != persisted_model {
                 tracing::info!(
@@ -1976,7 +2147,7 @@ impl acp::Agent for MvpAgent {
                 );
             }
             catalog_key
-        } else if available.is_empty() {
+        } else if available.is_empty() && !exact_route_pinned {
             tracing::warn!(
                 session_id = %session_id.0,
                 persisted = %persisted_model.0,
@@ -2012,6 +2183,7 @@ impl acp::Agent for MvpAgent {
                 .await;
             fallback
         } else {
+            skip_model_apply = exact_route_pinned;
             let fallback = available
                 .keys()
                 .next()
@@ -2022,6 +2194,9 @@ impl acp::Agent for MvpAgent {
                 previous = %persisted_model.0,
                 fallback = %fallback.0,
                 available_count = available.len(),
+                exact_route_pinned,
+                companion_integrity_failed,
+                skip_model_apply,
                 available_keys = ?available.keys().take(10).collect::<Vec<_>>(),
                 "Persisted model no longer available, no same-family fallback — blocking prompts for this session"
             );
@@ -2033,13 +2208,27 @@ impl acp::Agent for MvpAgent {
                     "persisted_model": persisted_model.0.as_ref(),
                     "fallback_model": fallback.0.as_ref(),
                     "available_count": available.len(),
+                    "exact_route_pinned": exact_route_pinned,
+                    "companion_integrity_failed": companion_integrity_failed,
                 }),
                 ),
             );
-            let reason = format!(
-                "Model \"{}\" is no longer available. Please start a new session.",
-                persisted_model.0,
-            );
+            let reason = if companion_integrity_failed {
+                format!(
+                    "Model \"{}\" route identity is corrupted or incomplete. Please start a new session.",
+                    persisted_model.0,
+                )
+            } else if exact_route_pinned {
+                format!(
+                    "Model \"{}\" is bound to a provider account incarnation that is no longer available. Please start a new session.",
+                    persisted_model.0,
+                )
+            } else {
+                format!(
+                    "Model \"{}\" is no longer available. Please start a new session.",
+                    persisted_model.0,
+                )
+            };
             let empty_id = acp::ModelId::new(String::new());
             self.send_model_auto_switched(
                     &session_id,
@@ -2051,14 +2240,22 @@ impl acp::Agent for MvpAgent {
             self.model_unavailable_sessions
                 .borrow_mut()
                 .insert(session_id.0.to_string(), persisted_model.clone());
-            fallback
+            // Do not apply a sibling fallback model when exact-route failed:
+            // leave the session on the persisted selection and keep the
+            // companion on disk unrewritten.
+            if skip_model_apply {
+                persisted_model
+            } else {
+                fallback
+            }
         };
         tracing::debug!(
             session_id = %session_id.0,
             final_model_id = %model_id.0,
+            skip_model_apply,
             "load_session: resolved final model_id for set_session_model"
         );
-        {
+        if !skip_model_apply {
             let _timer = crate::instrumentation_timer!("session.restore_model");
             let restore_meta = summary
                 .reasoning_effort
@@ -2089,6 +2286,17 @@ impl acp::Agent for MvpAgent {
             )
             .await?;
         }
+        // Summary execution mode is authoritative on resume. Re-apply after
+        // model_switch (which seeds from the catalog) so Native↔external
+        // cannot flip silently, including when turn_count > 0. Still runs when
+        // exact-route fail-closed skips model apply so mode restore is intact.
+        Self::restore_summary_execution_mode(
+            self,
+            &session_id,
+            summary.execution_backend,
+            summary.external_runtime.clone(),
+        )
+        .await?;
         let mut response_meta_map = serde_json::Map::new();
         response_meta_map.insert("sessionId".to_string(), serde_json::json!(session_id));
         if let Some(persist) = persist_data {
@@ -2308,10 +2516,12 @@ impl acp::Agent for MvpAgent {
             .cloned();
         if let Some(unavailable_model) = latched_model {
             let models = self.models_manager.models();
+            let origins = self.models_manager.catalog_origins();
             let available = self.models_manager.available();
-            let restore_model_id = selectable_catalog_key_for_persisted(
+            let restore_model_id = selectable_catalog_key_for_persisted_with_origins(
                     &models,
                     &available,
+                    &origins,
                     &unavailable_model,
                 )
                 .unwrap_or(unavailable_model.clone());
@@ -2580,12 +2790,13 @@ impl acp::Agent for MvpAgent {
             .and_then(|m| m.get("clientIdentifier"))
             .and_then(|v| v.as_str())
             .map(|s| s.to_string());
-        let prompt_screen_mode = arguments
+                let prompt_screen_mode = arguments
             .meta
             .as_ref()
             .and_then(|m| m.get("screenMode"))
             .and_then(|v| v.as_str())
             .map(|s| s.to_string());
+        let origin = classify_acp_prompt_origin(arguments.meta.as_ref(), &prompt_id);
         let json_schema = arguments
             .meta
             .as_ref()
@@ -2619,6 +2830,7 @@ impl acp::Agent for MvpAgent {
             .cmd_tx
             .send(SessionCommand::Prompt {
                 prompt_id: prompt_id.clone(),
+                origin,
                 prompt_blocks: arguments.prompt.clone(),
                 prompt_mode,
                 artifact_upload_ctx: trace_context
@@ -3476,7 +3688,7 @@ impl acp::Agent for MvpAgent {
         &self,
         args: acp::SetSessionModelRequest,
     ) -> Result<acp::SetSessionModelResponse, acp::Error> {
-        let model = self.resolve_model_id(&args.model_id)?;
+        let (_selection, model) = self.resolve_model_id(&args.model_id)?;
         if !model.info.user_selectable {
             return Err(
                 acp::Error::invalid_params()

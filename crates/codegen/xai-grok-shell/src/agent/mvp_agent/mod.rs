@@ -55,7 +55,10 @@ use crate::agent::auth_method;
 use crate::agent::config::{self, Config as AgentConfig, ModelEntry, resolve_credentials};
 use crate::agent::feedback_client::FeedbackClient;
 use crate::agent::folder_trust;
-use crate::agent::models::{resolve_catalog_key, selectable_catalog_key_for_persisted};
+use crate::agent::models::{
+    resolve_catalog_key, resolve_catalog_key_with_origins,
+    selectable_catalog_key_for_persisted, selectable_catalog_key_for_persisted_with_origins,
+};
 use crate::agent::session_config;
 use xai_grok_inference_types::{
     REASONING_EFFORT_META_KEY, ReasoningEffortOption, ReasoningEffortSelection,
@@ -789,6 +792,12 @@ pub struct MvpAgent {
     subagent_event_tx: tokio::sync::mpsc::UnboundedSender<
         xai_grok_tools::implementations::grok_build::task::types::SubagentEvent,
     >,
+    /// Shell-private capability for exact assigned child routes. Public task
+    /// events cannot carry this envelope.
+    assigned_spawn_tx: crate::agent::subagent::assigned_spawn::AssignedSpawnSender,
+    /// Private receiver paired with `assigned_spawn_tx`; drained alongside
+    /// public subagent events by the coordinator.
+    assigned_spawn_rx: RefCell<Option<crate::agent::subagent::assigned_spawn::AssignedSpawnReceiver>>,
     /// Receiver for subagent events. Taken once by `start_subagent_coordinator()`.
     /// `None` after the coordinator drain task has been spawned.
     subagent_event_rx: RefCell<

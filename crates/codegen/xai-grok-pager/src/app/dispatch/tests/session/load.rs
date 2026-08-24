@@ -696,6 +696,7 @@ fn auth_complete_restores_view_after_mid_session_login() {
             request_seq: seq,
             meta: None,
             repair: None,
+            credential_write_receipt: None,
         }),
         &mut app,
     );

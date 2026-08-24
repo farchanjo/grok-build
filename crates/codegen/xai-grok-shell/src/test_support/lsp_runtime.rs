@@ -33,6 +33,9 @@ pub(crate) fn ctx_with_toggle_and_cmd_tx(
 }
 pub(crate) fn ctx_with_toggle(toggle: HashMap<String, bool>) -> SubagentSpawnContext {
     let (tx, _rx) = mpsc::unbounded_channel();
+    let (assigned_spawn_capability, _assigned_rx) =
+        crate::agent::subagent::assigned_spawn::channel();
+    let assigned_spawn_sender = assigned_spawn_capability.trusted_sender();
     SubagentSpawnContext {
         lsp: None,
         parent_max_turns: None,
@@ -95,6 +98,7 @@ pub(crate) fn ctx_with_toggle(toggle: HashMap<String, bool>) -> SubagentSpawnCon
                 xai_grok_tools::implementations::grok_build::task::admission::SubagentLimits::default(),
             ),
         ),
+        assigned_spawn_sender,
         hunk_tracker_handle: xai_hunk_tracker::HunkTrackerHandle::noop(),
         hunk_tracking_enabled: false,
         fs: Arc::new(xai_grok_workspace::file_system::LocalFs::new(
@@ -107,6 +111,7 @@ pub(crate) fn ctx_with_toggle(toggle: HashMap<String, bool>) -> SubagentSpawnCon
         session_env: Arc::new(HashMap::new()),
         memory_config: None,
         web_search_inference_config: None,
+        web_search_attribution_callback: None,
         web_fetch_config: Default::default(),
         image_gen_config: Default::default(),
         video_gen_config: Default::default(),

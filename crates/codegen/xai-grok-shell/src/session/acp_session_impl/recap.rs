@@ -23,10 +23,21 @@ impl SessionActor {
         let parent_session_id = self.session_info.id.to_string();
         let asked_at = chrono::Utc::now();
 
-        let sampling_client = self
-            .prepare_chat_completion(false)
+        // Exact @session inherit with SideQuestion purpose/provenance.
+        let sampling_client = match self
+            .resolve_aux_route(
+                crate::session::auxiliary_route::AuxiliaryPurpose::SideQuestion,
+                crate::session::auxiliary_route::SESSION_ROUTE_SENTINEL,
+            )
             .await
-            .map_err(|e| format!("failed to prepare client: {e}"))?;
+        {
+            Ok(route) => route
+                .client()
+                .map_err(|e| format!("failed to prepare side-question client: {e}"))?,
+            Err(e) => {
+                return Err(format!("side-question aux route unavailable: {e}"));
+            }
+        };
 
         // Full conversation snapshot including system prompt, tool calls, and results.
         // Strip reasoning/thinking blocks from assistant items so we don't send
@@ -196,10 +207,28 @@ impl SessionActor {
         // (not on failure/empty/cancel) so auto can retry later for this turn if needed.
         let clear_in_flight = || self.recap_in_flight.set(false);
 
-        let sampling_client = match self.prepare_chat_completion(false).await {
-            Ok(c) => c,
+        // Gate B: recap is a named aux consumer — exact @session inherit with
+        // SessionRecap purpose/partition and route-bound attribution.
+        let sampling_client = match self
+            .resolve_aux_route(
+                crate::session::auxiliary_route::AuxiliaryPurpose::SessionRecap,
+                crate::session::auxiliary_route::SESSION_ROUTE_SENTINEL,
+            )
+            .await
+        {
+            Ok(route) => match route.client() {
+                Ok(c) => c,
+                Err(e) => {
+                    tracing::warn!(error = %e, "recap: failed to build route-aware client");
+                    clear_in_flight();
+                    if !auto {
+                        self.emit_recap_unavailable().await;
+                    }
+                    return;
+                }
+            },
             Err(e) => {
-                tracing::warn!(error = %e, "recap: failed to prepare sampling client");
+                tracing::warn!(error = %e, "recap: session recap aux route unavailable");
                 clear_in_flight();
                 // A manual `/recap` shows a loading spinner; clear it on failure.
                 if !auto {
@@ -507,7 +536,31 @@ impl SessionActor {
         cwd: &str,
         model_override: Option<&str>,
     ) -> Option<String> {
-        let sampling_client = self.prepare_chat_completion(false).await.ok()?;
+        // Exact ShellSuggest route: never sample a foreign model on the
+        // session endpoint/credentials. Miss → skip (fail closed soft).
+        let requested = model_override
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or(crate::models::default_model());
+        let (sampling_client, wire_model) = match self
+            .resolve_aux_route(
+                crate::session::auxiliary_route::AuxiliaryPurpose::ShellSuggest,
+                requested,
+            )
+            .await
+        {
+            Ok(route) => match route.client() {
+                Ok(client) => (client, route.upstream_model_id),
+                Err(e) => {
+                    tracing::debug!(error = %e, "shell suggest: aux client unavailable");
+                    return None;
+                }
+            },
+            Err(e) => {
+                tracing::debug!(error = %e, "shell suggest: aux route unavailable; skipping");
+                return None;
+            }
+        };
 
         let system = "You are a shell command autocomplete engine. \
             Given a partial command, output ONLY the completed command. \
@@ -520,15 +573,10 @@ impl SessionActor {
             ConversationItem::user(user_msg),
         ];
 
-        let model = match model_override {
-            Some(m) => m.to_owned(),
-            None => "grok-build".to_owned(),
-        };
-
         let request = ConversationRequest {
             items,
             tools: vec![],
-            model: Some(model),
+            model: Some(wire_model),
             temperature: Some(0.1),
             max_output_tokens: Some(50),
             ..Default::default()
@@ -641,16 +689,29 @@ impl SessionActor {
             return None;
         };
 
-        let sampling_client = match self.prepare_chat_completion(false).await {
-            Ok(c) => c,
+        // Exact aux route: never send the session account to a foreign model.
+        let (sampling_client, wire_model) = match self
+            .resolve_aux_route(
+                crate::session::auxiliary_route::AuxiliaryPurpose::PromptSuggest,
+                &model,
+            )
+            .await
+        {
+            Ok(route) => match route.client() {
+                Ok(client) => (client, route.upstream_model_id),
+                Err(e) => {
+                    tracing::debug!(error = %e, "prompt suggest: aux client unavailable");
+                    return None;
+                }
+            },
             Err(e) => {
-                tracing::debug!(error = %e, "prompt suggest: sampling client unavailable");
+                tracing::debug!(error = %e, "prompt suggest: aux route unavailable; skipping");
                 return None;
             }
         };
 
         tracing::debug!(
-            model = %model,
+            model = %wire_model,
             transcript_len = transcript.len(),
             "prompt suggest: requesting"
         );
@@ -672,7 +733,7 @@ impl SessionActor {
         let request = ConversationRequest {
             items,
             tools: vec![],
-            model: Some(model),
+            model: Some(wire_model),
             temperature: None,
             x_grok_conv_id: Some(format!("promptsuggest-{}", uuid::Uuid::new_v4())),
             x_grok_req_id: Some(format!("xai-promptsuggest-{}", uuid::Uuid::new_v4())),

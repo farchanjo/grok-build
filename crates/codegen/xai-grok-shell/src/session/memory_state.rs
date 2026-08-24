@@ -127,25 +127,55 @@ impl SessionMemory {
 
     /// Open (or create) the memory index for the current workspace.
     ///
-    /// Shared helper that extracts embed dimensions from `backend_params`
-    /// and opens the index at `<workspace_dir>/index.sqlite`.
+    /// Shared helper that resolves embed dimensions through the same single
+    /// factory decision as the search backend (named-profile facade first,
+    /// legacy `[memory.embedding]` otherwise) so flush/Dream write-time
+    /// vectorization writes into the pinned space, and opens the index at
+    /// `<workspace_dir>/index.sqlite` with the real `[memory.index]` config.
     pub(crate) fn open_index(
         &self,
         storage: &crate::session::memory::MemoryStorage,
     ) -> Option<crate::session::memory::MemoryIndex> {
-        let embed_dims = self
-            .backend_params
-            .as_ref()
-            .and_then(|p| p.embed_config.as_ref())
-            .map_or(1024, |c| c.dimensions);
+        let (embed_dims, index_config) = match &self.backend_params {
+            Some(p) => (p.resolve_embedding_dims(), p.index_config.clone()),
+            None => (1024, crate::config::MemoryIndexConfig::default()),
+        };
         let db_path = storage.workspace_dir().join("index.sqlite");
         crate::session::memory::MemoryIndex::open_or_create(
             &db_path,
             storage.clone(),
-            Default::default(),
+            index_config,
             embed_dims,
         )
         .ok()
+    }
+
+    /// Reconcile the pinned embedding source before vector reads or writes.
+    pub(crate) async fn reconcile_vectors(
+        &self,
+        storage: &crate::session::memory::MemoryStorage,
+    ) -> Option<(
+        crate::session::memory::MemoryIndex,
+        std::sync::Arc<dyn crate::session::memory::embedding::EmbeddingProvider>,
+        xai_grok_memory::rebuild::VectorReadiness,
+    )> {
+        let params = self.backend_params.as_ref()?;
+        let provider = params.make_embedding_provider().await?;
+        let spec = params.embedding_source_spec()?;
+        let db_path = storage.workspace_dir().join("index.sqlite");
+        let readiness = xai_grok_memory::rebuild::ensure_vectors_ready(
+            &db_path,
+            storage.clone(),
+            params.index_config.clone(),
+            &spec,
+            Some(provider.clone()),
+            params.stale_claim_secs,
+            params.rebuild_backoff_secs,
+            Some(4),
+            tokio_util::sync::CancellationToken::new(),
+        )
+        .await;
+        Some((self.open_index(storage)?, provider, readiness))
     }
 
     /// Reindex a file and embed new chunks when embedding is configured.
@@ -153,13 +183,19 @@ impl SessionMemory {
         let Some(storage) = self.storage.borrow().clone() else {
             return;
         };
-        if let Some(mut index) = self.open_index(&storage) {
-            let _ = index.reindex_file(path, source);
-            if let Some(ref params) = self.backend_params
-                && let Some(provider) = params.make_embedding_provider().await
-            {
-                crate::session::memory::embed_missing_chunks(&index, &provider).await;
-            }
+        let Some(mut index) = self.open_index(&storage) else {
+            return;
+        };
+        let _ = index.reindex_file(path, source);
+        let Some((index, provider, readiness)) = self.reconcile_vectors(&storage).await else {
+            return;
+        };
+        if matches!(
+            readiness,
+            xai_grok_memory::rebuild::VectorReadiness::Ready
+                | xai_grok_memory::rebuild::VectorReadiness::ReadyMissing { .. }
+        ) {
+            crate::session::memory::embed_missing_chunks(&index, &*provider).await;
         }
     }
 

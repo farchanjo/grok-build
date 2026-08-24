@@ -150,6 +150,13 @@ impl ChatStateActor {
                 self.push_user_message(item);
                 let _ = reply.send(());
             }
+            ChatStateCommand::PushMessageBatch { items } => {
+                self.push_message_batch(items);
+            }
+            ChatStateCommand::PushMessageBatchAndAck { items, reply } => {
+                self.push_message_batch(items);
+                let _ = reply.send(());
+            }
             ChatStateCommand::AppendWorkingDirectorySwitchAndAck {
                 content,
                 cwd_generation,

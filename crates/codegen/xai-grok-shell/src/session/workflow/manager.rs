@@ -7,6 +7,9 @@ use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 use xai_workflow::{Journal, WorkflowOutcome, WorkflowRunParams};
 
+use crate::agent::models::ModelsManager;
+use crate::agent::subagent::assigned_spawn::TrustedAssignedSpawnSender;
+
 use super::host_service::{
     HostDrainOutcome, TelemetryHook, WorkflowHostParams, spawn_workflow_host_service,
 };
@@ -62,6 +65,10 @@ pub(crate) struct WorkflowManager {
     subagent_event_tx: mpsc::UnboundedSender<
         xai_grok_tools::implementations::grok_build::task::types::SubagentEvent,
     >,
+    assigned_spawn_sender: Option<TrustedAssignedSpawnSender>,
+    models_manager: ModelsManager,
+    inference_config: xai_grok_inference::InferenceConfig,
+    grok_home: Option<PathBuf>,
     telemetry: TelemetryHook,
     session_cmd_tx: mpsc::UnboundedSender<crate::session::commands::SessionCommand>,
     templates: HashMap<String, String>,
@@ -81,6 +88,10 @@ impl WorkflowManager {
         subagent_event_tx: mpsc::UnboundedSender<
             xai_grok_tools::implementations::grok_build::task::types::SubagentEvent,
         >,
+        assigned_spawn_sender: Option<TrustedAssignedSpawnSender>,
+        models_manager: ModelsManager,
+        inference_config: xai_grok_inference::InferenceConfig,
+        grok_home: Option<PathBuf>,
         telemetry: TelemetryHook,
         session_cmd_tx: mpsc::UnboundedSender<crate::session::commands::SessionCommand>,
         templates: HashMap<String, String>,
@@ -93,6 +104,10 @@ impl WorkflowManager {
             store,
             notify,
             subagent_event_tx,
+            assigned_spawn_sender,
+            models_manager,
+            inference_config,
+            grok_home,
             telemetry,
             session_cmd_tx,
             templates,
@@ -236,6 +251,12 @@ impl WorkflowManager {
             .join(&run_id)
             .join("scratch");
 
+        let assigned_spawn_sender = self
+            .assigned_spawn_sender
+            .as_ref()
+            .map(|sender| sender.for_workflow(&run_id))
+            .transpose()
+            .map_err(|error| LaunchError::Store(error.to_string()))?;
         let (host_service, host_drained) = spawn_workflow_host_service(
             WorkflowHostParams {
                 run_id: run_id.clone(),
@@ -245,6 +266,10 @@ impl WorkflowManager {
                 store: self.store.clone(),
                 notify: self.notify.clone(),
                 subagent_event_tx: self.subagent_event_tx.clone(),
+                assigned_spawn_sender,
+                models_manager: self.models_manager.clone(),
+                inference_config: self.inference_config.clone(),
+                grok_home: self.grok_home.clone(),
                 parent_session_id: self.session_id.clone(),
                 allow_fork_context,
                 templates: self.templates.clone(),
@@ -408,6 +433,10 @@ impl WorkflowManager {
             store,
             notify,
             mpsc::unbounded_channel().0,
+            None,
+            ModelsManager::default(),
+            xai_grok_inference::InferenceConfig::default(),
+            None,
             Arc::new(|_, _, _| {}),
             mpsc::unbounded_channel().0,
             std::collections::HashMap::new(),
@@ -716,6 +745,10 @@ mod tests {
             store,
             notify,
             subagent_tx,
+            None,
+            ModelsManager::default(),
+            xai_grok_inference::InferenceConfig::default(),
+            None,
             Arc::new(|_, _, _| {}),
             mpsc::unbounded_channel().0,
             HashMap::new(),

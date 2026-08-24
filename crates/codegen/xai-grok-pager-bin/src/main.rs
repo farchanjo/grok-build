@@ -241,6 +241,9 @@ async fn run_openrouter_native_cli(args: &xai_grok_pager::app::OpenRouterNativeC
         provider: args.provider.clone(),
         dry_run: args.dry_run,
         yes: args.yes,
+        stream: args.stream,
+        output: args.output.clone(),
+        files: args.files.clone(),
         command: match &args.command {
             OpenRouterNativeCommand::Ops => shell_or::OpenRouterCliCommand::Ops,
             OpenRouterNativeCommand::Call {
@@ -414,11 +417,15 @@ async fn run_provider_cli(args: &ProviderCliArgs) -> Result<()> {
                     yes,
                     remove_secrets,
                     remove_caches,
+                    force,
+                    typed_id,
                 } => ProviderLifecycleCommand::Remove {
                     id: id.clone(),
                     config: None,
                     remove_secrets: *remove_secrets,
                     remove_caches: *remove_caches,
+                    force: *force,
+                    typed_id: typed_id.clone(),
                     yes: *yes,
                 },
                 ProviderCliCommand::SetKey { id, from_env } => ProviderLifecycleCommand::SetKey {

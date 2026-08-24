@@ -846,7 +846,12 @@ pub(crate) struct SessionActor {
     /// `maybe_notify_git_branch` no-ops — no git subprocess.
     git_head_enabled: bool,
     /// Shared models manager for etag-triggered refresh from response headers.
+    /// Picker/default UI only — session route uses [`Self::selection_model_id`].
     pub(crate) models_manager: crate::agent::models::ModelsManager,
+    /// Session-private canonical selection for route context (not manager global).
+    pub(crate) selection_model_id: std::cell::RefCell<acp::ModelId>,
+    /// Frozen credential-free route sidecar for the selected provider.
+    pub(crate) route_context: std::cell::RefCell<Option<xai_grok_inference::ProviderRouteContext>>,
     /// Stable display path for forked sessions (original project path).
     ///
     /// Used by `build_user_message_prefix` (user-message `Workspace Path`),
@@ -875,6 +880,11 @@ pub(crate) struct SessionActor {
     /// recorded as `skill.name` on the turn span. Reset at the start of each
     /// prompt (`handle_prompt`), so it never leaks across turns.
     pub(crate) active_skill: parking_lot::Mutex<Option<String>>,
+    /// Per-session PR18 inventory cache. `/clear` and fs-watch recovery
+    /// invalidate it; tool and fs-watch paths mark it dirty. Child sessions own their own cache and
+    /// build their own workspace inventory, so prime bodies never leak across
+    /// sessions/workspaces.
+    pub(crate) prime_cache: crate::session::prime::inventory::InventoryCache,
     /// Canonical session mode last set via ACP `session/set_mode`.
     /// Used as the fallback start prompt mode when prompt request metadata
     /// does not explicitly provide one.
@@ -1256,16 +1266,17 @@ impl SessionActor {
     ) {
         self.events.emit_turn_ended(outcome, category, context);
     }
-    /// Current model ID for OTLP span attributes. Reads from chat_state_handle
-    /// so it always reflects the latest model override — no stale cached field.
-    /// Returns "unknown" if no sampling config is set.
+    /// Session-private **canonical** selection id for OTLP span attributes and
+    /// session-scoped routing. Never the upstream wire slug in
+    /// `InferenceConfig.model` (which may be shared by duplicate-slug accounts).
+    /// Returns `"unknown"` only when the selection cell is empty.
     async fn current_model_id(&self) -> String {
-        self.chat_state_handle
-            .get_inference_settings()
-            .await
-            .map(|c| c.model)
-            .filter(|m| !m.is_empty())
-            .unwrap_or_else(|| "unknown".to_string())
+        let selection = self.selection_model_id.borrow().0.to_string();
+        if selection.is_empty() {
+            "unknown".to_string()
+        } else {
+            selection
+        }
     }
     /// Build a hook run context for dispatching hook events.
     fn session_id_string(&self) -> String {
@@ -2290,6 +2301,9 @@ mod goal_planner_e2e_tests;
 #[cfg(test)]
 #[path = "acp_session_tests/interjection_tests.rs"]
 mod interjection_tests;
+#[cfg(test)]
+#[path = "acp_session_tests/prime_injection_tests.rs"]
+mod prime_injection_tests;
 #[cfg(test)]
 #[path = "acp_session_tests/recap_display_only_tests.rs"]
 mod recap_display_only_tests;

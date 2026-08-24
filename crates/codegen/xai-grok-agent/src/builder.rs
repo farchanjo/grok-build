@@ -114,6 +114,11 @@ pub struct AgentBuilder {
     context_window_tokens: Option<u64>,
     api_key_provider: Option<xai_grok_tools::types::SharedApiKeyProvider>,
     attribution_callback: Option<xai_grok_tools::SharedAttributionCallback>,
+    /// Exact-route 401 attribution for the web_search tool only. When set,
+    /// takes precedence over [`Self::attribution_callback`] so a pinned
+    /// web-search account is never attributed against a sibling session
+    /// credential.
+    web_search_attribution_callback: Option<xai_grok_tools::SharedAttributionCallback>,
     /// Session-scoped MCP tool-result inline cap (bytes). When `Some`, seeded
     /// into the toolset's `TruncationCfg` resource after finalize, where the
     /// MCP truncation path consults it before the process-global cap. The
@@ -268,6 +273,7 @@ impl AgentBuilder {
             context_window_tokens: None,
             api_key_provider: None,
             attribution_callback: None,
+            web_search_attribution_callback: None,
             mcp_max_output_bytes: None,
             system_reminder_tag: xai_grok_tools::reminders::DEFAULT_REMINDER_TAG,
             persisted_announced_skill_names: None,
@@ -542,6 +548,15 @@ impl AgentBuilder {
         callback: xai_grok_tools::SharedAttributionCallback,
     ) -> Self {
         self.attribution_callback = Some(callback);
+        self
+    }
+    /// Exact-route 401 attribution for the web_search tool (overrides the
+    /// generic tool attribution callback for that client only).
+    pub fn with_web_search_attribution_callback(
+        mut self,
+        callback: xai_grok_tools::SharedAttributionCallback,
+    ) -> Self {
+        self.web_search_attribution_callback = Some(callback);
         self
     }
     /// Override the system-reminder tag name used in tool result text.
@@ -1072,6 +1087,7 @@ impl AgentBuilder {
                 api_key_provider: self.api_key_provider,
                 auth_provider: None,
                 attribution_callback: self.attribution_callback,
+                web_search_attribution_callback: self.web_search_attribution_callback,
                 system_reminder_tag: self.system_reminder_tag,
             },
         )

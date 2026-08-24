@@ -180,7 +180,15 @@ impl SessionActor {
         }
 
         let cwd = self.tool_context.cwd.as_str().to_owned();
-        let selected_model = self.current_model_id().await;
+        // Wire slug for the external CLI (provider expects upstream id).
+        // Session-private canonical selection is used only for persistence.
+        let selected_model = self
+            .chat_state_handle
+            .get_inference_settings()
+            .await
+            .map(|c| c.model)
+            .filter(|m| !m.is_empty())
+            .unwrap_or_else(|| self.selection_model_id.borrow().0.to_string());
         let effort = self
             .chat_state_handle
             .get_inference_settings()
@@ -269,7 +277,8 @@ impl SessionActor {
                 if let Some(partial) = e.partial_envelope.clone() {
                     if let Ok(validated) = partial.clone().validated() {
                         *self.external_runtime.borrow_mut() = Some(validated.clone());
-                        let model_id = acp::ModelId::new(selected_model.clone());
+                        // Canonical selection — not the upstream wire slug.
+                        let model_id = self.selection_model_id.borrow().clone();
                         let agent_name = self.agent.borrow().definition().name.clone();
                         let _ = self.notifications.persistence_tx.send(
                             crate::session::persistence::PersistenceMsg::CurrentModel {
@@ -278,6 +287,7 @@ impl SessionActor {
                                 reasoning_effort: None,
                                 execution_backend: Some(backend),
                                 external_runtime: Some(Some(validated)),
+                                route_provenance: None,
                             },
                         );
                     }
@@ -400,7 +410,8 @@ impl SessionActor {
             }
         };
         *self.external_runtime.borrow_mut() = Some(envelope_to_store.clone());
-        let model_id = acp::ModelId::new(selected_model.clone());
+        // Canonical selection — not the upstream wire slug in selected_model.
+        let model_id = self.selection_model_id.borrow().clone();
         let agent_name = self.agent.borrow().definition().name.clone();
         let _ = self.notifications.persistence_tx.send(
             crate::session::persistence::PersistenceMsg::CurrentModel {
@@ -409,6 +420,7 @@ impl SessionActor {
                 reasoning_effort: None,
                 execution_backend: Some(backend),
                 external_runtime: Some(Some(envelope_to_store)),
+                route_provenance: None,
             },
         );
 
@@ -584,13 +596,21 @@ enum UserEchoMode {
     /// monitor gutter, task pane) that no pane should render live.
     PersistOnly,
 }
-fn user_echo_mode(prompt_id: &str) -> UserEchoMode {
-    if prompt_id.starts_with(super::interjection::INTERJECT_FALLBACK_PROMPT_PREFIX) {
-        return UserEchoMode::PersistOnly;
-    }
-    match super::super::PromptOrigin::from_prompt_id(prompt_id) {
-        super::super::PromptOrigin::NotificationDrain => UserEchoMode::PersistOnly,
-        _ => UserEchoMode::Broadcast,
+fn user_echo_mode(origin: &super::super::PromptOrigin) -> UserEchoMode {
+    match origin {
+        // Interjection fallback and notification drain are model-only / already
+        // rendered side-channel content — never broadcast as a user prompt.
+        super::super::PromptOrigin::Interjection
+        | super::super::PromptOrigin::NotificationDrain => UserEchoMode::PersistOnly,
+        super::super::PromptOrigin::User
+        | super::super::PromptOrigin::SubagentAssignment
+        | super::super::PromptOrigin::TaskCompleted { .. }
+        | super::super::PromptOrigin::SubagentCompleted { .. }
+        | super::super::PromptOrigin::WorkflowCompleted { .. }
+        | super::super::PromptOrigin::GoalSummary
+        | super::super::PromptOrigin::SchedulerFired
+        | super::super::PromptOrigin::PlanResume
+        | super::super::PromptOrigin::Unknown => UserEchoMode::Broadcast,
     }
 }
 impl SessionActor {
@@ -653,7 +673,11 @@ impl SessionActor {
         }
         user_images
     }
-    pub(super) fn persist_host_turn_user_echo(&self, text: &str, prompt_id: &str) {
+    pub(super) fn persist_host_turn_user_echo(
+        &self,
+        text: &str,
+        origin: &super::super::PromptOrigin,
+    ) {
         let text = text.trim();
         if text.is_empty() {
             return;
@@ -663,7 +687,7 @@ impl SessionActor {
             crate::session::storage::HOST_TURN_META_KEY.into(),
             serde_json::json!(true),
         );
-        if super::super::PromptOrigin::from_prompt_id(prompt_id).hide_user_echo_from_scrollback() {
+        if origin.hide_user_echo_from_scrollback() {
             chunk_meta.insert("hideFromScrollback".into(), serde_json::json!(true));
         }
         let update = acp::SessionUpdate::UserMessageChunk(
@@ -682,6 +706,145 @@ impl SessionActor {
                 crate::session::storage::SessionUpdate::Acp(Box::new(notification)),
             ));
     }
+    /// Per-session PR18 workspace inventory, built off the async executor and
+    /// cached via [`InventoryCache`]. `/clear` and tool-touched paths
+    /// invalidate it; children build their own (no parent body/cache reuse).
+    async fn prime_inventory(&self) -> crate::session::prime::inventory::WorkspaceInventory {
+        let cache = self.prime_cache.clone();
+        let root = self.tool_context.cwd.to_path_buf();
+        let limits = crate::session::prime::inventory::InventoryLimits::default();
+        tokio::task::spawn_blocking(move || cache.get_or_build(&root, limits))
+            .await
+            .unwrap_or_default()
+    }
+    /// PR19: run PR18 skill prime for an explicit real [`PromptOrigin::User`]
+    /// turn on a native backend, at execution time (after all slash/media
+    /// normalization is complete), returning a hidden `ConversationItem` to
+    /// insert immediately before the real user item. Never primes for external
+    /// backends, synthetic/unknown origins, subagents without an explicit user
+    /// origin, or when disabled/degraded/cancelled.
+    ///
+    /// Fail-closed: on a hard prime error with `degrade_on_error = false` the
+    /// typed error is returned BEFORE any user insertion / inference. The
+    /// rendered block is PR18's already-escaped output, used literally (no
+    /// entity re-decode / re-encode). Prompt and prime bodies never reach
+    /// debug/telemetry.
+    pub(crate) async fn maybe_inject_prime_reminder(
+        self: &Arc<Self>,
+        origin: &crate::session::PromptOrigin,
+        user_query: &str,
+        turn_cancel: &tokio_util::sync::CancellationToken,
+    ) -> Result<Option<xai_grok_inference_types::ConversationItem>, acp::Error> {
+        // ── Prime gate: ONLY an explicit real `User` + native backend. ─────
+        if !origin.prime_eligible() {
+            return Ok(None);
+        }
+        if self.execution_backend.get().is_external() {
+            return Ok(None);
+        }
+        // Per-home retrieval registry supplies the prime config and the
+        // semantic service (child sessions share the registry but build their
+        // own inventory from their own workspace below).
+        let Some(registry) =
+            crate::retrieval::registry_for_prime_home(xai_grok_config::grok_home())
+        else {
+            return Ok(None);
+        };
+        let snapshot = registry.load();
+        let cfg = &snapshot.prime.skills;
+        if !cfg.enabled {
+            return Ok(None);
+        }
+
+        // Authoritative eligible native skill snapshot + fresh revalidation
+        // source (closes the rank-vs-load TOCTOU).
+        let bridge = self.tool_bridge_handle();
+        let eligible = bridge.eligible_native_skills().await;
+        let refresh_bridge = Arc::clone(&bridge);
+        let refresh = move || {
+            let b = Arc::clone(&refresh_bridge);
+            async move { b.eligible_native_skills().await }
+        };
+
+        // Select skills from the raw user query so assembled context stays local.
+        let prompt = user_query.to_string();
+
+        // Workspace + trusted containment roots (canonicalized upstream).
+        let cwd: std::path::PathBuf = self.tool_context.cwd.to_path_buf();
+        let mut trusted_roots: Vec<std::path::PathBuf> = vec![cwd.clone()];
+        if let xai_grok_workspace::session::git::GitDiscoveryResult::Found(root) =
+            xai_grok_workspace::session::git::discover_git_root(&cwd)
+        {
+            trusted_roots.push(root);
+        }
+
+        let context_window = self
+            .chat_state_handle
+            .get_inference_settings()
+            .await
+            .map(|s| s.context_window.get());
+        let semantic_profile = cfg.retrieval_profile.clone();
+        let explicit_skill = self.active_skill.lock().clone();
+        let owned_inventory = self.prime_inventory().await;
+        let semantic_service = registry.service();
+
+        let input = crate::session::prime::PrimeInput {
+            eligible_skills: &eligible,
+            refresh_skills: &refresh,
+            workspace_root: &cwd,
+            trusted_roots: &trusted_roots,
+            prompt: &prompt,
+            explicit_skill: explicit_skill.as_deref(),
+            config: cfg.clone(),
+            context_window,
+            semantic_profile: semantic_profile.as_deref(),
+            semantic_service: if semantic_profile.is_some() && snapshot.enabled {
+                Some(&semantic_service)
+            } else {
+                None
+            },
+            inventory: Some(&owned_inventory),
+        };
+
+        let result = crate::session::prime::run_prime_selection(&input, turn_cancel.clone()).await;
+
+        match result {
+            Ok(sel) if sel.cancelled => Ok(None),
+            Ok(sel) => {
+                tracing::debug!(
+                    session_id = %self.session_info.id.0,
+                    selected_names = ?sel.budget_state.selected_names,
+                    rendered_chars = sel.rendered.as_ref().map(|r| r.chars),
+                    cancelled = sel.cancelled,
+                    "skill prime run complete (secret-free; bodies omitted)"
+                );
+                match sel.rendered {
+                    Some(rendered) if !rendered.text.is_empty() => {
+                        // PR18 rendered block, used literally (already single-pass
+                        // escaped). Auto/empty/degraded omit the reminder.
+                        Ok(Some(
+                            xai_grok_inference_types::ConversationItem::system_reminder(
+                                rendered.text,
+                            ),
+                        ))
+                    }
+                    _ => Ok(None),
+                }
+            }
+            Err(crate::session::prime::PrimeError::SemanticRetrievalFailed) => {
+                if cfg.degrade_on_error {
+                    Ok(None)
+                } else {
+                    // Hard failure: return the typed error BEFORE user
+                    // insertion / inference.
+                    Err(acp::Error::internal_error().data(
+                        "skill prime failed and degrade_on_error is disabled; \
+                         refusing to continue without priming",
+                    ))
+                }
+            }
+        }
+    }
     #[tracing::instrument(
         name = "session.handle_prompt",
         skip_all,
@@ -696,6 +859,7 @@ impl SessionActor {
     pub(super) async fn handle_prompt(
         self: &Arc<Self>,
         prompt_id: &str,
+        origin: super::super::PromptOrigin,
         prompt_blocks: Vec<acp::ContentBlock>,
         prompt_mode: PromptMode,
         trace_gcs_config: Option<crate::session::repo_changes::TraceExportConfig>,
@@ -737,14 +901,13 @@ impl SessionActor {
             );
             return Err(err.into_acp_error());
         }
-        let origin = super::super::PromptOrigin::from_prompt_id(prompt_id);
         if let Some(completion_id) = origin.completion_id() {
             self.mark_completions_reported(&[completion_id]).await;
             if let Some(reservations) = &self.tool_context.task_completion_reservations {
                 reservations.release(completion_id);
             }
         }
-        if !origin.is_synthetic() {
+        if origin.is_client_user_prompt() {
             self.cancel_pending_recap_for_new_prompt();
         }
         *self.turn_start_prompt_mode.lock() = prompt_mode;
@@ -754,9 +917,8 @@ impl SessionActor {
         let _turn_active_guard =
             TurnActiveGuard::activate(self.tool_context.is_turn_active.as_ref());
         let _session_turn_active_guard = TurnActiveGuard::activate(Some(&self.session_turn_active));
-        let turn_start_input = xai_agent_lifecycle::TurnStartInput::new(
-            super::super::PromptOrigin::from_prompt_id(prompt_id).is_synthetic(),
-        );
+        let turn_start_input =
+            xai_agent_lifecycle::TurnStartInput::new(!origin.is_client_user_prompt());
         for contributor in self.extension_registry.turn_lifecycle_contributors() {
             contributor.on_turn_start(&turn_start_input).await;
         }
@@ -839,7 +1001,7 @@ impl SessionActor {
                     {
                         // Reject before any goal/workflow/memory/dream mutation.
                         xai_grok_telemetry::session_ctx::log_event(slash_used);
-                        self.persist_host_turn_user_echo(&original_prompt_text, prompt_id);
+                        self.persist_host_turn_user_echo(&original_prompt_text, &origin);
                         let msg = format!(
                             "{} is not supported on Claude Agent (CLI, Experimental) sessions. \
                              Start /new with a native model.",
@@ -864,14 +1026,14 @@ impl SessionActor {
                                 vec![text_block(reminder)]
                             }
                             GoalResumeOutcome::Message(msg) => {
-                                self.persist_host_turn_user_echo(&original_prompt_text, prompt_id);
+                                self.persist_host_turn_user_echo(&original_prompt_text, &origin);
                                 self.send_host_turn_slash_command_output(&msg).await;
                                 return ok_end_turn(0, None);
                             }
                         }
                     }
                     BuiltinAction::WorkflowLaunch { name, input } => {
-                        self.persist_host_turn_user_echo(&original_prompt_text, prompt_id);
+                        self.persist_host_turn_user_echo(&original_prompt_text, &origin);
                         let msg = self
                             .launch_named_workflow(&workflow_registry, &name, &input)
                             .await;
@@ -879,7 +1041,7 @@ impl SessionActor {
                         return ok_end_turn(0, None);
                     }
                     _ => {
-                        self.persist_host_turn_user_echo(&original_prompt_text, prompt_id);
+                        self.persist_host_turn_user_echo(&original_prompt_text, &origin);
                         return self.execute_builtin_slash_command(action).await;
                     }
                 }
@@ -962,10 +1124,7 @@ impl SessionActor {
         self.current_turn_number.set(turn_number);
         let yolo_mode = self.permissions.is_yolo_mode();
         let msg_count = self.chat_state_handle.get_conversation_len().await;
-        let redirect_kind = if matches!(
-            super::super::PromptOrigin::from_prompt_id(prompt_id),
-            super::super::PromptOrigin::User
-        ) {
+        let redirect_kind = if origin.prime_eligible() {
             self.events.take_prior_redirect_kind()
         } else {
             None
@@ -1006,7 +1165,6 @@ impl SessionActor {
         });
         let current_prompt_index = self.chat_state_handle.get_prompt_index().await;
         xai_grok_telemetry::session_ctx::begin_prompt_id();
-        let origin = super::super::PromptOrigin::from_prompt_id(prompt_id);
         let mut chunk_meta = serde_json::Map::new();
         chunk_meta.insert("modelId".into(), serde_json::json!(model_id));
         chunk_meta.insert(
@@ -1032,25 +1190,7 @@ impl SessionActor {
         self.file_state_tracker
             .begin_prompt(current_prompt_index)
             .await;
-        let echo_mode = user_echo_mode(prompt_id);
-        for block in prompt_blocks.iter() {
-            let update = acp::SessionUpdate::UserMessageChunk(
-                acp::ContentChunk::new(block.clone()).meta(user_chunk_meta.clone()),
-            );
-            let notification_meta = self.build_notification_meta();
-            let notification = acp::SessionNotification::new(self.session_info.id.clone(), update)
-                .meta(notification_meta.as_object().cloned());
-            if echo_mode == UserEchoMode::PersistOnly {
-                let _ = self
-                    .notifications
-                    .persistence_tx
-                    .send(PersistenceMsg::Update(
-                        crate::session::storage::SessionUpdate::Acp(Box::new(notification)),
-                    ));
-            } else {
-                self.emit_notification_direct(notification).await;
-            }
-        }
+        let echo_mode = user_echo_mode(&origin);
         let crate::session::prompt_parser::ParsedPrompt {
             mut context,
             query,
@@ -1120,6 +1260,7 @@ impl SessionActor {
         } else {
             (query, Vec::new())
         };
+        let prime_query = query.clone();
         let assembled = crate::session::prompt_parser::ParsedPrompt::assemble_parts_with_skills(
             &context,
             &query,
@@ -1180,7 +1321,7 @@ impl SessionActor {
         self.maybe_inject_date_rollover_reminder().await;
         self.inject_plan_mode_reminders().await;
         self.inject_resumed_tasks_reminder();
-        if matches!(&origin, super::super::PromptOrigin::User) {
+        if origin.prime_eligible() {
             if let Some(gate) = &self.tool_context.task_wake_suppressed {
                 gate.set(false);
             }
@@ -1224,12 +1365,17 @@ impl SessionActor {
                     cwd: self.session_info.cwd.clone(),
                 });
             let media = media.clone();
-            let stt_config = self.models_manager.config_snapshot().voice;
-            let stt = crate::session::media_stt::maybe_xai_stt_transcriber(
-                self.auth_manager.as_ref(),
-                self.rebuild_spec.api_key_provider.as_ref(),
-                stt_config,
-            );
+            // Gate B MediaStt: exact xAI session route before any STT bearer use.
+            let stt = match self
+                .resolve_media_stt_transcriber(media.audio_model.as_deref())
+                .await
+            {
+                Ok((_route, tx)) => Some(tx),
+                Err(error) => {
+                    tracing::debug!(%error, "user-audio STT route closed");
+                    None
+                }
+            };
             let mut envelopes = Vec::with_capacity(raw_audios.len());
             for audio in &raw_audios {
                 envelopes.push(
@@ -1288,8 +1434,11 @@ impl SessionActor {
             if trace_gcs_config.is_some() {
                 self.chat_state_handle.begin_turn_capture();
             }
-            let origin = super::super::PromptOrigin::from_prompt_id(prompt_id);
-            if matches!(origin, super::super::PromptOrigin::User) {
+            // The interrupt reminder applies to a real user turn (User) or a
+            // promoted interjection (the user typed it mid-turn). Legacy
+            // Unknown and parent-authored assignments are ambiguous, so they
+            // are omitted here (is_user_typed is exhaustive).
+            if origin.is_user_typed() {
                 self.maybe_inject_interrupt_reminder().await;
             }
             let mut user_chat = match &origin {
@@ -1308,13 +1457,13 @@ impl SessionActor {
                 super::super::PromptOrigin::GoalSummary => {
                     ConversationItem::goal_summary(user_message)
                 }
-                super::super::PromptOrigin::GoalClassifierNudge => {
-                    ConversationItem::goal_classifier_nudge(user_message)
-                }
                 super::super::PromptOrigin::SchedulerFired => {
                     ConversationItem::scheduler_fired(user_message)
                 }
-                super::super::PromptOrigin::PlanResume => ConversationItem::user(user_message),
+                super::super::PromptOrigin::PlanResume
+                | super::super::PromptOrigin::Interjection
+                | super::super::PromptOrigin::SubagentAssignment
+                | super::super::PromptOrigin::Unknown => ConversationItem::user(user_message),
                 super::super::PromptOrigin::User => {
                     let mut item = ConversationItem::user(user_message);
                     if let Some(interrupt) = self
@@ -1336,10 +1485,52 @@ impl SessionActor {
                     user_chat.add_image(format!("data:{};base64,{}", image.mime_type, image.data));
                 }
             }
+            // The prime run shares the turn's cancellation token, so a
+            // cancel/abort stops semantic work and discards partial prime
+            // without breaking the real user item lifecycle.
+            let turn_cancel = self.turn_cancel.borrow().clone();
+            let prime_reminder = match self
+                .maybe_inject_prime_reminder(&origin, &prime_query, &turn_cancel)
+                .await
+            {
+                Ok(reminder) => reminder,
+                Err(error) => {
+                    let message = error.to_string();
+                    let input = xai_agent_lifecycle::TurnErrorInput { message: &message };
+                    for contributor in self.extension_registry.turn_lifecycle_contributors() {
+                        contributor.on_turn_error(&input).await;
+                    }
+                    return Err(error);
+                }
+            };
+            let mut items: Vec<ConversationItem> = prime_reminder.into_iter().collect();
+            for item in &mut items {
+                item.set_prompt_index(current_prompt_index);
+            }
+            items.push(user_chat);
+            for block in &prompt_blocks {
+                let update = acp::SessionUpdate::UserMessageChunk(
+                    acp::ContentChunk::new(block.clone()).meta(user_chunk_meta.clone()),
+                );
+                let notification_meta = self.build_notification_meta();
+                let notification =
+                    acp::SessionNotification::new(self.session_info.id.clone(), update)
+                        .meta(notification_meta.as_object().cloned());
+                if echo_mode == UserEchoMode::PersistOnly {
+                    let _ = self
+                        .notifications
+                        .persistence_tx
+                        .send(PersistenceMsg::Update(
+                            crate::session::storage::SessionUpdate::Acp(Box::new(notification)),
+                        ));
+                } else {
+                    self.emit_notification_direct(notification).await;
+                }
+            }
             if let Some(ack) = persist_ack {
                 if self
                     .chat_state_handle
-                    .push_user_message_and_ack(user_chat)
+                    .push_message_batch_and_ack(items)
                     .await
                     .is_some()
                 {
@@ -1355,21 +1546,19 @@ impl SessionActor {
                     {
                         let _ = ack.send(());
                     } else {
-                        tracing::error!(
-                            session_id = %self.session_info.id.0,
-                            prompt_id = %prompt_id,
-                            "persist_ack flush barrier failed"
-                        );
+                        // Surface the failure: the user pair was not durably
+                        // accepted, so do not proceed to inference.
+                        return Err(acp::Error::internal_error().data(
+                            "persist flush barrier failed after prompt insertion; \
+                             user message pair was not durably accepted",
+                        ));
                     }
                 } else {
-                    tracing::error!(
-                        session_id = %self.session_info.id.0,
-                        prompt_id = %prompt_id,
-                        "persist_ack skipped: chat-state actor unavailable"
-                    );
+                    return Err(acp::Error::internal_error()
+                        .data("chat-state actor unavailable; user message pair was not accepted"));
                 }
             } else {
-                self.chat_state_handle.push_user_message(user_chat);
+                self.chat_state_handle.push_message_batch(items);
             }
         }
         self.dispatch_hook(
@@ -3316,6 +3505,7 @@ mod identical_tool_call_run_tests {
 }
 #[cfg(test)]
 mod user_echo_broadcast_tests {
+    use super::PromptOrigin;
     use super::{UserEchoMode, user_echo_mode};
     /// Notification-drain: persisted (rewind/fork count user-chunk runs as
     /// turn boundaries) but never broadcast live; the pager hides it via the
@@ -3323,7 +3513,7 @@ mod user_echo_broadcast_tests {
     #[test]
     fn notification_drain_turn_is_persist_only() {
         assert_eq!(
-            user_echo_mode("notifications-019e0000-0000-7000-8000-0000000000aa"),
+            user_echo_mode(&PromptOrigin::NotificationDrain),
             UserEchoMode::PersistOnly
         );
     }
@@ -3331,17 +3521,21 @@ mod user_echo_broadcast_tests {
     /// live so multi-client / dashboard viewers stay in sync.
     #[test]
     fn user_and_cron_turns_broadcast_live() {
-        assert_eq!(user_echo_mode("my-prompt"), UserEchoMode::Broadcast);
+        assert_eq!(user_echo_mode(&PromptOrigin::User), UserEchoMode::Broadcast);
         assert_eq!(
-            user_echo_mode("scheduler-fired-abc"),
+            user_echo_mode(&PromptOrigin::SchedulerFired),
             UserEchoMode::Broadcast
         );
         assert_eq!(
-            user_echo_mode("task-completed-bg-1"),
+            user_echo_mode(&PromptOrigin::TaskCompleted {
+                task_id: "bg-1".into()
+            }),
             UserEchoMode::Broadcast
         );
         assert_eq!(
-            user_echo_mode("subagent-completed-xyz"),
+            user_echo_mode(&PromptOrigin::SubagentCompleted {
+                subagent_id: "xyz".into()
+            }),
             UserEchoMode::Broadcast
         );
     }
@@ -3351,7 +3545,7 @@ mod user_echo_broadcast_tests {
     #[test]
     fn interject_fallback_turn_is_persist_only() {
         assert_eq!(
-            user_echo_mode("interject-fallback-019e24b7"),
+            user_echo_mode(&PromptOrigin::Interjection),
             UserEchoMode::PersistOnly
         );
     }

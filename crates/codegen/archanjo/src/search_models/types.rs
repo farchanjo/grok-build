@@ -44,9 +44,22 @@ pub struct SearchModelsHit {
     /// Human-readable display name (label).
     pub name: String,
     /// Catalog key for `spawn_subagent` `model=` (e.g. `openrouter:z-ai/glm-5.2`).
+    /// Always the **canonical selection id**, never a bare upstream wire slug
+    /// when siblings exist.
     pub slug: String,
     /// Provider id/kind string (e.g. `openrouter`, `xai`).
     pub provider: String,
+    /// Secret-free provider instance id that owns this selection
+    /// (e.g. `openai`, `openai_work`, `openrouter`). Distinguishes sibling
+    /// accounts that share an upstream wire slug.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_instance_id: Option<String>,
+    /// Provider kind label (`openai`, `openrouter`, `xai`, …).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_kind: Option<String>,
+    /// Exact upstream wire model id (never normalized). Distinct from `slug`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upstream_model_id: Option<String>,
     /// Whether this slug passes the same gate as `Task.model` validation.
     pub task_eligible: bool,
     /// Catalog tools flag when known.

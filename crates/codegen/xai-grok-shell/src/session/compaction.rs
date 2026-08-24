@@ -179,30 +179,37 @@ impl SessionActor {
             && xai_chat_state::compaction_utils::conversation_contains_images(conversation);
 
         let (client, model, provider) = if allow_lazy_backfill {
-            let active_session_config = self.reconstruct_full_config().await;
             let image_description_model = media.image_model.as_deref().unwrap_or("@session");
-            let resolved = self
-                .resolve_aux_inference_config(image_description_model)
-                .await;
-            let (describe_model, sampler_config) =
-                crate::agent::config::finalize_image_describe_inference_config(
-                    resolved,
-                    &active_session_config,
-                    self.client_identifier.clone(),
-                    Some(self.max_retries),
-                );
-            let provider = sampler_config.provider_identity;
-            let client = crate::session::media_pipeline::auxiliary_media_route_allowed(
-                provider,
-                self.auth_manager.as_ref(),
-            )
-            .ok()
-            .and_then(|()| xai_grok_inference::InferenceClient::new(sampler_config).ok());
-            (
-                client,
-                Some(describe_model),
-                Some(provider.label().to_owned()),
-            )
+            // Compaction backfill is best-effort: route miss skips lazy describe.
+            match self.resolve_media_describe(image_description_model).await {
+                Ok(route) => {
+                    let describe_model = route.upstream_model_id.clone();
+                    let sampler_config = route.inference;
+                    let route_ctx = route.route.clone();
+                    let provider = sampler_config.provider_identity;
+                    let client = crate::session::media_pipeline::auxiliary_media_route_allowed(
+                        provider,
+                        self.auth_manager.as_ref(),
+                    )
+                    .ok()
+                    .and_then(|()| {
+                        xai_grok_inference::InferenceClient::new_with_route_context(
+                            sampler_config,
+                            Some(route_ctx),
+                        )
+                        .ok()
+                    });
+                    (
+                        client,
+                        Some(describe_model),
+                        Some(provider.label().to_owned()),
+                    )
+                }
+                Err(error) => {
+                    tracing::debug!(%error, "compaction media describe route unavailable");
+                    (None, None, None)
+                }
+            }
         } else {
             (None, None, None)
         };
@@ -236,14 +243,22 @@ impl SessionActor {
         media_descriptors: &CompactionMediaDescriptors,
     ) -> Option<CompactOutput> {
         let history = sanitize_compaction_images_with_descriptors(history, media_descriptors);
-        let inference_config = self.reconstruct_full_config().await;
-        let client = match self.prepare_chat_completion(false).await {
-            Ok(c) => c,
+        // Gate B: two-pass prefire uses exact compaction route handles (same
+        // as full-replace/rolling), not a route-less primary client.
+        let routes = match self.prepare_compaction_routes().await {
+            Ok(r) if !r.is_empty() => r,
+            Ok(_) => {
+                tracing::warn!("two_pass: no compaction routes configured");
+                return None;
+            }
             Err(e) => {
-                tracing::warn!(error = %e, "two_pass: failed to prepare sampling client");
+                tracing::warn!(error = %e, "two_pass: failed to prepare compaction routes");
                 return None;
             }
         };
+        let first = &routes[0];
+        let client = first.client.clone();
+        let inference_config = first.inference_config.clone();
         let tool_defs = self.prepare_tool_definitions().await;
         let tools = self.turn_base_tool_specs(&tool_defs);
         let wall_clock_budget_secs = self
@@ -912,12 +927,17 @@ impl SessionActor {
             )
             .await;
 
-        let (retry_state, message, acp_err) = if let Some(provider) = provider {
+        let (retry_state, message, acp_err, binding_meta) = if let Some(provider) = provider {
             let mut msg = provider_credential_repair_message(&provider.provider_name);
             msg.push_str(" Compaction could not complete until the key is repaired.");
             if let Some(model) = provider.failed_model_id.as_deref() {
                 msg.push_str(&format!(" Failed model: {model}."));
             }
+            let binding = self.frozen_route_binding_meta(
+                false,
+                provider.credential_generation,
+                &provider.provider_id,
+            );
             let state = crate::extensions::notification::RetryState::failed_with_provider(
                 msg.clone(),
                 provider,
@@ -930,7 +950,7 @@ impl SessionActor {
                     Some(401),
                     xai_grok_inference::InferenceErrorKind::Auth,
                 ));
-            (state, msg, err)
+            (state, msg, err, Some(binding))
         } else {
             let message = if detailed.to_ascii_lowercase().contains("unauthorized") {
                 detailed
@@ -948,7 +968,7 @@ impl SessionActor {
                     Some(401),
                     xai_grok_inference::InferenceErrorKind::Auth,
                 ));
-            (state, message, err)
+            (state, message, err, None)
         };
 
         tracing::warn!(
@@ -983,8 +1003,17 @@ impl SessionActor {
             })),
         );
         let _ = message;
-        self.send_xai_notification(XaiSessionUpdate::RetryState(retry_state))
-            .await;
+        // Exact-route repair binding must travel with the failure notification;
+        // never drop it (old/no-meta consumers fail closed for configured routes).
+        let extra = binding_meta
+            .as_ref()
+            .map(|b| b.to_meta_map())
+            .filter(|m| !m.is_empty());
+        self.send_xai_notification_with_extra_meta(
+            XaiSessionUpdate::RetryState(retry_state),
+            extra,
+        )
+        .await;
         acp_err
     }
     /// Clear [`SUPPRESS_AUTH`] on login/token refresh (credit suppress waits for a 200).
@@ -2702,12 +2731,17 @@ mod inline_auto_compact_flow_tests {
             last_reported_branch: std::sync::Arc::new(parking_lot::Mutex::new(None)),
             git_head_enabled: false,
             models_manager: Default::default(),
+            selection_model_id: std::cell::RefCell::new(acp::ModelId::new(
+                crate::test_support::TEST_MODEL,
+            )),
+            route_context: std::cell::RefCell::new(None),
             display_cwd: std::sync::OnceLock::new(),
             active_agent_type: parking_lot::Mutex::new(None),
             queue_exit_reminder_on_approved_exit: Arc::new(std::sync::atomic::AtomicBool::new(
                 false,
             )),
             active_skill: parking_lot::Mutex::new(None),
+            prime_cache: crate::session::prime::inventory::InventoryCache::new(),
             current_prompt_mode: Arc::new(parking_lot::Mutex::new(PromptMode::Agent)),
             turn_start_prompt_mode: parking_lot::Mutex::new(PromptMode::Agent),
             turn_prompt_mode: Arc::new(parking_lot::Mutex::new(PromptMode::Agent)),

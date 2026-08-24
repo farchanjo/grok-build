@@ -145,10 +145,70 @@ impl MemoryIndex {
                 }
             };
 
-        // Create schema
+        // Fail-closed gate BEFORE any schema DDL: a DB written by a **newer**
+        // reader must never be touched by this reader's `schema_sql` or the
+        // staging ALTER migration (they could error or mutate a schema we do
+        // not understand). Open as vec-disabled FTS-only with no writes at all.
+        let stored_schema: Option<u32> = db
+            .query_row(
+                schema::GET_META_SQL,
+                params![schema::META_SCHEMA_VERSION],
+                |r| r.get::<_, String>(0),
+            )
+            .ok()
+            .and_then(|s| s.trim().parse().ok());
+        if let Some(stored) = stored_schema
+            && stored > schema::SCHEMA_VERSION
+        {
+            static NEWER_SCHEMA_WARNED: std::sync::Once = std::sync::Once::new();
+            NEWER_SCHEMA_WARNED.call_once(|| {
+                tracing::warn!(
+                    stored,
+                    current = schema::SCHEMA_VERSION,
+                    "memory index written by a newer schema version; refusing all writes, FTS-only"
+                );
+            });
+            return Ok(Self {
+                db,
+                storage,
+                chunk_config: config,
+                vec_available: false,
+                embedding_dimensions: dimensions,
+            });
+        }
+
+        // Create schema (only for a current-or-legacy/fresh DB).
         db.execute_batch(&schema::schema_sql(dimensions, vec_available))?;
 
-        // Store/verify embedding dimensions in meta table
+        // Additive migration: DBs that created `vector_staging` before the
+        // chunk-hash column existed get the column now.
+        // Old staged rows get an empty hash, which never matches a live chunk
+        // hash, so they are pruned and re-embedded rather than installed.
+        {
+            let cols: Vec<String> = {
+                let mut stmt = db.prepare("PRAGMA table_info(vector_staging)")?;
+                let rows = stmt.query_map([], |r| r.get::<_, String>(1))?;
+                let mut out = Vec::new();
+                for c in rows {
+                    out.push(c?);
+                }
+                out
+            };
+            if !cols.iter().any(|c| c == "chunk_hash") {
+                db.execute_batch(
+                    "ALTER TABLE vector_staging ADD COLUMN chunk_hash TEXT NOT NULL DEFAULT ''",
+                )?;
+            }
+        }
+
+        // Store/verify embedding dimensions in meta table.
+        //
+        // This is not a destructive migration. A dimension
+        // mismatch no longer drops `chunks_vec` (which destroyed all vectors).
+        // Instead it records a fail-closed pending marker so the transactional
+        // rebuild state machine (`super::rebuild`) can rebuild vectors through
+        // the pinned source and atomically swap them in. Chunks + FTS survive
+        // every vector-migration failure.
         let stored_dims: Option<String> = db
             .query_row(schema::GET_META_SQL, params!["embedding_dimensions"], |r| {
                 r.get(0)
@@ -157,30 +217,20 @@ impl MemoryIndex {
 
         match stored_dims {
             Some(ref s) if s.parse::<usize>().ok() == Some(dimensions) => {
-                // Dimensions match — nothing to do
+                // Dimensions match — nothing to do.
             }
             Some(ref s) => {
-                // Dimension mismatch — recreate vec table
+                // Dimension mismatch — fail closed: mark rebuild pending, do NOT
+                // drop the existing vec table (would destroy users' vectors).
                 tracing::warn!(
                     stored = %s,
                     requested = dimensions,
-                    "embedding dimension mismatch, recreating chunks_vec"
+                    "embedding dimension mismatch, marking vector rebuild pending (FTS-only)"
                 );
-                if vec_available {
-                    let _ = db.execute("DROP TABLE IF EXISTS chunks_vec", []);
-                    db.execute_batch(&format!(
-                        "CREATE VIRTUAL TABLE IF NOT EXISTS chunks_vec USING vec0(\n    \
-                         chunk_id TEXT PRIMARY KEY,\n    \
-                         embedding FLOAT[{dimensions}]\n);"
-                    ))?;
-                }
-                db.execute(
-                    schema::UPSERT_META_SQL,
-                    params!["embedding_dimensions", dimensions.to_string()],
-                )?;
+                super::rebuild::mark_dimension_mismatch_pending(&db)?;
             }
             None => {
-                // First time — store dimensions
+                // First time — store dimensions.
                 db.execute(
                     schema::UPSERT_META_SQL,
                     params!["embedding_dimensions", dimensions.to_string()],
@@ -207,10 +257,132 @@ impl MemoryIndex {
         self.embedding_dimensions
     }
 
-    /// Direct access to the underlying SQLite connection (test-only).
-    #[cfg(test)]
+    /// Direct access to the underlying SQLite connection (shared with
+    /// `super::rebuild` state machine).
     pub(crate) fn db(&self) -> &rusqlite::Connection {
         &self.db
+    }
+
+    /// Read a `meta` value.
+    pub(crate) fn meta_get(&self, key: &str) -> Option<String> {
+        self.db
+            .query_row(schema::GET_META_SQL, params![key], |r| {
+                r.get::<_, String>(0)
+            })
+            .ok()
+    }
+
+    /// Installed canonical vector fingerprint hash, if any.
+    ///
+    /// Public so the shell can reconcile PR15 `MemoryReindexImpact` semantics
+    /// with the actually-persisted fingerprint rather than assuming.
+    pub fn installed_vector_fingerprint_hash(&self) -> Option<String> {
+        let h = self
+            .meta_get(schema::META_VECTOR_FINGERPRINT_HASH)?
+            .trim()
+            .to_owned();
+        if h.is_empty() { None } else { Some(h) }
+    }
+
+    /// Installed vector schema compat version (0 when unset/legacy).
+    pub fn installed_vector_schema_version(&self) -> u32 {
+        self.meta_get(schema::META_VECTOR_SCHEMA_VERSION)
+            .and_then(|s| s.trim().parse().ok())
+            .unwrap_or(0)
+    }
+
+    /// Whether vectors can be used after a caller has reconciled the source.
+    /// This local predicate also rejects pending or uninitialized state.
+    /// Callers with a provider must first use `ensure_vectors_ready`.
+    ///
+    /// Whether legacy back-fill (`embed_missing_chunks` on the `chunks_vec`
+    /// table) is safe right now.
+    ///
+    /// Returns `false` while a vector rebuild is pending (writes would be
+    /// redundant work against a table the atomic install is about to replace,
+    /// or could mix an incompatible space) or when no installed fingerprint
+    /// exists yet. Back-fill callers must gate on this.
+    pub fn vectors_safe_to_backfill(&self) -> bool {
+        if !self.vec_available {
+            return false;
+        }
+        if super::rebuild::pending_marker_present(self) {
+            return false;
+        }
+        self.installed_vector_fingerprint_hash().is_some()
+    }
+
+    /// Number of rows currently in `chunks_vec` (vector rows installed).
+    pub(crate) fn vec_row_count(&self) -> i64 {
+        if !self.vec_available {
+            return 0;
+        }
+        self.db
+            .query_row("SELECT COUNT(*) FROM chunks_vec", [], |r| r.get(0))
+            .unwrap_or(0)
+    }
+
+    /// Remove orphan vector rows — rows whose `chunk_id` no longer exists in
+    /// the `chunks` table (crash/legacy residue). Orphans are inert (search
+    /// joins through live chunk ids) but pollute the vec table and make
+    /// `vec_row_count` inaccurate. Pruning is transactional and touches
+    /// **only** orphan rows: valid rows and the installed fingerprint are
+    /// preserved, and no rebuild is triggered. Returns the number of
+    /// removed rows.
+    pub(crate) fn prune_orphan_vector_rows(&self) -> usize {
+        if !self.vec_available {
+            return 0;
+        }
+        if self.db.execute_batch("BEGIN IMMEDIATE;").is_err() {
+            return 0;
+        }
+        let mut removed = 0usize;
+        let result = (|| -> rusqlite::Result<()> {
+            // Detect orphans and prune them under one write lock (BEGIN
+            // IMMEDIATE), so a concurrent writer cannot re-index a chunk
+            // between detection and deletion.
+            let mut stmt = self.db.prepare(
+                "SELECT v.id FROM chunks_vec_rowids v \
+                 WHERE NOT EXISTS ( \
+                   SELECT 1 FROM chunks c WHERE c.id = v.id \
+                 )",
+            )?;
+            let ids: Vec<String> = stmt
+                .query_map([], |r| r.get::<_, String>(0))?
+                .filter_map(Result::ok)
+                .collect();
+            drop(stmt);
+            for id in &ids {
+                // Re-check absence at DELETE time (still inside the write
+                // lock, so no writer can commit between the check and the
+                // DELETE), and count only rows actually deleted.
+                let still_absent: bool = self
+                    .db
+                    .query_row(
+                        "SELECT NOT EXISTS (SELECT 1 FROM chunks c WHERE c.id = ?1)",
+                        params![id],
+                        |r| r.get::<_, bool>(0),
+                    )
+                    .unwrap_or(false);
+                if still_absent {
+                    let deleted = self
+                        .db
+                        .execute("DELETE FROM chunks_vec WHERE chunk_id = ?1", params![id])?;
+                    removed += deleted;
+                }
+            }
+            Ok(())
+        })();
+        match result {
+            Ok(()) => {
+                let _ = self.db.execute_batch("COMMIT;");
+            }
+            Err(_) => {
+                let _ = self.db.execute_batch("ROLLBACK;");
+                removed = 0;
+            }
+        }
+        removed
     }
 
     // -----------------------------------------------------------------------
@@ -515,7 +687,7 @@ impl MemoryIndex {
     // Vector operations (no-op if !vec_available)
     // -----------------------------------------------------------------------
 
-    /// Return chunks that don't have embeddings yet.
+    /// Return chunks that don't have embeddings yet (legacy path).
     pub fn chunks_without_embeddings(&self) -> Result<Vec<(String, String)>, rusqlite::Error> {
         if !self.vec_available {
             return Ok(vec![]);
@@ -531,6 +703,75 @@ impl MemoryIndex {
             })?
             .collect::<Result<Vec<_>, _>>()?;
         Ok(results)
+    }
+
+    /// Chunks that lack embeddings **and** belong to exactly the given file
+    /// paths — the *fresh* watcher-dirty work set. The pre-existing
+    /// compatible gap (chunks from other files that missed an earlier embed)
+    /// is deliberately excluded so a genuine-failure backoff can defer only the
+    /// same missing set while newly changed chunks still embed.
+    pub(crate) fn chunks_without_embeddings_for_paths(
+        &self,
+        paths: &[String],
+    ) -> Result<Vec<(String, String)>, rusqlite::Error> {
+        if !self.vec_available {
+            return Ok(vec![]);
+        }
+        let mut result: Vec<(String, String)> = Vec::new();
+        for p in paths {
+            let mut stmt = self.db.prepare(
+                "SELECT c.id, c.text FROM chunks c \
+                 LEFT JOIN chunks_vec_rowids v ON v.id = c.id \
+                 WHERE v.id IS NULL AND c.path = ?1",
+            )?;
+            let rows = stmt
+                .query_map(params![p], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                })?
+                .filter_map(Result::ok);
+            result.extend(rows);
+        }
+        Ok(result)
+    }
+
+    /// All chunks not yet staged **for their current content hash** under the
+    /// given attempt `pending_id`.
+    ///
+    /// Unlike [`Self::chunks_without_embeddings`], this ignores the *current*
+    /// `chunks_vec` contents: a rebuild replaces the entire embedding space, so
+    /// every chunk (including those with old-space vectors) must be re-embedded
+    /// and staged before atomic install. A staged row only counts if its
+    /// `chunk_hash` matches the chunk's current `hash` — a chunk edited
+    /// mid-rebuild is re-staged with its new text, and a deleted chunk stops
+    /// being eligible. Staged rows survive a crash/reopen, so a retry only
+    /// re-embeds the remaining chunks.
+    pub(crate) fn chunks_not_staged(
+        &self,
+        pending_id: &str,
+    ) -> Result<Vec<(String, String)>, rusqlite::Error> {
+        if !self.vec_available {
+            return Ok(vec![]);
+        }
+        let mut stmt = self.db.prepare(
+            "SELECT c.id, c.text FROM chunks c \
+             WHERE NOT EXISTS ( \
+               SELECT 1 FROM vector_staging s \
+               WHERE s.pending_id = ?1 AND s.chunk_id = c.id AND s.chunk_hash = c.hash \
+             )",
+        )?;
+        let results = stmt
+            .query_map(params![pending_id], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(results)
+    }
+
+    /// Total number of chunks in the index (for install completeness checks).
+    pub(crate) fn chunk_count(&self) -> i64 {
+        self.db
+            .query_row("SELECT COUNT(*) FROM chunks", [], |r| r.get(0))
+            .unwrap_or(0)
     }
 
     /// Insert or update an embedding for a chunk.
@@ -585,6 +826,13 @@ impl MemoryIndex {
     /// (older than `stale_threshold_secs`). Returns `true` if claimed.
     /// Under SQLite's serialized writer model, at most one agent wins.
     pub fn try_claim_reindex(&self, stale_threshold_secs: i64) -> bool {
+        self.try_claim_reindex_owned(stale_threshold_secs).is_some()
+    }
+
+    /// Like [`Self::try_claim_reindex`], but returns the exact claim token on
+    /// success so the caller can later perform an owner-scoped
+    /// [`Self::release_claim`].
+    pub fn try_claim_reindex_owned(&self, stale_threshold_secs: i64) -> Option<String> {
         let pid = std::process::id();
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -605,14 +853,21 @@ impl MemoryIndex {
                 0
             });
 
-        rows == 1
+        if rows == 1 { Some(claim_value) } else { None }
     }
 
-    /// Release the reindex claim. Call after reindex completes.
-    pub fn release_claim(&self) {
-        let _ = self
-            .db
-            .execute("UPDATE meta SET value = '' WHERE key = 'reindex_claim'", []);
+    /// Release the reindex claim, but only when this caller still owns it.
+    ///
+    /// Owner-scoped: if a concurrent agent reclaimed the claim via the stale
+    /// window while we were working, our release must NOT clear their claim
+    /// (that would let a third agent claim while the second is still syncing).
+    /// `claim_value` must be the exact token [`Self::try_claim_reindex_owned`]
+    /// returned (or, in tests, the current value of the claim).
+    pub fn release_claim(&self, claim_value: &str) {
+        let _ = self.db.execute(
+            "UPDATE meta SET value = '' WHERE key = 'reindex_claim' AND value = ?1",
+            params![claim_value],
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -1247,13 +1502,15 @@ mod tests {
         );
 
         // After the first owner releases, the CLI can claim successfully.
-        idx.release_claim();
+        let claim = idx.get_reindex_claim();
+        idx.release_claim(&claim);
         let third = idx.try_claim_reindex(60);
         assert!(
             third,
             "CLI reindex must succeed after the live session releases"
         );
-        idx.release_claim();
+        let claim = idx.get_reindex_claim();
+        idx.release_claim(&claim);
     }
 
     /// `grok memory reindex` Phase 3 resets the stale reindex claim.
@@ -1275,12 +1532,47 @@ mod tests {
         );
 
         // Simulate `grok memory reindex` Phase 3: release the claim.
-        idx.release_claim();
+        let claim = idx.get_reindex_claim();
+        idx.release_claim(&claim);
 
         assert_eq!(
             idx.get_reindex_claim(),
             "",
             "release_claim must reset the claim so doctor reports no stale lock"
         );
+    }
+
+    /// A5: `release_claim` is owner-scoped — a stolen (stale-window) claim is
+    /// never cleared by the loser.
+    #[test]
+    fn test_reindex_claim_release_is_owner_scoped() {
+        let tmp = TempDir::new().unwrap();
+        let idx = test_index(&tmp);
+
+        // Original owner claims.
+        let original = idx
+            .try_claim_reindex_owned(i64::MAX)
+            .expect("original owner must claim");
+        // A second agent steals the claim via the stale window (writes a new
+        // claim value directly, as a stale predicate would allow).
+        let stolen = "424242:1".to_owned();
+        idx.db()
+            .execute(
+                "UPDATE meta SET value = ?1 WHERE key = 'reindex_claim'",
+                params![stolen],
+            )
+            .unwrap();
+
+        // The original owner finishing must NOT clear the stolen claim.
+        idx.release_claim(&original);
+        assert_eq!(
+            idx.get_reindex_claim(),
+            stolen,
+            "owner-scoped release must leave the stolen claim intact"
+        );
+
+        // The actual owner can release.
+        idx.release_claim(&stolen);
+        assert_eq!(idx.get_reindex_claim(), "");
     }
 }

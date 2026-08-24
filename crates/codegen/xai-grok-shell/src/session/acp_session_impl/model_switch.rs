@@ -4,6 +4,7 @@ use xai_chat_state::conversation_util::replace_or_insert_system_head;
 impl SessionActor {
     pub(super) async fn handle_set_session_model(
         &self,
+        selection_model_id: acp::ModelId,
         inference_config: xai_grok_inference::InferenceConfig,
         use_concise: bool,
         apply_prompt_override: bool,
@@ -11,7 +12,9 @@ impl SessionActor {
         auto_compact_threshold_percent: u8,
         execution_backend: crate::agent::execution_backend::ExecutionBackend,
     ) -> Result<acp::ModelId, acp::Error> {
-        let model_id = acp::ModelId::new(inference_config.model.clone());
+        // Canonical selection is session-scoped; never take the upstream wire slug
+        // from InferenceConfig.model as the selection id.
+        let model_id = selection_model_id;
         let prepared_external_runtime = if execution_backend.is_native() {
             None
         } else if let Some(envelope) = self.external_runtime.borrow().clone() {
@@ -166,15 +169,41 @@ impl SessionActor {
         }
         let agent_name = self.agent.borrow().definition().name.clone();
         let envelope = self.external_runtime.borrow().clone();
+        // Envelope already validated while preparing `prepared_external_runtime`.
+        // Atomic session canonical + route with sampler config.
+        let reasoning_effort = inference_config.reasoning_effort;
+        *self.selection_model_id.borrow_mut() = model_id.clone();
+        let home = crate::util::grok_home::grok_home();
+        let route = crate::session::route_context::resolve_for_models_manager_with_selection(
+            &inference_config,
+            &self.models_manager,
+            model_id.0.as_ref(),
+            Some(home.as_path()),
+        )
+        .map_err(|e| {
+            acp::Error::invalid_params()
+                .data(format!("provider route unusable for model switch: {e}"))
+        })?;
+        *self.route_context.borrow_mut() = Some(route.clone());
+        let provenance = crate::session::storage::model_route::provenance_from_route_context(
+            &route,
+            model_id.0.as_ref(),
+            inference_config.model.as_str(),
+        );
+        self.sampler_handle.update_config_with_route_context(
+            inference_config,
+            xai_grok_inference::route_context::RouteContextUpdate::Replace(route),
+        );
         let _ = self
             .notifications
             .persistence_tx
             .send(PersistenceMsg::CurrentModel {
                 model_id: model_id.clone(),
                 agent_name: Some(agent_name),
-                reasoning_effort: Some(inference_config.reasoning_effort),
+                reasoning_effort: Some(reasoning_effort),
                 execution_backend: Some(execution_backend),
                 external_runtime: Some(envelope),
+                route_provenance: Some(provenance),
             });
         Ok(model_id)
     }

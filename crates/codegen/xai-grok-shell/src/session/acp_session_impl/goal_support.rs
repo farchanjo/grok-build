@@ -1070,6 +1070,31 @@ impl SessionActor {
             .await;
     }
 
+    pub(super) fn trusted_goal_assigned_sender(
+        &self,
+        goal_id: String,
+        inference_config: xai_grok_inference::InferenceConfig,
+    ) -> Option<crate::agent::subagent::assigned_spawn::GoalAssignedSpawnSender> {
+        self.tool_context
+            .assigned_spawn_sender
+            .as_ref()
+            .map(|sender| {
+                // Pass the real isolated auth profile so BYOK/OAuth binding
+                // generations and authority match final handle_request resolve.
+                let grok_home = self
+                    .auth_manager
+                    .as_ref()
+                    .map(|manager| manager.grok_home().to_path_buf());
+                crate::agent::subagent::assigned_spawn::GoalAssignedSpawnSender::new(
+                    sender,
+                    self.models_manager.clone(),
+                    inference_config,
+                    grok_home,
+                    goal_id,
+                )
+            })
+    }
+
     pub(super) fn prune_subagent_records_for_active_goal(&self) {
         let goal_id = match self.goal_tracker.lock().snapshot() {
             Some(o) => o.goal_id.clone(),
@@ -1102,20 +1127,23 @@ impl SessionActor {
                     tracing::debug!("goal planner: plan already present; skipping");
                     return;
                 }
-                Some(_) => tracker.plan_path(),
+                Some(o) => (o.goal_id.clone(), tracker.plan_path()),
                 None => return,
             }
         };
+        let (goal_id, plan_file) = plan_file;
 
         // `GOAL_PLANNER_MAX_RUNS` is telemetry-only; resume retries are unbounded.
         let attempt = 1u32;
 
-        let model_id = self
-            .chat_state_handle
-            .get_inference_settings()
-            .await
-            .map(|c| c.model)
-            .unwrap_or_default();
+        let inference_config = match self.reconstruct_full_config().await {
+            Ok(cfg) => cfg,
+            Err(e) => {
+                tracing::warn!(error = %e, "goal planner: provider route unusable");
+                return;
+            }
+        };
+        let model_id = inference_config.model.clone();
         // Fork owns history; fail-open stays OBJECTIVE-only (no last-assistant CONTEXT).
         let context = String::new();
 
@@ -1149,6 +1177,8 @@ impl SessionActor {
         let inherit_tool_names = tool_names.clone();
         let spawner: std::sync::Arc<dyn crate::session::goal_planner::GoalPlannerSpawner> =
             std::sync::Arc::new(crate::session::goal_planner::ChannelSpawner {
+                assigned_sender: self
+                    .trusted_goal_assigned_sender(goal_id.clone(), inference_config.clone()),
                 event_tx,
                 parent_session_id: self.session_id_string(),
                 parent_prompt_id,
@@ -1272,12 +1302,13 @@ impl SessionActor {
         // Assemble inputs under one scoped lock, then drop it before the spawn
         // await. `plan_path` / `strategy_path` are derived from the tracker
         // while we hold the lock (cheap path joins).
-        let (objective, plan_file, strategy_file, verifier_id) = {
+        let (goal_id, objective, plan_file, strategy_file, verifier_id) = {
             let tracker = self.goal_tracker.lock();
             let Some(o) = tracker.snapshot() else {
                 return;
             };
             (
+                o.goal_id.clone(),
                 o.objective.clone(),
                 tracker.plan_path(),
                 tracker.strategy_path(),
@@ -1290,12 +1321,14 @@ impl SessionActor {
         let session_traces_dir = crate::session::persistence::session_dir(&self.session_info);
         let scratch_root = crate::session::goal_tracker::goal_scratch_root(&verifier_id);
 
-        let model_id = self
-            .chat_state_handle
-            .get_inference_settings()
-            .await
-            .map(|c| c.model)
-            .unwrap_or_default();
+        let inference_config = match self.reconstruct_full_config().await {
+            Ok(cfg) => cfg,
+            Err(e) => {
+                tracing::warn!(error = %e, "goal strategist: provider route unusable");
+                return;
+            }
+        };
+        let model_id = inference_config.model.clone();
 
         let task_tool_name = self.resolve_goal_tool_names().await.task;
         let parent_prompt_id = self
@@ -1318,6 +1351,8 @@ impl SessionActor {
         let strategist_model_override = role_override.model.clone();
         let spawner: std::sync::Arc<dyn crate::session::goal_strategist::GoalStrategistSpawner> =
             std::sync::Arc::new(crate::session::goal_strategist::ChannelSpawner {
+                assigned_sender: self
+                    .trusted_goal_assigned_sender(goal_id.clone(), inference_config.clone()),
                 event_tx,
                 parent_session_id: self.session_id_string(),
                 parent_prompt_id,
@@ -1389,12 +1424,13 @@ impl SessionActor {
         };
 
         // Snapshot inputs under one scoped lock, dropped before the awaits.
-        let (objective, plan_file, details_file) = {
+        let (goal_id, objective, plan_file, details_file) = {
             let tracker = self.goal_tracker.lock();
             let Some(o) = tracker.snapshot() else {
                 return;
             };
             (
+                o.goal_id.clone(),
                 o.objective.clone(),
                 tracker.plan_path(),
                 o.last_classifier_details_path.clone(),
@@ -1402,12 +1438,14 @@ impl SessionActor {
         };
 
         let session_traces_dir = crate::session::persistence::session_dir(&self.session_info);
-        let model_id = self
-            .chat_state_handle
-            .get_inference_settings()
-            .await
-            .map(|c| c.model)
-            .unwrap_or_default();
+        let inference_config = match self.reconstruct_full_config().await {
+            Ok(cfg) => cfg,
+            Err(e) => {
+                tracing::warn!(error = %e, "goal summarizer: provider route unusable");
+                return;
+            }
+        };
+        let model_id = inference_config.model.clone();
         let task_tool_name = self.resolve_goal_tool_names().await.task;
         let parent_prompt_id = self
             .current_prompt_id
@@ -1420,6 +1458,8 @@ impl SessionActor {
 
         let spawner: std::sync::Arc<dyn crate::session::goal_summarizer::GoalSummarizerSpawner> =
             std::sync::Arc::new(crate::session::goal_summarizer::ChannelSpawner {
+                assigned_sender: self
+                    .trusted_goal_assigned_sender(goal_id.clone(), inference_config.clone()),
                 event_tx,
                 parent_session_id: self.session_id_string(),
                 parent_prompt_id,

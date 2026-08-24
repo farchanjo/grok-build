@@ -28,7 +28,11 @@ impl Default for MemoryIndexConfig {
 }
 
 /// Embedding provider configuration (`[memory.embedding]`).
-#[derive(Debug, Clone, PartialEq, Deserialize)]
+///
+/// Legacy path: remains readable and unchanged when a named retrieval profile
+/// is selected via [`crate::MemoryConfig`]-level `retrieval_profile` (shell)
+/// or the additive memory field. PR15 does not migrate this table.
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 #[serde(default)]
 pub struct MemoryEmbeddingConfig {
     /// Provider type: `"api"`, `"local"`, or `"auto"`.
@@ -47,6 +51,20 @@ impl Default for MemoryEmbeddingConfig {
             dimensions: 1024,
         }
     }
+}
+
+/// Additive memory retrieval-profile selection field.
+///
+/// Lives on `[memory] retrieval_profile = "<profile_id>"`. When set, memory
+/// consumers may resolve embeddings/rerank through the named profile; when
+/// absent, legacy `[memory.embedding]` / `[memory.search]` remain the only
+/// path. Credentials never appear here.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]
+#[serde(default)]
+pub struct MemoryRetrievalSelection {
+    /// Optional named `[retrieval_profiles.<id>]` reference.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retrieval_profile: Option<String>,
 }
 
 /// Hybrid search scoring configuration (`[memory.search]`).
