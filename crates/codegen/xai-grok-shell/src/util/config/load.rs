@@ -68,10 +68,21 @@ pub fn load_config_from_toml(root: &TomlValue) -> Config {
         table: &toml::map::Map<String, TomlValue>,
         key: &str,
     ) -> T {
-        table
-            .get(key)
-            .and_then(|v| v.clone().try_into().ok())
-            .unwrap_or_default()
+        match table.get(key) {
+            Some(v) => match v.clone().try_into() {
+                Ok(parsed) => parsed,
+                Err(error) => {
+                    if key == "language" {
+                        tracing::warn!(
+                            error = %error,
+                            "malformed [language] section; using defaults"
+                        );
+                    }
+                    T::default()
+                }
+            },
+            None => T::default(),
+        }
     }
     if let Some(TomlValue::Table(toolset)) = table.get("toolset")
         && toolset.get("use_concise").is_some()
@@ -111,6 +122,7 @@ pub fn load_config_from_toml(root: &TomlValue) -> Config {
             .unwrap_or_default(),
         privacy: section(table, "privacy"),
         compaction: section(table, "compaction"),
+        language: section(table, "language"),
         // Raw `[media]` section only — env / legacy image_description
         // layering lives in `MediaConfig::resolve` for runtime consumers.
         media: section(table, "media"),
@@ -272,6 +284,16 @@ enabled = false
             assert!(!enabled);
         }
     }
+    #[test]
+    fn malformed_language_section_defaults_without_panic() {
+        let root: TomlValue = toml::from_str("language = \"not-a-table\"\n").unwrap();
+        let config = load_config_from_toml(&root);
+        assert_eq!(
+            config.language,
+            crate::agent::config::LanguageConfig::default()
+        );
+    }
+
     #[test]
     fn test_relay_sync_no_section() {
         let toml_str = r#"

@@ -1771,6 +1771,18 @@ pub async fn run_leader(
                             });
                             let _ = ipc_tx_for_config.send(notification.to_string());
                         }
+                        ConfigUpdate::Language { conversation } => {
+                            info!("Language config change detected — updating active sessions");
+                            let line = internal_reload_request_line(
+                                "config-reload-language",
+                                "x.ai/internal/reload_language",
+                                serde_json::json!({ "conversation": conversation }),
+                            );
+                            let mut tx = acp_tx_for_config.lock().await;
+                            if let Err(error) = tx.write_all(line.as_bytes()).await {
+                                warn!(%error, "failed to inject language reload into ACP stream");
+                            }
+                        }
                     }
                 }
             });

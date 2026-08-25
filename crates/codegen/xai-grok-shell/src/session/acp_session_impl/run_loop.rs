@@ -2696,6 +2696,22 @@ pub(super) async fn run_session(
                             // Preserves threshold/memory/timing/two-pass state.
                             session.update_compaction_config(*compaction);
                         }
+                        SessionCommand::SetConversationLanguage {
+                            conversation_language,
+                        } => {
+                            let conversation_language = conversation_language
+                                .as_deref()
+                                .map(str::trim)
+                                .filter(|s| !s.is_empty() && *s != "off")
+                                .map(str::to_owned);
+                            *session.conversation_language.borrow_mut() =
+                                conversation_language.clone();
+                            let _ = session.notifications.persistence_tx.send(
+                                PersistenceMsg::ConversationLanguage {
+                                    conversation_language,
+                                },
+                            );
+                        }
                         SessionCommand::UpdateMediaConfig { media } => {
                             *session.media_config.borrow_mut() = *media;
                         }

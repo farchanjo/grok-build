@@ -2547,10 +2547,19 @@ impl InferenceClient {
     }
 
     /// Backend-aware streaming call that collects the full response.
+    ///
+    /// `ConversationRequest::project_response_field` is intentionally ignored
+    /// here: collect is a non-actor consumer that needs the raw assistant
+    /// text for schema validation. Live Text projection is applied only on
+    /// the InferenceActor path (`run_one_attempt`).
     pub async fn conversation_collect(
         &self,
         request: ConversationRequest,
     ) -> Result<ConversationResponse> {
+        debug_assert!(
+            !request.project_response_field,
+            "conversation_collect does not apply project_response_field; use the InferenceActor path for live projection"
+        );
         let request_id = crate::types::RequestId::random();
         let idle_timeout = std::time::Duration::from_secs(300);
         let result = match self.api_backend() {
@@ -2649,9 +2658,6 @@ mod tests {
             doom_loop_recovery: None,
             header_injector: None,
             provider_identity: crate::config::ProviderIdentity::default(),
-            supports_image_input: None,
-            supports_audio_input: None,
-            supports_video_input: None,
         }
     }
 

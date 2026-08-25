@@ -193,7 +193,9 @@ async fn read_file_image_auto_routes_session_pin_to_catalog_vision() {
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
                 .await
                 .expect("bind image-describe server");
-            let addr = listener.local_addr().expect("image-describe server address");
+            let addr = listener
+                .local_addr()
+                .expect("image-describe server address");
             let server = tokio::spawn(async move {
                 axum::serve(listener, app)
                     .await
@@ -266,11 +268,15 @@ async fn read_file_image_auto_routes_session_pin_to_catalog_vision() {
                 .expect("tool image auto-route should succeed");
             assert!(followups.is_empty());
 
-            let request = tokio::time::timeout(std::time::Duration::from_secs(1), request_rx.recv())
-                .await
-                .expect("catalog vision fallback should receive a request")
-                .expect("vision route request channel should stay open");
-            assert_eq!(request.get("model").and_then(Value::as_str), Some("vision-model"));
+            let request =
+                tokio::time::timeout(std::time::Duration::from_secs(1), request_rx.recv())
+                    .await
+                    .expect("catalog vision fallback should receive a request")
+                    .expect("vision route request channel should stay open");
+            assert_eq!(
+                request.get("model").and_then(Value::as_str),
+                Some("vision-model")
+            );
             let request_json = request.to_string();
             assert!(
                 request_json.contains("data:image/png;base64,"),
@@ -291,10 +297,10 @@ async fn read_file_image_auto_routes_session_pin_to_catalog_vision() {
                 "a non-vision coding model must not receive an inline image",
             );
             assert!(
-                tool_result.content.contains("Read image file: /tmp/auto-route.png")
-                    && tool_result
-                        .content
-                        .contains("<image_description>"),
+                tool_result
+                    .content
+                    .contains("Read image file: /tmp/auto-route.png")
+                    && tool_result.content.contains("<image_description>"),
                 "the coding model should receive the routed text description: {}",
                 tool_result.content,
             );
@@ -409,11 +415,9 @@ async fn read_file_source_text_stays_on_session_and_does_not_hit_file_model() {
                 "source text must not be inlined as images"
             );
 
-            let missed = tokio::time::timeout(
-                std::time::Duration::from_millis(200),
-                request_rx.recv(),
-            )
-            .await;
+            let missed =
+                tokio::time::timeout(std::time::Duration::from_millis(200), request_rx.recv())
+                    .await;
             assert!(
                 missed.is_err(),
                 "the file/image model must not be called for source text: {missed:?}"

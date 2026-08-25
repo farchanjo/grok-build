@@ -3130,6 +3130,7 @@ impl MvpAgent {
             session_yolo_mode,
             session_auto_mode,
             prompt_display_cwd,
+            persisted_conversation_language,
         } = spec;
         let _timer = crate::instrumentation_timer!("session.spawn_and_register");
         reject_direct_hub_cloud_meta(session_meta)?;
@@ -3212,7 +3213,7 @@ impl MvpAgent {
             );
             std::sync::Arc::new(TerminalRunner::new(notifier, session_info.id.clone()))
         };
-        let startup_hints = init
+        let mut startup_hints = init
             .meta
             .as_ref()
             .and_then(|m| m.get("startupHints"))
@@ -3220,6 +3221,9 @@ impl MvpAgent {
                 serde_json::from_value::<crate::session::StartupHints>(v.clone()).ok()
             })
             .unwrap_or_default();
+        if persisted_conversation_language.is_some() {
+            startup_hints.conversation_language = persisted_conversation_language;
+        }
         let hunk_plan = plan_hunk_tracking(
             init
                 .client_capabilities

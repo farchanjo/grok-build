@@ -2914,8 +2914,8 @@ fn config_layers_user_overrides_managed() {
 }
 /// A provider in a trusted disk layer resolves through the real
 /// `ConfigLayers` → `effective_config_disk_only` → parse seam that the
-/// direct-TOML parse tests bypass. (`ConfigLayers` has no project slot, so
-/// a repo `.grok/config.toml` structurally cannot supply one.)
+/// direct-TOML parse tests bypass. Project `.grok/config.toml` is language-
+/// only on this layer (MCP / permission stay cwd-scoped consumers).
 #[test]
 fn auth_provider_honored_only_from_trusted_disk_layers() {
     let layers = ConfigLayers {

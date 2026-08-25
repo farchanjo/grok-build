@@ -1089,6 +1089,7 @@ impl WarningLabel for crate::agent::config_model_override_parse::WarningTarget {
             Self::PrimeSection => "prime".to_owned(),
             Self::Prime { consumer, .. } => format!("prime.{consumer}"),
             Self::MemoryRetrieval { .. } => "memory".to_owned(),
+            Self::LanguageSection => "language".to_owned(),
         }
     }
 }

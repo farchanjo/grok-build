@@ -259,6 +259,11 @@ impl ReplayState {
                         self.handle_rewind_marker(*target_prompt_index);
                         return Ok(ReplayAction::Continue);
                     }
+                    XaiSessionUpdate::StreamingAttemptReset => {
+                        self.current_agent_text.clear();
+                        self.has_pending_agent = false;
+                        return Ok(ReplayAction::Continue);
+                    }
                     // Other xAI notifications are informational — skip them.
                     _ => {}
                 }
@@ -665,6 +670,36 @@ mod tests {
             ]
         );
         assert_eq!(result.prompt_index_reached, 2);
+    }
+
+    fn make_streaming_attempt_reset() -> SessionUpdate {
+        SessionUpdate::Xai(Box::new(XaiNotification {
+            session_id: acp::SessionId::new("test"),
+            update: XaiSessionUpdate::StreamingAttemptReset,
+            meta: None,
+        }))
+    }
+
+    #[test]
+    fn replay_drops_agent_text_at_streaming_attempt_reset() {
+        let tmp = TempDir::new().unwrap();
+        let updates = vec![
+            make_user_update_pi("s1", "hi", 0),
+            make_agent_update("s1", r#"{"response":"bad"}"#),
+            make_streaming_attempt_reset(),
+            make_agent_update("s1", "olá"),
+        ];
+        let result = replay_updates(&updates, tmp.path(), 1);
+        let texts: Vec<_> = result
+            .conversation
+            .iter()
+            .map(ConversationItem::text_content)
+            .collect();
+        assert_eq!(
+            texts,
+            vec!["hi", "olá"],
+            "StreamingAttemptReset must drop discarded attempt text instead of concatenating it"
+        );
     }
 
     fn make_rewind_marker(target: usize) -> SessionUpdate {

@@ -601,6 +601,12 @@ pub struct PagerLocalSnapshot {
     /// language actually in effect when `[ui].voice_stt_language` is unset but
     /// an explicit `[voice].language` applies.
     pub voice_stt_language: String,
+    /// `[language].conversation` BCP-47 tag, or `"off"` when unset.
+    pub language_conversation: String,
+    /// `[language].artifact` BCP-47 tag (default `en-US`).
+    pub language_artifact: String,
+    /// Whether artifact language is locked by project/managed config.
+    pub language_artifact_locked: bool,
     /// Current compaction strategy (auto/rolling/full_replace).
     pub compaction_strategy: String,
     /// Current compaction trigger policy (fixed/dynamic).
@@ -649,6 +655,9 @@ impl Default for PagerLocalSnapshot {
             auto_mode_gate: false,
             ask_user_question_timeout_enabled: None,
             voice_stt_language: xai_grok_voice::STT_LANGUAGE_DEFAULT.to_string(),
+            language_conversation: "off".to_string(),
+            language_artifact: "en-US".to_string(),
+            language_artifact_locked: false,
             // Compaction config defaults - match registry defaults in defs.rs
             compaction_strategy: "auto".to_string(),
             compaction_trigger_policy: "fixed".to_string(),
@@ -686,6 +695,36 @@ pub fn canonical_voice_capture_mode(value: Option<&str>) -> &'static str {
 /// `auto`). Unknown/blank/`None` → `en`.
 pub fn canonical_voice_stt_language(value: Option<&str>) -> &'static str {
     xai_grok_voice::canonicalize_stt_language(value)
+}
+
+/// Canonicalize a conversation-language BCP-47 tag. Unknown/blank → `off`.
+pub fn canonical_conversation_language(value: Option<&str>) -> &'static str {
+    intern_bcp47(value, "off", true)
+}
+
+/// Canonicalize an artifact-language BCP-47 tag. Unknown/blank → `en-US`.
+pub fn canonical_artifact_language(value: Option<&str>) -> &'static str {
+    intern_bcp47(value, "en-US", false)
+}
+
+fn intern_bcp47(value: Option<&str>, default: &'static str, allow_off: bool) -> &'static str {
+    let raw = value.unwrap_or_default().trim();
+    if raw.is_empty() {
+        return default;
+    }
+    if allow_off && raw.eq_ignore_ascii_case("off") {
+        return "off";
+    }
+    const KNOWN: &[&str] = &[
+        "en-US", "en-GB", "pt-BR", "pt-PT", "es-ES", "es-MX", "fr-FR", "de-DE", "ja-JP", "zh-CN",
+        "zh-TW", "ko-KR", "it-IT", "nl-NL", "ru-RU", "ar-SA", "hi-IN",
+    ];
+    for code in KNOWN {
+        if code.eq_ignore_ascii_case(raw) {
+            return code;
+        }
+    }
+    default
 }
 
 /// Canonicalize a raw hunk-tracker mode to a registry choice. Case-insensitive
@@ -984,6 +1023,12 @@ pub fn current_value_for(
             ui.voice_stt_language
                 .as_deref()
                 .unwrap_or(&pager.voice_stt_language),
+        )))),
+        "language.conversation" => Some(SettingValue::Enum(canonical_conversation_language(Some(
+            &pager.language_conversation,
+        )))),
+        "language.artifact" => Some(SettingValue::Enum(canonical_artifact_language(Some(
+            &pager.language_artifact,
         )))),
         // Theme: unknown disk values fall through to canonical default.
         // auto_dark/light additionally filter out "auto" (circular ref).
@@ -1673,6 +1718,18 @@ mod tests {
                 }
                 ("media_status", SettingKind::Status) => {}
                 ("open_retrieval_settings", SettingKind::Status) => {}
+                ("language.conversation", SettingKind::Enum { default, .. }) => {
+                    assert_eq!(
+                        *default, "off",
+                        "language.conversation registry default must be off"
+                    );
+                }
+                ("language.artifact", SettingKind::Enum { default, .. }) => {
+                    assert_eq!(
+                        *default, "en-US",
+                        "language.artifact registry default must be en-US"
+                    );
+                }
 
                 _ => panic!(
                     "settings::defs::default_settings() contains entry `{}` with no \

@@ -54,6 +54,8 @@ pub struct Config {
     /// `[compaction]` section — round-tripped so the pager's live compaction
     /// config updates persist and future sessions adopt them.
     pub compaction: crate::agent::config::CompactionConfig,
+    /// `[language]` section — dual-language sampling policy.
+    pub language: crate::agent::config::LanguageConfig,
     /// `[media]` section — media-understanding policy and auxiliary model
     /// routes. Round-tripped so settings-modal edits land in config.toml
     /// without disturbing unrelated tables.

@@ -691,6 +691,10 @@ pub struct StartupHints {
     /// holds the parent's System and overwriting it would bust the cache prefix.
     #[serde(default)]
     pub preserve_inherited_system: bool,
+    /// Per-session conversation language restored from Summary on load.
+    /// `None` means inherit from `[language].conversation`.
+    #[serde(default)]
+    pub conversation_language: Option<String>,
 }
 
 #[cfg(test)]

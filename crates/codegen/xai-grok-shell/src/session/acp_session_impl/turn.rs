@@ -504,6 +504,78 @@ fn validate_structured_output(
     }
 }
 
+/// Decode the language-envelope `response` string. `None` if the field is
+/// missing or not a string.
+fn extract_language_response(value: &serde_json::Value) -> Option<String> {
+    value.get("response")?.as_str().map(str::to_owned)
+}
+
+/// True when `text` is a language-envelope JSON object. Used to keep raw
+/// envelope bytes off `AgentMessageChunk` / headless stdout.
+fn is_language_envelope_json(text: &str) -> bool {
+    serde_json::from_str::<serde_json::Value>(text.trim())
+        .ok()
+        .is_some_and(|value| {
+            value.get("response").is_some() && value.get("conversation_language").is_some()
+        })
+}
+
+/// Decode `response` from envelope JSON, or `None` if `text` is not an envelope.
+fn decode_language_envelope_text(text: &str) -> Option<String> {
+    let value = serde_json::from_str::<serde_json::Value>(text.trim()).ok()?;
+    extract_language_response(&value)
+}
+
+/// Rewrite an assistant item's content to the decoded `response` so chat_state
+/// never stores the raw envelope. Clears Messages replay payloads — they still
+/// hold envelope bytes and must not be replayed after a rewrite.
+fn rewrite_assistant_content(item: ConversationItem, response: &str) -> ConversationItem {
+    match item {
+        ConversationItem::Assistant(mut assistant) => {
+            assistant.content = std::sync::Arc::<str>::from(response);
+            assistant.clear_provider_payload();
+            ConversationItem::Assistant(assistant)
+        }
+        other => other,
+    }
+}
+
+/// Map assistant items through `rewrite`, leaving non-assistant items intact.
+fn rewrite_assistant_items(
+    items: Vec<xai_grok_inference_types::ConversationItem>,
+    response: &str,
+) -> Vec<xai_grok_inference_types::ConversationItem> {
+    items
+        .into_iter()
+        .map(|item| {
+            if matches!(
+                item,
+                xai_grok_inference_types::ConversationItem::Assistant(_)
+            ) {
+                rewrite_assistant_content(item, response)
+            } else {
+                item
+            }
+        })
+        .collect()
+}
+
+impl SessionActor {
+    /// Dual-language policy for this turn. Session conversation language
+    /// overrides config; artifact comes from the merged `[language]` config
+    /// (locked values already win at merge time). Inactive when conversation
+    /// is unset.
+    fn language_policy_for_turn(&self) -> Option<crate::agent::config::ResolvedLanguagePolicy> {
+        let cfg = crate::config::load_effective_config()
+            .ok()
+            .and_then(|raw| crate::agent::config::Config::new_from_toml_cfg(&raw).ok())
+            .map(|c| c.language)
+            .unwrap_or_default();
+        let session = self.conversation_language.borrow();
+        cfg.resolved(session.as_deref())
+    }
+}
+
 /// Result of the turn-end usage drain (and cancel's no-drain snapshot).
 ///
 /// **Ledger marks** only when [`Self::fail_closed`]. Sticky and background
@@ -2787,6 +2859,17 @@ impl SessionActor {
         artifact_tracker: Option<&crate::upload::manifest::ArtifactTracker>,
         json_schema: Option<serde_json::Value>,
     ) -> Result<TurnOutcome, acp::Error> {
+        let language_policy = self.language_policy_for_turn();
+        let user_supplied_schema = json_schema.is_some();
+        let language_envelope_active = language_policy.is_some() && !user_supplied_schema;
+        let json_schema = match (json_schema, language_policy.as_ref()) {
+            (Some(user), _) => Some(user),
+            (None, Some(policy)) => Some(xai_grok_inference_types::language_envelope_schema(
+                &policy.conversation,
+                &policy.artifact,
+            )),
+            (None, None) => None,
+        };
         let conv_turn_start = std::time::Instant::now();
         self.maybe_refresh_model_metadata_on_resume().await;
         self.maybe_compact_on_model_switch().await?;
@@ -2887,6 +2970,29 @@ impl SessionActor {
         };
         let structured_output_native = schema_ok && native_backend;
         let structured_output_tool = schema_ok && !native_backend;
+        self.language_envelope_turn.set(language_envelope_active);
+        self.suppress_language_envelope_text
+            .set(language_envelope_active && structured_output_tool);
+        struct ClearLanguageEnvelopeTurn<'a>(&'a SessionActor);
+        impl Drop for ClearLanguageEnvelopeTurn<'_> {
+            fn drop(&mut self) {
+                self.0.language_envelope_turn.set(false);
+                self.0.suppress_language_envelope_text.set(false);
+            }
+        }
+        let _clear_language_envelope_turn = ClearLanguageEnvelopeTurn(self);
+        if let Some(policy) = language_policy.as_ref() {
+            // Per-turn reminder so mid-session [language] changes apply on the
+            // next turn without rebuilding the cached system prompt.
+            self.push_system_reminder(&format!(
+                "Conversational replies MUST be written in {}.\n\
+ALL artifacts MUST be written in {}: source code, comments, documentation, \
+test names, commit messages, pull-request text, subagent prompts, \
+image/video prompts, and diagnostics.\n\
+Preserve identifiers, file paths, and quoted text verbatim; do not translate them.",
+                policy.conversation, policy.artifact
+            ));
+        }
         if structured_output_tool {
             self.push_system_reminder(
                 "A response schema is required. After any tool use, call the \
@@ -3044,6 +3150,9 @@ impl SessionActor {
             }
             if structured_output_native {
                 request.json_schema = json_schema.clone();
+                if language_envelope_active {
+                    request.project_response_field = true;
+                }
             }
             request.hosted_tools = self.hosted_tools_for_turn();
             request.max_output_tokens = self
@@ -3333,28 +3442,122 @@ impl SessionActor {
                 stop_reason == Some(xai_grok_inference_types::StopReason::ContentFilter);
             let refusal_explanation = response.stop_message.clone();
             let final_answer_text = json_schema.is_some().then(|| response.assistant_text());
-            for item in response.items {
-                match item {
-                    xai_grok_inference_types::ConversationItem::Assistant(_) => {
-                        self.record_assistant_response(item).await;
+            let mut language_envelope_error: Option<String> = None;
+            let mut items = response.items;
+            // Rewrite/decode assistant content for every language-envelope round,
+            // including tool-call rounds. Only the final no-tool round is the
+            // user-visible answer, but no round may persist the raw envelope.
+            if language_envelope_active
+                && let Some(validator) = structured_output_validator.as_ref()
+                && !turn_refused
+                && stop_reason != Some(xai_grok_inference_types::StopReason::Length)
+            {
+                match final_answer_text.as_ref() {
+                    Some(text) => match validate_structured_output(validator, text) {
+                        Ok(value) => match extract_language_response(&value) {
+                            Some(decoded) => {
+                                items = rewrite_assistant_items(items, &decoded);
+                            }
+                            None => {
+                                items = rewrite_assistant_items(items, "");
+                                if tool_calls.is_empty() {
+                                    language_envelope_error = Some(
+                                        "output does not match the required schema: missing response"
+                                            .to_string(),
+                                    );
+                                }
+                            }
+                        },
+                        Err(err) => {
+                            items = rewrite_assistant_items(items, "");
+                            if tool_calls.is_empty() {
+                                language_envelope_error = Some(err);
+                            }
+                        }
+                    },
+                    None => {
+                        if tool_calls.is_empty() {
+                            language_envelope_error = Some(
+                                "model output was not valid JSON: empty assistant text".into(),
+                            );
+                        }
                     }
-                    _ => {
-                        self.chat_state_handle.push_tool_result(item);
+                }
+            } else if language_envelope_active {
+                // Length / content-filter / no validator: still never persist
+                // envelope JSON as assistant content.
+                items = items
+                    .into_iter()
+                    .map(|item| match &item {
+                        xai_grok_inference_types::ConversationItem::Assistant(a)
+                            if is_language_envelope_json(a.content.as_ref()) =>
+                        {
+                            let decoded = decode_language_envelope_text(a.content.as_ref())
+                                .unwrap_or_default();
+                            rewrite_assistant_content(item, &decoded)
+                        }
+                        _ => item,
+                    })
+                    .collect();
+            }
+            let fallback_decoded = language_envelope_active.then(|| {
+                items.iter().find_map(|item| match item {
+                    xai_grok_inference_types::ConversationItem::Assistant(a) => {
+                        Some(a.content.as_ref().to_owned())
+                    }
+                    _ => None,
+                })
+            });
+            if let Some(err) = language_envelope_error.as_ref() {
+                tracing::warn!(
+                    error = %err,
+                    "language envelope validation failed after provisional stream; resetting attempt"
+                );
+                self.send_buffered_xai_update(XaiSessionUpdate::StreamingAttemptReset)
+                    .await;
+            } else {
+                for item in items {
+                    match item {
+                        xai_grok_inference_types::ConversationItem::Assistant(_) => {
+                            self.record_assistant_response(item).await;
+                        }
+                        _ => {
+                            self.chat_state_handle.push_tool_result(item);
+                        }
                     }
                 }
             }
-            if let Some(text) = fallback_text {
-                tracing::warn!(
-                    text_len = text.len(),
-                    "emitting fallback AgentMessageChunk — no text chunks were streamed"
-                );
-                self.send_update(
-                    acp::SessionUpdate::AgentMessageChunk(acp::ContentChunk::new(
-                        acp::ContentBlock::Text(acp::TextContent::new(text)),
-                    )),
-                    None,
-                )
-                .await;
+            // Fallback AgentMessageChunk is the user-visible answer. Skip it on
+            // tool-call rounds and never emit raw envelope JSON.
+            if language_envelope_error.is_none()
+                && tool_calls.is_empty()
+                && let Some(text) = fallback_text
+            {
+                let text = fallback_decoded.flatten().unwrap_or(text);
+                let text = if language_envelope_active {
+                    if is_language_envelope_json(&text) {
+                        decode_language_envelope_text(&text)
+                    } else if text.trim().is_empty() {
+                        None
+                    } else {
+                        Some(text)
+                    }
+                } else {
+                    Some(text)
+                };
+                if let Some(text) = text {
+                    tracing::warn!(
+                        text_len = text.len(),
+                        "emitting fallback AgentMessageChunk — no text chunks were streamed"
+                    );
+                    self.send_update(
+                        acp::SessionUpdate::AgentMessageChunk(acp::ContentChunk::new(
+                            acp::ContentBlock::Text(acp::TextContent::new(text)),
+                        )),
+                        None,
+                    )
+                    .await;
+                }
             }
             if turn_refused && response_is_empty {
                 let mut notice = "The model provider refused to generate a response \
@@ -3457,18 +3660,20 @@ impl SessionActor {
                 // reaches this branch on the normal InferenceClient path. The
                 // Length arm below is defense-in-depth only.
                 let structured_output = match (
+                    language_envelope_error,
                     structured_output_validator.as_ref(),
                     final_answer_text.as_ref(),
                     turn_refused,
                     stop_reason,
                 ) {
-                    (Some(_), _, true, _) => Some(Err(
+                    (Some(err), _, _, _, _) => Some(Err(err)),
+                    (_, Some(_), _, true, _) => Some(Err(
                         "model refused to produce structured output (content filter)".to_string(),
                     )),
-                    (Some(_), _, _, Some(xai_grok_inference_types::StopReason::Length)) => Some(
+                    (_, Some(_), _, _, Some(xai_grok_inference_types::StopReason::Length)) => Some(
                         Err("model hit max_tokens before completing structured output".to_string()),
                     ),
-                    (Some(validator), Some(text), false, _) => {
+                    (_, Some(validator), Some(text), false, _) => {
                         Some(validate_structured_output(validator, text))
                     }
                     _ => None,
@@ -3492,6 +3697,24 @@ impl SessionActor {
                 {
                     StructuredOutputStep::Complete(validated) => {
                         turn_tools_called.push(STRUCTURED_OUTPUT_TOOL.to_string());
+                        if language_envelope_active {
+                            match &validated {
+                                Ok(value) => {
+                                    if let Some(decoded) = extract_language_response(value) {
+                                        self.send_update(
+                                            acp::SessionUpdate::AgentMessageChunk(
+                                                acp::ContentChunk::new(acp::ContentBlock::Text(
+                                                    acp::TextContent::new(decoded),
+                                                )),
+                                            ),
+                                            None,
+                                        )
+                                        .await;
+                                    }
+                                }
+                                Err(_) => {}
+                            }
+                        }
                         let snapshot = self
                             .finalize_turn_bookkeeping(
                                 req_id,
@@ -3757,7 +3980,11 @@ mod user_echo_broadcast_tests {
 }
 #[cfg(test)]
 mod structured_output_validation_tests {
-    use super::validate_structured_output;
+    use super::{
+        decode_language_envelope_text, extract_language_response, is_language_envelope_json,
+        rewrite_assistant_content, rewrite_assistant_items, validate_structured_output,
+    };
+    use crate::inference::ConversationItem;
     fn validator() -> Result<jsonschema::Validator, String> {
         let schema = serde_json::json!({
             "type": "object",
@@ -3787,5 +4014,85 @@ mod structured_output_validation_tests {
         let bad: Result<jsonschema::Validator, String> = Err("invalid output schema: boom".into());
         let err = validate_structured_output(&bad, r#"{"name":"alice","age":1}"#).unwrap_err();
         assert_eq!(err, "invalid output schema: boom");
+    }
+
+    #[test]
+    fn extract_language_response_reads_string_field() {
+        let value = serde_json::json!({
+            "conversation_language": "pt-BR",
+            "artifact_language": "en-US",
+            "response": "olá",
+        });
+        assert_eq!(extract_language_response(&value).as_deref(), Some("olá"));
+        assert!(extract_language_response(&serde_json::json!({"response": 1})).is_none());
+        assert!(extract_language_response(&serde_json::json!({})).is_none());
+    }
+
+    #[test]
+    fn rewrite_assistant_content_replaces_envelope() {
+        let item = ConversationItem::assistant(r#"{"response":"hi"}"#);
+        let rewritten = rewrite_assistant_content(item, "hi");
+        match rewritten {
+            ConversationItem::Assistant(a) => {
+                assert_eq!(a.content.as_ref(), "hi");
+                assert!(
+                    a.replayable_messages_content().is_none(),
+                    "rewritten rounds must not replay envelope wire payloads"
+                );
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn rewrite_assistant_content_clears_replayable_payload() {
+        let assistant = xai_grok_inference_types::AssistantItem {
+            content: std::sync::Arc::<str>::from(r#"{"response":"hi"}"#),
+            tool_calls: Vec::new(),
+            model_id: None,
+            model_fingerprint: None,
+            reasoning_effort: None,
+            reasoning_details: Vec::new(),
+            provider_payload: None,
+        }
+        .with_messages_payload(
+            vec![xai_grok_inference_types::messages::ContentBlock::Text {
+                text: r#"{"response":"hi"}"#.into(),
+                cache_control: None,
+                citations: None,
+            }],
+            true,
+        );
+        assert!(assistant.replayable_messages_content().is_some());
+        let rewritten = rewrite_assistant_content(ConversationItem::Assistant(assistant), "hi");
+        match rewritten {
+            ConversationItem::Assistant(a) => {
+                assert_eq!(a.content.as_ref(), "hi");
+                assert!(a.replayable_messages_content().is_none());
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn rewrite_assistant_items_runs_on_tool_call_rounds() {
+        let items = vec![ConversationItem::assistant(
+            r#"{"conversation_language":"pt-BR","artifact_language":"en-US","response":"olá"}"#,
+        )];
+        let rewritten = rewrite_assistant_items(items, "olá");
+        match &rewritten[0] {
+            ConversationItem::Assistant(a) => assert_eq!(a.content.as_ref(), "olá"),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn decode_language_envelope_text_reads_response() {
+        let raw =
+            r#"{"conversation_language":"pt-BR","artifact_language":"en-US","response":"oi"}"#;
+        assert!(is_language_envelope_json(raw));
+        assert_eq!(decode_language_envelope_text(raw).as_deref(), Some("oi"));
+        assert!(!is_language_envelope_json("plain text"));
+        assert!(decode_language_envelope_text("plain text").is_none());
     }
 }

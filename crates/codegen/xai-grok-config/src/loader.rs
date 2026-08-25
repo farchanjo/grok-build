@@ -164,6 +164,10 @@ pub struct ConfigLayers {
     pub system_managed: toml::Value,
     pub managed: toml::Value,
     pub user: toml::Value,
+    /// Project `.grok/config.toml` overlay. Not part of the general deep-merge
+    /// chain (MCP / permission stay cwd-scoped consumers). `[language]` is
+    /// merged specially in [`Self::effective_config_base`].
+    pub project: toml::Value,
     pub user_requirements: Option<toml::Value>,
     pub system_requirements: Option<toml::Value>,
     /// macOS MDM requirements; highest requirements tier when present.
@@ -177,6 +181,7 @@ impl Default for ConfigLayers {
             system_managed: toml::Value::Table(Default::default()),
             managed: toml::Value::Table(Default::default()),
             user: toml::Value::Table(Default::default()),
+            project: toml::Value::Table(Default::default()),
             user_requirements: None,
             system_requirements: None,
             mdm_requirements: None,
@@ -221,6 +226,7 @@ impl ConfigLayers {
             system_managed,
             managed,
             user,
+            project: toml::Value::Table(Default::default()),
             user_requirements,
             system_requirements,
             mdm_requirements,
@@ -234,6 +240,10 @@ impl ConfigLayers {
     }
 
     /// Layer merge only (no campaign overlay).
+    ///
+    /// `[language]` is merged with lock-aware precedence after the general
+    /// deep-merge: conversation stays user-writable; artifact locks as
+    /// requirements > managed > project-lock > user.
     pub fn effective_config_base(&self) -> toml::Value {
         let mut merged = self.system_managed.clone();
         deep_merge_toml(&mut merged, &self.managed);
@@ -247,6 +257,7 @@ impl ConfigLayers {
         if let Some(mdm_req) = &self.mdm_requirements {
             deep_merge_toml(&mut merged, mdm_req);
         }
+        apply_language_layer_merge(&mut merged, self);
         merged
     }
 
@@ -345,6 +356,138 @@ impl ConfigLayers {
         self.system_managed
             .as_table()
             .is_some_and(|t| !t.is_empty())
+    }
+}
+
+fn language_table(layer: &toml::Value) -> Option<&toml::map::Map<String, toml::Value>> {
+    layer.get("language").and_then(toml::Value::as_table)
+}
+
+fn language_str(table: &toml::map::Map<String, toml::Value>, key: &str) -> Option<String> {
+    table
+        .get(key)
+        .and_then(toml::Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned)
+}
+
+fn language_flag(table: &toml::map::Map<String, toml::Value>, key: &str) -> bool {
+    table
+        .get(key)
+        .and_then(toml::Value::as_bool)
+        .unwrap_or(false)
+}
+
+fn first_language_str<'a>(
+    layers: impl IntoIterator<Item = Option<&'a toml::map::Map<String, toml::Value>>>,
+    key: &str,
+) -> Option<String> {
+    layers
+        .into_iter()
+        .flatten()
+        .find_map(|table| language_str(table, key))
+}
+
+/// Replace `merged["language"]` with lock-aware dual-language policy.
+///
+/// Conversation is user-writable (user > project > managed > system_managed >
+/// requirements). Artifact locks when a higher-authority layer sets it:
+/// requirements > managed (when `artifact_locked`) > project (artifact set)
+/// > user. Empty layers leave `[language]` absent.
+fn apply_language_layer_merge(merged: &mut toml::Value, layers: &ConfigLayers) {
+    let system_managed = language_table(&layers.system_managed);
+    let managed = language_table(&layers.managed);
+    let user = language_table(&layers.user);
+    let project = language_table(&layers.project);
+    let user_req = layers.user_requirements.as_ref().and_then(language_table);
+    let system_req = layers.system_requirements.as_ref().and_then(language_table);
+    let mdm_req = layers.mdm_requirements.as_ref().and_then(language_table);
+
+    if system_managed.is_none()
+        && managed.is_none()
+        && user.is_none()
+        && project.is_none()
+        && user_req.is_none()
+        && system_req.is_none()
+        && mdm_req.is_none()
+    {
+        if let toml::Value::Table(table) = merged {
+            table.remove("language");
+        }
+        return;
+    }
+
+    let conversation = first_language_str(
+        [
+            user,
+            project,
+            managed,
+            system_managed,
+            user_req,
+            system_req,
+            mdm_req,
+        ],
+        "conversation",
+    );
+
+    let (artifact, artifact_locked) =
+        if let Some(artifact) = first_language_str([mdm_req, system_req, user_req], "artifact") {
+            (Some(artifact), true)
+        } else if managed.is_some_and(|t| language_flag(t, "artifact_locked"))
+            || system_managed.is_some_and(|t| language_flag(t, "artifact_locked"))
+        {
+            (
+                first_language_str([managed, system_managed], "artifact"),
+                true,
+            )
+        } else if let Some(artifact) = project.and_then(|t| language_str(t, "artifact")) {
+            (Some(artifact), true)
+        } else if project.is_some_and(|t| language_flag(t, "artifact_locked")) {
+            (None, true)
+        } else {
+            (
+                first_language_str([user, project, managed, system_managed], "artifact"),
+                false,
+            )
+        };
+
+    let validate_prose = [
+        mdm_req,
+        system_req,
+        user_req,
+        project,
+        user,
+        managed,
+        system_managed,
+    ]
+    .into_iter()
+    .flatten()
+    .any(|t| language_flag(t, "validate_prose"));
+
+    let mut language = toml::map::Map::new();
+    if let Some(conversation) = conversation {
+        language.insert("conversation".to_owned(), toml::Value::String(conversation));
+    }
+    if let Some(artifact) = artifact {
+        language.insert("artifact".to_owned(), toml::Value::String(artifact));
+    }
+    if artifact_locked {
+        language.insert("artifact_locked".to_owned(), toml::Value::Boolean(true));
+    }
+    if validate_prose {
+        language.insert("validate_prose".to_owned(), toml::Value::Boolean(true));
+    }
+
+    match merged {
+        toml::Value::Table(table) => {
+            if language.is_empty() {
+                table.remove("language");
+            } else {
+                table.insert("language".to_owned(), toml::Value::Table(language));
+            }
+        }
+        _ => {}
     }
 }
 
@@ -705,5 +848,78 @@ mod tests {
             Some(v) => unsafe { std::env::set_var("GROK_CAMPAIGNS", v) },
             None => unsafe { std::env::remove_var("GROK_CAMPAIGNS") },
         }
+    }
+
+    #[test]
+    fn language_project_artifact_locks_over_user() {
+        let layers = ConfigLayers {
+            user: toml::from_str("[language]\nconversation = \"pt-BR\"\nartifact = \"ja-JP\"\n")
+                .unwrap(),
+            project: toml::from_str("[language]\nartifact = \"en-US\"\n").unwrap(),
+            ..Default::default()
+        };
+        let merged = layers.effective_config_base();
+        assert_eq!(
+            merged["language"]["conversation"].as_str(),
+            Some("pt-BR"),
+            "conversation stays user-writable"
+        );
+        assert_eq!(merged["language"]["artifact"].as_str(), Some("en-US"));
+        assert_eq!(merged["language"]["artifact_locked"].as_bool(), Some(true));
+    }
+
+    #[test]
+    fn language_managed_lock_beats_project_and_user() {
+        let layers = ConfigLayers {
+            managed: toml::from_str("[language]\nartifact = \"en-US\"\nartifact_locked = true\n")
+                .unwrap(),
+            user: toml::from_str("[language]\nartifact = \"ja-JP\"\n").unwrap(),
+            project: toml::from_str("[language]\nartifact = \"de-DE\"\n").unwrap(),
+            ..Default::default()
+        };
+        let merged = layers.effective_config_base();
+        assert_eq!(merged["language"]["artifact"].as_str(), Some("en-US"));
+        assert_eq!(merged["language"]["artifact_locked"].as_bool(), Some(true));
+    }
+
+    #[test]
+    fn language_requirements_beat_managed_lock() {
+        let layers = ConfigLayers {
+            managed: toml::from_str("[language]\nartifact = \"en-US\"\nartifact_locked = true\n")
+                .unwrap(),
+            user_requirements: Some(toml::from_str("[language]\nartifact = \"fr-FR\"\n").unwrap()),
+            user: toml::from_str("[language]\nartifact = \"ja-JP\"\n").unwrap(),
+            ..Default::default()
+        };
+        let merged = layers.effective_config_base();
+        assert_eq!(merged["language"]["artifact"].as_str(), Some("fr-FR"));
+        assert_eq!(merged["language"]["artifact_locked"].as_bool(), Some(true));
+    }
+
+    #[test]
+    fn language_user_artifact_wins_when_unlocked() {
+        let layers = ConfigLayers {
+            managed: toml::from_str("[language]\nartifact = \"en-US\"\n").unwrap(),
+            user: toml::from_str("[language]\nartifact = \"ja-JP\"\n").unwrap(),
+            ..Default::default()
+        };
+        let merged = layers.effective_config_base();
+        assert_eq!(merged["language"]["artifact"].as_str(), Some("ja-JP"));
+        assert!(
+            merged
+                .get("language")
+                .and_then(|l| l.get("artifact_locked"))
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn language_absent_when_no_layer_sets_it() {
+        let layers = ConfigLayers {
+            user: toml::from_str("[telemetry]\nmode = \"off\"\n").unwrap(),
+            ..Default::default()
+        };
+        let merged = layers.effective_config_base();
+        assert!(merged.get("language").is_none());
     }
 }

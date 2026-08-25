@@ -98,6 +98,9 @@ async fn create_test_actor(
         chat_state_handle,
         unattributed_background_usage: std::sync::atomic::AtomicBool::new(false),
         current_prompt_id: std::sync::Arc::new(std::sync::Mutex::new(None)),
+        conversation_language: std::cell::RefCell::new(None),
+        language_envelope_turn: std::cell::Cell::new(false),
+        suppress_language_envelope_text: std::cell::Cell::new(false),
         pending_interactions: std::sync::Arc::new(std::sync::Mutex::new(
             std::collections::HashMap::new(),
         )),
@@ -650,6 +653,9 @@ async fn create_test_actor_with_memory(
         chat_state_handle,
         unattributed_background_usage: std::sync::atomic::AtomicBool::new(false),
         current_prompt_id: std::sync::Arc::new(std::sync::Mutex::new(None)),
+        conversation_language: std::cell::RefCell::new(None),
+        language_envelope_turn: std::cell::Cell::new(false),
+        suppress_language_envelope_text: std::cell::Cell::new(false),
         pending_interactions: std::sync::Arc::new(std::sync::Mutex::new(
             std::collections::HashMap::new(),
         )),
@@ -1467,6 +1473,9 @@ async fn test_e2e_idle_resume_refreshes_model_metadata() {
                 chat_state_handle,
                 unattributed_background_usage: std::sync::atomic::AtomicBool::new(false),
                 current_prompt_id: std::sync::Arc::new(std::sync::Mutex::new(None)),
+                conversation_language: std::cell::RefCell::new(None),
+                language_envelope_turn: std::cell::Cell::new(false),
+                suppress_language_envelope_text: std::cell::Cell::new(false),
                 pending_interactions: std::sync::Arc::new(std::sync::Mutex::new(
                     std::collections::HashMap::new(),
                 )),

@@ -655,6 +655,12 @@ pub struct ConversationRequest {
     /// Mapped to Chat Completions `parallel_tool_calls` and Messages
     /// `tool_choice.disable_parallel_tool_use`. `None` leaves provider default.
     pub parallel_tool_calls: Option<bool>,
+    /// When true, wrap the already-normalized L2 stream with the incremental
+    /// JSON-string projector so Text `ChannelToken`s carry unescaped `response`
+    /// contents from the language envelope. Reasoning, `ToolCallDelta`, and
+    /// `Completed.assistant_text` stay raw for terminal schema validation.
+    /// Default false is a zero-regression identity path.
+    pub project_response_field: bool,
 }
 
 impl ConversationRequest {
@@ -664,6 +670,41 @@ impl ConversationRequest {
     pub fn strip_images(&mut self) -> Vec<Arc<str>> {
         strip_images_where(&mut self.items, |_| true)
     }
+}
+
+/// JSON Schema for the dual-language sampling envelope.
+///
+/// When `conversation_language` is set and the prompt has no user
+/// `json_schema`, the shell injects this object schema onto
+/// [`ConversationRequest::json_schema`] so native structured-output routes
+/// constrain the model to:
+///
+/// ```json
+/// {
+///   "conversation_language": "<const>",
+///   "artifact_language": "<const>",
+///   "response": "<prose>"
+/// }
+/// ```
+pub fn language_envelope_schema(conversation: &str, artifact: &str) -> serde_json::Value {
+    serde_json::json!({
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["conversation_language", "artifact_language", "response"],
+        "properties": {
+            "conversation_language": {
+                "type": "string",
+                "const": conversation,
+            },
+            "artifact_language": {
+                "type": "string",
+                "const": artifact,
+            },
+            "response": {
+                "type": "string",
+            },
+        },
+    })
 }
 
 /// Replace only image parts whose URL appears in `urls`.
@@ -11147,6 +11188,33 @@ mod tests {
             reasoning_items.len(),
             2,
             "both reasoning siblings must be present"
+        );
+    }
+
+    #[test]
+    fn language_envelope_schema_is_strict_object_with_const_languages() {
+        let schema = language_envelope_schema("pt-BR", "en-US");
+        assert_eq!(schema["type"], "object");
+        assert_eq!(schema["additionalProperties"], false);
+        assert_eq!(
+            schema["required"],
+            serde_json::json!(["conversation_language", "artifact_language", "response"])
+        );
+        assert_eq!(
+            schema["properties"]["conversation_language"]["const"],
+            "pt-BR"
+        );
+        assert_eq!(schema["properties"]["artifact_language"]["const"], "en-US");
+        assert_eq!(schema["properties"]["response"]["type"], "string");
+        assert!(schema["properties"].get("extra").is_none());
+    }
+
+    #[test]
+    fn conversation_request_project_response_field_defaults_false() {
+        let req = ConversationRequest::default();
+        assert!(
+            !req.project_response_field,
+            "unset policy must be a zero-regression identity path"
         );
     }
 }

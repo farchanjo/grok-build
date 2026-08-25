@@ -837,6 +837,12 @@ pub enum SessionCommand {
     UpdateCompactionConfig {
         compaction: Box<crate::agent::config::CompactionConfig>,
     },
+    /// Set the per-session conversation language (BCP-47). `None` or `"off"`
+    /// clears the override so the session inherits `[language].conversation`.
+    /// Persists to Summary so resume restores it.
+    SetConversationLanguage {
+        conversation_language: Option<String>,
+    },
     /// Update the complete media-understanding policy for a live session.
     /// Applied at an actor mailbox boundary so a turn sees one coherent
     /// routes-and-bounds snapshot.

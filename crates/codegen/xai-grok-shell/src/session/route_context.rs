@@ -21,7 +21,7 @@ use crate::auth::{
     read_provider_oauth_auth, read_provider_oauth_binding,
 };
 use crate::provider_registry::ProviderService;
-use crate::provider_registry::id::{BuiltInProviderId, ProviderId};
+use crate::provider_registry::id::{BuiltInProviderId, ProviderId, canonical_descriptor_id};
 use crate::provider_registry::instance::{ApiSurface, CredentialRoute, ProviderIncarnation};
 use crate::provider_registry::secrets::application_key_scope;
 
@@ -45,7 +45,7 @@ pub fn resolve_production_route_context(inputs: RouteResolutionInputs<'_>) -> Pr
     };
 
     let kind = map_kind(resolved.kind);
-    let instance_id = resolved.id.as_str();
+    let instance_id = canonical_descriptor_id(resolved.id.as_str());
     let (api_surface, credential_route) = resolve_surface_and_route(inputs, kind, instance_id);
 
     let incarnation = inputs.descriptor_incarnation.filter(|s| !s.is_empty());
@@ -172,6 +172,13 @@ pub(crate) fn project_inference_for_canonical_selection(
     } else if !entry.info().base_url.is_empty() {
         projected.base_url = entry.info().base_url.clone();
     }
+    // Project the entry's provider origin too. The legacy route path (entries
+    // without a `model_provider`) derives `provider_kind` from the config's
+    // `provider_identity`, so a stale session-spawn snapshot — captured while
+    // the session ran a foreign provider — would otherwise mint a foreign
+    // route for a first-party selection and fail the exact-route drift check
+    // that re-validates against the child's fresh entry-derived config.
+    projected.provider_identity = crate::agent::config::provider_identity_for_model(entry);
     projected
 }
 
@@ -187,7 +194,13 @@ fn resolve_for_models_manager_with_selection_projected(
     let entry = models
         .get(canonical_selection_id)
         .or_else(|| crate::agent::config::find_model_by_id(&models, canonical_selection_id));
-    let resolved = entry.and_then(|m| m.model_provider.clone());
+    let mut resolved = entry.and_then(|m| m.model_provider.clone());
+    if let Some(provider) = resolved.as_mut() {
+        let canonical = canonical_descriptor_id(&provider.id);
+        if canonical != provider.id {
+            provider.id = canonical.to_owned();
+        }
+    }
 
     let (service, registry_generation) = if let Some(home) = grok_home {
         match crate::provider_registry::runtime_cache::load_runtime(home) {
@@ -447,9 +460,12 @@ fn live_api_key_binding(
     credential_route: RouteCredentialRoute,
     incarnation: Option<&str>,
 ) -> (u64, RouteAuthority) {
-    if incarnation.is_some() {
-        return (0, RouteAuthority::Unverified);
-    }
+    // Lifecycle incarnation is route identity, not an API-key vault key.
+    // Built-in providers always attach a stable incarnation via
+    // `with_lifecycle_incarnations`; skipping the live generation there
+    // froze routes at generation 0 while the vault sat at gen N, so the
+    // exact-route resolver fail-closed and stripped Authorization.
+    let _ = incarnation;
     let Some(home) = grok_home else {
         return (0, RouteAuthority::Unverified);
     };
@@ -475,7 +491,11 @@ fn live_oauth_binding(
     let Some(home) = grok_home else {
         return (0, RouteAuthority::Unverified);
     };
-    if instance_id == "openai" && incarnation.is_none() {
+    if crate::provider_registry::lifecycle_state::is_absent_or_stable_builtin_incarnation(
+        instance_id,
+        incarnation,
+    ) && instance_id == "openai"
+    {
         let path = home.join("auth.json");
         return match read_auth_json(&path) {
             Ok(store) if lookup_auth(&store, OPENAI_OAUTH_SCOPE).is_some() => {
@@ -512,7 +532,12 @@ pub fn live_binding_generation_for_route(
 ) -> Option<u64> {
     match credential_route {
         "chatgpt_oauth" => {
-            if provider_id == "openai" && incarnation.is_none() {
+            if provider_id == "openai"
+                && crate::provider_registry::lifecycle_state::is_absent_or_stable_builtin_incarnation(
+                    provider_id,
+                    incarnation,
+                )
+            {
                 let path = grok_home.join("auth.json");
                 let store = read_auth_json(&path).ok()?;
                 lookup_auth(&store, OPENAI_OAUTH_SCOPE)?;
@@ -530,9 +555,10 @@ pub fn live_binding_generation_for_route(
             (binding.incarnation == expected).then_some(binding.generation)
         }
         "api_key" | "openai_platform" => {
-            if incarnation.is_some() {
-                return None;
-            }
+            // Same contract as `lookup_route_credential`: API-key vaults are
+            // scoped by provider id. A lifecycle incarnation on the route
+            // must not hide the live binding generation.
+            let _ = incarnation;
             let scope = match provider_id {
                 "openai" => OPENAI_API_KEY_SCOPE.to_owned(),
                 "openrouter" => OPENROUTER_API_KEY_SCOPE.to_owned(),
@@ -619,6 +645,32 @@ mod tests {
     #[test]
     fn global_picker_change_cannot_alter_other_session_route_context() {
         let dir = tempdir().unwrap();
+        // Materialize the configured providers into the home: with a
+        // `grok_home`, the PR13 home-authoritative service loads from the
+        // home's config.toml and never consults the in-memory manager config.
+        {
+            use crate::provider_registry::management::ProviderManagementService;
+            use crate::provider_registry::management::dto::ProviderAddRequest;
+            use crate::provider_registry::runtime_cache;
+            runtime_cache::invalidate_for_home(dir.path());
+            let svc = ProviderManagementService::new(dir.path());
+            for provider_id in ["account-a", "account-b"] {
+                let expected = svc.current_generation();
+                assert!(
+                    svc.add(ProviderAddRequest {
+                        id: provider_id.into(),
+                        kind: "openai_compatible".into(),
+                        base_url: format!("https://{provider_id}.example/v1"),
+                        display_name: None,
+                        admin_base_url: None,
+                        enabled: true,
+                        expected_generation: expected,
+                    })
+                    .ok
+                );
+            }
+            runtime_cache::invalidate_for_home(dir.path());
+        }
         let mut config = crate::agent::config::Config::default();
         for provider_id in ["account-a", "account-b"] {
             config.model_providers.insert(
@@ -903,6 +955,76 @@ mod tests {
         );
     }
 
+    /// Regression: a first-party selection (no `model_provider`) resolves
+    /// through the legacy route path, which derives `provider_kind` from the
+    /// config's `provider_identity`. A stale session-spawn snapshot captured
+    /// while the session ran a foreign provider must not mint a foreign route:
+    /// the projection normalizes the identity from the catalog entry so the
+    /// workflow host's assigned route matches the child's fresh
+    /// entry-derived config (exact-route drift check).
+    #[test]
+    fn selection_projection_normalizes_provider_identity_for_first_party_entries() {
+        let dir = tempdir().unwrap();
+        let config = crate::agent::config::Config::default();
+        let mut models = indexmap::IndexMap::new();
+        let mut first_party = catalog_entry("grok-4.5", "xai");
+        first_party.model_provider = None;
+        first_party.info.base_url = "https://cli-chat-proxy.grok.com/v1".to_owned();
+        models.insert("grok-4.5".to_owned(), first_party);
+        let manager = crate::agent::models::ModelsManager::new(
+            None,
+            models,
+            acp::ModelId::new("grok-4.5"),
+            std::sync::Arc::new(crate::auth::AuthManager::new(
+                dir.path(),
+                crate::auth::GrokComConfig::default(),
+            )),
+            config,
+        );
+        // Stale snapshot captured while the session ran a ChatGPT route.
+        let stale = InferenceConfig {
+            base_url: "https://chatgpt.com/backend-api/codex".into(),
+            model: "chatgpt-gpt-5.6-sol".into(),
+            provider_identity: xai_grok_inference::config::ProviderIdentity::Custom,
+            ..InferenceConfig::default()
+        };
+        // Fresh entry-derived config the child will build.
+        let fresh = InferenceConfig {
+            base_url: "https://cli-chat-proxy.grok.com/v1".into(),
+            model: "grok-4.5".into(),
+            provider_identity: xai_grok_inference::config::ProviderIdentity::Xai,
+            ..InferenceConfig::default()
+        };
+
+        let projected = project_inference_for_canonical_selection(&stale, &manager, "grok-4.5");
+        assert_eq!(
+            projected.provider_identity,
+            xai_grok_inference::config::ProviderIdentity::Xai,
+            "projection must adopt the entry's provider origin"
+        );
+
+        let host_route = resolve_for_models_manager_with_selection(
+            &stale,
+            &manager,
+            "grok-4.5",
+            Some(dir.path()),
+        )
+        .expect("host route resolve");
+        let child_route = resolve_for_models_manager_with_selection(
+            &fresh,
+            &manager,
+            "grok-4.5",
+            Some(dir.path()),
+        )
+        .expect("child route resolve");
+        assert_eq!(
+            host_route, child_route,
+            "stale and fresh configs must project to the same route for one selection"
+        );
+        assert_eq!(host_route.provider_kind(), RouteProviderKind::Xai);
+        assert_eq!(host_route.instance_id(), "xai");
+    }
+
     /// F-PR5-1: omitting grok_home zeros binding generation / Unverified;
     /// isolated auth home preserves non-zero generation through re-resolve.
     #[test]
@@ -1013,6 +1135,35 @@ mod tests {
     #[test]
     fn explicit_override_rejects_sibling_account_borrow_at_mint() {
         let dir = tempdir().unwrap();
+        // Materialize the sibling accounts into the home: with a `grok_home`,
+        // the PR13 home-authoritative service loads from the home's
+        // config.toml and never consults the in-memory manager config.
+        {
+            use crate::provider_registry::management::ProviderManagementService;
+            use crate::provider_registry::management::dto::ProviderAddRequest;
+            use crate::provider_registry::runtime_cache;
+            runtime_cache::invalidate_for_home(dir.path());
+            let svc = ProviderManagementService::new(dir.path());
+            for (id, host) in [
+                ("work-openai", "https://work.openai.example/v1"),
+                ("home-openai", "https://home.openai.example/v1"),
+            ] {
+                let expected = svc.current_generation();
+                assert!(
+                    svc.add(ProviderAddRequest {
+                        id: id.into(),
+                        kind: "openai".into(),
+                        base_url: host.into(),
+                        display_name: None,
+                        admin_base_url: None,
+                        enabled: true,
+                        expected_generation: expected,
+                    })
+                    .ok
+                );
+            }
+            runtime_cache::invalidate_for_home(dir.path());
+        }
         let mut config = crate::agent::config::Config::default();
         for (id, host) in [
             ("work-openai", "https://work.openai.example/v1"),
@@ -1274,6 +1425,129 @@ mod tests {
         // Assigned spawn mapping.
         let spawn_msg = format!("provider route unusable for assigned spawn: {err}");
         assert!(spawn_msg.contains("lab") || spawn_msg.contains("disabled"));
+    }
+
+    /// Catalog presets used to stamp `grok_build_openrouter`. That id is a
+    /// config source, not a descriptor; resolve must use canonical `openrouter`.
+    #[test]
+    fn grok_build_openrouter_alias_resolves_to_canonical_openrouter() {
+        use crate::provider_registry::runtime_cache;
+
+        let dir = tempdir().unwrap();
+        runtime_cache::invalidate_for_home(dir.path());
+        let mut config = crate::agent::config::Config::default();
+        config.model_providers.insert(
+            "grok_build_openrouter".to_owned(),
+            crate::agent::model_providers::grok_build_openrouter_config(),
+        );
+        let mut models = indexmap::IndexMap::new();
+        models.insert(
+            "openrouter:moonshotai/kimi-k3".to_owned(),
+            entry_on_provider(
+                "moonshotai/kimi-k3",
+                "grok_build_openrouter",
+                ModelProviderKind::OpenRouter,
+                "https://openrouter.ai/api/v1",
+            ),
+        );
+        let manager = crate::agent::models::ModelsManager::new(
+            None,
+            models,
+            acp::ModelId::new("openrouter:moonshotai/kimi-k3"),
+            std::sync::Arc::new(crate::auth::AuthManager::new(
+                dir.path(),
+                crate::auth::GrokComConfig::default(),
+            )),
+            config,
+        );
+        let inference = InferenceConfig {
+            base_url: "https://openrouter.ai/api/v1".into(),
+            model: "moonshotai/kimi-k3".into(),
+            provider_identity: xai_grok_inference::config::ProviderIdentity::OpenRouter,
+            ..InferenceConfig::default()
+        };
+        let ok = resolve_for_models_manager_with_selection(
+            &inference,
+            &manager,
+            "openrouter:moonshotai/kimi-k3",
+            Some(dir.path()),
+        )
+        .expect("internal OpenRouter alias must resolve to the canonical built-in");
+        assert_eq!(ok.instance_id(), "openrouter");
+    }
+
+    /// Production resolve attaches the stable builtin incarnation. That stamp
+    /// must not zero the live API-key generation, or `RouteBoundBearerResolver`
+    /// fail-closes and the sampler sends OpenRouter requests with no Bearer.
+    #[test]
+    fn builtin_openrouter_lifecycle_incarnation_keeps_live_api_key_generation() {
+        use crate::auth::attribution::lookup_route_credential;
+        use crate::provider_registry::lifecycle_state::stable_builtin_incarnation;
+        use crate::provider_registry::runtime_cache;
+
+        let dir = tempdir().unwrap();
+        runtime_cache::invalidate_for_home(dir.path());
+        let generation =
+            store_provider_api_key(dir.path(), OPENROUTER_API_KEY_SCOPE, "or-live-key-BBBBBBBB")
+                .unwrap();
+        assert_eq!(generation, 1);
+
+        let mut config = crate::agent::config::Config::default();
+        config.model_providers.insert(
+            "openrouter".to_owned(),
+            ModelProviderConfig {
+                kind: ModelProviderKind::OpenRouter,
+                base_url: Some("https://openrouter.ai/api/v1".into()),
+                ..ModelProviderConfig::default()
+            },
+        );
+        let mut models = indexmap::IndexMap::new();
+        models.insert(
+            "openrouter:deepseek/deepseek-v4-flash-0731".to_owned(),
+            entry_on_provider(
+                "deepseek/deepseek-v4-flash-0731",
+                "openrouter",
+                ModelProviderKind::OpenRouter,
+                "https://openrouter.ai/api/v1",
+            ),
+        );
+        let manager = crate::agent::models::ModelsManager::new(
+            None,
+            models,
+            acp::ModelId::new("openrouter:deepseek/deepseek-v4-flash-0731"),
+            std::sync::Arc::new(crate::auth::AuthManager::new(
+                dir.path(),
+                crate::auth::GrokComConfig::default(),
+            )),
+            config,
+        );
+        let inference = InferenceConfig {
+            base_url: "https://openrouter.ai/api/v1".into(),
+            model: "deepseek/deepseek-v4-flash-0731".into(),
+            provider_identity: xai_grok_inference::config::ProviderIdentity::OpenRouter,
+            ..InferenceConfig::default()
+        };
+        let ctx = resolve_for_models_manager_with_selection(
+            &inference,
+            &manager,
+            "openrouter:deepseek/deepseek-v4-flash-0731",
+            Some(dir.path()),
+        )
+        .expect("builtin OpenRouter must resolve");
+        assert_eq!(ctx.instance_id(), "openrouter");
+        assert_eq!(ctx.credential_route(), RouteCredentialRoute::ApiKey);
+        let expected_incarnation =
+            stable_builtin_incarnation("openrouter").expect("builtin OpenRouter incarnation");
+        assert_eq!(
+            ctx.incarnation(),
+            Some(expected_incarnation.as_str()),
+            "production resolve stamps the stable builtin incarnation"
+        );
+        assert_eq!(ctx.binding_generation(), generation);
+        assert_eq!(ctx.authority(), RouteAuthority::Authoritative);
+        let snap = lookup_route_credential(dir.path(), &ctx)
+            .expect("exact-route lookup must return the vault key with incarnation present");
+        assert_eq!(snap.key, "or-live-key-BBBBBBBB");
     }
 
     /// Re-enable after disable: resolve succeeds again (session re-enableable).

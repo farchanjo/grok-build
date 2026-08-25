@@ -48,6 +48,9 @@ pub(crate) struct ModelPatch {
     pub model_id: acp::ModelId,
     pub agent_name: Option<String>,
     pub reasoning_effort: Option<Option<ReasoningEffort>>,
+    /// When `Some`, overwrite `Summary::conversation_language` (including
+    /// clearing with `Some(None)`).
+    pub conversation_language: Option<Option<String>>,
     /// When `Some`, overwrite `Summary::execution_backend`.
     pub execution_backend: Option<crate::agent::execution_backend::ExecutionBackend>,
     /// When `Some`, overwrite `Summary::external_runtime` (including clearing
@@ -97,6 +100,9 @@ pub(crate) struct SummaryPatch {
     /// set via `/rename`. Ignored when `generated_title` is also set.
     pub generated_title_if_absent: Option<String>,
     pub cwd_switch_bookkeeping_generation: Option<u64>,
+    /// When `Some`, overwrite `Summary::conversation_language` (including
+    /// clearing with `Some(None)`).
+    pub conversation_language: Option<Option<String>>,
 }
 
 impl Summary {
@@ -154,12 +160,18 @@ impl Summary {
             if let Some(reasoning_effort) = &model.reasoning_effort {
                 self.reasoning_effort = *reasoning_effort;
             }
+            if let Some(conversation_language) = &model.conversation_language {
+                self.conversation_language = conversation_language.clone();
+            }
             if let Some(backend) = model.execution_backend {
                 self.execution_backend = backend;
             }
             if let Some(envelope) = &model.external_runtime {
                 self.external_runtime = envelope.clone();
             }
+        }
+        if let Some(conversation_language) = &patch.conversation_language {
+            self.conversation_language = conversation_language.clone();
         }
         if let Some(git_head) = &patch.git_head {
             self.head_commit = git_head.commit.clone();

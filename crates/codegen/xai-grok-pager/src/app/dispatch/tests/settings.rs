@@ -644,6 +644,26 @@ fn set_simple_mode_emits_persist_setting_with_correct_payload() {
 /// if input routing breaks — closes the modal defensively
 /// (debug_assert guards this in dev builds).
 #[test]
+fn dispatch_open_settings_copies_language_fields() {
+    use crate::views::modal::ActiveModal;
+    let mut app = test_app_with_agent();
+    app.language_config.conversation = Some("pt-BR".to_string());
+    app.language_config.artifact = Some("ja-JP".to_string());
+    app.language_config.artifact_locked = true;
+    let _ = dispatch(Action::OpenSettings, &mut app);
+    let agent = app.agents.get(&AgentId(0)).expect("agent");
+    let Some(ActiveModal::Settings { state }) = &agent.active_modal else {
+        panic!("settings modal must open");
+    };
+    assert_eq!(state.pager_snapshot.language_conversation, "pt-BR");
+    assert_eq!(state.pager_snapshot.language_artifact, "ja-JP");
+    assert!(
+        state.pager_snapshot.language_artifact_locked,
+        "open-settings snapshot must copy the live lock bit"
+    );
+}
+
+#[test]
 fn dispatch_open_settings_opens_then_close_on_reentry() {
     use crate::views::modal::ActiveModal;
     let mut app = test_app_with_agent();
@@ -1531,6 +1551,12 @@ fn move_setting_away_from_default(app: &mut AppView, key: crate::settings::Setti
         "media_status" => {
             panic!("media_status is read-only, no action to dispatch");
         }
+        "language.conversation" => {
+            let _ = dispatch(Action::SetConversationLanguage("pt-BR".to_string()), app);
+        }
+        "language.artifact" => {
+            let _ = dispatch(Action::SetArtifactLanguage("ja-JP".to_string()), app);
+        }
         other => {
             panic!(
                 "move_setting_away_from_default: no arm for `{other}`. \
@@ -1980,6 +2006,41 @@ fn set_vim_mode_idempotent_no_toast() {
         "redundant set must not re-toast",
     );
 }
+#[test]
+fn language_settings_rollback_restores_previous_values() {
+    let mut app = test_app_with_agent();
+    app.language_config.conversation = Some("pt-BR".to_string());
+    app.language_config.artifact = Some("en-US".to_string());
+    let _ = dispatch(
+        Action::SetConversationLanguage("ja-JP".to_string()),
+        &mut app,
+    );
+    assert_eq!(app.language_config.conversation.as_deref(), Some("ja-JP"));
+    let _ = apply_setting_rollback(
+        &mut app,
+        "language.conversation",
+        &crate::settings::SettingValue::Enum("pt-BR"),
+    );
+    assert_eq!(
+        app.language_config.conversation.as_deref(),
+        Some("pt-BR"),
+        "failed persist must restore the previous conversation language"
+    );
+
+    let _ = dispatch(Action::SetArtifactLanguage("de-DE".to_string()), &mut app);
+    assert_eq!(app.language_config.artifact.as_deref(), Some("de-DE"));
+    let _ = apply_setting_rollback(
+        &mut app,
+        "language.artifact",
+        &crate::settings::SettingValue::Enum("en-US"),
+    );
+    assert_eq!(
+        app.language_config.artifact.as_deref(),
+        Some("en-US"),
+        "failed persist must restore the previous artifact language"
+    );
+}
+
 #[test]
 fn set_keep_text_selection_emits_persist_and_updates_cache() {
     use crate::appearance::TextSelection;

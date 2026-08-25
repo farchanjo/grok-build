@@ -360,6 +360,13 @@ impl HeadlessEmitter {
         self.usage = meta.get("usage").cloned();
     }
 
+    fn reset_streaming_attempt(&mut self) {
+        self.text_buffer.clear();
+        if matches!(self.format, OutputFormat::StreamingJson) {
+            println!("{}", serde_json::json!({"type":"streaming_attempt_reset"}));
+        }
+    }
+
     fn on_text_chunk(&mut self, text: &str) {
         match self.format {
             OutputFormat::Plain => {
@@ -1473,7 +1480,7 @@ fn track_background_lifecycle(
                 completed_before_bg.insert(key);
             }
         }
-        ExtEvent::MonitorEvent | ExtEvent::None => {}
+        ExtEvent::MonitorEvent | ExtEvent::StreamingAttemptReset | ExtEvent::None => {}
     }
 }
 
@@ -1611,6 +1618,9 @@ fn handle_headless_acp_message(
         }
         AcpClientMessageBox::ExtNotification(notif) => {
             let event = handle_ext_notification(&notif, output_format);
+            if matches!(event, ExtEvent::StreamingAttemptReset) {
+                emitter.reset_streaming_attempt();
+            }
             let _ = notif.response_tx.send(Ok(()));
             track_background_lifecycle(event, pending_bg, completed_before_bg);
         }
@@ -1645,6 +1655,8 @@ enum ExtEvent {
     /// Monitor emitted a line (or ended streaming). Does not complete the task;
     /// completion still arrives via `TaskCompleted`.
     MonitorEvent,
+    /// Native language-envelope attempt was discarded; rewind the text buffer.
+    StreamingAttemptReset,
 }
 
 fn handle_ext_notification(
@@ -1744,6 +1756,7 @@ fn handle_ext_notification(
         SubagentFinished {
             subagent_id: String,
         },
+        StreamingAttemptReset {},
         #[serde(other)]
         Other,
     }
@@ -1824,6 +1837,9 @@ fn handle_ext_notification(
         }
         XaiUpdate::SubagentFinished { subagent_id, .. } => {
             return ExtEvent::SubagentFinished { subagent_id };
+        }
+        XaiUpdate::StreamingAttemptReset {} => {
+            return ExtEvent::StreamingAttemptReset;
         }
         XaiUpdate::Other => {}
     }
@@ -2114,6 +2130,18 @@ mod tests {
         emitter.attach_structured_output(&mut target);
         assert_eq!(target["structuredOutput"]["name"], "bob");
         assert!(target.get("structuredOutputError").is_none());
+    }
+
+    #[test]
+    fn streaming_attempt_reset_clears_text_buffer() {
+        let mut emitter = super::HeadlessEmitter::new(super::OutputFormat::Json, true);
+        emitter.on_text_chunk(r#"{"response":"bad"}"#);
+        assert_eq!(emitter.text_buffer, r#"{"response":"bad"}"#);
+        emitter.reset_streaming_attempt();
+        assert!(
+            emitter.text_buffer.is_empty(),
+            "discarded attempt text must not stay in the headless buffer"
+        );
     }
 
     #[test]

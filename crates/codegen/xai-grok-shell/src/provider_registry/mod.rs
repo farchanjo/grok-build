@@ -38,7 +38,8 @@ pub use gate::{
 #[cfg(test)]
 pub(crate) use gate::{multi_account_rollout_env_lock, with_multi_account_rollout_env};
 pub use id::{
-    BuiltInProviderId, ProviderId, ProviderIdError, ProviderRef, validate_provider_id_str,
+    BuiltInProviderId, ProviderId, ProviderIdError, ProviderRef, canonical_descriptor_id,
+    validate_provider_id_str,
 };
 pub use instance::{
     ApiSurface, CredentialRoute, IncarnationError, MAX_INCARNATION_LEN, ProviderIncarnation,

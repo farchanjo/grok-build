@@ -506,6 +506,149 @@ const CONCRETE_THEME_CHOICES: &[EnumChoice] = &[
 /// globally unique — bare `plan_mode` collides with the plan-mode enum row).
 /// They are registered as normal Bool settings but hidden from the top-level
 /// list (`build_rows` skips any key that is a group child).
+const MODEL_LANGUAGE_CHILDREN: &[&str] = &["language.conversation", "language.artifact"];
+
+const BCP47_LANGUAGE_CHOICES: &[EnumChoice] = &[
+    EnumChoice {
+        canonical: "off",
+        display: "Off",
+        description: "Do not constrain conversational language (model default).",
+    },
+    EnumChoice {
+        canonical: "en-US",
+        display: "English (US)",
+        description: "",
+    },
+    EnumChoice {
+        canonical: "en-GB",
+        display: "English (UK)",
+        description: "",
+    },
+    EnumChoice {
+        canonical: "pt-BR",
+        display: "Portuguese (Brazil)",
+        description: "",
+    },
+    EnumChoice {
+        canonical: "pt-PT",
+        display: "Portuguese (Portugal)",
+        description: "",
+    },
+    EnumChoice {
+        canonical: "es-ES",
+        display: "Spanish (Spain)",
+        description: "",
+    },
+    EnumChoice {
+        canonical: "es-MX",
+        display: "Spanish (Mexico)",
+        description: "",
+    },
+    EnumChoice {
+        canonical: "fr-FR",
+        display: "French",
+        description: "",
+    },
+    EnumChoice {
+        canonical: "de-DE",
+        display: "German",
+        description: "",
+    },
+    EnumChoice {
+        canonical: "ja-JP",
+        display: "Japanese",
+        description: "",
+    },
+    EnumChoice {
+        canonical: "zh-CN",
+        display: "Chinese (Simplified)",
+        description: "",
+    },
+    EnumChoice {
+        canonical: "zh-TW",
+        display: "Chinese (Traditional)",
+        description: "",
+    },
+    EnumChoice {
+        canonical: "ko-KR",
+        display: "Korean",
+        description: "",
+    },
+    EnumChoice {
+        canonical: "it-IT",
+        display: "Italian",
+        description: "",
+    },
+    EnumChoice {
+        canonical: "nl-NL",
+        display: "Dutch",
+        description: "",
+    },
+    EnumChoice {
+        canonical: "ru-RU",
+        display: "Russian",
+        description: "",
+    },
+    EnumChoice {
+        canonical: "ar-SA",
+        display: "Arabic",
+        description: "",
+    },
+    EnumChoice {
+        canonical: "hi-IN",
+        display: "Hindi",
+        description: "",
+    },
+];
+
+const ARTIFACT_LANGUAGE_CHOICES: &[EnumChoice] = &[
+    EnumChoice {
+        canonical: "en-US",
+        display: "English (US)",
+        description: "Default artifact language.",
+    },
+    EnumChoice {
+        canonical: "en-GB",
+        display: "English (UK)",
+        description: "",
+    },
+    EnumChoice {
+        canonical: "pt-BR",
+        display: "Portuguese (Brazil)",
+        description: "",
+    },
+    EnumChoice {
+        canonical: "ja-JP",
+        display: "Japanese",
+        description: "",
+    },
+    EnumChoice {
+        canonical: "zh-CN",
+        display: "Chinese (Simplified)",
+        description: "",
+    },
+    EnumChoice {
+        canonical: "de-DE",
+        display: "German",
+        description: "",
+    },
+    EnumChoice {
+        canonical: "fr-FR",
+        display: "French",
+        description: "",
+    },
+    EnumChoice {
+        canonical: "es-ES",
+        display: "Spanish",
+        description: "",
+    },
+    EnumChoice {
+        canonical: "ko-KR",
+        display: "Korean",
+        description: "",
+    },
+];
+
 const CONTEXTUAL_HINTS_CHILDREN: &[&str] = &[
     "contextual_hints.undo",
     "contextual_hints.plan_mode",
@@ -904,6 +1047,59 @@ pub fn default_settings() -> Vec<SettingMeta> {
             kind: SettingKind::DynamicEnum {
                 default: "",
                 source: DynamicEnumSource::ActiveModelCatalog,
+                supports_preview: false,
+            },
+            restart_required: false,
+            hidden_in_minimal: false,
+        },
+        SettingMeta {
+            key: "language",
+            category: SettingCategory::Models,
+            owner: SettingOwner::Shell,
+            label: "Model language",
+            description: "Dual-language policy: conversational replies vs artifacts \
+                          (code, comments, docs, diagnostics).",
+            keywords: &[
+                "language",
+                "locale",
+                "bcp-47",
+                "conversation",
+                "artifact",
+                "translation",
+            ],
+            kind: SettingKind::Group {
+                children: MODEL_LANGUAGE_CHILDREN,
+            },
+            restart_required: false,
+            hidden_in_minimal: false,
+        },
+        SettingMeta {
+            key: "language.conversation",
+            category: SettingCategory::Models,
+            owner: SettingOwner::Shell,
+            label: "Conversation language",
+            description: "Language for conversational replies. Off leaves the model unconstrained. \
+                          Applies at the start of the next turn.",
+            keywords: &["language", "conversation", "chat", "locale"],
+            kind: SettingKind::Enum {
+                default: "off",
+                choices: BCP47_LANGUAGE_CHOICES,
+                supports_preview: false,
+            },
+            restart_required: false,
+            hidden_in_minimal: false,
+        },
+        SettingMeta {
+            key: "language.artifact",
+            category: SettingCategory::Models,
+            owner: SettingOwner::Shell,
+            label: "Artifact language",
+            description: "Language for code, comments, docs, test names, commit/PR text, and \
+                          diagnostics. Locked when set by project or managed configuration.",
+            keywords: &["language", "artifact", "code", "docs", "locale"],
+            kind: SettingKind::Enum {
+                default: "en-US",
+                choices: ARTIFACT_LANGUAGE_CHOICES,
                 supports_preview: false,
             },
             restart_required: false,
@@ -1721,7 +1917,9 @@ pub fn default_settings() -> Vec<SettingMeta> {
             owner: SettingOwner::Shell,
             label: "File model",
             description: "Auxiliary model for binary files only (PDF pages and similar). Source, JSON, and other text from read_file always stay on the session coding model. Leave Unset to reuse the image model for binary files.",
-            keywords: &["media", "file", "pdf", "binary", "document", "model", "session"],
+            keywords: &[
+                "media", "file", "pdf", "binary", "document", "model", "session",
+            ],
             kind: SettingKind::DynamicEnum {
                 default: "",
                 source: DynamicEnumSource::MediaFileModelCatalog,

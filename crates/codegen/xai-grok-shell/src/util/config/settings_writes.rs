@@ -265,6 +265,95 @@ pub async fn set_voice_stt_language(value: String) -> Result<()> {
     update_config(|cfg| cfg.ui.voice_stt_language = Some(value)).await
 }
 
+/// Persist `[language].conversation` (BCP-47 tag). Empty string or `"off"`
+/// clears the field and deactivates the dual-language policy.
+pub async fn set_language_conversation(value: String) -> Result<()> {
+    update_config(|cfg| {
+        cfg.language.conversation = if value.trim().is_empty() || value == "off" {
+            None
+        } else {
+            Some(value)
+        };
+    })
+    .await
+}
+
+/// Persist `[language].artifact` (BCP-47 tag). Rejected when the artifact
+/// language is locked by a project/managed/requirements layer.
+///
+/// Lock status is taken from the **effective** config, not the user-layer
+/// file: a managed/requirements/project lock is otherwise invisible to
+/// `load_from_disk()`.
+pub async fn set_language_artifact(value: String) -> Result<()> {
+    if language_artifact_is_locked() {
+        anyhow::bail!(
+            "artifact language is locked by project or managed configuration and cannot be changed"
+        );
+    }
+    update_config(|cfg| {
+        cfg.language.artifact = if value.trim().is_empty() {
+            None
+        } else {
+            Some(value)
+        };
+    })
+    .await
+}
+
+/// Whether `[language].artifact` is locked in the merged effective config.
+pub fn language_artifact_is_locked() -> bool {
+    crate::config::load_effective_config()
+        .ok()
+        .is_some_and(|root| language_artifact_locked_in(&root))
+}
+
+/// Lock bit from an already-merged effective TOML tree.
+pub fn language_artifact_locked_in(effective: &toml::Value) -> bool {
+    effective
+        .get("language")
+        .cloned()
+        .and_then(|value| {
+            value
+                .try_into::<crate::agent::config::LanguageConfig>()
+                .ok()
+        })
+        .is_some_and(|language| language.artifact_locked)
+}
+
+#[cfg(test)]
+mod language_lock_tests {
+    use super::language_artifact_locked_in;
+    use xai_grok_config::ConfigLayers;
+
+    #[test]
+    fn managed_lock_cannot_be_overridden_by_user_toml() {
+        let layers = ConfigLayers {
+            managed: toml::from_str("[language]\nartifact = \"en-US\"\nartifact_locked = true\n")
+                .unwrap(),
+            user: toml::from_str("[language]\nartifact = \"ja-JP\"\n").unwrap(),
+            ..Default::default()
+        };
+        let effective = layers.effective_config_base();
+        assert!(language_artifact_locked_in(&effective));
+        assert_eq!(
+            effective["language"]["artifact"].as_str(),
+            Some("en-US"),
+            "user TOML must not beat a managed artifact lock"
+        );
+    }
+
+    #[test]
+    fn unlocked_user_artifact_is_writable() {
+        let layers = ConfigLayers {
+            user: toml::from_str("[language]\nartifact = \"ja-JP\"\n").unwrap(),
+            ..Default::default()
+        };
+        assert!(!language_artifact_locked_in(
+            &layers.effective_config_base()
+        ));
+    }
+}
+
 /// Persist `[ui].default_selected_permission` via `update_config`. Value is
 /// one of the canonical strings from `DEFAULT_SELECTED_PERMISSION_CHOICES`
 /// (`default` | `allow_once` | `allow_always` | `reject`); `default` is the

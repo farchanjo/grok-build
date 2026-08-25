@@ -80,6 +80,9 @@ pub enum ConfigUpdate {
     /// band count, and model routes. Broadcasts to all sessions for
     /// live policy mutation.
     Compaction(Box<crate::agent::config::CompactionConfig>),
+    /// `[language].conversation` changed. Broadcasts to all sessions so
+    /// the per-session override and Summary patch stay in sync.
+    Language { conversation: Option<String> },
     /// Named retrieval graph sections changed (`embedding_models`,
     /// `reranker_models`, `retrieval_profiles`, `prime`, or
     /// `[memory] retrieval_profile`). Agent rebuilds the PR17 registry
@@ -132,6 +135,8 @@ pub struct ConfigReloader {
     last_project_mcp_hashes: HashMap<PathBuf, u64>,
     /// Content hash of the `[compaction]` section for dedup.
     last_compaction_hash: u64,
+    /// Content hash of the `[language]` section for dedup.
+    last_language_hash: u64,
     grok_home: PathBuf,
     auth_scope: String,
     remote_settings: Option<crate::util::config::RemoteSettings>,
@@ -155,11 +160,13 @@ impl ConfigReloader {
     ) -> Self {
         // Compute initial compaction hash from the initial config
         let initial_compaction_hash = hash_compaction_config(&initial_config);
+        let initial_language_hash = hash_language_config(&initial_config);
         Self {
             last_auth_key_hash: initial_auth_key_hash,
             last_global_config: initial_config,
             last_project_mcp_hashes: HashMap::new(),
             last_compaction_hash: initial_compaction_hash,
+            last_language_hash: initial_language_hash,
             grok_home,
             auth_scope,
             remote_settings,
@@ -470,6 +477,7 @@ impl ConfigReloader {
         }
 
         self.maybe_reload_compaction(&new_global);
+        self.maybe_reload_language(&new_global);
 
         // Named retrieval graph (PR15/PR17). Provider changes already fire
         // ModelsChanged; this covers retrieval-only section edits.
@@ -507,6 +515,25 @@ impl ConfigReloader {
                 // same prior good value must still be reconsidered.
             }
         }
+    }
+
+    fn maybe_reload_language(&mut self, config: &toml::Value) {
+        let new_hash = hash_language_config(config);
+        if self.last_language_hash == new_hash {
+            return;
+        }
+        let conversation = config
+            .get("language")
+            .and_then(|v| v.get("conversation"))
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_owned);
+        info!("language config change detected");
+        let _ = self
+            .config_update_tx
+            .send(ConfigUpdate::Language { conversation });
+        self.last_language_hash = new_hash;
     }
 }
 
@@ -683,6 +710,20 @@ fn hash_compaction_config(config: &toml::Value) -> u64 {
         })
         .unwrap_or_else(|| {
             // No compaction section → hash of empty
+            0u8.hash(&mut hasher);
+        });
+    hasher.finish()
+}
+
+fn hash_language_config(config: &toml::Value) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    config
+        .get("language")
+        .map(|v| {
+            let bytes = toml::to_string(v).unwrap_or_default();
+            bytes.hash(&mut hasher);
+        })
+        .unwrap_or_else(|| {
             0u8.hash(&mut hasher);
         });
     hasher.finish()
@@ -1114,6 +1155,44 @@ models = ["@session", "custom:summarizer"]
         assert!(
             rx.try_recv().is_err(),
             "unchanged accepted config must not dispatch twice"
+        );
+    }
+
+    #[test]
+    fn language_reload_dispatches_conversation_and_dedupes() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let initial = toml::Value::Table(toml::map::Map::new());
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut reloader = ConfigReloader::new(
+            tmp.path().to_path_buf(),
+            0,
+            initial,
+            "https://test.example.com".to_owned(),
+            None,
+            tx,
+            false,
+            false,
+        );
+        let language: toml::Value = toml::from_str(
+            r#"
+[language]
+conversation = "pt-BR"
+artifact = "en-US"
+"#,
+        )
+        .unwrap();
+        reloader.maybe_reload_language(&language);
+        let update = rx.try_recv().expect("language change should dispatch");
+        match update {
+            ConfigUpdate::Language { conversation } => {
+                assert_eq!(conversation.as_deref(), Some("pt-BR"));
+            }
+            other => panic!("expected language update, got {other:?}"),
+        }
+        reloader.maybe_reload_language(&language);
+        assert!(
+            rx.try_recv().is_err(),
+            "unchanged language config must not dispatch twice"
         );
     }
 

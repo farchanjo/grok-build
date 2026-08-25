@@ -106,6 +106,8 @@ pub enum WarningTarget {
         #[serde(skip_serializing_if = "Option::is_none")]
         field: Option<String>,
     },
+    /// The `[language]` section as a whole (malformed table).
+    LanguageSection,
 }
 
 impl WarningTarget {
@@ -127,6 +129,7 @@ impl WarningTarget {
             Self::PrimeSection => "prime".to_owned(),
             Self::Prime { consumer, .. } => format!("prime.{consumer}"),
             Self::MemoryRetrieval { .. } => "memory".to_owned(),
+            Self::LanguageSection => "language".to_owned(),
         }
     }
 
@@ -146,7 +149,8 @@ impl WarningTarget {
             | Self::EmbeddingModelsSection
             | Self::RerankerModelsSection
             | Self::RetrievalProfilesSection
-            | Self::PrimeSection => None,
+            | Self::PrimeSection
+            | Self::LanguageSection => None,
         }
     }
 }
@@ -231,6 +235,14 @@ impl ConfigWarning {
     pub(crate) fn model_provider_section(kind: ConfigWarningKind, reason: String) -> Self {
         Self {
             target: WarningTarget::ModelProviderSection,
+            kind,
+            reason,
+        }
+    }
+
+    pub(crate) fn language_section(kind: ConfigWarningKind, reason: String) -> Self {
+        Self {
+            target: WarningTarget::LanguageSection,
             kind,
             reason,
         }

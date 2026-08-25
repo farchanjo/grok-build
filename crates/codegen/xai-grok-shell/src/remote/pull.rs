@@ -156,6 +156,7 @@ pub(crate) mod hydrate {
             // Hydrated locally — record the profile this process runs under.
             sandbox_profile: xai_grok_sandbox::configured_profile_name().map(String::from),
             reasoning_effort: None,
+            conversation_language: None,
             execution_backend: crate::agent::execution_backend::ExecutionBackend::NativeInference,
             external_runtime: None,
         };

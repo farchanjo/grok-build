@@ -83,6 +83,8 @@ pub struct AgentBuilder {
     memory_workspace_path: Option<String>,
     is_non_interactive: bool,
     system_prompt_label: String,
+    conversation_language: Option<String>,
+    artifact_language: Option<String>,
     session_env: Option<Arc<HashMap<String, String>>>,
     state_path: Option<PathBuf>,
     memory_backend: Option<Arc<dyn xai_grok_tools::types::memory_backend::MemoryBackend>>,
@@ -249,6 +251,8 @@ impl AgentBuilder {
             memory_workspace_path: None,
             is_non_interactive: false,
             system_prompt_label: crate::prompt::context::DEFAULT_SYSTEM_PROMPT_LABEL.to_string(),
+            conversation_language: None,
+            artifact_language: None,
             session_env: None,
             state_path: None,
             memory_backend: None,
@@ -388,6 +392,15 @@ impl AgentBuilder {
     /// shell-prefix tip and the `<user_guide>` TUI pointer).
     pub fn with_is_non_interactive(mut self, value: bool) -> Self {
         self.is_non_interactive = value;
+        self
+    }
+    pub fn with_language_policy(
+        mut self,
+        conversation: Option<String>,
+        artifact: Option<String>,
+    ) -> Self {
+        self.conversation_language = conversation;
+        self.artifact_language = artifact;
         self
     }
     pub fn with_system_prompt_label(mut self, label: impl Into<String>) -> Self {
@@ -1223,6 +1236,8 @@ impl AgentBuilder {
             ),
             is_non_interactive: self.is_non_interactive,
             system_prompt_label: self.system_prompt_label,
+            conversation_language: self.conversation_language,
+            artifact_language: self.artifact_language,
         };
         let system_prompt = prompt_context
             .render(&tool_bridge)

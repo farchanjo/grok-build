@@ -400,6 +400,15 @@ pub(crate) mod chat_rebuild {
                 // Handled by `rebuild_chat_history` before reducer dispatch so
                 // it can load the referenced checkpoint from disk.
                 XaiUpdate::CompactionCheckpoint(_) => Vec::new(),
+                // Live TUI drops the in-progress agent bubble. Reconstruction
+                // must not concatenate the discarded attempt's AgentMessageChunks.
+                XaiUpdate::StreamingAttemptReset => {
+                    self.agent_text.clear();
+                    if self.agent_tool_calls.is_empty() {
+                        self.has_agent_content = false;
+                    }
+                    Vec::new()
+                }
                 _ => Vec::new(), // DiffReview, MemoryFlush, etc. not needed
             }
         }
@@ -1323,6 +1332,14 @@ pub trait StorageAdapter: Send + Sync {
         .await?;
         self.update_model_route_provenance(info, provenance).await
     }
+
+    /// Persist the per-session conversation language (BCP-47), including
+    /// clearing with `None`.
+    async fn update_conversation_language(
+        &self,
+        info: &Info,
+        conversation_language: Option<String>,
+    ) -> io::Result<()>;
 
     /// Update the collection ID for telemetry tracing
     async fn update_collection_id(&self, info: &Info, collection_id: &str) -> io::Result<()>;
@@ -2688,6 +2705,42 @@ mod tests {
         let error = chat_rebuild::rebuild_chat_history(dir.path()).unwrap_err();
         assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
         assert!(!dir.path().join(CHAT_HISTORY_FILE).exists());
+    }
+
+    #[test]
+    fn chat_rebuild_drops_agent_text_at_streaming_attempt_reset() {
+        use crate::inference::ConversationItem;
+        let dir = tempfile::tempdir().unwrap();
+        let user = acp_envelope(
+            r#"{"sessionUpdate":"user_message_chunk","content":{"type":"text","text":"hi"}}"#,
+        );
+        let discarded = acp_envelope(
+            r#"{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"{\"response\":\"bad\"}"}}"#,
+        );
+        let reset = xai_envelope(r#"{"sessionUpdate":"streaming_attempt_reset"}"#);
+        let kept = acp_envelope(
+            r#"{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"olá"}}"#,
+        );
+        std::fs::write(
+            dir.path().join(UPDATES_FILE),
+            format!("{user}\n{discarded}\n{reset}\n{kept}\n"),
+        )
+        .unwrap();
+
+        assert_eq!(chat_rebuild::rebuild_chat_history(dir.path()).unwrap(), 2);
+        let rebuilt = std::fs::read_to_string(dir.path().join(CHAT_HISTORY_FILE)).unwrap();
+        let items = rebuilt
+            .lines()
+            .map(|line| serde_json::from_str::<ConversationItem>(line).unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            items
+                .iter()
+                .map(ConversationItem::text_content)
+                .collect::<Vec<_>>(),
+            vec!["hi", "olá"],
+            "StreamingAttemptReset must drop the discarded attempt instead of concatenating it"
+        );
     }
 
     // ── parse_prompt_extract_event unit tests ─────────────────────────────────

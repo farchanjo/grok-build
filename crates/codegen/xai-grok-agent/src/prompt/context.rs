@@ -149,6 +149,14 @@ pub struct PromptContext {
     /// Not the UI picker name. Defaults to [`DEFAULT_SYSTEM_PROMPT_LABEL`].
     #[serde(default = "default_system_prompt_label")]
     pub system_prompt_label: String,
+    /// Conversational BCP-47 tag. When set with [`Self::artifact_language`],
+    /// `render()` appends a durable `<language_policy>` section.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub conversation_language: Option<String>,
+    /// Artifact BCP-47 tag (code, comments, docs, diagnostics). Defaults to
+    /// `en-US` when conversation language is set and this is unset.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub artifact_language: Option<String>,
 }
 /// Default legacy/custom-template identity label.
 pub const DEFAULT_SYSTEM_PROMPT_LABEL: &str = "Grok";
@@ -193,8 +201,21 @@ impl Default for PromptContext {
             current_date: None,
             is_non_interactive: false,
             system_prompt_label: default_system_prompt_label(),
+            conversation_language: None,
+            artifact_language: None,
         }
     }
+}
+
+fn format_language_policy_section(conversation: &str, artifact: &str) -> String {
+    format!(
+        "\n\n<language_policy>\n\
+Conversational replies (explanations, questions, and chat) MUST be written in {conversation}.\n\
+ALL artifacts MUST be written in {artifact}: source code, comments, documentation, test names, \
+commit messages, pull-request text, subagent prompts, image/video prompts, and diagnostics.\n\
+Preserve identifiers, file paths, and quoted text verbatim; do not translate them.\n\
+</language_policy>\n"
+    )
 }
 impl PromptContext {
     /// Format the AGENTS.md section as a `<system-reminder>` block.
@@ -261,7 +282,7 @@ impl PromptContext {
     /// correctly regardless of prompt mode.
     pub async fn render(&self, tool_bridge: &ToolBridge) -> Option<String> {
         let placeholders = self.placeholders();
-        let prompt = match self.prompt_mode {
+        let mut prompt = match self.prompt_mode {
             PromptMode::Extend => {
                 let decrypted;
                 let base = match &self.system_prompt {
@@ -295,6 +316,20 @@ impl PromptContext {
                 tool_bridge.render_prompt(body, &placeholders).await?
             }
         };
+        if let Some(conversation) = self
+            .conversation_language
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            let artifact = self
+                .artifact_language
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .unwrap_or("en-US");
+            prompt.push_str(&format_language_policy_section(conversation, artifact));
+        }
         Some(prompt)
     }
 }
@@ -324,6 +359,8 @@ mod tests {
             current_date: None,
             is_non_interactive: false,
             system_prompt_label: default_system_prompt_label(),
+            conversation_language: None,
+            artifact_language: None,
         }
     }
     #[test]
@@ -609,6 +646,8 @@ mod tests {
             current_date: None,
             is_non_interactive: false,
             system_prompt_label: default_system_prompt_label(),
+            conversation_language: None,
+            artifact_language: None,
         }
     }
     #[test]
@@ -1114,6 +1153,18 @@ mod tests {
             "tool_calling line should end cleanly after read reference"
         );
     }
+    #[test]
+    fn language_policy_section_appended_when_conversation_set() {
+        let mut ctx = test_context();
+        ctx.conversation_language = Some("pt-BR".into());
+        ctx.artifact_language = Some("en-US".into());
+        let section = format_language_policy_section("pt-BR", "en-US");
+        assert!(section.contains("<language_policy>"));
+        assert!(section.contains("pt-BR"));
+        assert!(section.contains("en-US"));
+        assert!(section.contains("Preserve identifiers"));
+    }
+
     #[test]
     fn test_prompt_body_none_skipped_in_json() {
         let ctx = test_context();

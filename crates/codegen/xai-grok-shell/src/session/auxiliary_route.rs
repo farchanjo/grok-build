@@ -103,13 +103,26 @@ pub enum AuxiliaryRouteKind {
 /// Fail-closed reasons for auxiliary route resolution.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AuxiliaryRouteError {
-    Missing { input: String },
-    Ambiguous { input: String },
+    Missing {
+        input: String,
+    },
+    Ambiguous {
+        input: String,
+    },
     SessionRouteRequired,
-    CredentialUnavailable { selection: String },
-    ConstructionFailed { selection: String, detail: String },
-    ExplicitPinFailed { selection: String },
-    NamespacedHijackRejected { input: String },
+    CredentialUnavailable {
+        selection: String,
+    },
+    ConstructionFailed {
+        selection: String,
+        detail: String,
+    },
+    ExplicitPinFailed {
+        selection: String,
+    },
+    NamespacedHijackRejected {
+        input: String,
+    },
     /// `@session` media pin on a non-vision model, and no catalog vision
     /// route with usable credentials was available.
     VisionFallbackUnavailable,

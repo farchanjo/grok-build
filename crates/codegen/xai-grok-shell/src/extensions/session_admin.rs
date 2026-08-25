@@ -14,6 +14,7 @@
 //! - `x.ai/internal/reload_models`          model list hot-reload from config.toml
 //! - `x.ai/internal/reload_models_cache`    model catalog hot-reload from disk cache
 //! - `x.ai/internal/reload_compaction`      compaction policy fan-out
+//! - `x.ai/internal/reload_language`        conversation-language fan-out
 //! - `x.ai/internal/auth_cleared`           auth hot-clear cleanup
 //! - `x.ai/plugins/reload`                  rebuild shared plugin registry
 //! - `x.ai/commands/list`                   list slash commands
@@ -50,6 +51,7 @@ pub async fn handle(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
         "x.ai/internal/reload_models" => handle_reload_models(agent, args),
         "x.ai/internal/reload_models_cache" => handle_reload_models_cache(agent),
         "x.ai/internal/reload_compaction" => handle_reload_compaction(agent, args),
+        "x.ai/internal/reload_language" => handle_reload_language(agent, args),
         "x.ai/internal/auth_cleared" => handle_auth_cleared(agent),
         "x.ai/plugins/reload" => handle_plugins_reload(agent).await,
         "x.ai/commands/list" => handle_commands_list(agent, args).await,
@@ -899,6 +901,41 @@ fn fan_out_compaction_config<'a>(
                 .is_ok()
         })
         .count()
+}
+
+fn handle_reload_language(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
+    #[derive(Deserialize)]
+    struct LanguageReload {
+        conversation: Option<String>,
+    }
+    let params: LanguageReload = parse_params(args)?;
+    let conversation = params
+        .conversation
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty() && *s != "off")
+        .map(str::to_owned);
+    let sessions = agent.sessions.borrow();
+    let total = sessions.len();
+    let updated = sessions
+        .values()
+        .filter(|session| {
+            session
+                .cmd_tx
+                .send(SessionCommand::SetConversationLanguage {
+                    conversation_language: conversation.clone(),
+                })
+                .is_ok()
+        })
+        .count();
+    tracing::info!(
+        updated,
+        total,
+        "reloaded conversation language for active sessions"
+    );
+    ExtMethodResult::success(serde_json::json!({ "reloaded": true }))
+        .to_ext_response()
+        .map_err(|error| acp::Error::internal_error().data(error.to_string()))
 }
 
 fn handle_reload_compaction(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {

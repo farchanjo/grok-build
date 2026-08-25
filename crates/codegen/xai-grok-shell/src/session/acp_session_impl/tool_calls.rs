@@ -2283,7 +2283,9 @@ impl SessionActor {
             ) {
                 Ok(bytes) => bytes,
                 Err(error) => {
-                    parts.push(format!("[{label} was not understood: invalid base64 ({error})]"));
+                    parts.push(format!(
+                        "[{label} was not understood: invalid base64 ({error})]"
+                    ));
                     continue;
                 }
             };
@@ -2539,66 +2541,66 @@ impl SessionActor {
                         prompt_text = format!("[Image from {path} was not understood: {error}]");
                     }
                     Ok(media_route) => {
-                            let describe_model = media_route.upstream_model_id.clone();
-                            let sampler_config = media_route.inference;
-                            let route_ctx = media_route.route.clone();
-                            if let Err(error) =
-                                crate::session::media_pipeline::auxiliary_media_route_allowed(
-                                    sampler_config.provider_identity,
-                                    self.auth_manager.as_ref(),
+                        let describe_model = media_route.upstream_model_id.clone();
+                        let sampler_config = media_route.inference;
+                        let route_ctx = media_route.route.clone();
+                        if let Err(error) =
+                            crate::session::media_pipeline::auxiliary_media_route_allowed(
+                                sampler_config.provider_identity,
+                                self.auth_manager.as_ref(),
+                            )
+                        {
+                            prompt_text =
+                                format!("[Image from {path} was not understood: {error}]");
+                        } else {
+                            let provider_label = sampler_config.provider_identity.label();
+                            let client =
+                                xai_grok_inference::InferenceClient::new_with_route_context(
+                                    sampler_config,
+                                    Some(route_ctx),
                                 )
-                            {
-                                prompt_text =
-                                    format!("[Image from {path} was not understood: {error}]");
-                            } else {
-                                let provider_label = sampler_config.provider_identity.label();
-                                let client =
-                                    xai_grok_inference::InferenceClient::new_with_route_context(
-                                        sampler_config,
-                                        Some(route_ctx),
-                                    )
-                                    .map_err(|error| {
-                                        acp::Error::internal_error().data(format!(
+                                .map_err(|error| {
+                                    acp::Error::internal_error().data(format!(
                                         "failed to build image-describe sampling client: {error}"
                                     ))
-                                    })?;
-                                match crate::session::media_pipeline::describe_image(
-                                    &self.image_describe_cache,
-                                    &self.media_descriptor_store,
-                                    client,
-                                    &describe_model,
-                                    Some(provider_label),
-                                    &raw_bytes,
-                                    &image_content.mime_type,
-                                    None,
-                                    "Describe this file for the current coding task.",
-                                    crate::session::image_describe::ImageDescribeSource::ToolRead,
-                                    Some(std::path::Path::new(path)),
-                                )
-                                .await
-                                {
-                                    Ok(description) => {
-                                        prompt_text = format!(
+                                })?;
+                            match crate::session::media_pipeline::describe_image(
+                                &self.image_describe_cache,
+                                &self.media_descriptor_store,
+                                client,
+                                &describe_model,
+                                Some(provider_label),
+                                &raw_bytes,
+                                &image_content.mime_type,
+                                None,
+                                "Describe this file for the current coding task.",
+                                crate::session::image_describe::ImageDescribeSource::ToolRead,
+                                Some(std::path::Path::new(path)),
+                            )
+                            .await
+                            {
+                                Ok(description) => {
+                                    prompt_text = format!(
                                             "Read image file: {path}\n\n{}",
                                             crate::session::image_describe::render_image_description_block(
                                                 &description
                                             )
                                         );
-                                    }
-                                    Err(error) => {
-                                        tracing::warn!(
-                                            %error,
-                                            %path,
-                                            "tool-result image description failed"
-                                        );
-                                        prompt_text = format!(
-                                            "[Image from {path} could not be transcribed: {error}]"
-                                        );
-                                    }
+                                }
+                                Err(error) => {
+                                    tracing::warn!(
+                                        %error,
+                                        %path,
+                                        "tool-result image description failed"
+                                    );
+                                    prompt_text = format!(
+                                        "[Image from {path} could not be transcribed: {error}]"
+                                    );
                                 }
                             }
                         }
                     }
+                }
             }
         }
         if !can_inline_images
@@ -2967,13 +2969,18 @@ impl SessionActor {
                     self.emit_event(crate::session::events::Event::PhaseChanged {
                         phase: crate::session::events::Phase::StreamingText,
                     });
-                    self.send_update(
-                        acp::SessionUpdate::AgentMessageChunk(acp::ContentChunk::new(
-                            acp::ContentBlock::Text(acp::TextContent::new(text)),
-                        )),
-                        Some(chunk_index),
-                    )
-                    .await;
+                    // StructuredOutput-tool + language envelope: buffer, do not
+                    // leak envelope JSON. The tool-complete path emits one
+                    // decoded AgentMessageChunk.
+                    if !self.suppress_language_envelope_text.get() {
+                        self.send_update(
+                            acp::SessionUpdate::AgentMessageChunk(acp::ContentChunk::new(
+                                acp::ContentBlock::Text(acp::TextContent::new(text)),
+                            )),
+                            Some(chunk_index),
+                        )
+                        .await;
+                    }
                 }
                 InferenceChannel::Reasoning => {
                     {
@@ -3014,6 +3021,17 @@ impl SessionActor {
                     name.clone(),
                     arguments_delta.clone(),
                 );
+                if name.as_deref() == Some("StructuredOutput")
+                    || matches!(
+                        &emit,
+                        crate::session::streaming_tool_calls::StreamingToolCallEmit::Announce {
+                            name: tool_name,
+                            ..
+                        } if tool_name == "StructuredOutput"
+                    )
+                {
+                    return;
+                }
                 match emit {
                     crate::session::streaming_tool_calls::StreamingToolCallEmit::None => {}
                     crate::session::streaming_tool_calls::StreamingToolCallEmit::Announce {
@@ -3149,6 +3167,10 @@ impl SessionActor {
                     );
                     self.signals_handle()
                         .record_doom_loop_recovery_attempt(triggers, doom_loop_aborted_at_chunk);
+                }
+                if self.language_envelope_turn.get() {
+                    self.send_buffered_xai_update(XaiSessionUpdate::StreamingAttemptReset)
+                        .await;
                 }
                 xai_grok_telemetry::unified_log::warn(
                     "shell.turn.inference_retry",

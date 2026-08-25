@@ -72,6 +72,7 @@ fn remote_fetch_enabled_from_layers(layers: &crate::config::ConfigLayers) -> boo
         system_managed,
         managed,
         user,
+        project: _,
         user_requirements,
         system_requirements,
         mdm_requirements,

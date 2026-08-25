@@ -195,12 +195,40 @@ fn build_model_items(models: &ModelState) -> Vec<ArgItem> {
 
         items.push(ArgItem {
             display,
-            match_text: info.name.clone(),
+            match_text: model_match_text(id, info),
             insert_text,
-            description: info.description.clone().unwrap_or_default(),
+            // Keep the slug visible when a config `[model."…"] name =` override
+            // strips the catalog date suffix (e.g. "DeepSeek V4 Flash" for
+            // `…flash-0731`). The filter also matches this field.
+            description: info
+                .description
+                .clone()
+                .filter(|d| !d.trim().is_empty())
+                .unwrap_or_else(|| id.0.as_ref().to_string()),
         });
     }
     items
+}
+
+/// Search haystack for the `/model` dropdown filter.
+///
+/// Display names are often shortened in `config.toml` (`name = "DeepSeek V4
+/// Flash"` for `openrouter:deepseek/deepseek-v4-flash-0731`). Include the
+/// canonical selection id and the upstream slug so typing `0731` or
+/// `deepseek-v4-flash-0731` still finds the row.
+fn model_match_text(id: &acp::ModelId, info: &acp::ModelInfo) -> String {
+    let mut parts = vec![info.name.as_str(), id.0.as_ref()];
+    if let Some(upstream) = info
+        .meta
+        .as_ref()
+        .and_then(|m| m.get("upstreamModelId"))
+        .and_then(|v| v.as_str())
+        && !upstream.is_empty()
+        && !parts.iter().any(|part| part.eq_ignore_ascii_case(upstream))
+    {
+        parts.push(upstream);
+    }
+    parts.join(" ")
 }
 
 /// One row per effort level for the `/model` chained effort phase.
@@ -310,13 +338,47 @@ mod tests {
         // Enter so the effort sub-menu can render.
         let reasoning = items
             .iter()
-            .find(|i| i.match_text == "Reasoning X")
+            .find(|i| i.insert_text == "Reasoning X ")
             .unwrap();
+        assert!(
+            reasoning.match_text.contains("Reasoning X"),
+            "match_text should still contain the display name: {}",
+            reasoning.match_text
+        );
         assert_eq!(reasoning.insert_text, "Reasoning X ");
 
         // Plain model has no trailing space -- Enter commits immediately.
-        let plain = items.iter().find(|i| i.match_text == "Grok 4.5").unwrap();
+        let plain = items.iter().find(|i| i.insert_text == "Grok 4.5").unwrap();
         assert_eq!(plain.insert_text, "Grok 4.5");
+        assert!(plain.match_text.contains("Grok 4.5"));
+        assert!(plain.match_text.contains("grok-4.5"));
+    }
+
+    #[test]
+    fn match_text_includes_canonical_id_when_display_name_drops_the_slug() {
+        let mut state = ModelState::default();
+        // Config override often shortens the catalog label, stripping the
+        // date suffix the user actually searches for.
+        let (id, info) = plain_model(
+            "openrouter:deepseek/deepseek-v4-flash-0731",
+            "DeepSeek V4 Flash",
+        );
+        state.available.insert(id, info);
+
+        let items = build_model_items(&state);
+        assert_eq!(items.len(), 1);
+        let haystack = items[0].match_text.to_lowercase();
+        assert!(
+            haystack.contains("0731"),
+            "typing 0731 must match: {}",
+            items[0].match_text
+        );
+        assert!(haystack.contains("deepseek-v4-flash-0731"));
+        assert!(haystack.contains("deepseek v4 flash"));
+        assert_eq!(
+            items[0].description,
+            "openrouter:deepseek/deepseek-v4-flash-0731"
+        );
     }
 
     #[test]

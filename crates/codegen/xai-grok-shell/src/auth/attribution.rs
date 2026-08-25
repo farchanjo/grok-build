@@ -496,7 +496,12 @@ pub(crate) fn lookup_route_credential(
 
     match route.credential_route() {
         RouteCredentialRoute::ChatGptOauth => {
-            if instance == "openai" && incarnation.is_none() {
+            if instance == "openai"
+                && crate::provider_registry::lifecycle_state::is_absent_or_stable_builtin_incarnation(
+                    instance,
+                    incarnation,
+                )
+            {
                 let path = grok_home.join("auth.json");
                 let store = read_auth_json(&path).ok()?;
                 let auth = lookup_auth(&store, OPENAI_OAUTH_SCOPE)?;
@@ -530,11 +535,13 @@ pub(crate) fn lookup_route_credential(
                 .map(snapshot_from_auth)
         }
         RouteCredentialRoute::ApiKey | RouteCredentialRoute::OpenAiPlatform => {
-            // API-key routes do not carry incarnation on the durable store;
-            // any incarnation requirement fails closed.
-            if incarnation.is_some() {
-                return None;
-            }
+            // API-key vaults are scoped by provider id, not lifecycle
+            // incarnation. Built-in descriptors always carry a stable
+            // incarnation (`00000000-…`); treating that as a credential-store
+            // pin made `RouteBoundBearerResolver` return `None` and the
+            // inference client strip Authorization (OpenRouter 401).
+            // Incarnation matching for disable/remove is route-guard's job.
+            let _ = incarnation;
             let scope = match (instance, route.provider_kind()) {
                 ("openai", _) => OPENAI_API_KEY_SCOPE.to_owned(),
                 ("openrouter", _) | (_, RouteProviderKind::OpenRouter)
@@ -933,6 +940,88 @@ mod tests {
             lookup_route_credential(dir.path(), &oauth_sidecar).is_none(),
             "OAuth route must not fall back to API-key store"
         );
+    }
+
+    /// Built-in OpenRouter always carries a stable lifecycle incarnation on the
+    /// production route. The API-key vault is scoped by provider id, so that
+    /// identity stamp must not fail-close exact-route lookup (otherwise the
+    /// sampler strips Authorization and OpenRouter returns 401).
+    #[test]
+    fn lookup_route_credential_ignores_lifecycle_incarnation_for_api_key() {
+        use crate::auth::{OPENROUTER_API_KEY_SCOPE, store_provider_api_key};
+        use crate::provider_registry::lifecycle_state::stable_builtin_incarnation;
+        use xai_grok_inference::{
+            ProviderRouteContext, RouteApiSurface, RouteAuthority, RouteCredentialRoute,
+            RouteProviderKind,
+        };
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let generation = store_provider_api_key(
+            dir.path(),
+            OPENROUTER_API_KEY_SCOPE,
+            "or-key-incarnation-AAAA",
+        )
+        .expect("store");
+        assert_eq!(generation, 1);
+        let incarnation = stable_builtin_incarnation("openrouter").expect("builtin incarnation");
+
+        let sidecar = ProviderRouteContext::builder()
+            .instance_id("openrouter")
+            .provider_kind(RouteProviderKind::OpenRouter)
+            .api_surface(RouteApiSurface::OpenRouterNative)
+            .credential_route(RouteCredentialRoute::ApiKey)
+            .incarnation(incarnation.as_str())
+            .binding_generation(1)
+            .authority(RouteAuthority::Authoritative)
+            .build()
+            .unwrap();
+        let snap = lookup_route_credential(dir.path(), &sidecar)
+            .expect("builtin incarnation must not hide the OpenRouter API key");
+        assert_eq!(snap.key, "or-key-incarnation-AAAA");
+    }
+
+    /// Built-in OpenAI ChatGPT OAuth is stored under `openai::oauth`, not per
+    /// lifecycle incarnation. The stable builtin stamp must still resolve.
+    #[test]
+    fn lookup_route_credential_chatgpt_oauth_accepts_stable_builtin_incarnation() {
+        use crate::auth::chatgpt_oauth::{self, ChatGptOAuthTokens};
+        use crate::provider_registry::lifecycle_state::stable_builtin_incarnation;
+        use xai_grok_inference::{
+            ProviderRouteContext, RouteApiSurface, RouteAuthority, RouteCredentialRoute,
+            RouteProviderKind,
+        };
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        chatgpt_oauth::store_tokens(
+            dir.path(),
+            &ChatGptOAuthTokens {
+                access_token: "chatgpt-oauth-token-AAAA".into(),
+                refresh_token: "refresh".into(),
+                expires_at: chrono::Utc::now() + chrono::Duration::hours(1),
+                account_id: Some("acc-1".into()),
+                email: None,
+            },
+        )
+        .expect("store oauth");
+        let generation = chatgpt_oauth::read_builtin_oauth_binding_generation(dir.path())
+            .ok()
+            .flatten()
+            .unwrap_or(0);
+        let incarnation = stable_builtin_incarnation("openai").expect("builtin incarnation");
+
+        let sidecar = ProviderRouteContext::builder()
+            .instance_id("openai")
+            .provider_kind(RouteProviderKind::OpenAi)
+            .api_surface(RouteApiSurface::ChatGptInference)
+            .credential_route(RouteCredentialRoute::ChatGptOauth)
+            .incarnation(incarnation.as_str())
+            .binding_generation(generation)
+            .authority(RouteAuthority::Authoritative)
+            .build()
+            .unwrap();
+        let snap = lookup_route_credential(dir.path(), &sidecar)
+            .expect("builtin OpenAI incarnation must not hide ChatGPT OAuth");
+        assert_eq!(snap.key, "chatgpt-oauth-token-AAAA");
     }
 
     /// Capture `tracing::Span` `on_new_span` callbacks into a

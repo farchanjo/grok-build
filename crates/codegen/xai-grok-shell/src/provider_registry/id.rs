@@ -208,6 +208,25 @@ pub fn validate_provider_id_str(s: &str) -> Result<(), ProviderIdError> {
     Ok(())
 }
 
+/// Map internal preset / legacy alias ids onto the canonical built-in
+/// instance id used by [`super::service::ProviderService`] descriptors.
+///
+/// Catalog presets historically stamped `grok_build_openrouter` (and the
+/// OpenAI/Anthropic equivalents) as `model_provider`. Those tables are
+/// config *sources* and never become descriptors, so route freeze/switch
+/// must look up `openrouter` / `openai` / `anthropic` instead. Unknown ids
+/// pass through unchanged. This is not sibling remapping: it is the same
+/// product built-in, under its public id.
+pub fn canonical_descriptor_id(id: &str) -> &str {
+    match id {
+        "grok_build_openai" | "chatgpt" | "codex" => BuiltInProviderId::OpenAi.as_str(),
+        "grok_build_openrouter" => BuiltInProviderId::OpenRouter.as_str(),
+        "grok_build_anthropic" => BuiltInProviderId::Anthropic.as_str(),
+        "grok" => BuiltInProviderId::Xai.as_str(),
+        other => other,
+    }
+}
+
 /// Reserved IDs that must not be used for user-configured providers when
 /// creating new entries (built-ins already own these names).
 pub fn is_reserved_configured_id(id: &str) -> bool {
@@ -277,5 +296,20 @@ mod tests {
                 BuiltInProviderId::Anthropic,
             ]
         );
+    }
+
+    #[test]
+    fn canonical_descriptor_id_maps_internal_aliases() {
+        assert_eq!(
+            canonical_descriptor_id("grok_build_openrouter"),
+            "openrouter"
+        );
+        assert_eq!(canonical_descriptor_id("grok_build_openai"), "openai");
+        assert_eq!(canonical_descriptor_id("grok_build_anthropic"), "anthropic");
+        assert_eq!(canonical_descriptor_id("chatgpt"), "openai");
+        assert_eq!(canonical_descriptor_id("codex"), "openai");
+        assert_eq!(canonical_descriptor_id("grok"), "xai");
+        assert_eq!(canonical_descriptor_id("openrouter"), "openrouter");
+        assert_eq!(canonical_descriptor_id("farchanjo"), "farchanjo");
     }
 }

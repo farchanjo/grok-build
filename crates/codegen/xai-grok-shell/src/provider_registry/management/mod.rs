@@ -1277,86 +1277,143 @@ impl ProviderManagementService {
         }
     }
 
+    /// Refresh catalogs for extra configured instances (second OpenRouter,
+    /// OpenAI-compatible hosts, …). Built-in openai/openrouter/anthropic are
+    /// owned by [`crate::agent::providers::ProviderManager::refresh_configured_catalogs`].
+    pub async fn refresh_additional_catalogs(&self) {
+        let Ok((entries, _)) = self.load_entries() else {
+            return;
+        };
+        for (id, cfg) in entries {
+            if matches!(id.as_str(), "openai" | "openrouter" | "anthropic" | "xai")
+                || id.starts_with("grok_build_")
+            {
+                continue;
+            }
+            if !cfg.enabled || !cfg.catalog_enabled {
+                continue;
+            }
+            let snap = self.refresh_catalog(&id).await;
+            if let Some(error) = snap.error.as_deref() {
+                tracing::warn!(provider_id = %id, %error, "additional provider catalog refresh failed");
+            } else {
+                tracing::info!(
+                    provider_id = %id,
+                    model_count = ?snap.model_count,
+                    "additional provider catalog refreshed"
+                );
+            }
+        }
+    }
+
     /// Catalog status + optional refresh using PR8/production paths.
+    ///
+    /// Built-in Anthropic/xAI keep their dedicated catalog fetchers. OpenAI,
+    /// OpenRouter, OpenAI-compatible, and Z.ai instances (including extra
+    /// OpenRouter accounts) refresh through
+    /// [`crate::agent::provider_catalog::CatalogRefreshCoordinator`] so each
+    /// instance writes `$GROK_HOME/provider_caches/<id>/` and the picker can
+    /// advertise `<instance>:<slug>` without borrowing a sibling catalog.
     pub async fn refresh_catalog(&self, id: &str) -> CatalogStatusSnapshot {
         let generation = self.current_generation();
-        if let Some(backend) = built_in_backend(id) {
-            let manager = ProviderManager::new(&self.home);
-            let result = match backend {
-                BuiltInBackendId::OpenAi => manager
-                    .refresh_openai_catalog()
-                    .await
-                    .map(|c| c.models.len()),
-                BuiltInBackendId::OpenRouter => manager
-                    .refresh_openrouter_catalog()
-                    .await
-                    .map(|c| c.models.len()),
-                BuiltInBackendId::Anthropic => manager
-                    .refresh_anthropic_catalog()
-                    .await
-                    .map(|c| c.models.len()),
-                BuiltInBackendId::Xai => {
-                    return CatalogStatusSnapshot {
-                        provider_id: id.to_owned(),
-                        generation,
-                        catalog_enabled: true,
-                        model_count: None,
-                        last_refresh_label: None,
-                        source: None,
-                        error: Some(
-                            "xAI catalog is not refreshed via the provider management path".into(),
-                        ),
-                        sample_model_ids: Vec::new(),
-                    };
-                }
-            };
-            return match result {
-                Ok(count) => CatalogStatusSnapshot {
-                    provider_id: id.to_owned(),
-                    generation,
-                    catalog_enabled: true,
-                    model_count: Some(count),
-                    last_refresh_label: Some("just now".into()),
-                    source: Some("live".into()),
-                    error: None,
-                    sample_model_ids: Vec::new(),
-                },
-                Err(e) => CatalogStatusSnapshot {
-                    provider_id: id.to_owned(),
-                    generation,
-                    catalog_enabled: true,
-                    model_count: None,
-                    last_refresh_label: None,
-                    source: None,
-                    error: Some(e.to_string()),
-                    sample_model_ids: Vec::new(),
-                },
-            };
-        }
-        // Configured: live refresh via non-mutating models list probe (PR11 path).
-        match self.probe_configured_models_list(id).await {
-            Ok(summary) => CatalogStatusSnapshot {
+        if matches!(id, "xai") {
+            return CatalogStatusSnapshot {
                 provider_id: id.to_owned(),
                 generation,
                 catalog_enabled: true,
                 model_count: None,
-                last_refresh_label: Some("just now".into()),
-                source: Some("live_probe".into()),
-                error: None,
-                sample_model_ids: vec![summary],
-            },
-            Err(e) => {
-                let cached = self.catalog_cache_hint(id);
-                CatalogStatusSnapshot {
-                    provider_id: id.to_owned(),
-                    generation,
-                    catalog_enabled: true,
-                    model_count: cached.as_ref().map(|(n, _)| *n),
-                    last_refresh_label: cached.as_ref().map(|_| "from cache".into()),
-                    source: cached.as_ref().map(|_| "cache".into()),
-                    error: Some(e),
-                    sample_model_ids: cached.map(|(_, s)| s).unwrap_or_default(),
+                last_refresh_label: None,
+                source: None,
+                error: Some("xAI catalog is not refreshed via the provider management path".into()),
+                sample_model_ids: Vec::new(),
+            };
+        }
+        if matches!(id, "anthropic") {
+            let manager = ProviderManager::new(&self.home);
+            let result = manager.refresh_anthropic_catalog().await;
+            self.seed_legacy_builtin_cache(id);
+            return match result {
+                Ok(catalog) => {
+                    let mut snap = self.catalog_status(id);
+                    snap.model_count = Some(catalog.models.len());
+                    snap.last_refresh_label = Some("just now".into());
+                    snap.source = Some("live".into());
+                    snap.error = None;
+                    if snap.sample_model_ids.is_empty() {
+                        snap.sample_model_ids = catalog
+                            .models
+                            .iter()
+                            .take(8)
+                            .map(|m| m.id.clone())
+                            .collect();
+                    }
+                    snap
                 }
+                Err(e) => {
+                    let mut snap = self.catalog_status(id);
+                    snap.error = Some(e.to_string());
+                    snap
+                }
+            };
+        }
+
+        if let Some(cfg) = self.provider_config(id) {
+            match cfg.kind {
+                crate::agent::model_providers::ModelProviderKind::OpenRouter
+                | crate::agent::model_providers::ModelProviderKind::OpenAi
+                | crate::agent::model_providers::ModelProviderKind::OpenAiCompatible
+                | crate::agent::model_providers::ModelProviderKind::Zai => {
+                    return self.refresh_openai_family_catalog(id, &cfg).await;
+                }
+                _ => {}
+            }
+        } else if matches!(id, "openrouter" | "openai") {
+            // Builtin table may exist only as a runtime descriptor.
+            let manager = ProviderManager::new(&self.home);
+            let result = if id == "openrouter" {
+                manager
+                    .refresh_openrouter_catalog()
+                    .await
+                    .map(|c| c.models.len())
+            } else {
+                manager
+                    .refresh_openai_catalog()
+                    .await
+                    .map(|c| c.models.len())
+            };
+            self.seed_legacy_builtin_cache(id);
+            return match result {
+                Ok(count) => {
+                    let mut snap = self.catalog_status(id);
+                    snap.model_count = Some(count);
+                    snap.last_refresh_label = Some("just now".into());
+                    snap.source = Some("live".into());
+                    snap.error = None;
+                    snap
+                }
+                Err(e) => {
+                    let mut snap = self.catalog_status(id);
+                    snap.error = Some(e.to_string());
+                    snap
+                }
+            };
+        }
+
+        match self.probe_configured_models_list(id).await {
+            Ok(summary) => {
+                let mut snap = self.catalog_status(id);
+                snap.last_refresh_label = Some("just now".into());
+                snap.source = Some("live_probe".into());
+                snap.error = None;
+                if snap.sample_model_ids.is_empty() {
+                    snap.sample_model_ids = vec![summary];
+                }
+                snap
+            }
+            Err(e) => {
+                let mut snap = self.catalog_status(id);
+                snap.error = Some(e);
+                snap
             }
         }
     }
@@ -1423,25 +1480,182 @@ impl ProviderManagementService {
 
     /// Best-effort catalog cache summary when origin can be derived from base_url.
     fn catalog_cache_hint(&self, id: &str) -> Option<(usize, Vec<String>)> {
+        self.seed_legacy_builtin_cache(id);
         let pid = ProviderId::new(id).ok()?;
         let detail = self.detail(id).ok()?;
         let base = detail.base_url.as_deref()?;
         let origin = normalize_endpoint_origin(base).ok()?;
-        let entry = CatalogCacheStore::load(&self.home, &pid, &origin)
+        if let Some(entry) = CatalogCacheStore::load(&self.home, &pid, &origin)
             .ok()
-            .flatten()?;
-        let samples: Vec<String> = entry
-            .models
-            .iter()
-            .take(8)
-            .filter_map(|m| {
-                m.get("id")
-                    .and_then(|v| v.as_str())
-                    .map(str::to_owned)
-                    .or_else(|| m.as_str().map(str::to_owned))
-            })
-            .collect();
-        Some((entry.models.len(), samples))
+            .flatten()
+        {
+            let samples: Vec<String> = catalog_sample_ids(&entry.models);
+            return Some((entry.models.len(), samples));
+        }
+        legacy_singleton_catalog_hint(&self.home, id)
+    }
+
+    fn provider_config(&self, id: &str) -> Option<ModelProviderConfig> {
+        let (entries, _) = self.load_entries().ok()?;
+        entries.get(id).cloned().or_else(|| {
+            // Runtime builtin tables (not necessarily present in config.toml).
+            match id {
+                "openai" => Some(crate::agent::model_providers::grok_build_openai_config()),
+                "openrouter" => Some(crate::agent::model_providers::grok_build_openrouter_config()),
+                "anthropic" => Some(crate::agent::model_providers::grok_build_anthropic_config()),
+                _ => None,
+            }
+        })
+    }
+
+    async fn refresh_openai_family_catalog(
+        &self,
+        id: &str,
+        cfg: &ModelProviderConfig,
+    ) -> CatalogStatusSnapshot {
+        use crate::agent::provider_catalog::{
+            CatalogCredential, CatalogPublisher, CatalogRefreshCoordinator,
+        };
+        use crate::agent::provider_discovery::refresh_target_from_config;
+        use crate::auth::{
+            ANTHROPIC_API_KEY_SCOPE, OPENAI_API_KEY_SCOPE, OPENROUTER_API_KEY_SCOPE,
+            read_provider_api_key, read_provider_api_key_binding,
+        };
+        use crate::provider_registry::lifecycle_state::stable_builtin_incarnation;
+        use std::sync::Arc;
+
+        let generation = self.current_generation();
+        let Ok(pid) = ProviderId::new(id) else {
+            return CatalogStatusSnapshot {
+                provider_id: id.to_owned(),
+                generation,
+                catalog_enabled: cfg.catalog_enabled,
+                model_count: None,
+                last_refresh_label: None,
+                source: None,
+                error: Some(format!("invalid provider id `{id}`")),
+                sample_model_ids: Vec::new(),
+            };
+        };
+        let scope = match id {
+            "openai" => OPENAI_API_KEY_SCOPE.to_owned(),
+            "openrouter" => OPENROUTER_API_KEY_SCOPE.to_owned(),
+            "anthropic" => ANTHROPIC_API_KEY_SCOPE.to_owned(),
+            _ => application_key_scope(&pid),
+        };
+        let token = match read_provider_api_key(&self.home, &scope) {
+            Ok(Some(t)) if !t.trim().is_empty() => t,
+            _ => {
+                let mut snap = self.catalog_status(id);
+                snap.error = Some(format!(
+                    "no application credential for `{id}`; connect the provider and refresh again"
+                ));
+                return snap;
+            }
+        };
+        let token_generation = read_provider_api_key_binding(&self.home, &scope)
+            .ok()
+            .flatten()
+            .map(|b| b.generation)
+            .unwrap_or(0);
+        let incarnation = self
+            .live_incarnation_str(id)
+            .and_then(|raw| super::instance::ProviderIncarnation::new(raw).ok())
+            .or_else(|| stable_builtin_incarnation(id));
+        let Some(incarnation) = incarnation else {
+            let mut snap = self.catalog_status(id);
+            snap.error = Some(format!("missing lifecycle incarnation for `{id}`"));
+            return snap;
+        };
+        let binding = super::ProviderCacheStore::load_state(&self.home, &pid)
+            .ok()
+            .flatten()
+            .map(|s| s.credential_binding_id)
+            .unwrap_or_else(super::CredentialBindingId::generate);
+        let credential = match CatalogCredential::new(binding, token_generation, token) {
+            Ok(c) => c,
+            Err(e) => {
+                let mut snap = self.catalog_status(id);
+                snap.error = Some(e.to_string());
+                return snap;
+            }
+        };
+        let target = match refresh_target_from_config(id, cfg, credential, incarnation) {
+            Ok(t) => t,
+            Err(e) => {
+                let mut snap = self.catalog_status(id);
+                snap.error = Some(e);
+                return snap;
+            }
+        };
+        let publisher = Arc::new(CatalogPublisher::new());
+        let registry_gen = generation.get();
+        let coordinator = CatalogRefreshCoordinator::new(
+            self.home.clone(),
+            publisher,
+            Arc::new(move || registry_gen),
+        );
+        let published = coordinator
+            .refresh_all(vec![target], tokio_util::sync::CancellationToken::new())
+            .await;
+        let mut snap = self.catalog_status(id);
+        if published.is_some() {
+            snap.last_refresh_label = Some("just now".into());
+            snap.source = Some("live".into());
+            snap.error = None;
+        } else if snap.model_count.is_none() {
+            snap.error = Some(format!(
+                "catalog refresh for `{id}` did not publish; last-known-good is empty"
+            ));
+        }
+        snap
+    }
+
+    fn seed_legacy_builtin_cache(&self, id: &str) {
+        use crate::provider_registry::lifecycle_state::stable_builtin_incarnation;
+        let Some(incarnation) = stable_builtin_incarnation(id) else {
+            return;
+        };
+        let Ok(pid) = ProviderId::new(id) else {
+            return;
+        };
+        let Some(cfg) = self.provider_config(id) else {
+            return;
+        };
+        let Some(base) = cfg.base_url.as_deref().or(cfg.api_base_url.as_deref()) else {
+            return;
+        };
+        let Ok(origin) = normalize_endpoint_origin(base) else {
+            return;
+        };
+        let kind = super::ProviderKind::from(cfg.kind);
+        let surface = cfg.api_surface.unwrap_or(match kind {
+            super::ProviderKind::OpenRouter => super::ApiSurface::OpenRouterNative,
+            super::ProviderKind::OpenAi => super::ApiSurface::OpenAiPlatform,
+            super::ProviderKind::Anthropic => super::ApiSurface::AnthropicMessages,
+            _ => super::ApiSurface::OpenAiCompatibleSubset,
+        });
+        let route = cfg
+            .credential_route
+            .unwrap_or(super::CredentialRoute::ApiKey);
+        let binding = super::ProviderCacheStore::load_state(&self.home, &pid)
+            .ok()
+            .flatten()
+            .map(|s| s.credential_binding_id)
+            .unwrap_or_else(super::CredentialBindingId::generate);
+        let Ok(identity) = super::ProviderCacheIdentity::new(
+            pid,
+            incarnation,
+            kind,
+            surface,
+            route,
+            origin,
+            String::new(),
+            binding,
+        ) else {
+            return;
+        };
+        let _ = super::ProviderCacheStore::try_import_legacy_builtin(&self.home, &identity);
     }
 
     // ── internals ────────────────────────────────────────────────────────
@@ -1858,6 +2072,36 @@ impl ProviderManagementService {
     }
 }
 
+fn catalog_sample_ids(models: &[serde_json::Value]) -> Vec<String> {
+    models
+        .iter()
+        .take(8)
+        .filter_map(|m| {
+            m.get("canonical_id")
+                .and_then(|v| v.as_str())
+                .map(str::to_owned)
+                .or_else(|| m.get("id").and_then(|v| v.as_str()).map(str::to_owned))
+                .or_else(|| m.as_str().map(str::to_owned))
+        })
+        .collect()
+}
+
+fn legacy_singleton_catalog_hint(home: &Path, id: &str) -> Option<(usize, Vec<String>)> {
+    let name = match id {
+        "openrouter" => "openrouter_models_cache.json",
+        "openai" => "openai_models_cache.json",
+        "anthropic" => "anthropic_models_cache.json",
+        _ => return None,
+    };
+    let bytes = fs::read(home.join(name)).ok()?;
+    let value: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
+    let models = value.get("models")?.as_array()?;
+    if models.is_empty() {
+        return None;
+    }
+    Some((models.len(), catalog_sample_ids(models)))
+}
+
 fn built_in_backend(id: &str) -> Option<BuiltInBackendId> {
     match BuiltInProviderId::parse(id)? {
         BuiltInProviderId::Xai => Some(BuiltInBackendId::Xai),
@@ -2195,6 +2439,31 @@ mod tests {
 
     fn svc(dir: &TempDir) -> ProviderManagementService {
         ProviderManagementService::new(dir.path())
+    }
+
+    #[test]
+    fn catalog_hint_reads_legacy_openrouter_singleton_cache() {
+        let dir = TempDir::new().unwrap();
+        let body = serde_json::json!({
+            "version": 2,
+            "models": [
+                {"id": "openrouter:moonshotai/kimi-k3", "model": "moonshotai/kimi-k3"},
+                {"id": "openrouter:deepseek/deepseek-v4-flash-0731", "model": "deepseek/deepseek-v4-flash-0731"}
+            ]
+        });
+        std::fs::write(
+            dir.path().join("openrouter_models_cache.json"),
+            serde_json::to_vec(&body).unwrap(),
+        )
+        .unwrap();
+        let (count, samples) =
+            super::legacy_singleton_catalog_hint(dir.path(), "openrouter").expect("legacy hint");
+        assert_eq!(count, 2);
+        assert!(
+            samples
+                .iter()
+                .any(|s| s.contains("kimi-k3") || s.contains("deepseek"))
+        );
     }
 
     #[test]

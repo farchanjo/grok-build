@@ -43,6 +43,12 @@ impl ChatStateActor {
     /// - The process crashes between pushing the assistant and tool results
     /// - The tokio task is aborted at an `.await` point
     ///
+    /// This method also strips orphaned/displaced `ToolResult`s — results
+    /// whose owning assistant tool call is gone or out of position. That is
+    /// the shape behind "No tool call found for function call output with
+    /// call_id …" 400s on strict Responses backends (ChatGPT Codex), which
+    /// brick the session on every request until repaired.
+    ///
     /// This method repairs the state in-place and persists the fix to disk.
     /// It is idempotent — calling it on a clean conversation is a cheap no-op
     /// (single forward scan, no allocations).
@@ -70,8 +76,21 @@ impl ChatStateActor {
                 "Removed duplicate tool results in conversation"
             );
         }
+        // Orphaned/displaced tool results must be stripped before the dangling
+        // pass so the two passes agree on which calls are answered (same order
+        // as `compaction_utils::repair_history`). This self-heals sessions that
+        // would otherwise 400 on every request until the out-of-band
+        // `x.ai/session/repair` rail ran.
+        let stripped =
+            crate::compaction_utils::strip_displaced_tool_results(&mut self.state.conversation);
+        if !stripped.is_empty() {
+            tracing::warn!(
+                stripped_tool_result_ids = ?stripped,
+                "Stripped orphaned/displaced tool results in conversation"
+            );
+        }
         let repaired = repair_dangling_tool_calls(&mut self.state.conversation, reason);
-        if repaired > 0 || deduped > 0 {
+        if repaired > 0 || deduped > 0 || !stripped.is_empty() {
             tracing::info!(
                 repaired_count = repaired,
                 "Repaired dangling tool calls in conversation"

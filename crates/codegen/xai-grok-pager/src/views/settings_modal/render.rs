@@ -678,7 +678,15 @@ pub(super) fn render_rows(
                         }
                     }
                     SettingValue::String(s) => dynamic_value_display(meta, s).into_owned(),
-                    SettingValue::Enum(e) => display_for_enum_canonical(&meta.kind, e).to_string(),
+                    SettingValue::Enum(e) => {
+                        let mut display = display_for_enum_canonical(&meta.kind, e).to_string();
+                        if *key == "language.artifact"
+                            && state.pager_snapshot.language_artifact_locked
+                        {
+                            display.push_str(" (locked)");
+                        }
+                        display
+                    }
                     SettingValue::Int(i) => i.to_string(),
                 };
                 let show_restart_pill_for_layout = meta.restart_required && is_expanded;
@@ -716,6 +724,7 @@ pub(super) fn render_rows(
                     theme,
                     is_expanded,
                     is_hovered,
+                    *key == "language.artifact" && state.pager_snapshot.language_artifact_locked,
                 );
                 state.value_hit_rects[row_idx] = value_rect;
                 y_cursor = y_cursor.saturating_add(row_height);
@@ -837,7 +846,15 @@ fn compute_filtered_row_heights(state: &SettingsModalState, area_width: u16) -> 
                         }
                     }
                     SettingValue::String(s) => dynamic_value_display(meta, s).into_owned(),
-                    SettingValue::Enum(e) => display_for_enum_canonical(&meta.kind, e).to_string(),
+                    SettingValue::Enum(e) => {
+                        let mut display = display_for_enum_canonical(&meta.kind, e).to_string();
+                        if *key == "language.artifact"
+                            && state.pager_snapshot.language_artifact_locked
+                        {
+                            display.push_str(" (locked)");
+                        }
+                        display
+                    }
                     SettingValue::Int(i) => i.to_string(),
                 };
                 let show_restart_pill = meta.restart_required && is_expanded;
@@ -1331,13 +1348,48 @@ fn render_picking_group(
             Style::default().fg(theme.text_primary).bg(bg)
         };
 
-        // Value read live from the snapshot (refreshed after each toggle).
-        let on = matches!(state.value_for(child_key), Some(SettingValue::Bool(true)));
-        let value_text = if on { "on" } else { "off" };
-        let value_style = if on {
-            Style::default().fg(theme.accent_user).bg(bg)
+        // Value read live from the snapshot (refreshed after each mutation).
+        // Bool children render on/off; Enum children (e.g. the model-language
+        // group) render their current choice's display name so the sheet
+        // reflects commits made in the child picker — a Bool-only read would
+        // show "off" forever and make the setting look broken. Non-Bool rows
+        // append a chevron to signal that Enter opens a picker.
+        let value = state.value_for(child_key);
+        let value_display: std::borrow::Cow<'_, str> = match &value {
+            Some(SettingValue::Bool(true)) => "on".into(),
+            Some(SettingValue::Bool(false)) => "off".into(),
+            Some(SettingValue::Enum(e)) => {
+                let base = display_for_enum_canonical(&child_meta.kind, e);
+                if *child_key == "language.artifact"
+                    && state.pager_snapshot.language_artifact_locked
+                {
+                    format!("{base} (locked)").into()
+                } else {
+                    base.into()
+                }
+            }
+            Some(SettingValue::Int(i)) => i.to_string().into(),
+            Some(SettingValue::String(s)) => {
+                dynamic_value_display(child_meta, s).into_owned().into()
+            }
+            None => "—".into(),
+        };
+        let value_text: std::borrow::Cow<'_, str> = if matches!(
+            &value,
+            Some(SettingValue::Bool(_))
+        ) || (*child_key == "language.artifact"
+            && state.pager_snapshot.language_artifact_locked)
+        {
+            // Bool children toggle in place; a locked artifact language
+            // cannot open a picker — no chevron in either case.
+            value_display
         } else {
+            format!("{value_display} {}", crate::glyphs::chevron()).into()
+        };
+        let value_style = if matches!(&value, Some(SettingValue::Bool(false))) {
             Style::default().fg(theme.gray).bg(bg)
+        } else {
+            Style::default().fg(theme.accent_user).bg(bg)
         };
 
         // " <marker>  <label> … <value> " (value right-aligned with a pad).
@@ -2325,6 +2377,7 @@ pub(super) fn render_setting_row(
     theme: &Theme,
     is_expanded: bool,
     is_hovered: bool,
+    enum_locked: bool,
 ) -> Rect {
     let bg = settings_list_row_bg(theme, is_selected, is_hovered);
     // Paint the row bg across the full area (1 or 2 lines).
@@ -2357,7 +2410,15 @@ pub(super) fn render_setting_row(
             value_text_owned = dynamic_value_display(meta, s).into_owned();
             &value_text_owned
         }
-        SettingValue::Enum(e) => display_for_enum_canonical(&meta.kind, e),
+        SettingValue::Enum(e) => {
+            if enum_locked {
+                value_text_owned =
+                    format!("{} (locked)", display_for_enum_canonical(&meta.kind, e));
+                &value_text_owned
+            } else {
+                display_for_enum_canonical(&meta.kind, e)
+            }
+        }
         SettingValue::Int(i) => {
             value_text_owned = i.to_string();
             &value_text_owned
@@ -2376,7 +2437,8 @@ pub(super) fn render_setting_row(
         (SettingKind::Enum { .. }, _)
             | (SettingKind::String { .. }, _)
             | (SettingKind::DynamicEnum { .. }, _)
-    ) && !matches!(meta.kind, SettingKind::Status);
+    ) && !matches!(meta.kind, SettingKind::Status)
+        && !enum_locked;
     let chevron_str = format!(" {}", crate::glyphs::chevron()); // › → > on legacy ConHost
     let chevron_w = if show_chevron {
         chevron_str.width() as u16
@@ -2903,8 +2965,9 @@ pub(super) fn build_shortcuts(state: &SettingsModalState) -> Vec<Shortcut<'stati
                 clickable: false,
                 id: 0,
             },
+            // Bool children toggle in place; Enum children open their picker.
             Shortcut {
-                label: "Space/Enter toggle",
+                label: "Space/Enter select",
                 clickable: false,
                 id: 0,
             },

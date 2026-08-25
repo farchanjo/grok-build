@@ -414,6 +414,17 @@ fn acquire_lifecycle_flock(home: &Path) -> Result<std::fs::File, LifecycleStateE
     Ok(lock_file)
 }
 
+/// True when `incarnation` is absent **or** is the stable built-in stamp for
+/// `id`. Product-provider API-key / ChatGPT-OAuth vaults are scoped by
+/// provider id, not this lifecycle identity, so callers must not fail-closed
+/// solely because `with_lifecycle_incarnations` attached the stamp.
+pub fn is_absent_or_stable_builtin_incarnation(id: &str, incarnation: Option<&str>) -> bool {
+    match incarnation {
+        None => true,
+        Some(inc) => stable_builtin_incarnation(id).is_some_and(|builtin| builtin.as_str() == inc),
+    }
+}
+
 /// Stable built-in incarnation for product providers.
 pub fn stable_builtin_incarnation(id: &str) -> Option<ProviderIncarnation> {
     let raw = match BuiltInProviderId::parse(id) {
@@ -532,6 +543,15 @@ mod tests {
             stable_builtin_incarnation("openai").unwrap(),
             stable_builtin_incarnation("openrouter").unwrap()
         );
+        assert!(is_absent_or_stable_builtin_incarnation("openai", None));
+        assert!(is_absent_or_stable_builtin_incarnation(
+            "openai",
+            Some(a.as_str())
+        ));
+        assert!(!is_absent_or_stable_builtin_incarnation(
+            "openai",
+            Some("00000000-0000-4000-8000-000000000099")
+        ));
     }
 
     #[test]

@@ -1608,6 +1608,7 @@ mod tests {
             agent_name: None,
             sandbox_profile: None,
             reasoning_effort: None,
+            conversation_language: None,
             execution_backend: crate::agent::execution_backend::ExecutionBackend::NativeInference,
             external_runtime: None,
         }

@@ -112,6 +112,113 @@ fn contextual_hints_group_sub_sheet_flow() {
     assert!(matches!(s.mode(), SettingsModalMode::Browse));
 }
 
+/// Helper: build a modal state with the given language snapshot, open the
+/// Model-language group sub-sheet, render it, and return the rendered text
+/// of every visual row.
+fn render_model_language_sheet(
+    language_conversation: &str,
+    language_artifact: &str,
+    artifact_locked: bool,
+) -> Vec<String> {
+    let mut s = SettingsModalState::new(
+        Arc::new(SettingsRegistry::defaults()),
+        UiConfig::default(),
+        PagerLocalSnapshot {
+            language_conversation: language_conversation.to_string(),
+            language_artifact: language_artifact.to_string(),
+            language_artifact_locked: artifact_locked,
+            ..PagerLocalSnapshot::default()
+        },
+    );
+    let group_idx = s
+        .rows
+        .iter()
+        .position(|r| matches!(r, RowEntry::Setting { key, .. } if *key == "language"))
+        .expect("language group row present");
+    s.selected = group_idx;
+    let out = handle_settings_key(&mut s, &KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    assert!(matches!(out, SettingsKeyOutcome::Changed));
+    assert!(matches!(
+        s.mode(),
+        SettingsModalMode::PickingGroup { key, .. } if key == "language"
+    ));
+
+    let area = Rect {
+        x: 0,
+        y: 0,
+        width: 100,
+        height: 30,
+    };
+    let mut buf = Buffer::empty(area);
+    render_settings_modal(&mut buf, area, &mut s, false, None);
+    (0..area.height)
+        .map(|y| buf_row_text(&buf, y, area.x, area.width))
+        .collect()
+}
+
+/// The Model-language group sub-sheet renders each child's ACTUAL current
+/// value (Enum display names), not a Bool-only "off". Regression test: the
+/// sheet previously rendered "off" for every Enum child regardless of the
+/// committed value, which made the setting look broken after picking a
+/// language in the child picker.
+#[test]
+fn model_language_group_sheet_renders_enum_child_values() {
+    let rows = render_model_language_sheet("pt-BR", "en-US", false);
+
+    let conversation = rows
+        .iter()
+        .find(|r| r.contains("Conversation language"))
+        .expect("conversation child row renders");
+    assert!(
+        conversation.contains("Portuguese (Brazil)"),
+        "conversation row must show the committed enum value, got: {conversation:?}"
+    );
+
+    let artifact = rows
+        .iter()
+        .find(|r| r.contains("Artifact language"))
+        .expect("artifact child row renders");
+    assert!(
+        artifact.contains("English (US)"),
+        "artifact row must show the current enum value (default en-US), got: {artifact:?}"
+    );
+    // Chevron signals that Enter opens a picker for the unlocked child.
+    assert!(
+        artifact.contains(crate::glyphs::chevron()),
+        "unlocked enum child must show a chevron, got: {artifact:?}"
+    );
+}
+
+/// A locked artifact language renders its value with the "(locked)" suffix
+/// and no chevron (Enter cannot open a picker), mirroring the browse row.
+#[test]
+fn locked_artifact_language_child_renders_locked_value() {
+    let rows = render_model_language_sheet("pt-BR", "en-US", true);
+
+    let artifact = rows
+        .iter()
+        .find(|r| r.contains("Artifact language"))
+        .expect("artifact child row renders");
+    assert!(
+        artifact.contains("English (US) (locked)"),
+        "locked artifact row must show the locked suffix, got: {artifact:?}"
+    );
+    assert!(
+        !artifact.contains(crate::glyphs::chevron()),
+        "locked artifact row must not show a picker chevron, got: {artifact:?}"
+    );
+
+    // Conversation is unaffected by the artifact lock.
+    let conversation = rows
+        .iter()
+        .find(|r| r.contains("Conversation language"))
+        .expect("conversation child row renders");
+    assert!(
+        conversation.contains("Portuguese (Brazil)"),
+        "conversation row must still show its value, got: {conversation:?}"
+    );
+}
+
 /// The permission_mode picker hides the "Auto" choice when the auto feature
 /// gate is off (matching the Shift+Tab cycle, which skips Auto when gated),
 /// and shows it when the gate is on. Other choices are unaffected.
@@ -642,7 +749,8 @@ fn render_setting_row_shows_full_label_when_one_line_fits() {
         false,
         &theme,
         false, // is_expanded
-        false, // is_hovered
+        false, // is_hovered,
+        false, // enum_locked
     );
     let mut rendered = String::new();
     for x in 0..area.width {
@@ -783,10 +891,16 @@ fn rows_contain_categories_and_settings_through_pr_14() {
             "coding_data_sharing",
             // SHELL-owned default_model (Models category).
             "default_model",
+            // SHELL-owned language group (Models category). Child keys
+            // (`language.conversation`, `language.artifact`) live in the
+            // group sub-sheet and are not top-level rows.
+            "language",
             // Models category. `default_reasoning_effort`,
             // `web_search_model`, and `session_summary_model` are
             // not exposed in the modal.
             "fork_secondary_model",
+            // PAGER-owned retrieval deep-link (Models category).
+            "open_retrieval_settings",
             // Media understanding rows under Models.
             "media_routing",
             "media_image_model",
@@ -1092,6 +1206,7 @@ fn selected_browse_row_label_is_bold() {
         &theme,
         false,
         false,
+        false, // enum_locked
     );
 
     assert!(
@@ -1548,7 +1663,8 @@ fn render_setting_row_emits_restart_pill_when_required() {
         false, // is_selected
         &theme,
         true,  // is_expanded — gate on
-        false, // is_hovered
+        false, // is_hovered,
+        false, // enum_locked
     );
     let mut rendered = String::new();
     for x in 0..area.width {
@@ -1572,7 +1688,8 @@ fn render_setting_row_emits_restart_pill_when_required() {
         false,
         &theme,
         false, // is_expanded — off
-        false, // is_hovered
+        false, // is_hovered,
+        false, // enum_locked
     );
     let mut rendered = String::new();
     for x in 0..area.width {
@@ -1620,7 +1737,8 @@ fn render_setting_row_hides_restart_pill_when_at_default_and_collapsed() {
         false,
         &theme,
         false, // is_expanded
-        false, // is_hovered
+        false, // is_hovered,
+        false, // enum_locked
     );
     let mut rendered = String::new();
     for x in 0..area.width {
@@ -4603,7 +4721,8 @@ fn narrow_terminal_drops_value_to_second_line() {
         false,
         &theme,
         false,
-        false, // is_hovered
+        false, // is_hovered,
+        false, // enum_locked
     );
     let line1 = buf_row_text(&buf, 0, area.x, area.width);
     let line2 = buf_row_text(&buf, 1, area.x, area.width);
@@ -4666,7 +4785,8 @@ fn wide_terminal_keeps_value_on_first_line() {
         false,
         &theme,
         false,
-        false, // is_hovered
+        false, // is_hovered,
+        false, // enum_locked
     );
     let line1 = buf_row_text(&buf, 0, area.x, area.width);
     let line2 = buf_row_text(&buf, 1, area.x, area.width);
@@ -4707,7 +4827,8 @@ fn pathologically_narrow_truncates_label_with_ellipsis() {
         false,
         &theme,
         false,
-        false, // is_hovered
+        false, // is_hovered,
+        false, // enum_locked
     );
     let line1 = buf_row_text(&buf, 0, area.x, area.width);
     let line2 = buf_row_text(&buf, 1, area.x, area.width);
@@ -5456,6 +5577,7 @@ fn bool_off_value_renders_in_dim_color() {
         &theme,
         false,
         false,
+        false, // enum_locked
     );
     // Use `find_text_col` so the
     // column index is the actual buffer position, not a byte
@@ -5488,6 +5610,7 @@ fn bool_off_value_renders_in_dim_color() {
         &theme,
         false,
         false,
+        false, // enum_locked
     );
     let on_col = find_text_col(&buf_on, 0, "on").expect("must find `on` substring");
     let on_cell = buf_on.cell((on_col, 0)).expect("on cell");
@@ -5559,6 +5682,7 @@ fn chevron_column_is_at_constant_right_offset() {
         &theme,
         false,
         false,
+        false, // enum_locked
     );
 
     // Enum row — chevron column contains the `›` glyph.
@@ -5573,6 +5697,7 @@ fn chevron_column_is_at_constant_right_offset() {
         &theme,
         false,
         false,
+        false, // enum_locked
     );
 
     // The chevron column is a 2-cell block at
@@ -5644,6 +5769,7 @@ fn chevron_column_is_at_constant_right_offset() {
         &theme,
         false,
         false,
+        false, // enum_locked
     );
     let _ = render_setting_row(
         &mut buf_multi,
@@ -5655,6 +5781,7 @@ fn chevron_column_is_at_constant_right_offset() {
         &theme,
         false,
         false,
+        false, // enum_locked
     );
     // Bool row's `off` ends at column N; Enum row's `›` glyph
     // lands at column M. The contract: N == M's column
@@ -5711,6 +5838,7 @@ fn chevron_column_aligns_across_one_and_two_line_layouts() {
         &theme,
         false,
         false,
+        false, // enum_locked
     );
     let area_one = Rect {
         x: 0,
@@ -5729,6 +5857,7 @@ fn chevron_column_aligns_across_one_and_two_line_layouts() {
         &theme,
         false,
         false,
+        false, // enum_locked
     );
     // The column offset from the area's right edge is constant:
     // `area.right - ROW_RIGHT_PAD_W - 1` is the `›` glyph

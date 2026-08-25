@@ -2658,6 +2658,9 @@ mod inline_auto_compact_flow_tests {
             mcp_strategy: McpInitStrategy::Blocking,
             chat_state_handle,
             current_prompt_id: std::sync::Arc::new(std::sync::Mutex::new(None)),
+            conversation_language: std::cell::RefCell::new(None),
+            language_envelope_turn: std::cell::Cell::new(false),
+            suppress_language_envelope_text: std::cell::Cell::new(false),
             pending_interactions: std::sync::Arc::new(std::sync::Mutex::new(
                 std::collections::HashMap::new(),
             )),

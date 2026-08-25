@@ -789,6 +789,20 @@ pub(crate) async fn handle_assigned_subagent_request(
         }
     };
     if !assigned_route_matches_final(assigned_route.as_ref(), resolved_final_live_route.as_ref()) {
+        // The drift check compares eleven identity fields; log both sides so
+        // a production mismatch identifies the drifting field directly.
+        if let (Some(assigned), Some(live)) =
+            (assigned_route.as_ref(), resolved_final_live_route.as_ref())
+        {
+            tracing::warn!(
+                subagent_id = %request.id,
+                assigned = ?assigned,
+                final = ?live,
+                child_config_model = %effective_inference_config.model,
+                child_config_identity = ?effective_inference_config.provider_identity,
+                "Assigned exact model route drifted after final child model resolution."
+            );
+        }
         send_failure(
             request,
             "Assigned exact model route drifted after final child model resolution.",

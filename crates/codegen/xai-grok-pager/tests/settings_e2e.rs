@@ -91,6 +91,14 @@ const ALL_SETTINGS_EXERCISED: &[&str] = &[
     "compaction_primary_model",
     "compaction_fallback_model",
     "compaction_status",
+    // Model-language group + its two Enum children (exercised via the
+    // group sub-sheet, which opens each child's enum picker).
+    "language",
+    "language.conversation",
+    "language.artifact",
+    // Deep-link action row (Status kind): Enter dispatches the retrieval
+    // settings deep-link.
+    "open_retrieval_settings",
 ];
 
 #[test]
@@ -552,6 +560,207 @@ fn mouse_click_on_contextual_hints_group_opens_sub_sheet_and_toggles_child() {
             SettingsKeyOutcome::Action(Action::SetContextualHintUndo(false))
         ),
         "click on the first child must toggle undo off, got {out:?}",
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Model-language group (Enum children — opens each child's picker)
+// ---------------------------------------------------------------------------
+
+/// Enter on the "Model language" group row opens the sub-sheet; Enter on the
+/// conversation child (an Enum, not a Bool) opens the enum picker seeded at
+/// `off`; navigating to `pt-BR` and pressing Enter commits
+/// `Action::SetConversationLanguage("pt-BR")`.
+#[test]
+fn enter_on_model_language_group_opens_children_pickers() {
+    let mut s = make_state();
+    navigate_to(&mut s, "language");
+
+    let out = handle_settings_key(&mut s, &press(KeyCode::Enter));
+    assert!(matches!(out, SettingsKeyOutcome::Changed));
+    assert!(matches!(
+        s.mode(),
+        SettingsModalMode::PickingGroup { key, child_idx: 0, .. } if key == "language",
+    ));
+
+    // child 0: language.conversation (Enum) → Enter opens its picker.
+    let out = handle_settings_key(&mut s, &press(KeyCode::Enter));
+    assert!(
+        matches!(out, SettingsKeyOutcome::Changed),
+        "Enter on the conversation Enum child must open the picker, got {out:?}",
+    );
+    match &s.mode() {
+        SettingsModalMode::PickingEnum {
+            key,
+            original_value,
+            ..
+        } => {
+            assert_eq!(*key, "language.conversation");
+            assert_eq!(
+                original_value,
+                &SettingValue::Enum("off"),
+                "default snapshot conversation language → original 'off'"
+            );
+        }
+        other => panic!("expected PickingEnum mode, got {other:?}"),
+    }
+
+    // Choices: off(0), en-US(1), en-GB(2), pt-BR(3).
+    for _ in 0..3 {
+        let _ = handle_settings_key(&mut s, &press(KeyCode::Down));
+    }
+    let outcome = handle_settings_key(&mut s, &press(KeyCode::Enter));
+    match outcome {
+        SettingsKeyOutcome::Action(Action::SetConversationLanguage(code)) => {
+            assert_eq!(code, "pt-BR", "fourth choice is Portuguese (Brazil)");
+        }
+        other => panic!("expected Action::SetConversationLanguage commit, got {other:?}"),
+    }
+    assert!(
+        matches!(s.mode(), SettingsModalMode::Browse),
+        "Enter commit must return to Browse"
+    );
+}
+
+/// A locked artifact language cannot be opened from the sub-sheet: Enter on
+/// the artifact child stays in the group sheet (no picker, no action).
+#[test]
+fn locked_artifact_language_child_cannot_enter_picker() {
+    let mut s = SettingsModalState::new(
+        Arc::new(SettingsRegistry::defaults()),
+        UiConfig::default(),
+        PagerLocalSnapshot {
+            auto_mode_gate: true,
+            language_artifact_locked: true,
+            ..PagerLocalSnapshot::default()
+        },
+    );
+    navigate_to(&mut s, "language");
+    let _ = handle_settings_key(&mut s, &press(KeyCode::Enter));
+    assert!(matches!(
+        s.mode(),
+        SettingsModalMode::PickingGroup { child_idx: 0, .. }
+    ));
+
+    // Move to child 1 (language.artifact) and try to open its picker.
+    let _ = handle_settings_key(&mut s, &press(KeyCode::Char('j')));
+    let out = handle_settings_key(&mut s, &press(KeyCode::Enter));
+    assert!(
+        matches!(out, SettingsKeyOutcome::Unchanged),
+        "Enter on a locked artifact child must be a no-op, got {out:?}",
+    );
+    assert!(
+        matches!(
+            s.mode(),
+            SettingsModalMode::PickingGroup { child_idx: 1, .. }
+        ),
+        "the modal must stay in the group sub-sheet",
+    );
+}
+
+/// Mouse parity: clicking the group row's value column opens the sub-sheet,
+/// and clicking the conversation child opens its enum picker (one click).
+#[test]
+fn mouse_click_on_model_language_group_opens_child_picker() {
+    let mut s = make_state();
+    synth_rects(&mut s);
+    let group_row = row_idx_for(&s, "language") as u16;
+
+    let out = handle_settings_mouse(
+        &mut s,
+        MouseEventKind::Down(crossterm::event::MouseButton::Left),
+        72,
+        group_row,
+    );
+    assert!(matches!(out, SettingsKeyOutcome::Changed));
+    assert!(
+        matches!(s.mode(), SettingsModalMode::PickingGroup { .. }),
+        "click on the group value column must open the sub-sheet, got {:?}",
+        s.mode(),
+    );
+
+    // Synthesize child hit-rects and click the first child → opens the
+    // conversation-language picker in one click.
+    s.picker_choice_rects = (0..2)
+        .map(|i| Rect {
+            x: 0,
+            y: i as u16,
+            width: 80,
+            height: 1,
+        })
+        .collect();
+    let out = handle_settings_mouse(
+        &mut s,
+        MouseEventKind::Down(crossterm::event::MouseButton::Left),
+        1,
+        0,
+    );
+    assert!(
+        matches!(out, SettingsKeyOutcome::Changed),
+        "click on the conversation child must open its picker, got {out:?}",
+    );
+    assert!(
+        matches!(
+            &s.mode(),
+            SettingsModalMode::PickingEnum { key, .. } if *key == "language.conversation"
+        ),
+        "expected PickingEnum for language.conversation, got {:?}",
+        s.mode(),
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Retrieval-settings deep-link row (Status kind)
+// ---------------------------------------------------------------------------
+
+/// Enter on the `open_retrieval_settings` Status row dispatches the
+/// `OpenRetrievalSettings` deep-link action (no picker, no editor).
+#[test]
+fn enter_on_retrieval_settings_row_dispatches_deep_link() {
+    let mut s = make_state();
+    navigate_to(&mut s, "open_retrieval_settings");
+    let outcome = handle_settings_key(&mut s, &press(KeyCode::Enter));
+    assert!(
+        matches!(
+            outcome,
+            SettingsKeyOutcome::Action(Action::OpenRetrievalSettings)
+        ),
+        "Enter must dispatch the retrieval deep-link, got {outcome:?}",
+    );
+}
+
+/// Mouse parity: clicking the retrieval-settings row dispatches the same
+/// deep-link action (two-stage click: first selects, second activates —
+/// matching the modal's click contract for non-value-column clicks).
+#[test]
+fn mouse_click_on_retrieval_settings_row_dispatches_deep_link() {
+    let mut s = make_state();
+    synth_rects(&mut s);
+    let row = row_idx_for(&s, "open_retrieval_settings") as u16;
+    // First click: selection only (read-the-description affordance).
+    let outcome = handle_settings_mouse(
+        &mut s,
+        MouseEventKind::Down(crossterm::event::MouseButton::Left),
+        40,
+        row,
+    );
+    assert!(
+        matches!(outcome, SettingsKeyOutcome::Changed),
+        "first click must select the row, got {outcome:?}",
+    );
+    // Second click on the now-selected row dispatches the deep link.
+    let outcome = handle_settings_mouse(
+        &mut s,
+        MouseEventKind::Down(crossterm::event::MouseButton::Left),
+        40,
+        row,
+    );
+    assert!(
+        matches!(
+            outcome,
+            SettingsKeyOutcome::Action(Action::OpenRetrievalSettings)
+        ),
+        "click must dispatch the retrieval deep-link, got {outcome:?}",
     );
 }
 
@@ -1842,6 +2051,8 @@ fn registry_kind_membership_through_pr_14() {
             "default_selected_permission",
             "hunk_tracker_mode",
             "keep_text_selection",
+            "language.artifact",
+            "language.conversation",
             "media_routing",
             "permission_mode",
             "plan_mode",
@@ -1895,14 +2106,18 @@ fn registry_kind_membership_through_pr_14() {
     let group_keys = by_kind.remove("Group").unwrap_or_default();
     assert_eq!(
         group_keys,
-        vec!["contextual_hints"],
+        vec!["contextual_hints", "language"],
         "Group kind membership drift",
     );
 
     let status_keys = by_kind.remove("Status").unwrap_or_default();
     assert_eq!(
         status_keys,
-        vec!["compaction_status", "media_status"],
+        vec![
+            "compaction_status",
+            "media_status",
+            "open_retrieval_settings"
+        ],
         "Status kind membership drift",
     );
 
@@ -1935,6 +2150,8 @@ fn enum_settings_membership_through_pr_14() {
             "default_selected_permission",
             "hunk_tracker_mode",
             "keep_text_selection",
+            "language.artifact",
+            "language.conversation",
             "media_routing",
             "permission_mode",
             "plan_mode",
@@ -2041,6 +2258,13 @@ fn defaults_round_trip_through_registry() {
             "contextual_hints.small_screen" => SettingValue::Bool(true),
             "contextual_hints.word_select" => SettingValue::Bool(true),
             "contextual_hints.ssh_wrap" => SettingValue::Bool(true),
+            // Model-language group children (snapshot defaults).
+            "language.conversation" => SettingValue::Enum("off"),
+            "language.artifact" => SettingValue::Enum("en-US"),
+            // Deep-link Status row renders a static action label.
+            "open_retrieval_settings" => {
+                SettingValue::String("Open /retrieval-settings".to_string())
+            }
             other => panic!("test must list expected default for `{other}`"),
         }
     };

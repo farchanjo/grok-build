@@ -195,6 +195,10 @@ pub(super) fn handle_session_notification(notif: &acp::ExtNotification, app: &mu
     let root_session_id: &str = session_notif.session_id.0.as_ref();
     let raw_meta = session_notif.meta.as_ref().and_then(|v| v.as_object());
     let changed = match session_notif.update {
+        XaiSessionUpdate::StreamingAttemptReset => agent
+            .session
+            .tracker
+            .reset_streaming_attempt(&mut agent.scrollback),
         XaiSessionUpdate::RetryState(ref retry) => {
             let binding =
                 xai_grok_shell::extensions::notification::ProviderRouteBindingMeta::from_meta(

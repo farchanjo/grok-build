@@ -55,6 +55,19 @@ async fn save_config_locked(config: &Config) -> Result<()> {
     } else {
         merge_section(table, "compaction", &config.compaction);
     }
+    if config.language == crate::agent::config::LanguageConfig::default() {
+        table.remove("language");
+    } else {
+        merge_section(table, "language", &config.language);
+        if let Some(TomlValue::Table(language)) = table.get_mut("language") {
+            if config.language.conversation.is_none() {
+                language.remove("conversation");
+            }
+            if config.language.artifact.is_none() {
+                language.remove("artifact");
+            }
+        }
+    }
     if config.media == crate::config::MediaConfig::default() {
         table.remove("media");
     } else {

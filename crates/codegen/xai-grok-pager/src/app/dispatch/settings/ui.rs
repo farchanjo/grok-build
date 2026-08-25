@@ -1,24 +1,25 @@
 //! Settings UI: command palette, settings modal, toggles, resets, and rollback.
 
 use super::setters::{
-    pr13_effective_default, set_ask_user_question_timeout_enabled_inner, set_auto_dark_theme_inner,
+    pr13_effective_default, set_artifact_language_inner,
+    set_ask_user_question_timeout_enabled_inner, set_auto_dark_theme_inner,
     set_auto_light_theme_inner, set_auto_update_inner, set_collapsed_edit_blocks_inner,
     set_combine_queued_prompts_inner, set_compact_mode, set_compact_mode_inner,
     set_compaction_band_count_inner, set_compaction_fallback_model_inner,
     set_compaction_primary_model_inner, set_compaction_strategy_inner,
-    set_compaction_trigger_policy_inner, set_contextual_hint_inner, set_default_model_inner,
+    set_compaction_trigger_policy_inner, set_contextual_hint_inner,
+    set_conversation_language_inner, set_default_model_inner,
     set_default_selected_permission_inner, set_display_refresh_auto_cadence_inner,
     set_fork_secondary_model_inner, set_group_tool_verbs_inner, set_hunk_tracker_mode_inner,
     set_invert_scroll_inner, set_keep_text_selection_inner, set_max_thoughts_width_inner,
     set_media_audio_model_inner, set_media_file_model_inner, set_media_image_model_inner,
     set_media_routing_inner, set_media_video_model_inner, set_multiline_mode,
-    set_page_flip_on_send_inner,
-    set_prompt_suggestions_inner, set_remember_tool_approvals_inner, set_render_mermaid_inner,
-    set_respect_manual_folds_inner, set_screen_mode_inner, set_scroll_lines_inner,
-    set_scroll_mode_inner, set_scroll_speed_inner, set_show_thinking_blocks_inner,
-    set_show_tips_inner, set_simple_mode_inner, set_theme_inner, set_timeline_inner,
-    set_timestamps, set_timestamps_inner, set_vim_mode_inner, set_voice_capture_mode_inner,
-    set_voice_stt_language_inner,
+    set_page_flip_on_send_inner, set_prompt_suggestions_inner, set_remember_tool_approvals_inner,
+    set_render_mermaid_inner, set_respect_manual_folds_inner, set_screen_mode_inner,
+    set_scroll_lines_inner, set_scroll_mode_inner, set_scroll_speed_inner,
+    set_show_thinking_blocks_inner, set_show_tips_inner, set_simple_mode_inner, set_theme_inner,
+    set_timeline_inner, set_timestamps, set_timestamps_inner, set_vim_mode_inner,
+    set_voice_capture_mode_inner, set_voice_stt_language_inner,
 };
 use crate::app::actions::{Action, Effect};
 use crate::app::app_view::{ActiveView, AppView};
@@ -61,6 +62,17 @@ pub(crate) fn refresh_open_settings_modals(app: &mut AppView) {
     let voice_stt_language_from_app = app.voice_config.language.clone();
     let compaction_config_from_app = app.compaction_config.clone();
     let media_config_from_app = app.media_config.clone();
+    let language_conversation_from_app = app
+        .language_config
+        .conversation
+        .clone()
+        .unwrap_or_else(|| "off".to_string());
+    let language_artifact_from_app = app
+        .language_config
+        .artifact
+        .clone()
+        .unwrap_or_else(|| "en-US".to_string());
+    let language_artifact_locked_from_app = app.language_config.artifact_locked;
     for agent in app.agents.values_mut() {
         // Walk both `Settings` and `ResetSettingsConfirm` — the
         // confirm dialog embeds settings state that must stay fresh
@@ -101,6 +113,9 @@ pub(crate) fn refresh_open_settings_modals(app: &mut AppView) {
                 auto_mode_gate: auto_mode_gate_from_app,
                 ask_user_question_timeout_enabled: ask_user_question_timeout_enabled_from_app,
                 voice_stt_language: voice_stt_language_from_app.clone(),
+                language_conversation: language_conversation_from_app.clone(),
+                language_artifact: language_artifact_from_app.clone(),
+                language_artifact_locked: language_artifact_locked_from_app,
                 ..merge_compaction_and_media_snapshot(
                     &compaction_config_from_app,
                     agent.session.tracker.activity(),
@@ -685,6 +700,17 @@ pub(in crate::app::dispatch) fn dispatch_open_settings(
     let voice_stt_language_from_app = app.voice_config.language.clone();
     let compaction_config_from_app = app.compaction_config.clone();
     let media_config_from_app = app.media_config.clone();
+    let language_conversation_from_app = app
+        .language_config
+        .conversation
+        .clone()
+        .unwrap_or_else(|| "off".to_string());
+    let language_artifact_from_app = app
+        .language_config
+        .artifact
+        .clone()
+        .unwrap_or_else(|| "en-US".to_string());
+    let language_artifact_locked_from_app = app.language_config.artifact_locked;
 
     let Some(agent) = app.agents.get_mut(&id) else {
         return effects;
@@ -734,6 +760,9 @@ pub(in crate::app::dispatch) fn dispatch_open_settings(
         auto_mode_gate: auto_mode_gate_from_app,
         ask_user_question_timeout_enabled: ask_user_question_timeout_enabled_from_app,
         voice_stt_language: voice_stt_language_from_app,
+        language_conversation: language_conversation_from_app,
+        language_artifact: language_artifact_from_app,
+        language_artifact_locked: language_artifact_locked_from_app,
         ..merge_compaction_and_media_snapshot(
             &compaction_config_from_app,
             agent.session.tracker.activity(),
@@ -1309,11 +1338,8 @@ fn format_media_status(
         available_models,
         external_ids,
     );
-    let files = media_model_status_label(
-        config.file_model.as_deref(),
-        available_models,
-        external_ids,
-    );
+    let files =
+        media_model_status_label(config.file_model.as_deref(), available_models, external_ids);
     format!("{mode} · image: {image} · audio: {audio} · video: {video} · files: {files}")
 }
 
@@ -1387,6 +1413,17 @@ pub(crate) fn build_pager_snapshot(app: &AppView) -> crate::settings::PagerLocal
         auto_mode_gate: app.auto_mode_gate,
         ask_user_question_timeout_enabled: app.ask_user_question_timeout_enabled,
         voice_stt_language: app.voice_config.language.clone(),
+        language_conversation: app
+            .language_config
+            .conversation
+            .clone()
+            .unwrap_or_else(|| "off".to_string()),
+        language_artifact: app
+            .language_config
+            .artifact
+            .clone()
+            .unwrap_or_else(|| "en-US".to_string()),
+        language_artifact_locked: app.language_config.artifact_locked,
         ..merge_compaction_and_media_snapshot(
             &app.compaction_config,
             match app.active_view {
@@ -1566,6 +1603,12 @@ pub(in crate::app::dispatch) fn action_for_reset(
         }
         ("voice_stt_language", SettingValue::Enum(s)) => {
             Some(Action::SetVoiceSttLanguage((*s).to_string()))
+        }
+        ("language.conversation", SettingValue::Enum(s)) => {
+            Some(Action::SetConversationLanguage((*s).to_string()))
+        }
+        ("language.artifact", SettingValue::Enum(s)) => {
+            Some(Action::SetArtifactLanguage((*s).to_string()))
         }
         // fork_secondary_model: empty → Clear, non-empty is skew guard.
         ("fork_secondary_model", SettingValue::String(s)) => {
@@ -1950,6 +1993,12 @@ pub(in crate::app::dispatch) fn apply_setting_rollback(
         }
         ("media_file_model", SettingValue::String(s)) => {
             set_media_file_model_inner(app, s.clone());
+        }
+        ("language.conversation", SettingValue::Enum(s)) => {
+            set_conversation_language_inner(app, s);
+        }
+        ("language.artifact", SettingValue::Enum(s)) => {
+            set_artifact_language_inner(app, s);
         }
 
         _ => {

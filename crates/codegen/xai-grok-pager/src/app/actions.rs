@@ -553,6 +553,10 @@ pub enum Action {
     /// Set the voice STT language (catalog code or `auto`). SHELL-owned; persisted
     /// to `[ui].voice_stt_language`. Takes effect for the next voice capture.
     SetVoiceSttLanguage(String),
+    /// Set `[language].conversation` (BCP-47 or `off`). Applies at next turn.
+    SetConversationLanguage(String),
+    /// Set `[language].artifact` (BCP-47). Rejected when locked.
+    SetArtifactLanguage(String),
     /// Toggle timestamp display on messages.
     ToggleTimestamps,
     /// Toggle compact mode (reduce user message padding).

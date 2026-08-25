@@ -219,7 +219,8 @@ fn resolve_dismissable_campaigns() -> Vec<CampaignEntry> {
 /// Effective config with remote/override-aware campaign overlay
 /// (base → resolve [override/kill/merge/dismiss] → apply), one `ConfigLayers::load`.
 pub fn load_effective_config() -> std::io::Result<toml::Value> {
-    let layers = ConfigLayers::load()?;
+    let mut layers = ConfigLayers::load()?;
+    layers.project = load_project_language_layer();
     let dismissed = load_dismissed_ids();
     let remote = cached_remote_campaigns();
     let mut effective = layers.effective_config_base();
@@ -228,13 +229,42 @@ pub fn load_effective_config() -> std::io::Result<toml::Value> {
     Ok(effective)
 }
 
+/// Merge `[language]` tables from project `.grok/config.toml` files (repo root
+/// toward cwd; nearer files overwrite). Stored on [`ConfigLayers::project`] so
+/// lock-aware language merge can see the project artifact lock.
+fn load_project_language_layer() -> toml::Value {
+    let Ok(cwd) = std::env::current_dir() else {
+        return toml::Value::Table(Default::default());
+    };
+    load_project_language_layer_from(&cwd)
+}
+
+pub(crate) fn load_project_language_layer_from(cwd: &Path) -> toml::Value {
+    let mut language = toml::Value::Table(Default::default());
+    for path in crate::config::find_project_configs(cwd) {
+        if let Ok(root) = crate::config::load_config_file(&path)
+            && let Some(lang) = root.get("language")
+        {
+            xai_grok_config::deep_merge_toml(&mut language, lang);
+        }
+    }
+    if language.as_table().is_some_and(|t| t.is_empty()) {
+        return toml::Value::Table(Default::default());
+    }
+    let mut table = toml::map::Map::new();
+    table.insert("language".to_owned(), language);
+    toml::Value::Table(table)
+}
+
 /// Effective config with **disk campaigns only** — no remote cache, no
 /// `GROK_CAMPAIGNS_OVERRIDE`. For one-shot CLI entrypoints that never fetch
 /// remote settings: calling [`load_effective_config`] there would silently
 /// resolve against a never-seeded cache, so the divergence is named instead
 /// of implied (mirrors `ConfigLayers::effective_config_disk_only`).
 pub fn load_effective_config_disk_only() -> std::io::Result<toml::Value> {
-    Ok(ConfigLayers::load()?.effective_config_disk_only())
+    let mut layers = ConfigLayers::load()?;
+    layers.project = load_project_language_layer();
+    Ok(layers.effective_config_disk_only())
 }
 
 /// Read the value at `path` from an effective-config tree.

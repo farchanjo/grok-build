@@ -2013,6 +2013,7 @@ fn summary_schema_keys() -> std::collections::HashSet<String> {
         agent_name: Some("schema-probe-agent".to_string()),
         sandbox_profile: Some("workspace".to_string()),
         reasoning_effort: Some(xai_grok_inference_types::ReasoningEffort::Medium),
+        conversation_language: Some("pt-BR".to_string()),
         execution_backend: crate::agent::execution_backend::ExecutionBackend::ExternalAgent(
             crate::agent::execution_backend::ExternalAgentKind::ClaudeCli,
         ),
@@ -2350,6 +2351,7 @@ impl JsonlStorageAdapter {
             agent_name: source_summary.agent_name,
             sandbox_profile: source_summary.sandbox_profile,
             reasoning_effort: source_summary.reasoning_effort,
+            conversation_language: source_summary.conversation_language,
             execution_backend: source_summary.execution_backend,
             external_runtime: source_summary.external_runtime,
         };
@@ -2766,6 +2768,7 @@ impl StorageAdapter for JsonlStorageAdapter {
                     model_id,
                     agent_name,
                     reasoning_effort,
+                    conversation_language: None,
                     execution_backend,
                     external_runtime,
                 }),
@@ -2784,6 +2787,20 @@ impl StorageAdapter for JsonlStorageAdapter {
         })
         .await
         .map_err(io::Error::other)?
+    }
+    async fn update_conversation_language(
+        &self,
+        info: &Info,
+        conversation_language: Option<String>,
+    ) -> io::Result<()> {
+        self.apply_summary_patch(
+            info,
+            super::summary_write::SummaryPatch {
+                conversation_language: Some(conversation_language),
+                ..Default::default()
+            },
+        )
+        .await
     }
     async fn update_collection_id(&self, info: &Info, collection_id: &str) -> io::Result<()> {
         self.apply_summary_patch(

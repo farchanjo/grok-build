@@ -155,9 +155,6 @@ mod tests {
             compaction_at_tokens: None,
             doom_loop_recovery: None,
             header_injector: None,
-            supports_image_input: None,
-            supports_audio_input: None,
-            supports_video_input: None,
         }
     }
 

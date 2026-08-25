@@ -158,6 +158,9 @@ async fn persist_ack_waits_for_disk_flush_before_success() {
                 chat_state_handle,
                 unattributed_background_usage: std::sync::atomic::AtomicBool::new(false),
                 current_prompt_id: std::sync::Arc::new(std::sync::Mutex::new(None)),
+                conversation_language: std::cell::RefCell::new(None),
+                language_envelope_turn: std::cell::Cell::new(false),
+                suppress_language_envelope_text: std::cell::Cell::new(false),
                 pending_interactions: std::sync::Arc::new(std::sync::Mutex::new(
                     std::collections::HashMap::new(),
                 )),
@@ -687,6 +690,9 @@ async fn first_turn_memory_injection_disabled_does_not_persist_to_chat_history()
                 chat_state_handle,
                 unattributed_background_usage: std::sync::atomic::AtomicBool::new(false),
                 current_prompt_id: std::sync::Arc::new(std::sync::Mutex::new(None)),
+                conversation_language: std::cell::RefCell::new(None),
+                language_envelope_turn: std::cell::Cell::new(false),
+                suppress_language_envelope_text: std::cell::Cell::new(false),
                 pending_interactions: std::sync::Arc::new(std::sync::Mutex::new(
                     std::collections::HashMap::new(),
                 )),
@@ -995,6 +1001,9 @@ async fn cancel_running_task_teardown_clears_running_and_pending_work() {
                 current_prompt_id: std::sync::Arc::new(
                     std::sync::Mutex::new(Some("running".to_string())),
                 ),
+                conversation_language: std::cell::RefCell::new(None),
+                language_envelope_turn: std::cell::Cell::new(false),
+                suppress_language_envelope_text: std::cell::Cell::new(false),
                 pending_interactions: std::sync::Arc::new(
                     std::sync::Mutex::new(std::collections::HashMap::new()),
                 ),
@@ -2328,6 +2337,9 @@ async fn cancel_propagates_to_sampler_handle_so_no_further_emission() {
                 current_prompt_id: std::sync::Arc::new(
                     std::sync::Mutex::new(Some("running".to_string())),
                 ),
+                conversation_language: std::cell::RefCell::new(None),
+                language_envelope_turn: std::cell::Cell::new(false),
+                suppress_language_envelope_text: std::cell::Cell::new(false),
                 pending_interactions: std::sync::Arc::new(
                     std::sync::Mutex::new(std::collections::HashMap::new()),
                 ),

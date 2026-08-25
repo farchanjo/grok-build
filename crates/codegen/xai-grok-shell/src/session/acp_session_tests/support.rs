@@ -263,6 +263,9 @@ pub(crate) async fn create_test_actor_ex(
         chat_state_handle,
         unattributed_background_usage: std::sync::atomic::AtomicBool::new(false),
         current_prompt_id: std::sync::Arc::new(std::sync::Mutex::new(None)),
+        conversation_language: std::cell::RefCell::new(None),
+        language_envelope_turn: std::cell::Cell::new(false),
+        suppress_language_envelope_text: std::cell::Cell::new(false),
         pending_interactions: std::sync::Arc::new(std::sync::Mutex::new(
             std::collections::HashMap::new(),
         )),

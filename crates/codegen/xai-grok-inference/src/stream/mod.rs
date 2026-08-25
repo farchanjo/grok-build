@@ -12,8 +12,10 @@ pub mod chat_completions;
 pub mod collect;
 pub mod messages;
 pub mod responses;
+pub mod structured_output;
 
 pub use chat_completions::stream_chat_completions;
 pub use collect::collect_response;
 pub use messages::stream_messages;
 pub use responses::stream_responses;
+pub use structured_output::{ResponseFieldProjector, project_response_field};

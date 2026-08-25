@@ -227,16 +227,25 @@ fn handle_picking_group(state: &mut SettingsModalState, key: &KeyEvent) -> Setti
             state.transition_to_picking_group(group_key, child_idx - 1);
             SettingsKeyOutcome::Changed
         }
-        // Space/Enter toggle the focused child Bool and stay in the sheet so the
-        // user can flip several tips in a row. The dispatcher refreshes the
-        // modal snapshot, so the new value paints on the next frame.
+        // Space/Enter act on the focused child and stay in the sheet so the
+        // user can flip several tips in a row (Bool children toggle in
+        // place; Enum children open their picker). The dispatcher refreshes
+        // the modal snapshot, so the new value paints on the next frame.
         KeyCode::Char(' ') | KeyCode::Enter => {
             let Some(child_key) = children.get(child_idx).copied() else {
                 return SettingsKeyOutcome::Unchanged;
             };
             let cur = match state.value_for(child_key) {
                 Some(SettingValue::Bool(b)) => b,
-                _ => return SettingsKeyOutcome::Unchanged,
+                _ => {
+                    // Enum child (e.g. the model-language group): open its
+                    // picker in place of the sheet instead of toggling.
+                    return if state.try_enter_picking_enum_for_key(child_key) {
+                        SettingsKeyOutcome::Changed
+                    } else {
+                        SettingsKeyOutcome::Unchanged
+                    };
+                }
             };
             match action_for_bool(child_key, !cur) {
                 Some(action) => SettingsKeyOutcome::Action(action),
@@ -1045,6 +1054,13 @@ pub fn handle_settings_mouse(
                 if state.try_enter_picking_enum() || state.try_enter_editing_value() {
                     return SettingsKeyOutcome::Changed;
                 }
+                // Deep-link action rows (Status kind): mirror the keyboard's
+                // Enter contract so mouse parity holds.
+                if let Some((key, _)) = state.focused_setting()
+                    && key == "open_retrieval_settings"
+                {
+                    return SettingsKeyOutcome::Action(Action::OpenRetrievalSettings);
+                }
             }
             // Selection moved (or was already on this row); the
             // re-render reflects the new focus.
@@ -1190,6 +1206,15 @@ fn handle_group_mouse(
     let Some(child_key) = children.get(idx).copied() else {
         return SettingsKeyOutcome::Changed;
     };
+    // Bool children toggle in one click; Enum children open their picker
+    // (a click on the language rows must not be a silent no-op).
+    if !matches!(state.value_for(child_key), Some(SettingValue::Bool(_))) {
+        return if state.try_enter_picking_enum_for_key(child_key) {
+            SettingsKeyOutcome::Changed
+        } else {
+            SettingsKeyOutcome::Changed
+        };
+    }
     let cur = matches!(state.value_for(child_key), Some(SettingValue::Bool(true)));
     match action_for_bool(child_key, !cur) {
         Some(action) => SettingsKeyOutcome::Action(action),

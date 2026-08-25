@@ -257,6 +257,75 @@ pub(in crate::app::dispatch) fn set_voice_stt_language(
     }]
 }
 
+pub(super) fn set_conversation_language_inner(app: &mut AppView, canonical: &str) {
+    app.language_config.conversation = if canonical == "off" {
+        None
+    } else {
+        Some(canonical.to_string())
+    };
+}
+
+pub(in crate::app::dispatch) fn set_conversation_language(
+    app: &mut AppView,
+    value: String,
+) -> Vec<Effect> {
+    let canonical = crate::settings::canonical_conversation_language(Some(&value));
+    let prev = crate::settings::canonical_conversation_language(
+        app.language_config.conversation.as_deref(),
+    );
+    if prev == canonical {
+        return vec![];
+    }
+    set_conversation_language_inner(app, canonical);
+    refresh_open_settings_modals(app);
+    tracing::info!(
+        target: "settings",
+        key = "language.conversation",
+        value = canonical,
+        "setting changed"
+    );
+    app.show_toast(&format!("\u{2713} Conversation language: {canonical}"));
+    vec![Effect::PersistSetting {
+        key: "language.conversation",
+        value: crate::settings::SettingValue::Enum(canonical),
+        rollback_value: crate::settings::SettingValue::Enum(prev),
+    }]
+}
+
+pub(super) fn set_artifact_language_inner(app: &mut AppView, canonical: &str) {
+    app.language_config.artifact = Some(canonical.to_string());
+}
+
+pub(in crate::app::dispatch) fn set_artifact_language(
+    app: &mut AppView,
+    value: String,
+) -> Vec<Effect> {
+    if app.language_config.artifact_locked {
+        app.show_toast("Artifact language is locked by project or managed configuration");
+        return vec![];
+    }
+    let canonical = crate::settings::canonical_artifact_language(Some(&value));
+    let prev =
+        crate::settings::canonical_artifact_language(app.language_config.artifact.as_deref());
+    if prev == canonical {
+        return vec![];
+    }
+    set_artifact_language_inner(app, canonical);
+    refresh_open_settings_modals(app);
+    tracing::info!(
+        target: "settings",
+        key = "language.artifact",
+        value = canonical,
+        "setting changed"
+    );
+    app.show_toast(&format!("\u{2713} Artifact language: {canonical}"));
+    vec![Effect::PersistSetting {
+        key: "language.artifact",
+        value: crate::settings::SettingValue::Enum(canonical),
+        rollback_value: crate::settings::SettingValue::Enum(prev),
+    }]
+}
+
 /// State-only mutation for `vim_mode`. Propagates to every in-process
 /// agent so background subagents and side panes pick up the change
 /// without restart. The cache mirror lets new agents created later

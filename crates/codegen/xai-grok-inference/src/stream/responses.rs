@@ -256,12 +256,29 @@ pub(crate) fn stream_responses_tracked<'a>(
                 }
 
                 // Codex / some Responses dialects may finish a part with only
-                // the Done event (full text, no prior deltas). Capture it so
-                // the final assistant item is never empty after a painted turn.
+                // the Done event (full text, no prior deltas). Yield it as a
+                // Text ChannelToken so the projector can decode a language
+                // envelope and `message_chunks_emitted` reflects delivery.
+                // The final assistant item is still back-filled from `text_acc`.
                 ResponseStreamEvent::ResponseOutputTextDone(text_done_event) => {
                     let text = text_done_event.text;
                     if !text.is_empty() && text_acc.is_empty() {
-                        text_acc = text;
+                        text_acc = text.clone();
+                        if !first_token_emitted {
+                            first_token_emitted = true;
+                            yield InferenceEvent::FirstToken {
+                                request_id: request_id.clone(),
+                            };
+                        }
+                        chunk_timestamps.push(Instant::now());
+                        chunk_index += 1;
+                        message_chunk_count += 1;
+                        yield InferenceEvent::ChannelToken {
+                            request_id: request_id.clone(),
+                            channel: InferenceChannel::Text,
+                            text,
+                            chunk_index,
+                        };
                     }
                 }
 
@@ -967,10 +984,28 @@ mod tests {
         ))
         .await;
 
+        let text_tokens: Vec<&str> = events
+            .iter()
+            .filter_map(|e| match e {
+                InferenceEvent::ChannelToken {
+                    channel: InferenceChannel::Text,
+                    text,
+                    ..
+                } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            text_tokens,
+            vec!["full message"],
+            "Done-only streams must yield a Text ChannelToken so projectors and fallback counting see the text"
+        );
+
         match events.last().unwrap() {
             InferenceEvent::Completed { response, .. } => {
                 assert_eq!(response.assistant_text(), "full message");
                 assert!(response.empty_reason().is_none());
+                assert_eq!(response.message_chunks_emitted, 1);
             }
             other => panic!("expected Completed, got {other:?}"),
         }

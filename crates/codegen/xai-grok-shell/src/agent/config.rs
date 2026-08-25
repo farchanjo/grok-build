@@ -1521,6 +1521,9 @@ pub struct Config {
     /// `[goal]` section: canonical `/goal` configuration. See [`GoalConfig`].
     #[serde(default)]
     pub goal: GoalConfig,
+    /// `[language]` section: dual-language sampling policy. See [`LanguageConfig`].
+    #[serde(default)]
+    pub language: LanguageConfig,
     #[serde(default)]
     pub workflows: WorkflowsConfig,
     /// `[claude_cli]` section: extra Claude Agent CLI picker rows. See
@@ -1978,6 +1981,7 @@ impl Default for Config {
         let mut cfg = Self {
             features: Features::default(),
             goal: GoalConfig::default(),
+            language: LanguageConfig::default(),
             workflows: WorkflowsConfig::default(),
             claude_cli: ClaudeCliConfig::default(),
             doom_loop_recovery: crate::util::config::DoomLoopRecoverySettings::default(),
@@ -2231,6 +2235,15 @@ impl Config {
             t.remove("auth_provider");
             t.remove("model_providers");
         }
+        let mut malformed_language = false;
+        if let Some(language_val) = raw_without_model_sections.get("language")
+            && language_val.clone().try_into::<LanguageConfig>().is_err()
+        {
+            malformed_language = true;
+            if let toml::Value::Table(ref mut t) = raw_without_model_sections {
+                t.remove("language");
+            }
+        }
         crate::config::deep_merge_toml(&mut base, &raw_without_model_sections);
         let (mut config, user_unused) =
             Self::deserialize_collecting_unrecognized(base, &raw_without_model_sections)?;
@@ -2308,6 +2321,14 @@ impl Config {
                     ),
                 );
             }
+        }
+        if malformed_language {
+            config.config_warnings.push(
+                super::config_model_override_parse::ConfigWarning::language_section(
+                    super::config_model_override_parse::ConfigWarningKind::InvalidValue,
+                    "malformed [language] section; using defaults".to_string(),
+                ),
+            );
         }
         super::config_model_override_parse::log_config_warnings(&config.config_warnings);
         if config.grok_com_config.oidc.is_none() {
@@ -5059,6 +5080,162 @@ where
         _ => Vec::new(),
     })
 }
+/// `[language]` section: opt-in dual-language sampling policy.
+///
+/// When `conversation` is set, the shell injects a JSON Schema envelope and
+/// a durable `<language_policy>` prompt section. Artifact language defaults
+/// to `en-US` while the policy is active. `artifact_locked` is set by
+/// project/managed/requirements layers so session and user settings cannot
+/// override it. `validate_prose` is reserved for a follow-up markdown-aware
+/// check and is ignored in v1.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct LanguageConfig {
+    /// BCP-47 tag for conversational replies. Policy is inactive when unset.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub conversation: Option<String>,
+    /// BCP-47 tag for artifacts (code, comments, docs, diagnostics).
+    /// Defaults to `en-US` when the policy is active and this is unset.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub artifact: Option<String>,
+    /// When true, `artifact` is locked by a project/managed/requirements
+    /// layer and must not be overridden by session or user settings.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub artifact_locked: bool,
+    /// Follow-up: markdown-aware prose language checks. Unused in v1.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub validate_prose: bool,
+}
+
+impl LanguageConfig {
+    /// Default artifact language when the dual-language policy is active.
+    pub const DEFAULT_ARTIFACT: &'static str = "en-US";
+
+    /// Resolved `(conversation, artifact)` pair when the policy is active.
+    ///
+    /// Fail-closed: a locked artifact from this (already-merged) config wins
+    /// over any caller-supplied session override of artifact. Conversation is
+    /// taken from `conversation_override` when non-empty, else this config.
+    pub fn resolved(&self, conversation_override: Option<&str>) -> Option<ResolvedLanguagePolicy> {
+        let conversation = conversation_override
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_owned)
+            .or_else(|| {
+                self.conversation
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_owned)
+            })?;
+        let artifact = self
+            .artifact
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or(Self::DEFAULT_ARTIFACT)
+            .to_owned();
+        Some(ResolvedLanguagePolicy {
+            conversation,
+            artifact,
+            artifact_locked: self.artifact_locked,
+            validate_prose: self.validate_prose,
+        })
+    }
+}
+
+/// Resolved dual-language policy for one turn.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ResolvedLanguagePolicy {
+    pub conversation: String,
+    pub artifact: String,
+    pub artifact_locked: bool,
+    pub validate_prose: bool,
+}
+
+#[cfg(test)]
+mod language_config_tests {
+    use super::*;
+
+    #[test]
+    fn unset_conversation_is_inactive() {
+        let cfg = LanguageConfig::default();
+        assert!(cfg.resolved(None).is_none());
+        assert!(cfg.resolved(Some("")).is_none());
+        assert!(cfg.resolved(Some("  ")).is_none());
+    }
+
+    #[test]
+    fn conversation_from_config_defaults_artifact_en_us() {
+        let cfg = LanguageConfig {
+            conversation: Some("pt-BR".into()),
+            ..Default::default()
+        };
+        let resolved = cfg.resolved(None).expect("active");
+        assert_eq!(resolved.conversation, "pt-BR");
+        assert_eq!(resolved.artifact, "en-US");
+        assert!(!resolved.artifact_locked);
+    }
+
+    #[test]
+    fn session_conversation_overrides_config() {
+        let cfg = LanguageConfig {
+            conversation: Some("en-US".into()),
+            artifact: Some("en-US".into()),
+            ..Default::default()
+        };
+        let resolved = cfg.resolved(Some("ja-JP")).expect("active");
+        assert_eq!(resolved.conversation, "ja-JP");
+        assert_eq!(resolved.artifact, "en-US");
+    }
+
+    #[test]
+    fn locked_artifact_is_preserved_from_merged_config() {
+        let cfg = LanguageConfig {
+            conversation: Some("pt-BR".into()),
+            artifact: Some("en-US".into()),
+            artifact_locked: true,
+            ..Default::default()
+        };
+        let resolved = cfg.resolved(Some("es-ES")).expect("active");
+        assert_eq!(resolved.artifact, "en-US");
+        assert!(resolved.artifact_locked);
+    }
+
+    #[test]
+    fn toml_round_trip_skips_false_flags() {
+        let cfg = LanguageConfig {
+            conversation: Some("fr-FR".into()),
+            artifact: Some("en-US".into()),
+            artifact_locked: false,
+            validate_prose: false,
+        };
+        let toml = toml::to_string(&cfg).expect("serialize");
+        assert!(!toml.contains("artifact_locked"));
+        assert!(!toml.contains("validate_prose"));
+        let back: LanguageConfig = toml::from_str(&toml).expect("deserialize");
+        assert_eq!(back.conversation.as_deref(), Some("fr-FR"));
+        assert_eq!(back.artifact.as_deref(), Some("en-US"));
+    }
+
+    #[test]
+    fn malformed_language_section_emits_config_warning() {
+        let raw: toml::Value = toml::from_str("language = \"pt-BR\"\n").unwrap();
+        let cfg = Config::new_from_toml_cfg(&raw).expect("config still loads");
+        assert!(
+            cfg.config_warnings.iter().any(|w| {
+                matches!(
+                    w.target,
+                    crate::agent::config_model_override_parse::WarningTarget::LanguageSection
+                )
+            }),
+            "malformed [language] must warn instead of silently defaulting: {:?}",
+            cfg.config_warnings
+        );
+        assert_eq!(cfg.language, LanguageConfig::default());
+    }
+}
+
 /// `[goal]` section: the canonical home for `/goal` configuration. Field names
 /// mirror the remote `goal_*` keys with the prefix dropped, so config and remote
 /// stay 1:1. Per-key precedence is env > this config > remote > default.

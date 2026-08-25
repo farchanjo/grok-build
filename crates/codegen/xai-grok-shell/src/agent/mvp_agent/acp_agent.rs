@@ -1306,6 +1306,7 @@ impl acp::Agent for MvpAgent {
                         session_yolo_mode,
                         session_auto_mode: session_auto_mode && !session_yolo_mode,
                         prompt_display_cwd: None,
+                        persisted_conversation_language: None,
                     }
             };
             self.spawn_and_register_session(init, spawn_opts, false).await
@@ -1879,6 +1880,7 @@ impl acp::Agent for MvpAgent {
                         session_yolo_mode,
                         session_auto_mode: session_auto_mode && !session_yolo_mode,
                         prompt_display_cwd,
+                        persisted_conversation_language: summary.conversation_language.clone(),
                     },
                     true,
                 )
@@ -3779,6 +3781,7 @@ impl acp::Agent for MvpAgent {
             | "x.ai/internal/reload_project_mcp_servers" | "x.ai/internal/reload_skills"
             | "x.ai/internal/reload_workflows" | "x.ai/internal/reload_models"
             | "x.ai/internal/reload_models_cache" | "x.ai/internal/reload_compaction"
+            | "x.ai/internal/reload_language"
             | "x.ai/internal/auth_cleared"
             | "x.ai/plugins/reload" | "x.ai/commands/list" => {
                 crate::extensions::session_admin::handle(self, &args).await

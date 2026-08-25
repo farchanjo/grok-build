@@ -615,6 +615,8 @@ pub struct AppView {
     /// separate from `UiConfig` so the two configuration namespaces cannot
     /// drift or serialize into the wrong TOML table.
     pub compaction_config: xai_grok_shell::agent::config::CompactionConfig,
+    /// In-memory snapshot of the shell-owned `[language]` section.
+    pub language_config: xai_grok_shell::agent::config::LanguageConfig,
     /// In-memory snapshot of the shell-owned `[media]` section (media
     /// routing + auxiliary image/audio/video models).
     pub media_config: xai_grok_shell::config::MediaConfig,
@@ -1382,6 +1384,7 @@ impl AppView {
             settings_registry: Arc::new(crate::settings::SettingsRegistry::defaults()),
             current_ui: xai_grok_shell::agent::config::UiConfig::default(),
             compaction_config: xai_grok_shell::agent::config::CompactionConfig::default(),
+            language_config: xai_grok_shell::agent::config::LanguageConfig::default(),
             media_config: xai_grok_shell::config::MediaConfig::default(),
             cwd: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
             project_picker_shown: false,
@@ -5522,6 +5525,7 @@ pub(crate) mod tests {
             settings_registry: std::sync::Arc::new(crate::settings::SettingsRegistry::defaults()),
             current_ui: xai_grok_shell::agent::config::UiConfig::default(),
             compaction_config: xai_grok_shell::agent::config::CompactionConfig::default(),
+            language_config: xai_grok_shell::agent::config::LanguageConfig::default(),
             media_config: xai_grok_shell::config::MediaConfig::default(),
             cwd: std::path::PathBuf::from("/tmp"),
             project_picker_shown: true,

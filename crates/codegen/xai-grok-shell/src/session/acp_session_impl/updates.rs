@@ -212,11 +212,30 @@ impl SessionActor {
             }
             SessionNotification::Xai(n) => {
                 self.log_outbound_xai_buffered(&n);
+                let persist_reset = matches!(n.update, XaiSessionUpdate::StreamingAttemptReset);
+                let mut n = *n;
+                if persist_reset {
+                    let mut meta_map = n.meta.take().and_then(|v| match v {
+                        serde_json::Value::Object(m) => Some(m),
+                        _ => None,
+                    });
+                    crate::util::event_id::ensure_event_id_meta(
+                        &self.session_info.id.0,
+                        &mut meta_map,
+                    );
+                    n.meta = meta_map.map(serde_json::Value::Object);
+                    let _ = self
+                        .notifications
+                        .persistence_tx
+                        .send(PersistenceMsg::Update(
+                            crate::session::storage::SessionUpdate::Xai(Box::new(n.clone())),
+                        ));
+                }
                 if self
                     .notifications
                     .gateway_enabled
                     .load(std::sync::atomic::Ordering::Relaxed)
-                    && let Ok(value) = serde_json::to_value(&*n)
+                    && let Ok(value) = serde_json::to_value(&n)
                     && let Ok(params) = serde_json::value::to_raw_value(&value)
                 {
                     self.notifications

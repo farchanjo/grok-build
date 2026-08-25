@@ -649,6 +649,20 @@ impl ProviderManager {
         model_providers
             .entry("grok_build_anthropic".to_owned())
             .or_insert_with(grok_build_anthropic_config);
+        // Presets stamp canonical ids (`openai` / `openrouter` / `anthropic`)
+        // so route freeze can look up descriptors. The grok_build_* tables
+        // remain as config *sources*. Without the canonical rows, a ChatGPT
+        // override's `model_provider = "openai"` is dropped as invalid and
+        // Codex falls through to Chat Completions (`/chat/completions` → 404).
+        model_providers
+            .entry("openai".to_owned())
+            .or_insert_with(grok_build_openai_config);
+        model_providers
+            .entry("openrouter".to_owned())
+            .or_insert_with(grok_build_openrouter_config);
+        model_providers
+            .entry("anthropic".to_owned())
+            .or_insert_with(grok_build_anthropic_config);
         // First-class Z.ai Model API profile (credentials never inlined).
         super::zai::install_zai_provider(model_providers);
         let openrouter_configured = credential_lookup_manager()
@@ -719,10 +733,14 @@ impl ProviderManager {
             }
             let provider = match preset.provider {
                 ProviderId::Xai => continue,
-                ProviderId::OpenAi => "grok_build_openai",
-                ProviderId::OpenRouter => "grok_build_openrouter",
-                ProviderId::Anthropic => "grok_build_anthropic",
+                ProviderId::OpenAi => "openai",
+                ProviderId::OpenRouter => "openrouter",
+                ProviderId::Anthropic => "anthropic",
             };
+            let is_codex = preset
+                .base_url
+                .as_deref()
+                .is_some_and(crate::auth::chatgpt_oauth::is_codex_base_url);
             let preset_override = ConfigModelOverride {
                 model: Some(preset.model),
                 base_url: preset.base_url,
@@ -737,6 +755,11 @@ impl ProviderManager {
                 },
                 api_backend: if preset.provider == ProviderId::Anthropic {
                     Some(ApiBackend::Messages)
+                } else if is_codex {
+                    // ChatGPT Codex only serves POST /responses. Chat Completions
+                    // against chatgpt.com/backend-api/codex returns 404
+                    // `invalid_request_error: Not Found`.
+                    Some(ApiBackend::Responses)
                 } else {
                     None
                 },
@@ -782,6 +805,20 @@ impl ProviderManager {
                 }
             }
         }
+        inject_configured_instance_catalogs(
+            model_providers,
+            config_models,
+            &credential_lookup_manager().grok_home,
+        );
+    }
+
+    #[cfg(test)]
+    pub(super) fn inject_configured_instance_catalogs_for_test(
+        model_providers: &indexmap::IndexMap<String, super::model_providers::ModelProviderConfig>,
+        config_models: &mut indexmap::IndexMap<String, super::config::ConfigModelOverride>,
+        grok_home: &Path,
+    ) {
+        inject_configured_instance_catalogs(model_providers, config_models, grok_home);
     }
 
     /// List statuses without a network request.
@@ -1458,6 +1495,9 @@ impl ProviderManager {
             refresh_anthropic,
             refresh_codex
         );
+        crate::provider_registry::ProviderManagementService::new(&self.grok_home)
+            .refresh_additional_catalogs()
+            .await;
     }
 
     /// Refresh the authenticated ChatGPT/Codex catalog. The account-aware live
@@ -1580,6 +1620,104 @@ impl ProviderManager {
                     )
             })
             .map(|auth| auth.key.clone()))
+    }
+}
+
+/// Project per-instance catalogs from `$GROK_HOME/provider_caches/<id>/` into
+/// the picker. Built-in OpenAI/OpenRouter/Anthropic stay on their legacy
+/// singleton caches; additional accounts (a second OpenRouter, a local
+/// OpenAI-compatible host, …) must not borrow those catalogs.
+fn inject_configured_instance_catalogs(
+    model_providers: &indexmap::IndexMap<String, super::model_providers::ModelProviderConfig>,
+    config_models: &mut indexmap::IndexMap<String, super::config::ConfigModelOverride>,
+    grok_home: &Path,
+) {
+    use super::config::ConfigModelOverride;
+    use crate::inference::ApiBackend;
+    use crate::provider_registry::{
+        CatalogCacheStore, ProviderId as RegistryProviderId, namespaced_model_id,
+        normalize_endpoint_origin,
+    };
+
+    for (id, cfg) in model_providers {
+        if matches!(
+            id.as_str(),
+            "openrouter"
+                | "openai"
+                | "anthropic"
+                | "xai"
+                | "grok_build_openrouter"
+                | "grok_build_openai"
+                | "grok_build_anthropic"
+        ) {
+            continue;
+        }
+        if !cfg.enabled || !cfg.catalog_enabled {
+            continue;
+        }
+        let Some(base) = cfg.base_url.as_deref().or(cfg.api_base_url.as_deref()) else {
+            continue;
+        };
+        let Ok(origin) = normalize_endpoint_origin(base) else {
+            continue;
+        };
+        let Ok(pid) = RegistryProviderId::new(id) else {
+            continue;
+        };
+        let Some(entry) = CatalogCacheStore::load(grok_home, &pid, &origin)
+            .ok()
+            .flatten()
+        else {
+            continue;
+        };
+        let api_backend = cfg.api_backend.clone().or_else(|| match cfg.kind {
+            ModelProviderKind::Anthropic => Some(ApiBackend::Messages),
+            ModelProviderKind::OpenAi => Some(ApiBackend::Responses),
+            _ => Some(ApiBackend::ChatCompletions),
+        });
+        for model in &entry.models {
+            let Some(upstream) = model
+                .get("id")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+            else {
+                continue;
+            };
+            let canonical = model
+                .get("canonical_id")
+                .and_then(|v| v.as_str())
+                .map(str::to_owned)
+                .unwrap_or_else(|| namespaced_model_id(&pid, upstream));
+            if config_models.contains_key(&canonical) {
+                continue;
+            }
+            let label = model
+                .get("display_name")
+                .or_else(|| model.get("name"))
+                .or_else(|| model.get("label"))
+                .and_then(|v| v.as_str())
+                .unwrap_or(upstream);
+            config_models.insert(
+                canonical,
+                ConfigModelOverride {
+                    model: Some(upstream.to_owned()),
+                    base_url: Some(base.to_owned()),
+                    name: Some(label.to_owned()),
+                    description: model
+                        .get("description")
+                        .and_then(|v| v.as_str())
+                        .map(str::to_owned),
+                    model_provider: Some(id.clone()),
+                    api_backend: api_backend.clone(),
+                    context_window: model.get("context_window").and_then(|v| v.as_u64()),
+                    max_completion_tokens: model
+                        .get("max_completion_tokens")
+                        .and_then(|v| v.as_u64())
+                        .and_then(|n| u32::try_from(n).ok()),
+                    ..Default::default()
+                },
+            );
+        }
     }
 }
 
@@ -3248,6 +3386,79 @@ pub(crate) fn set_openrouter_catalog_url_for_tests(url: Option<String>) {
 mod tests {
     use super::*;
     use xai_grok_test_support::EnvGuard;
+
+    #[test]
+    fn extra_openrouter_instance_catalog_is_namespaced_and_not_builtin() {
+        use super::super::model_providers::{ModelProviderConfig, ModelProviderKind};
+        use crate::provider_registry::instance::{
+            ApiSurface, CredentialRoute, ProviderIncarnation, ProviderKind,
+        };
+        use crate::provider_registry::{
+            CATALOG_CACHE_VERSION, CacheOrigin, CatalogCacheEntry, CredentialBindingId,
+            ProviderCacheIdentity, ProviderCacheStore, ProviderId as RegistryProviderId,
+        };
+
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path();
+        let pid = RegistryProviderId::new("openrouter_team").unwrap();
+        let identity = ProviderCacheIdentity::new(
+            pid,
+            ProviderIncarnation::new("00000000-0000-4000-8000-0000000000aa").unwrap(),
+            ProviderKind::OpenRouter,
+            ApiSurface::OpenRouterNative,
+            CredentialRoute::ApiKey,
+            "https://openrouter.ai",
+            String::new(),
+            CredentialBindingId::new("00000000-0000-4000-8000-0000000000bb").unwrap(),
+        )
+        .unwrap();
+        let entry = CatalogCacheEntry {
+            version: CATALOG_CACHE_VERSION,
+            provider_id: "openrouter_team".into(),
+            origin: CacheOrigin::Live,
+            base_url_origin: "https://openrouter.ai".into(),
+            fetched_at_unix: 1,
+            models: vec![serde_json::json!({
+                "id": "moonshotai/kimi-k3",
+                "canonical_id": "openrouter_team:moonshotai/kimi-k3",
+                "display_name": "Kimi K3"
+            })],
+            baseline_version: None,
+            incarnation: Some(identity.incarnation.clone()),
+            provider_kind: Some(identity.kind),
+            api_surface: Some(identity.api_surface),
+            credential_route: Some(identity.credential_route),
+            credential_binding_id: Some(identity.credential_binding_id.clone()),
+            org_project_fingerprint: Some(identity.org_project_fingerprint.clone()),
+            catalog_generation: 1,
+            lifecycle_generation: None,
+        };
+        ProviderCacheStore::store_catalog(home, &identity, &entry).unwrap();
+
+        let mut providers = indexmap::IndexMap::new();
+        providers.insert(
+            "openrouter_team".to_owned(),
+            ModelProviderConfig {
+                kind: ModelProviderKind::OpenRouter,
+                base_url: Some("https://openrouter.ai/api/v1".into()),
+                enabled: true,
+                catalog_enabled: true,
+                ..ModelProviderConfig::default()
+            },
+        );
+        let mut models = indexmap::IndexMap::new();
+        ProviderManager::inject_configured_instance_catalogs_for_test(
+            &providers,
+            &mut models,
+            home,
+        );
+        let injected = models
+            .get("openrouter_team:moonshotai/kimi-k3")
+            .expect("second OpenRouter account must get instance-qualified models");
+        assert_eq!(injected.model.as_deref(), Some("moonshotai/kimi-k3"));
+        assert_eq!(injected.model_provider.as_deref(), Some("openrouter_team"));
+        assert!(!models.contains_key("openrouter:moonshotai/kimi-k3"));
+    }
 
     #[test]
     #[serial_test::serial]
@@ -4970,7 +5181,7 @@ mod tests {
             merged.base_url.as_deref(),
             Some(crate::auth::chatgpt_oauth::CODEX_RESPONSES_BASE_URL)
         );
-        assert_eq!(merged.model_provider.as_deref(), Some("grok_build_openai"));
+        assert_eq!(merged.model_provider.as_deref(), Some("openai"));
         assert_eq!(merged.name.as_deref(), Some("GPT-5.6 Sol via ChatGPT"));
         assert!(
             !merged.reasoning_efforts.is_empty(),
@@ -5023,11 +5234,17 @@ mod tests {
         assert_eq!(resolved.description, preset.description);
         assert_eq!(resolved.context_window, preset.context_window);
         assert_eq!(resolved.max_completion_tokens, preset.max_completion_tokens);
-        assert_eq!(
-            resolved.model_provider.as_deref(),
-            Some("grok_build_openai")
-        );
+        assert_eq!(resolved.model_provider.as_deref(), Some("openai"));
         assert_eq!(resolved.supports_tools, Some(preset.supports_tools));
+        assert_eq!(
+            resolved.api_backend,
+            Some(crate::inference::ApiBackend::Responses),
+            "ChatGPT Codex must use Responses; Chat Completions 404s on /codex/chat/completions"
+        );
+        assert!(
+            providers.contains_key("openai"),
+            "canonical openai table must exist so model_provider=openai is valid"
+        );
         set_stored_key_home_for_tests(None);
     }
 
@@ -5122,7 +5339,7 @@ mod tests {
             openai.base_url.as_deref(),
             Some("https://api.openai.com/v1")
         );
-        assert_eq!(openai.model_provider.as_deref(), Some("grok_build_openai"));
+        assert_eq!(openai.model_provider.as_deref(), Some("openai"));
 
         let openrouter = &models["openrouter-openai-gpt-5.6-sol"];
         assert_eq!(openrouter.context_window, Some(50_000));
@@ -5131,10 +5348,7 @@ mod tests {
             openrouter.base_url.as_deref(),
             Some("https://openrouter.ai/api/v1")
         );
-        assert_eq!(
-            openrouter.model_provider.as_deref(),
-            Some("grok_build_openrouter")
-        );
+        assert_eq!(openrouter.model_provider.as_deref(), Some("openrouter"));
 
         let anthropic = &models["anthropic-claude-sonnet-5"];
         assert_eq!(anthropic.context_window, Some(50_000));
@@ -5143,10 +5357,7 @@ mod tests {
             anthropic.base_url.as_deref(),
             Some(ANTHROPIC_INFERENCE_BASE_URL)
         );
-        assert_eq!(
-            anthropic.model_provider.as_deref(),
-            Some("grok_build_anthropic")
-        );
+        assert_eq!(anthropic.model_provider.as_deref(), Some("anthropic"));
         assert_eq!(
             anthropic.auth_scheme,
             Some(xai_grok_inference::AuthScheme::XApiKey)

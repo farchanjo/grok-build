@@ -220,6 +220,9 @@ pub(crate) struct SessionSpawnOptions<'a> {
     pub session_yolo_mode: bool,
     pub session_auto_mode: bool,
     pub prompt_display_cwd: Option<String>,
+    /// Restored from `Summary.conversation_language` on load. `None` on new
+    /// sessions (inherit `[language].conversation`).
+    pub persisted_conversation_language: Option<String>,
 }
 #[derive(Clone, Copy)]
 #[allow(dead_code)]
@@ -357,6 +360,7 @@ pub(crate) fn chat_session_spawn_options<'a>(
         session_yolo_mode,
         session_auto_mode: false,
         prompt_display_cwd: None,
+        persisted_conversation_language: None,
     }
 }
 /// `_meta.noReplay` → skip gateway replay (client already has the transcript).

@@ -833,6 +833,17 @@ impl AcpUpdateTracker {
         }
         changed
     }
+    /// Drop the in-progress agent message so the next chunk starts a new
+    /// bubble. Used when the shell emits `StreamingAttemptReset` after a
+    /// failed native structured-output attempt.
+    pub fn reset_streaming_attempt(&mut self, scrollback: &mut ScrollbackState) -> bool {
+        let Some(agent_id) = self.current_agent_msg.take() else {
+            return false;
+        };
+        scrollback.finish_running(agent_id);
+        scrollback.remove_entry(agent_id)
+    }
+
     /// Called when PromptResponse is received (turn complete).
     pub fn finish_turn(&mut self, scrollback: &mut ScrollbackState) {
         self.finish_thinking(scrollback);
@@ -2781,6 +2792,20 @@ mod tests {
             acp::TextContent::new(text.to_string()),
         )))
     }
+    #[test]
+    fn streaming_attempt_reset_removes_in_progress_agent_message() {
+        let mut sb = ScrollbackState::new();
+        let mut tracker = AcpUpdateTracker::new();
+        assert!(tracker.handle_update(agent_chunk("provisional "), &meta(), &mut sb));
+        assert_eq!(sb.len(), 1);
+        assert!(tracker.current_agent_msg.is_some());
+        assert!(tracker.reset_streaming_attempt(&mut sb));
+        assert!(tracker.current_agent_msg.is_none());
+        assert_eq!(sb.len(), 0);
+        assert!(tracker.handle_update(agent_chunk("retry"), &meta(), &mut sb));
+        assert_eq!(sb.len(), 1);
+    }
+
     #[test]
     fn streaming_agent_message() {
         let mut sb = ScrollbackState::new();

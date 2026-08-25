@@ -396,6 +396,13 @@ pub enum SessionUpdate {
     },
     /// Notification that a retry is in progress due to a transient error.
     RetryState(RetryState),
+    /// Discard the in-progress streamed agent message for this attempt.
+    ///
+    /// Native-schema routes stream provisionally. On terminal JSON Schema
+    /// failure the shell persist+forwards this x.ai extension (ACP 0.10.4 /
+    /// schema 0.11.4 has no reset/replace variant) so clients start a new
+    /// bubble. Empty payload. Not an AgentMessageChunk merge partner.
+    StreamingAttemptReset,
     /// Auto-compact is starting due to context window threshold
     AutoCompactStarted {
         /// Current token usage

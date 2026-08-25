@@ -289,6 +289,15 @@ impl AgentRebuildSpec {
         .with_mcp_max_output_bytes(
             crate::util::config::resolve_max_mcp_output_bytes_for_cwd(working_directory),
         );
+        let language = crate::config::load_effective_config()
+            .ok()
+            .and_then(|raw| crate::agent::config::Config::new_from_toml_cfg(&raw).ok())
+            .map(|c| c.language)
+            .unwrap_or_default();
+        if let Some(policy) = language.resolved(None) {
+            builder =
+                builder.with_language_policy(Some(policy.conversation), Some(policy.artifact));
+        }
         if let Some(owner_session_id) = owner_session_id.clone() {
             builder = builder.with_owner_session_id(owner_session_id);
         }

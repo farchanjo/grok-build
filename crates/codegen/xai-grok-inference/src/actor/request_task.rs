@@ -31,6 +31,7 @@ use crate::retry::{
 };
 use crate::route_context::ProviderRouteContext;
 use crate::stream::responses::stream_responses_tracked;
+use crate::stream::structured_output::project_response_field;
 use crate::stream::{stream_chat_completions, stream_messages};
 use crate::types::RequestId;
 
@@ -596,6 +597,7 @@ async fn run_one_attempt(
     doom_check: Option<xai_grok_inference_types::DoomLoopRecoveryPolicy>,
     output_observed: Arc<AtomicBool>,
 ) -> AttemptOutcome {
+    let project = request.project_response_field;
     match client.api_backend() {
         ApiBackend::ChatCompletions => {
             let (raw, metadata) = match client.conversation_stream(request).await {
@@ -616,7 +618,7 @@ async fn run_one_attempt(
                 },
             );
             drive_l2(
-                l2,
+                project_response_field(l2, project),
                 request_id,
                 event_tx,
                 cancel_token,
@@ -647,7 +649,7 @@ async fn run_one_attempt(
                 Arc::clone(&output_observed),
             );
             drive_l2(
-                l2,
+                project_response_field(l2, project),
                 request_id,
                 event_tx,
                 cancel_token,
@@ -665,7 +667,7 @@ async fn run_one_attempt(
             let (teed, captured) = tee_errors(raw);
             let l2 = stream_messages(teed, metadata, request_id.clone(), idle_timeout);
             drive_l2(
-                l2,
+                project_response_field(l2, project),
                 request_id,
                 event_tx,
                 cancel_token,
@@ -1194,6 +1196,7 @@ mod tests {
             &mut request,
             &mut client,
             &config,
+            None,
             &CancellationToken::new(),
             &mut completion_tx,
             &inference_pacer,

@@ -154,6 +154,7 @@ impl ChatStateActor {
             reasoning_effort: self.state.inference_settings.reasoning_effort,
             json_schema: None,
             parallel_tool_calls: None,
+            project_response_field: false,
         }
     }
 }

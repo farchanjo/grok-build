@@ -2,11 +2,11 @@
 
 use crate::agent::providers::{ProviderId as BuiltInProviderId, ProviderManager};
 use crate::provider_registry::id::{ProviderId, ProviderRef};
+use crate::provider_registry::remove_all_provider_caches;
 use crate::provider_registry::secrets::{
     ProviderCredentialKind, admin_key_scope, application_key_scope, clear_provider_secret,
     store_provider_secret,
 };
-use crate::provider_registry::{CatalogCacheStore, remove_all_provider_caches};
 use clap::{Parser, Subcommand};
 use serde_json::json;
 use std::path::PathBuf;
@@ -479,37 +479,10 @@ async fn run_inner(args: ProviderLifecycleArgs) -> Result<i32, String> {
             Ok(0)
         }
         RefreshModels { id } => {
-            use crate::agent::providers::{ProviderId as BuiltInId, ProviderManager};
-            use crate::provider_registry::id::BuiltInProviderId;
-            let home = grok_home();
-            if let Some(built_in) = BuiltInProviderId::parse(&id) {
-                let manager = ProviderManager::new(&home);
-                let backend = match built_in {
-                    BuiltInProviderId::OpenRouter => Some(BuiltInId::OpenRouter),
-                    BuiltInProviderId::Anthropic => Some(BuiltInId::Anthropic),
-                    BuiltInProviderId::OpenAi => Some(BuiltInId::OpenAi),
-                    BuiltInProviderId::Xai => None,
-                };
-                if let Some(backend) = backend {
-                    match backend {
-                        BuiltInId::OpenRouter => {
-                            let _ = manager.refresh_openrouter_catalog().await;
-                        }
-                        BuiltInId::Anthropic => {
-                            let _ = manager.refresh_anthropic_catalog().await;
-                        }
-                        BuiltInId::OpenAi => {
-                            let _ = manager.refresh_openai_catalog().await;
-                        }
-                        BuiltInId::Xai => {}
-                    }
-                }
-            } else if let Ok(pid) = ProviderId::new(&id) {
-                let _ = CatalogCacheStore::remove(&home, &pid);
-            }
-            crate::cli::output::write_json(&json!({"ok": true, "id": id}))
-                .map_err(|e| e.to_string())?;
-            Ok(0)
+            let svc = ProviderManagementService::from_grok_home();
+            let snap = svc.refresh_catalog(&id).await;
+            crate::cli::output::write_json(&snap).map_err(|e| e.to_string())?;
+            Ok(if snap.error.is_some() { 1 } else { 0 })
         }
         Test { id } => {
             let svc = ProviderManagementService::from_grok_home();

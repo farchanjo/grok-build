@@ -839,6 +839,16 @@ pub(crate) struct SessionActor {
     pub(crate) chat_state_handle: xai_chat_state::ChatStateHandle,
     /// Current running prompt/turn id, shared with SessionHandle.
     pub(crate) current_prompt_id: std::sync::Arc<std::sync::Mutex<Option<String>>>,
+    /// Per-session conversation language (BCP-47). `None` means inherit from
+    /// `[language].conversation` at turn start. Mid-session changes apply at
+    /// the next turn, never mid-stream.
+    pub(crate) conversation_language: std::cell::RefCell<Option<String>>,
+    /// Language-envelope native/projected turn in flight. Retrying after
+    /// projected text must emit `StreamingAttemptReset`.
+    pub(crate) language_envelope_turn: std::cell::Cell<bool>,
+    /// StructuredOutput-tool + language envelope: buffer live Text tokens
+    /// (do not forward ChannelTokens) so envelope braces never leak.
+    pub(crate) suppress_language_envelope_text: std::cell::Cell<bool>,
     pub(crate) unattributed_background_usage: std::sync::atomic::AtomicBool,
     /// Open blocking reverse-requests (permission / question / plan-approval),
     /// keyed by `tool_call_id`. Shared with `SessionHandle` so the roster can

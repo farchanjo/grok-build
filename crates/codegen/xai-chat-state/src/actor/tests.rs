@@ -1518,6 +1518,79 @@ async fn with_initial_conversation_preserves_items() {
 // BuildConversationRequest tests
 // ============================================================================
 
+/// An orphaned `ToolResult` (owning assistant tool call gone — the shape that
+/// 400s every request on strict Responses backends with "No tool call found
+/// for function call output with call_id …") must be stripped by the
+/// automatic integrity repair that runs on `BuildConversationRequest`, and
+/// the fix must be persisted — without waiting for the out-of-band
+/// `x.ai/session/repair` rail.
+#[tokio::test]
+async fn build_request_strips_orphaned_tool_result_and_persists() {
+    use xai_grok_inference_types::ToolCall;
+
+    let corrupted = vec![
+        ConversationItem::system("sys"),
+        ConversationItem::user("prompt"),
+        // ← assistant owning call_LOST is missing (compaction dropped it).
+        ConversationItem::tool_result("call_LOST", "orphaned"),
+        ConversationItem::assistant_tool_calls(vec![ToolCall {
+            id: "call_OK".into(),
+            name: "read_file".to_string(),
+            arguments: "{}".into(),
+        }]),
+        ConversationItem::tool_result("call_OK", "fine"),
+    ];
+    let mut h = TestHarness::with_conversation(corrupted);
+
+    // Building a request runs the integrity guard; the orphan must be gone
+    // from both the built request and the actor's conversation.
+    let request = h
+        .handle
+        .build_request(vec![], None, false, None, "c".into(), "r".into())
+        .await
+        .unwrap();
+    assert!(
+        !request.items.iter().any(|i| matches!(
+            i,
+            ConversationItem::ToolResult(tr) if tr.tool_call_id == "call_LOST"
+        )),
+        "the built request must not carry the orphaned tool result"
+    );
+    let conv = h.handle.get_conversation().await;
+    assert_eq!(conv.len(), 4);
+    assert!(!conv.iter().any(|i| matches!(
+        i,
+        ConversationItem::ToolResult(tr) if tr.tool_call_id == "call_LOST"
+    )));
+    // The paired call/result must survive untouched.
+    assert!(conv.iter().any(|i| matches!(
+        i,
+        ConversationItem::ToolResult(tr) if tr.tool_call_id == "call_OK"
+    )));
+
+    // The repair must persist a full history replace.
+    let replaced = h
+        .drain_persistence()
+        .into_iter()
+        .find_map(|r| match r {
+            PersistenceRecord::ReplaceHistory(items) => Some(items),
+            _ => None,
+        })
+        .expect("integrity repair must persist a full history replace");
+    assert_eq!(replaced.len(), 4);
+
+    // Idempotent: a second build persists nothing new.
+    let _ = h
+        .handle
+        .build_request(vec![], None, false, None, "c".into(), "r2".into())
+        .await
+        .unwrap();
+    assert!(
+        h.drain_persistence().is_empty(),
+        "a clean conversation must not trigger another history replace"
+    );
+}
+
 #[tokio::test]
 async fn proactive_image_budget_is_disabled_by_default() {
     use xai_grok_inference_types::ContentPart;
@@ -3535,11 +3608,20 @@ async fn get_conversation_counts_empty() {
 
 #[tokio::test]
 async fn get_conversation_counts_mixed() {
+    use xai_grok_inference_types::ToolCall;
+
     let h = TestHarness::new();
     h.handle.push_user_message(ConversationItem::system("sys"));
     h.handle.push_user_message(ConversationItem::user("q1"));
+    // The assistant must declare the call its tool result answers — the
+    // integrity guard now strips orphaned results, so an unpaired
+    // `tool_result("c1", …)` would not survive to be counted.
     h.handle
-        .push_assistant_response(ConversationItem::assistant("a1"));
+        .push_assistant_response(ConversationItem::assistant_tool_calls(vec![ToolCall {
+            id: "c1".into(),
+            name: "read_file".to_string(),
+            arguments: "{}".into(),
+        }]));
     h.handle
         .push_tool_result(ConversationItem::tool_result("c1", "r1"));
     h.handle.push_user_message(ConversationItem::user("q2"));
@@ -3646,12 +3728,20 @@ async fn forked_subagent_bootstrap_replaces_parent_system_message() {
 // ============================================================================
 
 /// Helper: push N complete turns (user + assistant + tool-result) so the
-/// conversation grows to a predictable length.
+/// conversation grows to a predictable length. The assistant declares the
+/// call its tool result answers — otherwise the integrity guard treats the
+/// result as orphaned and strips it before pruning runs.
 async fn push_turns(handle: &crate::handle::ChatStateHandle, turns: usize, content_len: usize) {
+    use xai_grok_inference_types::ToolCall;
+
     for i in 0..turns {
         handle.push_user_message(ConversationItem::user(format!("q{i}")));
         handle.increment_prompt_index();
-        handle.push_assistant_response(ConversationItem::assistant(format!("a{i}")));
+        handle.push_assistant_response(ConversationItem::assistant_tool_calls(vec![ToolCall {
+            id: format!("call_{i}").into(),
+            name: "read_file".to_string(),
+            arguments: "{}".into(),
+        }]));
         handle.push_tool_result(ConversationItem::tool_result(
             format!("call_{i}"),
             "x".repeat(content_len),

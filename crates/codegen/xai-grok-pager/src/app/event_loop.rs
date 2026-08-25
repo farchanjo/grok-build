@@ -1285,6 +1285,7 @@ pub(crate) async fn run(
     // stays sans-IO.
     app.current_ui = load_initial_ui_config();
     app.compaction_config = load_initial_compaction_config();
+    app.language_config = load_initial_language_config();
     app.media_config = load_initial_media_config();
     // Field-tolerant: a whole-`UiConfig` default (malformed unrelated `[ui]`
     // field) must not wipe a valid `show_timeline` or leave appearance /
@@ -2869,6 +2870,17 @@ pub(crate) fn load_initial_ui_config() -> xai_grok_shell::agent::config::UiConfi
         return UiConfig::default();
     };
     ui_value.try_into::<UiConfig>().unwrap_or_default()
+}
+
+/// Load the shell-owned `[language]` section for the settings snapshot.
+pub(crate) fn load_initial_language_config() -> xai_grok_shell::agent::config::LanguageConfig {
+    let Ok(root) = xai_grok_shell::config::load_effective_config() else {
+        return xai_grok_shell::agent::config::LanguageConfig::default();
+    };
+    root.get("language")
+        .cloned()
+        .and_then(|value| value.try_into().ok())
+        .unwrap_or_default()
 }
 
 /// Load the shell-owned `[compaction]` section for the settings snapshot.

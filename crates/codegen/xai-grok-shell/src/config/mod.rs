@@ -693,7 +693,10 @@ impl MediaConfig {
         self.video_model
             .as_deref()
             .filter(|value| !value.is_empty())
-            .or(self.image_model.as_deref().filter(|value| !value.is_empty()))
+            .or(self
+                .image_model
+                .as_deref()
+                .filter(|value| !value.is_empty()))
             .unwrap_or("@session")
     }
 
@@ -703,7 +706,10 @@ impl MediaConfig {
         self.file_model
             .as_deref()
             .filter(|value| !value.is_empty())
-            .or(self.image_model.as_deref().filter(|value| !value.is_empty()))
+            .or(self
+                .image_model
+                .as_deref()
+                .filter(|value| !value.is_empty()))
             .unwrap_or("@session")
     }
 }

@@ -548,10 +548,23 @@ impl SettingsModalState {
     /// Transition to `PickingEnum` if the focused row is Enum/DynamicEnum.
     /// Returns `false` if the focused row is another kind.
     pub fn try_enter_picking_enum(&mut self) -> bool {
+        let Some((key, _)) = self.focused_setting() else {
+            return false;
+        };
+        self.try_enter_picking_enum_for_key(key)
+    }
+
+    /// [`Self::try_enter_picking_enum`] for an arbitrary setting key —
+    /// group sub-sheets use this to open the enum picker for an Enum child
+    /// (the child is not the browse list's focused row).
+    pub fn try_enter_picking_enum_for_key(&mut self, key: SettingKey) -> bool {
         let (key, first_canonical, current_value, supports_preview, resolved_choices) = {
-            let Some((key, meta)) = self.focused_setting() else {
+            let Some((key, meta)) = self.registry.find(key).map(|meta| (key, meta)) else {
                 return false;
             };
+            if key == "language.artifact" && self.pager_snapshot.language_artifact_locked {
+                return false;
+            }
             // Handles both static `Enum` and `DynamicEnum` catalogs.
             let (supports_preview, resolved): (bool, Vec<OwnedEnumChoice>) = match &meta.kind {
                 SettingKind::Enum {
@@ -944,6 +957,8 @@ pub(super) fn action_for_enum_commit(key: SettingKey, choice: &'static str) -> O
         "screen_mode" => Some(Action::SetScreenMode(choice.to_string())),
         "voice_capture_mode" => Some(Action::SetVoiceCaptureMode(choice.to_string())),
         "voice_stt_language" => Some(Action::SetVoiceSttLanguage(choice.to_string())),
+        "language.conversation" => Some(Action::SetConversationLanguage(choice.to_string())),
+        "language.artifact" => Some(Action::SetArtifactLanguage(choice.to_string())),
         "render_mermaid" => {
             crate::appearance::RenderMermaid::from_canonical(choice).map(Action::SetRenderMermaid)
         }

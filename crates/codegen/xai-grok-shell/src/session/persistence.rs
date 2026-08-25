@@ -313,6 +313,9 @@ pub enum PersistenceMsg {
         respond_to:
             tokio::sync::oneshot::Sender<Result<(), xai_chat_state::CompactionPersistenceError>>,
     },
+    ConversationLanguage {
+        conversation_language: Option<String>,
+    },
     CurrentModel {
         /// Canonical catalog selection id (never the upstream wire slug).
         model_id: acp::ModelId,
@@ -961,6 +964,11 @@ pub struct Summary {
     pub sandbox_profile: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning_effort: Option<ReasoningEffort>,
+    /// Per-session conversation language (BCP-47). When set, the dual-language
+    /// sampling policy is active for this session. Follows the
+    /// `reasoning_effort` persistence precedent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub conversation_language: Option<String>,
     /// How this session executes model turns. Defaults to native HTTP
     /// inference so old summaries remain loadable without migration.
     /// Persisted so resume cannot silently switch Native↔external modes.
@@ -1030,6 +1038,7 @@ impl Summary {
             agent_name: None,
             sandbox_profile: None,
             reasoning_effort: None,
+            conversation_language: None,
             execution_backend: crate::agent::execution_backend::ExecutionBackend::NativeInference,
             external_runtime: None,
         })
@@ -1117,6 +1126,24 @@ mod is_hidden_tests {
         let json = serde_json::to_string(&s).unwrap();
         let back: Summary = serde_json::from_str(&json).unwrap();
         assert_eq!(back.reasoning_effort, Some(ReasoningEffort::Xhigh));
+    }
+
+    #[test]
+    fn summary_round_trips_and_defaults_conversation_language() {
+        let mut s = summary_with_kind(None);
+        s.conversation_language = None;
+        let json = serde_json::to_string(&s).unwrap();
+        assert!(
+            !json.contains("conversation_language"),
+            "a None conversation language must not be serialized"
+        );
+        let back: Summary = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.conversation_language, None);
+
+        s.conversation_language = Some("pt-BR".into());
+        let json = serde_json::to_string(&s).unwrap();
+        let back: Summary = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.conversation_language.as_deref(), Some("pt-BR"));
     }
 
     #[test]
@@ -2078,6 +2105,17 @@ impl SessionPersistence {
                 } => {
                     let result = self.commit_compaction(request).await;
                     let _ = respond_to.send(result);
+                }
+                PersistenceMsg::ConversationLanguage {
+                    conversation_language,
+                } => {
+                    if let Err(e) = self
+                        .storage
+                        .update_conversation_language(&self.info, conversation_language)
+                        .await
+                    {
+                        tracing::warn!(?e, "failed to update conversation language");
+                    }
                 }
                 PersistenceMsg::CurrentModel {
                     model_id,
