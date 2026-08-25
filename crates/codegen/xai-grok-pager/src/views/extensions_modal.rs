@@ -2866,6 +2866,17 @@ fn filter_and_sort_skills(
     SkillsEntryData { matches }
 }
 
+/// Compact source label for a `SkillScope`. Never Debug — `Option` would
+/// otherwise render as `Some(Bundled)` in the skills list.
+fn skill_scope_label(
+    scope: Option<xai_grok_tools::implementations::skills::types::SkillScope>,
+) -> String {
+    match scope {
+        Some(scope) => scope.as_ref().to_string(),
+        None => "unknown".into(),
+    }
+}
+
 fn skill_source_str(skill: &SkillInfo) -> String {
     if let Some(ref cs) = skill.config_source {
         match cs {
@@ -2891,10 +2902,22 @@ fn skill_source_str(skill: &SkillInfo) -> String {
             xai_grok_tools::types::config_source::ConfigSource::Plugin { plugin_name, .. } => {
                 format!("plugin: {}", plugin_name)
             }
-            _ => format!("{:?}", skill.scope).to_lowercase(),
+            other => other.display_label(),
         }
+    } else if let Some(ref plugin) = skill.plugin_name {
+        format!("plugin: {plugin}")
     } else {
-        format!("{:?}", skill.scope).to_lowercase()
+        skill.scope.as_ref().to_string()
+    }
+}
+
+/// Source column for a skills-list row. Quarantined / untested rows often
+/// have no parsed `SkillInfo`; fall back to identity scope instead of
+/// Debug-printing `Option<SkillScope>`.
+fn skill_row_source_label(row: &ManagedSkillRow) -> String {
+    match row.skill.as_ref() {
+        Some(skill) => skill_source_str(skill),
+        None => skill_scope_label(row.identity.scope),
     }
 }
 
@@ -3117,9 +3140,7 @@ pub fn render_extensions_modal(
                     for &(si, _) in &filtered.matches {
                         let row = &snapshot.rows[si];
                         let skill = row.skill.as_ref();
-                        let source = skill
-                            .map(skill_source_str)
-                            .unwrap_or_else(|| format!("{:?}", row.identity.scope));
+                        let source = skill_row_source_label(row);
                         entry_labels.push(row.display_name().to_string());
                         let right = match skill.and_then(|s| s.author.as_deref()) {
                             Some(a) if !a.is_empty() => format!("({} · {})", source, a),
@@ -5373,6 +5394,64 @@ mod tests {
         );
         assert_eq!(quarantined.matches.len(), 1);
         assert!(!rows[1].enableable);
+    }
+
+    #[test]
+    fn skill_row_source_label_does_not_debug_option() {
+        use xai_grok_tools::implementations::skills::types::SkillScope;
+        let label = |name: &str, scope| {
+            skill_row_source_label(&ManagedSkillRow::from_quarantined(
+                &xai_grok_tools::implementations::skills::strict::QuarantinedSkill {
+                    identity: SkillIdentity::new(name, scope),
+                    diagnostics: vec![],
+                },
+            ))
+        };
+        assert_eq!(label("chrome-devtools", Some(SkillScope::User)), "user");
+        assert_eq!(label("build-with-ai", Some(SkillScope::Bundled)), "bundled");
+        assert_eq!(label("cloudflare", Some(SkillScope::Repo)), "repo");
+        assert_eq!(label("local-skill", Some(SkillScope::Local)), "local");
+        assert_eq!(label("orphan", None), "unknown");
+        assert!(
+            !label("chrome-devtools", Some(SkillScope::User)).contains("Some("),
+            "source column must never Debug-print Option"
+        );
+    }
+
+    #[test]
+    fn quarantined_skill_source_renders_without_debug_option() {
+        use xai_grok_tools::implementations::skills::types::SkillScope;
+        let mut state = ExtensionsModalState::new(ExtensionsTab::Skills);
+        let mut snapshot = SkillsTabSnapshot::from_skill_infos(vec![make_plugin_skill(
+            "agents-sdk",
+            "Agents SDK",
+            "cloudflare",
+        )]);
+        snapshot.rows.push(ManagedSkillRow::from_quarantined(
+            &xai_grok_tools::implementations::skills::strict::QuarantinedSkill {
+                identity: SkillIdentity::new("chrome-devtools", Some(SkillScope::User)),
+                diagnostics: vec![],
+            },
+        ));
+        snapshot.rows.push(ManagedSkillRow::from_quarantined(
+            &xai_grok_tools::implementations::skills::strict::QuarantinedSkill {
+                identity: SkillIdentity::new("build-with-ai", Some(SkillScope::Bundled)),
+                diagnostics: vec![],
+            },
+        ));
+        snapshot.health = SkillsHealthHeader::tally(snapshot.rows.iter().map(|r| r.status));
+        state.skills_data = TabDataState::Loaded(snapshot);
+        let area = Rect::new(0, 0, 120, 28);
+        let mut buf = Buffer::empty(area);
+        render_extensions_modal(&mut buf, area, &mut state, None, false, 0);
+        let text = buffer_text(&buf);
+        assert!(
+            !text.contains("Some("),
+            "skills source column must not dump Option Debug, got:\n{text}"
+        );
+        assert!(text.contains("user"), "{text}");
+        assert!(text.contains("bundled"), "{text}");
+        assert!(text.contains("plugin: cloudflare"), "{text}");
     }
 
     #[test]
