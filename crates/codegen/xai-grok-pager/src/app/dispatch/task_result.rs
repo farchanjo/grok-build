@@ -2742,9 +2742,7 @@ mod management_result_tests {
     fn apply_prime_index_job_err_confirm_without_inflight_does_not_guess_backfill() {
         use crate::views::extensions_modal::{ExtensionsModalState, ExtensionsTab, ModalMessage};
         use crate::views::modal::ActiveModal;
-        use crate::views::retrieval_settings_modal::{
-            PRIME_UNAVAILABLE_PROFILE, RetrievalEditMode, RetrievalSettingsState,
-        };
+        use crate::views::retrieval_settings_modal::{RetrievalEditMode, RetrievalSettingsState};
 
         assert!(inflight_prime_confirm_target("cancel", "all").is_none());
         assert!(inflight_prime_confirm_target("", "").is_none());
@@ -2774,7 +2772,9 @@ mod management_result_tests {
             .and_then(|m| m.modal_message.as_ref())
         {
             Some(ModalMessage::Error(msg)) => {
-                assert_eq!(msg, PRIME_UNAVAILABLE_PROFILE);
+                assert_eq!(msg, "confirm required");
+                assert!(!msg.contains("couldn't run"), "{msg}");
+                assert!(!msg.contains("main"), "{msg}");
             }
             other => panic!("bare cancel inflight must not confirm backfill/skills, got {other:?}"),
         }
@@ -2798,6 +2798,6 @@ mod management_result_tests {
             panic!("retrieval settings");
         };
         assert!(matches!(state.edit, RetrievalEditMode::Browse));
-        assert_eq!(state.error.as_deref(), Some(PRIME_UNAVAILABLE_PROFILE));
+        assert_eq!(state.error.as_deref(), Some("confirm required"));
     }
 }

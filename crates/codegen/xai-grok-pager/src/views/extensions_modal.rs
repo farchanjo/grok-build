@@ -4253,6 +4253,9 @@ pub fn render_extensions_modal(
     // Render modal message overlay.
     if let Some(ref msg) = state.modal_message {
         let safe_overlay = overlay_prime_safe_text(msg);
+        let missing_profile = matches!(msg, ModalMessage::Error(_))
+            && safe_overlay
+                == crate::views::retrieval_settings_modal::PRIME_UNAVAILABLE_PROFILE;
         let (text, fg) = match msg {
             ModalMessage::Error(_) => (safe_overlay.as_str(), theme.accent_error),
             ModalMessage::Confirmation { .. } => (safe_overlay.as_str(), theme.accent_tool),
@@ -4267,11 +4270,34 @@ pub fn render_extensions_modal(
             let msg_content_x = popup_rect.x + 1;
             let msg_content_width = popup_rect.width.saturating_sub(2);
             if msg_content_height > 0 {
+                let pad = 2u16;
+                let max_w = msg_content_width.saturating_sub(pad * 2) as usize;
+                let overlay_text_owned;
+                let wrapped_lines: Vec<&str> = if missing_profile {
+                    overlay_text_owned = format!(
+                        "{}\n{}",
+                        crate::views::retrieval_settings_modal::PRIME_UNAVAILABLE_PROFILE,
+                        crate::views::retrieval_settings_modal::PRIME_UNAVAILABLE_PROFILE_HINT,
+                    );
+                    word_wrap(&overlay_text_owned, max_w)
+                } else {
+                    word_wrap(text, max_w)
+                };
+                // A missing-profile notice is a banner, not a takeover: keep
+                // the skills list visible so rebuild/backfill does not blank
+                // the whole TUI.
+                let banner_h = if missing_profile {
+                    (wrapped_lines.len() as u16)
+                        .saturating_add(1)
+                        .min(msg_content_height)
+                } else {
+                    msg_content_height
+                };
                 let msg_area = Rect::new(
                     msg_content_x,
                     msg_content_y,
                     msg_content_width,
-                    msg_content_height,
+                    banner_h,
                 );
                 let clear_style = Style::reset().bg(theme.bg_base);
                 let text_style = Style::reset().fg(fg).bg(theme.bg_base);
@@ -4283,11 +4309,12 @@ pub fn render_extensions_modal(
                         clear_style,
                     );
                 }
-                let pad = 2u16;
-                let max_w = msg_area.width.saturating_sub(pad * 2) as usize;
-                let wrapped_lines: Vec<&str> = word_wrap(text, max_w);
                 let msg_height = wrapped_lines.len().min(msg_area.height as usize);
-                let msg_y = msg_area.y + (msg_area.height.saturating_sub(msg_height as u16)) / 2;
+                let msg_y = if missing_profile {
+                    msg_area.y
+                } else {
+                    msg_area.y + (msg_area.height.saturating_sub(msg_height as u16)) / 2
+                };
                 for (i, wline) in wrapped_lines.iter().enumerate().take(msg_height) {
                     buf.set_string(msg_area.x + pad, msg_y + i as u16, wline, text_style);
                 }
@@ -4304,7 +4331,15 @@ pub fn render_extensions_modal(
     // bold modifier, and "  |  " separator all match the standard
     // footer shortcut style.
     if let Some(kind) = modal_msg_kind {
+        let missing_profile = state.modal_message.as_ref().is_some_and(|m| {
+            matches!(m, ModalMessage::Error(_))
+                && overlay_prime_safe_text(m)
+                    == crate::views::retrieval_settings_modal::PRIME_UNAVAILABLE_PROFILE
+        });
         let segments: &[(&str, &str)] = match kind {
+            ModalMsgKind::Error if missing_profile => {
+                &[("Enter", " open settings"), ("any other key", " back")]
+            }
             ModalMsgKind::Error => &[("any key", " back")],
             ModalMsgKind::Confirm => &[("y", " confirm"), ("any other key", " cancel")],
         };
@@ -5778,6 +5813,38 @@ mod tests {
             "health header must survive a mode switch"
         );
         assert_eq!(buffer_count(&buf, "commit"), 1);
+    }
+
+    #[test]
+    fn missing_retrieval_profile_banner_keeps_skills_list_visible() {
+        let mut state = ExtensionsModalState::new(ExtensionsTab::Skills);
+        state.skills_data = TabDataState::Loaded(SkillsTabSnapshot::from_skill_infos(vec![
+            make_skill("commit", "Create well-formatted git commits."),
+        ]));
+        state.modal_message = Some(ModalMessage::Error(
+            crate::views::retrieval_settings_modal::PRIME_UNAVAILABLE_PROFILE.to_string(),
+        ));
+        let area = Rect::new(0, 0, 100, 28);
+        let mut buf = Buffer::empty(area);
+        render_extensions_modal(&mut buf, area, &mut state, None, false, 0);
+        let text = buffer_text(&buf);
+        assert!(
+            text.contains(crate::views::retrieval_settings_modal::PRIME_UNAVAILABLE_PROFILE),
+            "{text}"
+        );
+        assert!(
+            text.contains(crate::views::retrieval_settings_modal::PRIME_UNAVAILABLE_PROFILE_HINT)
+                || text.contains("Retrieval settings"),
+            "{text}"
+        );
+        assert!(
+            text.contains("commit"),
+            "skills list must stay visible under the banner, got:\n{text}"
+        );
+        assert!(
+            !text.contains("unavailable —"),
+            "must not use the old dead-end copy, got:\n{text}"
+        );
     }
 
     #[test]

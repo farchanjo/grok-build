@@ -506,6 +506,15 @@ impl AgentView {
                         state.modal_message = None;
                         return self.confirm_extensions_modal_action(action, pending_entry_index);
                     }
+                    (Some(ModalMessage::Error(msg)), KeyCode::Enter)
+                        if msg
+                            == crate::views::retrieval_settings_modal::PRIME_UNAVAILABLE_PROFILE =>
+                    {
+                        // Close Skills so Retrieval settings can paint (render
+                        // returns early while `extensions_modal` is Some).
+                        self.extensions_modal = None;
+                        return InputOutcome::Action(Action::OpenRetrievalSettings);
+                    }
                     _ => {
                         // Dismissing the error/confirmation also clears
                         // the in-flight "[processing]" badge — the action
@@ -2694,6 +2703,73 @@ mod skills_regress_dispatch_tests {
                 .as_ref()
                 .and_then(|s| s.modal_message.as_ref())
                 .is_none()
+        );
+    }
+
+    #[test]
+    fn prime_index_rebuild_without_profile_offers_retrieval_settings() {
+        let (mut agent, mut modal) = skills_modal_with_row();
+        modal.prime_index_capable = true;
+        modal.prime_index = Some(xai_grok_shell::session::prime::PrimeIndexStatus {
+            api_version: 1,
+            generation: 1,
+            fingerprint_short: "abc123def456".into(),
+            skills: xai_grok_shell::session::prime::PrimeIndexCollectionStatus {
+                collection: "skills".into(),
+                generation: 1,
+                fingerprint_short: "abc123def456".into(),
+                item_count: 0,
+                vector_count: 0,
+                missing_vectors: 0,
+                readiness: "ready".into(),
+                route_id: None,
+                dimensions: None,
+            },
+            agents: xai_grok_shell::session::prime::PrimeIndexCollectionStatus {
+                collection: "agents".into(),
+                generation: 0,
+                fingerprint_short: String::new(),
+                item_count: 0,
+                vector_count: 0,
+                missing_vectors: 0,
+                readiness: "ready".into(),
+                route_id: None,
+                dimensions: None,
+            },
+            job: None,
+            configured_route: None,
+            capabilities: xai_grok_shell::session::prime::PrimeIndexCapabilities::SUPPORTED,
+            unchanged: false,
+        });
+        agent.extensions_modal = Some(modal);
+        let outcome = agent.handle_extensions_modal_key(&key(crossterm::event::KeyCode::Char('u')));
+        assert!(
+            matches!(outcome, InputOutcome::Changed),
+            "missing profile must not start a rebuild, got {outcome:?}"
+        );
+        match agent
+            .extensions_modal
+            .as_ref()
+            .and_then(|s| s.modal_message.as_ref())
+        {
+            Some(crate::views::extensions_modal::ModalMessage::Error(msg)) => {
+                assert_eq!(
+                    msg,
+                    crate::views::retrieval_settings_modal::PRIME_UNAVAILABLE_PROFILE
+                );
+                assert!(!msg.contains("unavailable —"), "{msg}");
+            }
+            other => panic!("expected missing-profile error, got {other:?}"),
+        }
+
+        let outcome = agent.handle_extensions_modal_key(&key(crossterm::event::KeyCode::Enter));
+        match outcome {
+            InputOutcome::Action(Action::OpenRetrievalSettings) => {}
+            other => panic!("Enter must open Retrieval settings, got {other:?}"),
+        }
+        assert!(
+            agent.extensions_modal.is_none(),
+            "Skills must close so Retrieval settings can render"
         );
     }
 

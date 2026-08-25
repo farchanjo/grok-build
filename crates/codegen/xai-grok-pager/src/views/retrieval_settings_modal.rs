@@ -2202,7 +2202,11 @@ fn prime_fields(prime: &PrimeConfig, skills: bool) -> Vec<(String, String)> {
 }
 
 /// Compact status when Prime rebuild/backfill has no saved profile route.
-pub(crate) const PRIME_UNAVAILABLE_PROFILE: &str = "unavailable — save a retrieval profile";
+pub(crate) const PRIME_UNAVAILABLE_PROFILE: &str = "No retrieval profile saved";
+/// Skills-list hint under [`PRIME_UNAVAILABLE_PROFILE`]. Retrieval settings
+/// already *is* the editor, so this line is overlay-only.
+pub(crate) const PRIME_UNAVAILABLE_PROFILE_HINT: &str =
+    "Press Enter to open Retrieval settings and create one.";
 
 /// Profile id only — never show an endpoint, path, or credential.
 pub(crate) fn display_configured_route(raw: Option<&str>) -> String {
@@ -2260,9 +2264,13 @@ pub(crate) fn compact_prime_job_error(message: &str) -> String {
     if code.is_empty() {
         return "failed".into();
     }
-    if xai_grok_shell::session::prime::prime_failure_is_confirm_required(Some(&code))
-        || code == "unavailable"
-    {
+    if xai_grok_shell::session::prime::prime_failure_is_confirm_required(Some(&code)) {
+        if xai_grok_shell::session::prime::confirm_required_display_route(&code).is_some() {
+            "confirm required".into()
+        } else {
+            PRIME_UNAVAILABLE_PROFILE.into()
+        }
+    } else if code == "unavailable" {
         PRIME_UNAVAILABLE_PROFILE.into()
     } else {
         code
@@ -2630,7 +2638,10 @@ mod tests {
         let text = buffer_text(&buf);
         assert!(!text.contains("127.0.0.1"), "{text}");
         assert!(!text.contains("http://"), "{text}");
-        assert!(text.contains("unavailable"), "{text}");
+        assert!(
+            text.contains(PRIME_UNAVAILABLE_PROFILE),
+            "{text}"
+        );
         assert!(
             s.handle_key(key(KeyCode::Char('y'))).is_none(),
             "y on an unsanitary confirm must not start a job"
@@ -2642,7 +2653,7 @@ mod tests {
     fn compact_prime_job_error_never_returns_raw_payload() {
         assert_eq!(
             compact_prime_job_error("couldn't run prime index: confirm_required:main"),
-            PRIME_UNAVAILABLE_PROFILE
+            "confirm required"
         );
         assert_eq!(
             compact_prime_job_error("confirm_required:http://127.0.0.1/v1"),
