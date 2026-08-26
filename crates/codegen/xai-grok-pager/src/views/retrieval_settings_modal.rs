@@ -1040,66 +1040,69 @@ impl RetrievalSettingsState {
     }
 
     fn begin_add(&mut self) {
-        match self.page {
-            RetrievalPage::EmbeddingModels => {
-                self.edit = RetrievalEditMode::EditFields {
-                    kind: "embedding".into(),
-                    id: String::new(),
-                    is_new: true,
-                    fields: default_embedding_fields(None),
-                    field_idx: 0,
-                    editing_value: false,
-                };
-            }
-            RetrievalPage::Rerankers => {
-                self.edit = RetrievalEditMode::EditFields {
-                    kind: "reranker".into(),
-                    id: String::new(),
-                    is_new: true,
-                    fields: default_reranker_fields(None),
-                    field_idx: 0,
-                    editing_value: false,
-                };
-            }
-            RetrievalPage::Profiles => {
-                self.edit = RetrievalEditMode::EditFields {
-                    kind: "profile".into(),
-                    id: String::new(),
-                    is_new: true,
-                    fields: default_profile_fields(None),
-                    field_idx: 0,
-                    editing_value: false,
-                };
-            }
-            RetrievalPage::Prime => {
-                self.edit = RetrievalEditMode::EditFields {
-                    kind: "prime".into(),
-                    id: if self.selected == 0 {
-                        "skills".into()
-                    } else {
-                        "agents".into()
-                    },
-                    is_new: false,
-                    fields: prime_fields(&self.draft_prime, self.selected == 0),
-                    field_idx: 0,
-                    editing_value: false,
-                };
-            }
-            RetrievalPage::Memory => {
-                self.edit = RetrievalEditMode::EditFields {
-                    kind: "memory".into(),
-                    id: "selection".into(),
-                    is_new: false,
-                    fields: vec![(
-                        "retrieval_profile".into(),
-                        self.draft_memory_profile.clone().unwrap_or_default(),
-                    )],
-                    field_idx: 0,
-                    editing_value: false,
-                };
-            }
-            RetrievalPage::Validate => {}
-        }
+        let (kind, id, is_new, fields) = match self.page {
+            RetrievalPage::EmbeddingModels => (
+                "embedding".to_string(),
+                String::new(),
+                true,
+                default_embedding_fields(None),
+            ),
+            RetrievalPage::Rerankers => (
+                "reranker".to_string(),
+                String::new(),
+                true,
+                default_reranker_fields(None),
+            ),
+            RetrievalPage::Profiles => (
+                "profile".to_string(),
+                String::new(),
+                true,
+                default_profile_fields(None),
+            ),
+            RetrievalPage::Prime => (
+                "prime".to_string(),
+                if self.selected == 0 {
+                    "skills".to_string()
+                } else {
+                    "agents".to_string()
+                },
+                false,
+                prime_fields(&self.draft_prime, self.selected == 0),
+            ),
+            RetrievalPage::Memory => (
+                "memory".to_string(),
+                "selection".to_string(),
+                false,
+                vec![(
+                    "retrieval_profile".to_string(),
+                    self.draft_memory_profile.clone().unwrap_or_default(),
+                )],
+            ),
+            RetrievalPage::Validate => return,
+        };
+        self.start_field_edit(kind, id, is_new, fields);
+    }
+
+    /// Open the field editor with value editing armed on the first editable
+    /// row, so typing works immediately after `a`/Enter without a hidden
+    /// extra `e` step (the old flow read as "nothing happens").
+    fn start_field_edit(
+        &mut self,
+        kind: String,
+        id: String,
+        is_new: bool,
+        fields: Vec<(String, String)>,
+    ) {
+        let idx = first_editable_field_idx(&fields);
+        self.line_editor.set_text(&fields[idx].1);
+        self.edit = RetrievalEditMode::EditFields {
+            kind,
+            id,
+            is_new,
+            fields,
+            field_idx: idx,
+            editing_value: true,
+        };
     }
 
     fn begin_edit_selected(&mut self) {
@@ -1108,39 +1111,36 @@ impl RetrievalSettingsState {
         };
         match self.page {
             RetrievalPage::EmbeddingModels => {
-                if let Some(e) = snap.embedding_models.get(self.selected) {
-                    self.edit = RetrievalEditMode::EditFields {
-                        kind: "embedding".into(),
-                        id: e.id.clone(),
-                        is_new: false,
-                        fields: default_embedding_fields(Some(e)),
-                        field_idx: 0,
-                        editing_value: false,
-                    };
+                let e = snap.embedding_models.get(self.selected).cloned();
+                if let Some(e) = e {
+                    self.start_field_edit(
+                        "embedding".into(),
+                        e.id.clone(),
+                        false,
+                        default_embedding_fields(Some(&e)),
+                    );
                 }
             }
             RetrievalPage::Rerankers => {
-                if let Some(e) = snap.reranker_models.get(self.selected) {
-                    self.edit = RetrievalEditMode::EditFields {
-                        kind: "reranker".into(),
-                        id: e.id.clone(),
-                        is_new: false,
-                        fields: default_reranker_fields(Some(e)),
-                        field_idx: 0,
-                        editing_value: false,
-                    };
+                let e = snap.reranker_models.get(self.selected).cloned();
+                if let Some(e) = e {
+                    self.start_field_edit(
+                        "reranker".into(),
+                        e.id.clone(),
+                        false,
+                        default_reranker_fields(Some(&e)),
+                    );
                 }
             }
             RetrievalPage::Profiles => {
-                if let Some(e) = snap.retrieval_profiles.get(self.selected) {
-                    self.edit = RetrievalEditMode::EditFields {
-                        kind: "profile".into(),
-                        id: e.id.clone(),
-                        is_new: false,
-                        fields: default_profile_fields(Some(e)),
-                        field_idx: 0,
-                        editing_value: false,
-                    };
+                let e = snap.retrieval_profiles.get(self.selected).cloned();
+                if let Some(e) = e {
+                    self.start_field_edit(
+                        "profile".into(),
+                        e.id.clone(),
+                        false,
+                        default_profile_fields(Some(&e)),
+                    );
                 }
             }
             RetrievalPage::Prime | RetrievalPage::Memory => self.begin_add(),
@@ -1166,11 +1166,29 @@ impl RetrievalSettingsState {
                         ..
                     } = &mut self.edit
                     {
+                        // Defensive: fixed rows are display-only, never written to.
+                        let on_fixed = fields
+                            .get(*field_idx)
+                            .is_some_and(|(k, _)| is_fixed_field_label(k));
+                        if on_fixed {
+                            *editing_value = false;
+                            self.line_editor.reset();
+                            return None;
+                        }
                         if let Some(f) = fields.get_mut(*field_idx) {
                             f.1 = self.line_editor.text().to_owned();
                         }
-                        *editing_value = false;
-                        self.line_editor.reset();
+                        // Wizard flow: advance to the next editable field and
+                        // keep typing. On the last field this ends editing so
+                        // `s` can commit.
+                        let next = next_editable_field_idx(fields, *field_idx);
+                        if next != *field_idx {
+                            *field_idx = next;
+                            self.line_editor.set_text(&fields[next].1);
+                        } else {
+                            *editing_value = false;
+                            self.line_editor.reset();
+                        }
                         self.dirty = true;
                     }
                     return None;
@@ -1567,7 +1585,7 @@ impl RetrievalSettingsState {
                 ..
             } => vec![
                 Shortcut {
-                    label: "Enter Accept",
+                    label: "Enter Accept + next field",
                     clickable: false,
                     id: 1,
                 },
@@ -1697,31 +1715,66 @@ impl RetrievalSettingsState {
                 field_idx,
                 editing_value,
             } => {
-                lines.push(Line::from(format!(
-                    "{} {} `{}`",
-                    if *is_new { "Add" } else { "Edit" },
-                    kind,
-                    if id.is_empty() { "(new)" } else { id }
+                lines.push(Line::from(Span::styled(
+                    format!(
+                        "{} {} `{}`",
+                        if *is_new { "Add" } else { "Edit" },
+                        kind,
+                        if id.is_empty() { "(new)" } else { id }
+                    ),
+                    Style::default().add_modifier(Modifier::BOLD),
+                )));
+                let hint = if *editing_value {
+                    "type the value · Enter saves the field and advances · Esc leaves editing"
+                } else {
+                    "j/k select a field · e edit its value · s save · Esc back"
+                };
+                lines.push(Line::from(Span::styled(
+                    hint,
+                    Style::default().fg(theme.gray),
                 )));
                 for (i, (k, v)) in fields.iter().enumerate() {
                     let fixed = is_fixed_field_label(k);
+                    let focused = i == *field_idx;
                     let mark = if fixed {
-                        " "
-                    } else if i == *field_idx {
-                        ">"
+                        "  "
+                    } else if focused {
+                        "> "
                     } else {
-                        " "
+                        "  "
                     };
-                    let val = if i == *field_idx && *editing_value && !fixed {
-                        format!("{}█", self.line_editor.text())
+                    let editing_here = focused && *editing_value && !fixed;
+                    let (val, val_is_hint) = if editing_here {
+                        (format!("{}█", self.line_editor.text()), false)
+                    } else if v.is_empty() && !fixed {
+                        ("(empty)".to_string(), true)
                     } else {
-                        truncate_id(v, area.width.saturating_sub(24) as usize)
+                        (
+                            truncate_id(v, area.width.saturating_sub(24) as usize),
+                            false,
+                        )
                     };
-                    if fixed {
-                        lines.push(Line::from(format!("  {k}: {val}  [read-only]")));
+                    let key_style = if focused {
+                        Style::default()
+                            .fg(theme.accent_user)
+                            .add_modifier(Modifier::BOLD)
+                    } else if fixed {
+                        Style::default().fg(theme.gray)
                     } else {
-                        lines.push(Line::from(format!("{mark} {k}: {val}")));
-                    }
+                        Style::default()
+                    };
+                    let val_style = if editing_here {
+                        key_style
+                    } else if val_is_hint || fixed {
+                        Style::default().fg(theme.gray)
+                    } else {
+                        Style::default()
+                    };
+                    let suffix = if fixed { "  [read-only]" } else { "" };
+                    lines.push(Line::from(vec![
+                        Span::styled(format!("{mark}{k}: "), key_style),
+                        Span::styled(format!("{val}{suffix}"), val_style),
+                    ]));
                 }
             }
             RetrievalEditMode::ConfirmDelete { kind, id } => {
@@ -2049,6 +2102,13 @@ fn prev_editable_field_idx(fields: &[(String, String)], from: usize) -> usize {
         }
     }
     from
+}
+
+fn first_editable_field_idx(fields: &[(String, String)]) -> usize {
+    fields
+        .iter()
+        .position(|(k, _)| !is_fixed_field_label(k))
+        .unwrap_or(0)
 }
 
 fn default_embedding_fields(existing: Option<&EmbeddingModelDto>) -> Vec<(String, String)> {
@@ -2743,6 +2803,7 @@ mod tests {
         let mut s = RetrievalSettingsState::new();
         s.apply_snapshot(snap_with_emb());
         s.handle_key(key(KeyCode::Char('a')));
+        s.handle_key(key(KeyCode::Esc)); // leave value editing, stay in form
         assert!(matches!(
             s.edit,
             RetrievalEditMode::EditFields { is_new: true, .. }
@@ -2920,6 +2981,7 @@ mod tests {
 
         // Next unrelated mutation must not be pre-confirmed.
         s.handle_key(key(KeyCode::Char('a')));
+        s.handle_key(key(KeyCode::Esc)); // leave value editing, stay in form
         if let RetrievalEditMode::EditFields { fields, .. } = &mut s.edit {
             for (k, v) in fields.iter_mut() {
                 match k.as_str() {
@@ -2977,6 +3039,7 @@ mod tests {
         });
         assert!(s2.pending_reindex_command.is_none());
         s2.handle_key(key(KeyCode::Char('a')));
+        s2.handle_key(key(KeyCode::Esc)); // leave value editing, stay in form
         if let RetrievalEditMode::EditFields { fields, .. } = &mut s2.edit {
             for (k, v) in fields.iter_mut() {
                 match k.as_str() {
@@ -3002,6 +3065,7 @@ mod tests {
         let mut s = RetrievalSettingsState::new();
         s.apply_snapshot(snap_with_emb());
         s.handle_key(key(KeyCode::Char('a')));
+        s.handle_key(key(KeyCode::Esc)); // leave value editing, stay in form
         let (proto_idx, dims_idx) = match &s.edit {
             RetrievalEditMode::EditFields { fields, .. } => {
                 let p = fields
@@ -3052,6 +3116,7 @@ mod tests {
         s.edit = RetrievalEditMode::Browse;
         s.page = RetrievalPage::Profiles;
         s.handle_key(key(KeyCode::Char('a')));
+        s.handle_key(key(KeyCode::Esc)); // leave value editing, stay in form
         if let RetrievalEditMode::EditFields {
             fields, field_idx, ..
         } = &mut s.edit
@@ -3070,6 +3135,110 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    /// `a` must arm value editing on the first field so typing works
+    /// immediately; Enter confirms the value and advances the wizard.
+    #[test]
+    fn add_starts_typing_immediately_and_enter_advances() {
+        let mut s = RetrievalSettingsState::new();
+        s.apply_snapshot(snap_with_emb());
+        s.page = RetrievalPage::EmbeddingModels;
+        s.handle_key(key(KeyCode::Char('a')));
+        let (editing, idx0) = match &s.edit {
+            RetrievalEditMode::EditFields {
+                editing_value,
+                field_idx,
+                ..
+            } => (*editing_value, *field_idx),
+            other => panic!("expected edit fields, got {other:?}"),
+        };
+        assert!(editing, "a must arm value editing");
+        assert_eq!(idx0, 0, "must start on the id field");
+        s.handle_key(key(KeyCode::Char('x')));
+        assert_eq!(s.line_editor.text(), "x", "typing must land in the editor");
+
+        s.handle_key(key(KeyCode::Enter));
+        match &s.edit {
+            RetrievalEditMode::EditFields {
+                fields,
+                field_idx,
+                editing_value,
+                ..
+            } => {
+                assert_eq!(fields[0].1, "x", "Enter must commit the typed value");
+                assert_eq!(*field_idx, 1, "Enter must advance to provider");
+                assert!(*editing_value, "wizard keeps editing the next field");
+            }
+            other => panic!("expected edit fields, got {other:?}"),
+        }
+    }
+
+    /// Enter on the last editable field leaves value editing so `s` commits.
+    #[test]
+    fn enter_on_last_field_ends_value_editing() {
+        let mut s = RetrievalSettingsState::new();
+        s.apply_snapshot(snap_with_emb());
+        s.page = RetrievalPage::EmbeddingModels;
+        s.handle_key(key(KeyCode::Char('a')));
+        s.handle_key(key(KeyCode::Esc));
+        let last_idx = match &s.edit {
+            RetrievalEditMode::EditFields { fields, .. } => fields
+                .iter()
+                .rposition(|(k, _)| !is_fixed_field_label(k))
+                .expect("editable field"),
+            other => panic!("expected edit fields, got {other:?}"),
+        };
+        if let RetrievalEditMode::EditFields { field_idx, .. } = &mut s.edit {
+            *field_idx = last_idx;
+        }
+        let before = match &s.edit {
+            RetrievalEditMode::EditFields { fields, .. } => fields[last_idx].1.clone(),
+            other => panic!("expected edit fields, got {other:?}"),
+        };
+        s.handle_key(key(KeyCode::Char('e')));
+        s.handle_key(key(KeyCode::Enter));
+        match &s.edit {
+            RetrievalEditMode::EditFields {
+                fields,
+                editing_value,
+                ..
+            } => {
+                assert!(!editing_value, "last field must end value editing");
+                assert_eq!(
+                    fields[last_idx].1, before,
+                    "value must be preserved through commit"
+                );
+            }
+            other => panic!("expected edit fields, got {other:?}"),
+        }
+    }
+
+    /// The add form shows visible placeholders and per-mode footer hints.
+    #[test]
+    fn add_form_renders_placeholders_and_edit_hints() {
+        let mut s = RetrievalSettingsState::new();
+        s.apply_snapshot(snap_with_emb());
+        s.page = RetrievalPage::EmbeddingModels;
+        s.handle_key(key(KeyCode::Char('a')));
+        let labels: Vec<&str> = s.footer_shortcuts().iter().map(|sc| sc.label).collect();
+        assert!(
+            labels.contains(&"Enter Accept + next field"),
+            "value-editing footer must advertise Enter confirm: {labels:?}"
+        );
+        s.handle_key(key(KeyCode::Esc));
+        let mut buf = Buffer::empty(Rect::new(0, 0, 100, 30));
+        s.render(Rect::new(0, 0, 100, 30), &mut buf, &Theme::current());
+        let text = buffer_text(&buf);
+        assert!(text.contains("Add embedding"), "{text}");
+        assert!(
+            text.contains("(empty)"),
+            "empty editable fields must show a placeholder, got:\n{text}"
+        );
+        assert!(
+            text.contains("e edit its value"),
+            "form body must show the edit hint, got:\n{text}"
+        );
     }
 
     #[test]
@@ -3103,6 +3272,13 @@ mod tests {
             s.edit
         );
         assert!(s.owns_escape());
+        // `e` arms value editing: first Esc leaves typing (stays in the form),
+        // second Esc returns to Browse. Neither dispatches a command.
+        assert!(s.handle_key(key(KeyCode::Esc)).is_none());
+        assert!(matches!(
+            s.edit,
+            RetrievalEditMode::EditFields { editing_value: false, .. }
+        ));
         assert!(s.handle_key(key(KeyCode::Esc)).is_none());
         assert!(
             matches!(s.edit, RetrievalEditMode::Browse),
