@@ -216,6 +216,57 @@ const PLAN_MODE_CHOICES: &[EnumChoice] = &[
 ];
 
 // ---------------------------------------------------------------------------
+// Tersify catalogs.
+//
+// PAGER-owned, persisted to `[hints]` in config.toml via `set_hint` (same
+// namespace as the worktree hints). Scope takes effect at the next session
+// start (the system prompt is assembled once per spawn, like `rules`); level
+// applies on the next toggle. Canonicals match `TersifyScope` /
+// `TersifyLevel::as_config_str` in `xai-grok-shell` (pinned by test).
+// ---------------------------------------------------------------------------
+
+const TERSIFY_SCOPE_CHOICES: &[EnumChoice] = &[
+    EnumChoice {
+        canonical: "main_only",
+        display: "Main context only (recommended)",
+        description: "Compress the main conversation's replies; subagent output stays raw. \
+                      Default.",
+    },
+    EnumChoice {
+        canonical: "all",
+        display: "Everywhere",
+        description: "Subagents are compressed too. Their raw reports are cheaper in the \
+                      transcript but can hide detail the parent must re-read.",
+    },
+    EnumChoice {
+        canonical: "off",
+        display: "Off",
+        description: "No style compression anywhere. Terse prompts still get terse answers.",
+    },
+];
+
+const TERSIFY_LEVEL_CHOICES: &[EnumChoice] = &[
+    EnumChoice {
+        canonical: "lite",
+        display: "Lite",
+        description: "No filler or hedging; full sentences and articles stay. Professional, \
+                      just tight.",
+    },
+    EnumChoice {
+        canonical: "full",
+        display: "Full (default)",
+        description: "Drop articles and filler, fragments allowed, short synonyms. Classic \
+                      terse style; code and error text byte-exact.",
+    },
+    EnumChoice {
+        canonical: "ultra",
+        display: "Ultra",
+        description: "One word when one word enough. Maximum compression while \
+                      cause-and-effect stays unambiguous.",
+    },
+];
+
+// ---------------------------------------------------------------------------
 // Mermaid-rendering catalog.
 //
 // SHELL-owned: persisted to `[ui].render_mermaid`, with a pager-side
@@ -1652,6 +1703,48 @@ pub fn default_settings() -> Vec<SettingMeta> {
         },
         // Contextual-hint children (hidden from the top-level list; reached via
         // the group sub-sheet). Default ON — `None` (inherit) reads as `true`.
+        SettingMeta {
+            key: "tersify_scope",
+            category: SettingCategory::Agent,
+            owner: SettingOwner::Pager,
+            label: "Tersify scope",
+            description: "Which conversations get compressed replies. Main context only \
+                          keeps subagent output raw (recommended: a compressed report \
+                          can hide detail the parent must re-read). Writes \
+                          [hints] tersify_scope in config.toml. New sessions apply it.",
+            keywords: &[
+                "tersify",
+                "terse",
+                "tokens",
+                "style",
+                "compression",
+                "subagent",
+            ],
+            kind: SettingKind::Enum {
+                default: "main_only",
+                choices: TERSIFY_SCOPE_CHOICES,
+                supports_preview: false,
+            },
+            restart_required: false,
+            hidden_in_minimal: false,
+        },
+        SettingMeta {
+            key: "tersify_level",
+            category: SettingCategory::Agent,
+            owner: SettingOwner::Pager,
+            label: "Tersify level",
+            description: "How hard prose is compressed when tersify is on. Code, \
+                          commands, numbers, and error text stay byte-exact at every \
+                          level. Applies from the next turn.",
+            keywords: &["tersify", "level", "lite", "ultra", "brevity", "tokens"],
+            kind: SettingKind::Enum {
+                default: "full",
+                choices: TERSIFY_LEVEL_CHOICES,
+                supports_preview: true,
+            },
+            restart_required: false,
+            hidden_in_minimal: false,
+        },
         SettingMeta {
             key: "contextual_hints.undo",
             category: SettingCategory::Advanced,

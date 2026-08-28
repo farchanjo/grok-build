@@ -10,6 +10,8 @@
 //! bytes unchanged.
 
 pub mod elision;
+pub mod log;
+pub mod marker;
 
 use crate::safety::Class;
 

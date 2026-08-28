@@ -810,6 +810,34 @@ pub(crate) async fn persist_setting(
         format!("persist_setting({key}) expected {expected}, got {got:?}")
     }
     match key {
+        "tersify_scope" => {
+            let SettingValue::Enum(s) = value else {
+                return Err(kind_mismatch("tersify_scope", "Enum", &value));
+            };
+            // Persisted in the same `[hints]` namespace as the worktree hints;
+            // validation lives in TersifyScope::from_config_str (fail-closed).
+            let normalized = xai_grok_shell::util::config::TersifyScope::from_config_str(&s)
+                .as_config_str();
+            tokio::task::spawn_blocking(move || {
+                crate::config_toml_edit::set_hint("tersify_scope", normalized)
+            })
+            .await
+            .map_err(|e| e.to_string())?
+            .map_err(|e| e.to_string())
+        }
+        "tersify_level" => {
+            let SettingValue::Enum(s) = value else {
+                return Err(kind_mismatch("tersify_level", "Enum", &value));
+            };
+            let normalized = xai_grok_shell::util::config::TersifyLevel::from_config_str(&s)
+                .as_config_str();
+            tokio::task::spawn_blocking(move || {
+                crate::config_toml_edit::set_hint("tersify_level", normalized)
+            })
+            .await
+            .map_err(|e| e.to_string())?
+            .map_err(|e| e.to_string())
+        }
         "compact_mode" => {
             let SettingValue::Bool(b) = value else {
                 return Err(kind_mismatch("compact_mode", "Bool", &value));

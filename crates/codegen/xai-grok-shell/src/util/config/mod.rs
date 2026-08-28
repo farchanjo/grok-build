@@ -9,6 +9,7 @@ mod permissions;
 mod persist;
 mod resolve;
 mod settings_writes;
+mod tersify;
 mod tips;
 mod worktree;
 
@@ -26,6 +27,7 @@ pub use persist::*;
 // re-exported so `crate::util::config::{RemoteSettings, GoalRoleModel}` keep working.
 pub use resolve::*;
 pub use settings_writes::*;
+pub use tersify::*;
 pub use tips::*;
 pub use worktree::*;
 pub use xai_grok_config_types::{

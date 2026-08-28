@@ -603,6 +603,10 @@ pub struct PagerLocalSnapshot {
     pub voice_stt_language: String,
     /// `[language].conversation` BCP-47 tag, or `"off"` when unset.
     pub language_conversation: String,
+    /// `[hints] tersify_scope` mirror, resolved fail-closed at snapshot time.
+    pub tersify_scope: String,
+    /// `[hints] tersify_level` mirror, resolved fail-closed at snapshot time.
+    pub tersify_level: String,
     /// `[language].artifact` BCP-47 tag (default `en-US`).
     pub language_artifact: String,
     /// Whether artifact language is locked by project/managed config.
@@ -656,6 +660,8 @@ impl Default for PagerLocalSnapshot {
             ask_user_question_timeout_enabled: None,
             voice_stt_language: xai_grok_voice::STT_LANGUAGE_DEFAULT.to_string(),
             language_conversation: "off".to_string(),
+            tersify_scope: "main_only".to_string(),
+            tersify_level: "full".to_string(),
             language_artifact: "en-US".to_string(),
             language_artifact_locked: false,
             // Compaction config defaults - match registry defaults in defs.rs
@@ -966,6 +972,12 @@ pub fn current_value_for(
         )),
         // PAGER — read from snapshot.
         "multiline_mode" => Some(SettingValue::Bool(pager.multiline_mode)),
+        "tersify_scope" => Some(SettingValue::Enum(Box::leak(
+            pager.tersify_scope.clone().into_boxed_str(),
+        ))),
+        "tersify_level" => Some(SettingValue::Enum(Box::leak(
+            pager.tersify_level.clone().into_boxed_str(),
+        ))),
         // PAGER — read from process-wide cache (snapshot mirror keeps
         // the modal in sync with the live cache value).
         "vim_mode" => Some(SettingValue::Bool(pager.vim_mode)),
@@ -1791,6 +1803,35 @@ mod tests {
                 }
                 // Action deep-link; no pager scalar to align.
                 ("open_retrieval_settings", SettingKind::Status) => {}
+                // Tersify defaults mirror the shell resolver's fail-closed
+                // defaults, which is also what PagerLocalSnapshot::default()
+                // carries (both read through TersifyConfig semantics).
+                ("tersify_scope", SettingKind::Enum { default, .. }) => {
+                    assert_eq!(
+                        *default, pager.tersify_scope,
+                        "tersify_scope default drifts from PagerLocalSnapshot::default()"
+                    );
+                    assert_eq!(
+                        *default,
+                        xai_grok_shell::util::config::TersifyConfig::default()
+                            .scope
+                            .as_config_str(),
+                        "tersify_scope default drifts from the shell resolver"
+                    );
+                }
+                ("tersify_level", SettingKind::Enum { default, .. }) => {
+                    assert_eq!(
+                        *default, pager.tersify_level,
+                        "tersify_level default drifts from PagerLocalSnapshot::default()"
+                    );
+                    assert_eq!(
+                        *default,
+                        xai_grok_shell::util::config::TersifyConfig::default()
+                            .level
+                            .as_config_str(),
+                        "tersify_level default drifts from the shell resolver"
+                    );
+                }
                 _ => panic!(
                     "settings::defs::default_settings() contains PAGER entry `{}` with no \
                      matching arm in defaults_match_pager_state. Add an arm.",

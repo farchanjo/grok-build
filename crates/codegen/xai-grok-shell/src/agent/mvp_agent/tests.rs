@@ -5517,3 +5517,50 @@ mod soft_default_settings_emit {
 }
 #[cfg(feature = "dhat-heap")]
 mod dhat_soak;
+
+/// The scope gate, at the prompt-assembly seam: `main_only` (the default)
+/// appends the style block for a main session and never for a session whose
+/// meta carries `parentSessionId` — subagent output must reach the parent raw.
+#[test]
+fn subagent_output_is_not_compressed_in_main_context() {
+    use acp::Meta;
+    use serde_json::json;
+
+    let main_meta: Meta = Meta::new();
+    let mut child_meta = Meta::new();
+    child_meta.insert("parentSessionId".into(), json!("parent-1"));
+
+    // The config default is main_only/full; the gate must follow it exactly.
+    let cfg = crate::util::config::TersifyConfig::load();
+    let main_prompt = build_spawn_system_prompt(Some(&main_meta), None, "BASE");
+    let child_prompt = build_spawn_system_prompt(Some(&child_meta), None, "BASE");
+
+    if cfg.applies_to_main_context() {
+        assert!(
+            main_prompt.contains("<tersify_style>"),
+            "main context carries the style block"
+        );
+    }
+    assert!(
+        !child_prompt.contains("<tersify_style>"),
+        "a parented session stays raw under main_only"
+    );
+    assert!(child_prompt.starts_with("BASE"));
+}
+
+/// A session meta level wins over the persisted config level without writing
+/// anything to disk: per-session override is ephemeral by design.
+#[test]
+fn session_meta_tersify_level_overrides_config_for_that_session() {
+    use acp::Meta;
+    use serde_json::json;
+
+    let mut meta = Meta::new();
+    meta.insert("tersifyLevel".into(), json!("ultra"));
+    let prompt = build_spawn_system_prompt(Some(&meta), None, "BASE");
+    assert!(prompt.contains("<tersify_style>"), "{prompt}");
+    assert!(
+        prompt.contains("One word when one word enough"),
+        "ultra text must be the one appended"
+    );
+}

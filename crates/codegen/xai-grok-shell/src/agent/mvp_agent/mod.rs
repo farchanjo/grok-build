@@ -1062,8 +1062,36 @@ fn build_spawn_system_prompt(
             prompt.push_str(rules);
             prompt.push_str("\n</human_rules>");
         }
+        if let Some(style) = tersify_style_for_session(session_meta, init_meta) {
+            prompt.push_str("\n\n<tersify_style>\n");
+            prompt.push_str(style);
+            prompt.push_str("\n</tersify_style>");
+        }
         prompt
     }
+}
+
+/// Whether this spawned session's own replies should carry the tersify style.
+///
+/// Scope policy lives in `util::config::TersifyConfig`; this function only
+/// decides the session ROLE. A session whose meta carries a parent session id
+/// is a child subagent and stays raw under `main_only` (the default). A style
+/// override in session meta wins over the config level so per-session choices
+/// remain possible without persisting anything.
+fn tersify_style_for_session(
+    session_meta: Option<&acp::Meta>,
+    init_meta: Option<&acp::Meta>,
+) -> Option<&'static str> {
+    let is_subagent = read_session_or_init_meta_str(session_meta, init_meta, "parentSessionId")
+        .is_some();
+    let cfg = crate::util::config::TersifyConfig::load();
+    if !cfg.applies_to(is_subagent) {
+        return None;
+    }
+    let level = read_session_or_init_meta_str(session_meta, init_meta, "tersifyLevel")
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| cfg.level.as_config_str().to_string());
+    Some(xai_grok_tersify::style::style_instruction(&level))
 }
 /// Enqueue a `ReplaceSystemPrompt` for a resident session actor. No-op when
 /// the client sent no (non-empty) `systemPromptOverride`, or when the head

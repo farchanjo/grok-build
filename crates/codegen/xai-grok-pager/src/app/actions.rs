@@ -589,6 +589,12 @@ pub enum Action {
     SetContextualHintSshWrap(bool),
     /// Commit the active theme (canonical name, e.g. `"groknight"`, `"auto"`).
     SetTheme(String),
+    /// Commit `[hints] tersify_scope` (`main_only` | `all` | `off`). Takes
+    /// effect for newly spawned sessions (system prompt is built at spawn).
+    SetTersifyScope(String),
+    /// Commit `[hints] tersify_level` (`lite` | `full` | `ultra`). Applies from
+    /// the next turn of sessions that already carry the style block.
+    SetTersifyLevel(String),
     /// Commit the theme used when the OS is in dark mode. Only updates
     /// the live display when `theme = "auto"` AND system is in dark mode.
     SetAutoDarkTheme(String),

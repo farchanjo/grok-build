@@ -17,9 +17,9 @@ use super::setters::{
     set_page_flip_on_send_inner, set_prompt_suggestions_inner, set_remember_tool_approvals_inner,
     set_render_mermaid_inner, set_respect_manual_folds_inner, set_screen_mode_inner,
     set_scroll_lines_inner, set_scroll_mode_inner, set_scroll_speed_inner,
-    set_show_thinking_blocks_inner, set_show_tips_inner, set_simple_mode_inner, set_theme_inner,
-    set_timeline_inner, set_timestamps, set_timestamps_inner, set_vim_mode_inner,
-    set_voice_capture_mode_inner, set_voice_stt_language_inner,
+    set_show_thinking_blocks_inner, set_show_tips_inner, set_simple_mode_inner, set_tersify_level,
+    set_tersify_scope, set_theme_inner, set_timeline_inner, set_timestamps, set_timestamps_inner,
+    set_vim_mode_inner, set_voice_capture_mode_inner, set_voice_stt_language_inner,
 };
 use crate::app::actions::{Action, Effect};
 use crate::app::app_view::{ActiveView, AppView};
@@ -1424,6 +1424,16 @@ pub(crate) fn build_pager_snapshot(app: &AppView) -> crate::settings::PagerLocal
             .clone()
             .unwrap_or_else(|| "en-US".to_string()),
         language_artifact_locked: app.language_config.artifact_locked,
+        // `[hints] tersify_*` read through the shell resolver (fail-closed),
+        // so the modal mirrors what a newly spawned session will actually use.
+        tersify_scope: xai_grok_shell::util::config::TersifyConfig::load()
+            .scope
+            .as_config_str()
+            .to_string(),
+        tersify_level: xai_grok_shell::util::config::TersifyConfig::load()
+            .level
+            .as_config_str()
+            .to_string(),
         ..merge_compaction_and_media_snapshot(
             &app.compaction_config,
             match app.active_view {
@@ -1478,6 +1488,10 @@ pub(in crate::app::dispatch) fn action_for_reset(
             Some(Action::SetContextualHintSshWrap(*b))
         }
         ("multiline_mode", SettingValue::Bool(b)) => Some(Action::SetMultilineMode(*b)),
+        ("tersify_scope", SettingValue::Enum(s)) => Some(Action::SetTersifyScope((*s).to_owned())),
+        ("tersify_level", SettingValue::Enum(s)) => Some(Action::SetTersifyLevel((*s).to_owned())),
+        ("tersify_scope", SettingValue::Enum(s)) => Some(Action::SetTersifyScope((*s).to_owned())),
+        ("tersify_level", SettingValue::Enum(s)) => Some(Action::SetTersifyLevel((*s).to_owned())),
         ("render_mermaid", SettingValue::Enum(s)) => {
             crate::appearance::RenderMermaid::from_canonical(s).map(Action::SetRenderMermaid)
         }
@@ -1741,6 +1755,17 @@ pub(in crate::app::dispatch) fn apply_setting_rollback(
         }
         ("respect_manual_folds", SettingValue::Bool(b)) => set_respect_manual_folds_inner(app, *b),
         ("theme", SettingValue::Enum(s)) => set_theme_inner(app, s),
+        // Tersify lives in `[hints]` and is re-read from disk by the snapshot
+        // builder; a failed persist needs no in-memory undo (there is no
+        // mirror), only the toast below. The setters early-return when the
+        // rollback value equals the on-disk value, so a reset-then-rollback
+        // round-trip still emits the persist effect the guard expects.
+        ("tersify_scope", SettingValue::Enum(s)) => {
+            let _ = set_tersify_scope(app, (*s).to_string());
+        }
+        ("tersify_level", SettingValue::Enum(s)) => {
+            let _ = set_tersify_level(app, (*s).to_string());
+        }
         ("default_selected_permission", SettingValue::Enum(s)) => {
             set_default_selected_permission_inner(
                 app,

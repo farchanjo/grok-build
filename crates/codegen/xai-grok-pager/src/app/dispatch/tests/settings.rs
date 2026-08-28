@@ -1325,6 +1325,12 @@ fn move_setting_away_from_default(app: &mut AppView, key: crate::settings::Setti
         "multiline_mode" => {
             let _ = dispatch(Action::SetMultilineMode(true), app);
         }
+        "tersify_scope" => {
+            let _ = dispatch(Action::SetTersifyScope("all".into()), app);
+        }
+        "tersify_level" => {
+            let _ = dispatch(Action::SetTersifyLevel("lite".into()), app);
+        }
         "render_mermaid" => {
             let _ = dispatch(
                 Action::SetRenderMermaid(crate::appearance::RenderMermaid::Off),

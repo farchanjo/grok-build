@@ -1320,6 +1320,70 @@ pub(super) fn set_theme_inner(app: &mut AppView, value: &str) {
     apply_theme_kind_for_display(kind);
 }
 
+/// Commit `[hints] tersify_scope` and persist it.
+///
+/// PAGER-owned like the worktree hints: writes `[hints] tersify_scope` through
+/// `Effect::PersistSetting`, whose arm re-normalizes the value fail-closed.
+/// The live effect is at the next session spawn (the style block is part of
+/// the system prompt, folded in once like `rules`), and the toast says so.
+pub(in crate::app::dispatch) fn set_tersify_scope(app: &mut AppView, new: String) -> Vec<Effect> {
+    let cfg = xai_grok_shell::util::config::TersifyConfig::load();
+    let scope = xai_grok_shell::util::config::TersifyScope::from_config_str(&new);
+    if cfg.scope == scope {
+        return vec![];
+    }
+    refresh_open_settings_modals(app);
+    tracing::info!(
+        target: "settings",
+        key = "tersify_scope",
+        value = scope.as_config_str(),
+        "setting changed",
+    );
+    app.show_toast(&format!(
+        "\u{2713} Tersify scope: {} (new sessions)",
+        scope.as_config_str()
+    ));
+    vec![Effect::PersistSetting {
+        key: "tersify_scope",
+        value: crate::settings::SettingValue::Enum(Box::leak(
+            scope.as_config_str().to_string().into_boxed_str(),
+        )),
+        rollback_value: crate::settings::SettingValue::Enum(Box::leak(
+            cfg.scope.as_config_str().to_string().into_boxed_str(),
+        )),
+    }]
+}
+
+/// Commit `[hints] tersify_level` and persist it. Live from the next turn of
+/// any session already carrying the style block; the picker previews on Enter.
+pub(in crate::app::dispatch) fn set_tersify_level(app: &mut AppView, new: String) -> Vec<Effect> {
+    let cfg = xai_grok_shell::util::config::TersifyConfig::load();
+    let level = xai_grok_shell::util::config::TersifyLevel::from_config_str(&new);
+    if cfg.level == level {
+        return vec![];
+    }
+    refresh_open_settings_modals(app);
+    tracing::info!(
+        target: "settings",
+        key = "tersify_level",
+        value = level.as_config_str(),
+        "setting changed",
+    );
+    app.show_toast(&format!(
+        "\u{2713} Tersify level: {}",
+        level.as_config_str()
+    ));
+    vec![Effect::PersistSetting {
+        key: "tersify_level",
+        value: crate::settings::SettingValue::Enum(Box::leak(
+            level.as_config_str().to_string().into_boxed_str(),
+        )),
+        rollback_value: crate::settings::SettingValue::Enum(Box::leak(
+            cfg.level.as_config_str().to_string().into_boxed_str(),
+        )),
+    }]
+}
+
 /// State + cache + persist for `theme` commits.
 pub(in crate::app::dispatch) fn set_theme(app: &mut AppView, new: String) -> Vec<Effect> {
     let prev_canonical: &'static str = app

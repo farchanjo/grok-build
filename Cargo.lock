@@ -13895,6 +13895,7 @@ dependencies = [
  "xai-grok-shell-session-support",
  "xai-grok-subagent-resolution",
  "xai-grok-telemetry",
+ "xai-grok-tersify",
  "xai-grok-test-support",
  "xai-grok-tools",
  "xai-grok-version",
@@ -14033,9 +14034,13 @@ name = "xai-grok-tersify"
 version = "0.1.0"
 dependencies = [
  "regex",
+ "rusqlite",
  "serde",
  "serde_json",
+ "tempfile",
  "thiserror 2.0.18",
+ "tracing",
+ "xai-sqlite-journal",
 ]
 
 [[package]]

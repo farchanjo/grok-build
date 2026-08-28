@@ -27,9 +27,38 @@ pub mod compressors;
 pub mod detect;
 pub mod engine;
 pub mod safety;
+pub mod store;
+pub mod style;
 pub mod tokens;
 
 pub use detect::ContentType;
 pub use engine::{Engine, Mode, Options, Result as CompressResult};
 pub use safety::{Class as SafetyClass, Info as SafetyInfo, lookup};
+pub use store::SqliteStore;
 pub use tokens::{Counter, TokenEstimate};
+
+/// Build an engine in the given mode with the default compressor set and a
+/// persistent store at `grok_home/tersify.db`.
+#[must_use]
+pub fn default_engine(mode: Mode, grok_home: &std::path::Path) -> Engine {
+    let db_path = grok_home.join("tersify.db");
+    let store: Option<Box<dyn crate::engine::RecoveryStore>> = match SqliteStore::open(&db_path) {
+        Ok(s) => Some(Box::new(s)),
+        Err(e) => {
+            // An unopenable store must not disable the engine: record mode
+            // still works, and compress mode fails closed per payload.
+            tracing::warn!(
+                path = %db_path.display(),
+                error = %e,
+                "tersify store unavailable; running without recovery"
+            );
+            None
+        }
+    };
+    Engine::new(
+        mode,
+        Box::new(tokens::ApproxCounter),
+        vec![Box::new(compressors::log::LogCompressor)],
+        store,
+    )
+}

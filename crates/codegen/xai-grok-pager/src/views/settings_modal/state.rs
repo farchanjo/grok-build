@@ -912,6 +912,10 @@ pub(super) fn action_for_enum(key: SettingKey, choice: &'static str) -> Option<A
         "render_mermaid" => None,
         "keep_text_selection" => None,
         "scroll_mode" => None,
+        // Tersify level previews live: switching lite/full/ultra has no side
+        // effects and Esc reverts to the persisted value (commit path is the
+        // same Set action the guard below asserts for every choice).
+        "tersify_level" => Some(Action::SetTersifyLevel(choice.to_string())),
         _ => None,
     }
 }
@@ -955,6 +959,14 @@ pub(super) fn action_for_enum_commit(key: SettingKey, choice: &'static str) -> O
         },
         "hunk_tracker_mode" => Some(Action::SetHunkTrackerMode(choice.to_string())),
         "screen_mode" => Some(Action::SetScreenMode(choice.to_string())),
+        "tersify_scope" => match choice {
+            "main_only" | "all" | "off" => Some(Action::SetTersifyScope(choice.to_string())),
+            _ => None,
+        },
+        "tersify_level" => match choice {
+            "lite" | "full" | "ultra" => Some(Action::SetTersifyLevel(choice.to_string())),
+            _ => None,
+        },
         "voice_capture_mode" => Some(Action::SetVoiceCaptureMode(choice.to_string())),
         "voice_stt_language" => Some(Action::SetVoiceSttLanguage(choice.to_string())),
         "language.conversation" => Some(Action::SetConversationLanguage(choice.to_string())),

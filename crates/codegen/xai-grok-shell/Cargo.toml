@@ -143,6 +143,7 @@ xai-sqlite-journal = { workspace = true }
 xai-token-estimation = { workspace = true }
 xai-grok-inference-types = { path = "../xai-grok-inference-types" }
 xai-grok-tools = { path = "../xai-grok-tools" }
+xai-grok-tersify = { workspace = true }
 # Streaming STT transport only — no microphone capture (`audio` feature off).
 xai-grok-voice = { path = "../xai-grok-voice", default-features = false }
 archanjo = { path = "../archanjo" }

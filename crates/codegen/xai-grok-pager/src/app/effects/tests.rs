@@ -755,6 +755,18 @@ async fn persist_setting_unknown_key_returns_err() {
         Ok(()) => panic!("expected Err for unknown key"),
     }
 }
+
+/// A non-Enum payload for tersify_scope is a kind mismatch, never a write.
+#[tokio::test]
+async fn persist_setting_type_mismatch_errors_tersify_scope() {
+    use crate::settings::SettingValue;
+    let r = persist_setting("tersify_scope", SettingValue::Bool(true)).await;
+    let err = r.expect_err("tersify_scope with Bool payload must return Err");
+    assert!(
+        err.contains("persist_setting(tersify_scope) expected Enum"),
+        "error message must mention key + expected kind, got: {err}"
+    );
+}
 /// Type-mismatch returns Err (not panic) for spawned-task safety.
 #[tokio::test]
 async fn persist_setting_type_mismatch_errors_compact_mode() {
