@@ -1219,14 +1219,28 @@ pub fn render_doc_viewer_overlay(
     }) = super::modal_window::render_modal_window(buf, area, window, &modal_config, theme)
     {
         let w = content_area.width;
-        let needs_reparse = cached_lines
+        let needs_rewrap = cached_lines
             .as_ref()
             .is_none_or(|(cached_w, _)| *cached_w != w);
-        if needs_reparse {
-            let mc = crate::scrollback::blocks::markdown_content::MarkdownContent::new(content);
-            let output = mc.output(w as usize);
-            let lines: Vec<ratatui::text::Line<'static>> =
-                output.lines.into_iter().map(|b| b.content).collect();
+        if needs_rewrap {
+            let lines: Vec<ratatui::text::Line<'static>> = match crate::docs::find_structured(title)
+            {
+                // Structured guides are laid out directly from their blocks: no
+                // markup parsing, just padded columns and wrapped prose.
+                Some(guide) => crate::docs::structured_body(guide, w as usize)
+                    .into_iter()
+                    .map(ratatui::text::Line::from)
+                    .collect(),
+                None => {
+                    let mc =
+                        crate::scrollback::blocks::markdown_content::MarkdownContent::new(content);
+                    mc.output(w as usize)
+                        .lines
+                        .into_iter()
+                        .map(|b| b.content)
+                        .collect()
+                }
+            };
             *cached_lines = Some((w, lines));
         }
         let all_lines = &cached_lines.as_ref().unwrap().1;
