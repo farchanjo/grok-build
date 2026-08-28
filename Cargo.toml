@@ -50,6 +50,7 @@ members = [
     "crates/codegen/xai-grok-shell-session-support",
     "crates/codegen/xai-grok-subagent-resolution",
     "crates/codegen/xai-grok-telemetry",
+    "crates/codegen/xai-grok-tersify",
     "crates/codegen/xai-grok-test-support",
     "crates/codegen/xai-grok-tools",
     "crates/codegen/xai-grok-tools-api",
@@ -304,6 +305,7 @@ xai-grok-shell = { path = "crates/codegen/xai-grok-shell" }
 xai-grok-shell-base = { path = "crates/codegen/xai-grok-shell-base" }
 xai-grok-shell-session-support = { path = "crates/codegen/xai-grok-shell-session-support" }
 xai-grok-telemetry = { path = "crates/codegen/xai-grok-telemetry" }
+xai-grok-tersify = { path = "crates/codegen/xai-grok-tersify" }
 xai-grok-test-support = { path = "crates/codegen/xai-grok-test-support" }
 xai-grok-tools = { path = "crates/codegen/xai-grok-tools" }
 xai-grok-tools-api = { path = "crates/codegen/xai-grok-tools-api" }

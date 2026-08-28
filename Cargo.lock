@@ -14029,6 +14029,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "xai-grok-tersify"
+version = "0.1.0"
+dependencies = [
+ "regex",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "xai-grok-test-support"
 version = "0.1.0"
 dependencies = [
