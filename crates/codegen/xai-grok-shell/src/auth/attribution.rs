@@ -544,17 +544,15 @@ pub(crate) fn lookup_route_credential(
             let _ = incarnation;
             let scope = match (instance, route.provider_kind()) {
                 ("openai", _) => OPENAI_API_KEY_SCOPE.to_owned(),
-                ("openrouter", _) | (_, RouteProviderKind::OpenRouter)
-                    if instance == "openrouter" =>
-                {
-                    OPENROUTER_API_KEY_SCOPE.to_owned()
+                ("openrouter", _) => OPENROUTER_API_KEY_SCOPE.to_owned(),
+                ("anthropic", _) => ANTHROPIC_API_KEY_SCOPE.to_owned(),
+                (id, RouteProviderKind::OpenRouter) => {
+                    let pid = ProviderId::new(id).ok()?;
+                    crate::provider_registry::secrets::extra_openrouter_application_key_scope(&pid)
                 }
-                ("anthropic", _) | (_, RouteProviderKind::Anthropic) if instance == "anthropic" => {
-                    ANTHROPIC_API_KEY_SCOPE.to_owned()
-                }
-                _ => {
-                    let id = ProviderId::new(instance).ok()?;
-                    application_key_scope(&id)
+                (id, _) => {
+                    let pid = ProviderId::new(id).ok()?;
+                    application_key_scope(&pid)
                 }
             };
             let key = read_provider_api_key(grok_home, &scope).ok().flatten()?;

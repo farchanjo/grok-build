@@ -48,6 +48,11 @@ pub struct CompactionPolicy {
     /// Number of logical bands used by rolling compaction.
     pub rolling_band_count: usize,
 
+    /// Whether the summarizer may run read-only artifact lookups (`read_file`,
+    /// `grep`, `list_dir`) before writing the summary, so it can resolve the
+    /// files, logs, and media referenced in the conversation it is compressing.
+    pub resolver_tools: bool,
+
     /// Whether to run a memory flush turn before each compaction.
     /// When enabled, the session actor asks the model to summarize
     /// important information from the conversation before it's compacted.
@@ -74,6 +79,7 @@ impl Default for CompactionPolicy {
             strategy: CompactionStrategy::Auto,
             trigger_policy: CompactionTriggerPolicy::Fixed,
             rolling_band_count: 4,
+            resolver_tools: true,
             memory_flush_enabled: false,
             wall_clock_budget_secs: 300,
             two_pass_enabled: false,

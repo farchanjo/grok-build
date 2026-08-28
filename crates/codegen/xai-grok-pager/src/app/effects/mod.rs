@@ -5175,6 +5175,17 @@ async fn run_provider_operation(
         }
     }
 
+    fn configured_provider_kind(
+        home: &std::path::Path,
+        id: &str,
+    ) -> xai_grok_shell::provider_registry::ProviderKind {
+        xai_grok_shell::provider_registry::ProviderManagementService::new(home)
+            .detail(id)
+            .ok()
+            .and_then(|d| xai_grok_shell::provider_registry::ProviderKind::parse(&d.kind))
+            .unwrap_or(xai_grok_shell::provider_registry::ProviderKind::OpenAiCompatible)
+    }
+
     fn connection_test_status(
         result: ProviderConnectionTest,
         saved_now: bool,
@@ -5457,12 +5468,14 @@ async fn run_provider_operation(
             } else if let ProviderKind::Configured(id) = &provider {
                 use xai_grok_shell::provider_registry::id::ProviderId as ConfiguredProviderId;
                 use xai_grok_shell::provider_registry::secrets::{
-                    application_key_scope, read_provider_secret,
+                    application_key_scope_for_kind, read_provider_secret,
                 };
+                let home = xai_grok_config::grok_home();
+                let kind = configured_provider_kind(&home, id);
                 match ConfiguredProviderId::new(id) {
                     Ok(id) => match read_provider_secret(
-                        &xai_grok_config::grok_home(),
-                        &application_key_scope(&id),
+                        &home,
+                        &application_key_scope_for_kind(&id, kind),
                     ) {
                         Ok(Some(_)) => ProviderStatus::Connected {
                             detail: Some("Connected with API key".into()),
@@ -5497,14 +5510,16 @@ async fn run_provider_operation(
                     Err(error) => ProviderStatus::Error(error.to_string()),
                 }
             } else if let ProviderKind::Configured(id) = &provider {
-                // Store under openai_compatible::<id>::api_key without logging.
+                // Extra OpenRouter stores `openrouter::<id>::api_key`; other
+                // configured hosts keep `openai_compatible::<id>::api_key`.
                 use xai_grok_shell::provider_registry::id::ProviderId as CfgId;
-                use xai_grok_shell::provider_registry::secrets::application_key_scope;
+                use xai_grok_shell::provider_registry::secrets::application_key_scope_for_kind;
                 let home = xai_grok_config::grok_home();
+                let kind = configured_provider_kind(&home, id);
                 match CfgId::new(id) {
                     Ok(pid) => match xai_grok_shell::auth::store_provider_api_key(
                         &home,
-                        &application_key_scope(&pid),
+                        &application_key_scope_for_kind(&pid, kind),
                         &key,
                     ) {
                         Ok(generation) => {
@@ -5562,13 +5577,10 @@ async fn run_provider_operation(
                 }
             } else if let ProviderKind::Configured(id) = &provider {
                 use xai_grok_shell::provider_registry::id::ProviderId as CfgId;
-                use xai_grok_shell::provider_registry::secrets::{
-                    admin_key_scope, application_key_scope, clear_provider_secret,
-                };
+                use xai_grok_shell::provider_registry::secrets::clear_configured_instance_secrets;
                 let home = xai_grok_config::grok_home();
                 if let Ok(pid) = CfgId::new(id) {
-                    let _ = clear_provider_secret(&home, &application_key_scope(&pid));
-                    let _ = clear_provider_secret(&home, &admin_key_scope(&pid));
+                    clear_configured_instance_secrets(&home, &pid);
                 }
                 ProviderStatus::Missing
             } else {
@@ -6036,6 +6048,7 @@ mod provider_status_tests {
             supports_audio_input: None,
             supports_video_input: None,
             reasoning_effort_selection: None,
+            ..Default::default()
         }];
 
         match display_provider_status(status) {
@@ -6086,6 +6099,7 @@ mod provider_status_tests {
             supports_audio_input: None,
             supports_video_input: None,
             reasoning_effort_selection: None,
+            ..Default::default()
         };
         let mut stale = live.clone();
         stale.context_window = Some(272_000);

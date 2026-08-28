@@ -63,8 +63,20 @@ pub struct DiscoveredModel {
     pub description: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context_window: Option<u64>,
+    /// Per-request max completion tokens when the provider advertises a
+    /// request budget, or when the user set a model override. OpenRouter
+    /// discovery leaves this unset: its `top_provider.max_completion_tokens`
+    /// is stored on [`Self::max_output_ceiling`] instead so context
+    /// validation does not reserve the full route cap.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_completion_tokens: Option<u32>,
+    /// OpenRouter-routed completion-token ceiling (min of positive
+    /// `top_provider.max_completion_tokens` and
+    /// `per_request_limits.completion_tokens`). Never copied onto
+    /// `ModelInfo.max_completion_tokens`. The sampler clamps the provider
+    /// request default to this ceiling.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_output_ceiling: Option<u32>,
     /// Projected agent/tool capabilities. Never guessed for embeddings/rerank.
     pub capabilities: ProjectedCapabilities,
     /// Provider instance that produced this row.
@@ -96,6 +108,21 @@ pub struct ProjectedCapabilities {
     pub supports_audio_input: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub supports_video_input: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supports_file_input: Option<bool>,
+    /// True when `architecture.output_modalities` includes `text`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_has_text: Option<bool>,
+    /// Native structured outputs from `structured_outputs` / `response_format`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supports_native_schema: Option<bool>,
+    /// OpenRouter zero-data-retention: `GET /models?zdr=true` membership or
+    /// `GET /endpoints/zdr` slug intersection. Never inferred from xAI team ZDR.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supports_zdr: Option<bool>,
+    /// Routed completion-token ceiling retained on capability snapshots.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_output_ceiling: Option<u32>,
     /// Explicit manual capability overrides from config (authoritative).
     #[serde(default, skip_serializing_if = "IndexMap::is_empty")]
     pub manual_overrides: IndexMap<String, bool>,

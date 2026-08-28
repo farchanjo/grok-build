@@ -40,6 +40,9 @@ use xai_chat_state::compaction_utils::{
 };
 
 use crate::inference::Client as OaiCompatClient;
+use crate::session::helpers::compaction_tools::{
+    CompactionToolResolver, run_resolver_rounds,
+};
 use crate::session::helpers::session_compact::{
     CompactFailure, CompactOutput, build_compaction_chat_history,
     generate_session_compact_cancellable,
@@ -64,6 +67,75 @@ pub(crate) struct CompactionRoute {
     pub(crate) inference_config: InferenceConfig,
     /// Exact provider route retained for pacing/attribution provenance.
     pub(crate) route: xai_grok_inference::ProviderRouteContext,
+    /// The `[compaction].models` reference this route was built from, e.g.
+    /// `zdr:z-ai/glm-5.3-flash`. Failure attribution reports this rather than
+    /// the bare wire id, because it is what the user configured and what the
+    /// model catalog keys on.
+    pub(crate) selection_id: String,
+}
+
+/// A compaction attempt's failing route. An auth failure must name the provider
+/// that actually rejected the credential, which is the compaction route — not
+/// the session's primary model, which may be an unrelated provider.
+#[derive(Clone, Debug)]
+pub(crate) struct FailedCompactionRoute {
+    pub(crate) selection_id: String,
+    pub(crate) model: String,
+    pub(crate) base_url: String,
+    pub(crate) backend: String,
+}
+
+impl FailedCompactionRoute {
+    fn from_route(route: &CompactionRoute) -> Self {
+        Self {
+            selection_id: route.selection_id.clone(),
+            model: route.inference_config.model.clone(),
+            base_url: route.inference_config.base_url.clone(),
+            backend: format!("{:?}", route.inference_config.api_backend).to_ascii_lowercase(),
+        }
+    }
+}
+
+/// Key under which a compaction failure stores its failing route on
+/// `acp::Error::data`.
+pub(crate) const COMPACTION_ROUTE_ERROR_DATA_KEY: &str = "compaction_route";
+
+/// Attach the failing compaction route to an error so the auth surface can
+/// attribute the failure to the right provider.
+///
+/// Compaction errors carry their detail as a JSON string in `data`; this
+/// promotes it to the object shape the auth surface reads, keeping the original
+/// text under `message` so every existing consumer still renders it.
+pub(crate) fn attribute_compaction_error(
+    mut err: acp::Error,
+    failed: Option<&FailedCompactionRoute>,
+) -> acp::Error {
+    let Some(failed) = failed else {
+        return err;
+    };
+    let message = err
+        .data
+        .as_ref()
+        .and_then(|data| data.as_str())
+        .map(str::to_owned)
+        .or_else(|| {
+            err.data
+                .as_ref()
+                .and_then(|data| data.get("message"))
+                .and_then(|m| m.as_str())
+                .map(str::to_owned)
+        })
+        .unwrap_or_else(|| "compaction failed".to_owned());
+    err.data = Some(serde_json::json!({
+        "message": message,
+        COMPACTION_ROUTE_ERROR_DATA_KEY: {
+            "selection_id": failed.selection_id,
+            "model": failed.model,
+            "base_url": failed.base_url,
+            "backend": failed.backend,
+        },
+    }));
+    err
 }
 
 pub(crate) struct ShellCompactionSampler {
@@ -90,6 +162,16 @@ pub(crate) struct ShellCompactionSampler {
     cancelled: std::sync::atomic::AtomicBool,
     /// Full output of the most recent successful sample (for L5 telemetry).
     last_success: Mutex<Option<CompactOutput>>,
+    /// Route of the most recent failed attempt, for failure attribution.
+    last_failed: Mutex<Option<FailedCompactionRoute>>,
+    /// Read-only tool resolver that lets the summarizer open artifacts
+    /// referenced in history. `None` keeps the pure single-call path.
+    resolver: Option<std::sync::Arc<dyn CompactionToolResolver>>,
+    /// `(rounds, calls)` spent by the resolver on this sampler's lifetime.
+    resolver_stats: Mutex<(u32, u32)>,
+    /// Resolved lookup turns, cached so the engine's retry ladder does not
+    /// re-pay the resolution rounds. `None` means "not attempted yet".
+    resolved_lookups: Mutex<Option<Vec<ConversationItem>>>,
 }
 
 impl ShellCompactionSampler {
@@ -122,12 +204,39 @@ impl ShellCompactionSampler {
             cancel: tokio_util::sync::CancellationToken::new(),
             cancelled: std::sync::atomic::AtomicBool::new(false),
             last_success: Mutex::new(None),
+            last_failed: Mutex::new(None),
+            resolver: None,
+            resolver_stats: Mutex::new((0, 0)),
+            resolved_lookups: Mutex::new(None),
         }
     }
 
     /// Attach the session-owned cancellation token for an in-flight compact.
     pub(crate) fn with_cancel(mut self, cancel: tokio_util::sync::CancellationToken) -> Self {
         self.cancel = cancel;
+        self
+    }
+
+    /// Attach the read-only tool resolver for artifact lookups.
+    pub(crate) fn with_resolver(
+        mut self,
+        resolver: std::sync::Arc<dyn CompactionToolResolver>,
+    ) -> Self {
+        self.resolver = Some(resolver);
+        self
+    }
+
+    /// `(rounds, calls)` the resolver spent before the summary was produced.
+    pub(crate) fn resolver_stats(&self) -> (u32, u32) {
+        *self.resolver_stats.lock().unwrap()
+    }
+
+    /// Pre-seed the resolved lookup context so every later sample call reuses
+    /// one shared resolution instead of deriving it from its own chunk. Rolling
+    /// compaction resolves the whole cold source once, then feeds the folded
+    /// context to every chunk and merge round.
+    pub(crate) fn with_resolved_lookups(mut self, items: Vec<ConversationItem>) -> Self {
+        *self.resolved_lookups.lock().unwrap() = Some(items);
         self
     }
 
@@ -143,6 +252,17 @@ impl ShellCompactionSampler {
     /// Take the [`CompactOutput`] of the most recent successful sample, if any.
     pub(crate) fn take_last_success(&self) -> Option<CompactOutput> {
         self.last_success.lock().unwrap().take()
+    }
+
+    /// Route of the most recent failed attempt, for failure attribution.
+    pub(crate) fn last_failed_route(&self) -> Option<FailedCompactionRoute> {
+        self.last_failed.lock().unwrap().clone()
+    }
+
+    /// Remember which route just failed. The last failure wins: it is the one
+    /// whose credential the provider surface should offer to repair.
+    fn record_failed_route(&self, route: &CompactionRoute) {
+        *self.last_failed.lock().unwrap() = Some(FailedCompactionRoute::from_route(route));
     }
 
     pub(crate) fn selected_model(&self) -> Option<&str> {
@@ -166,18 +286,56 @@ impl CompactionSampler for ShellCompactionSampler {
         prompt: &CompactionPrompt,
         _timeout: Duration,
     ) -> Result<LlmCompactionOutput, CompactionSampleError> {
+        // Read-only resolution runs on the bare turns: the summarization prompt
+        // explicitly forbids tool calls, so it must not be in front of the model
+        // while it decides what to look up.
+        let mut resolved_turns = turns.to_vec();
+        let cached_lookups = self.resolved_lookups.lock().unwrap().clone();
+        if let Some(items) = cached_lookups {
+            resolved_turns.extend(items);
+        } else if let Some(resolver) = self.resolver.as_deref() {
+            let route = self.routes.first();
+            if let Some(route) = route {
+                let outcome = run_resolver_rounds(
+                    &route.client,
+                    &route.inference_config,
+                    self.session_id.to_string().as_str(),
+                    &resolved_turns,
+                    resolver,
+                    &self.cancel,
+                )
+                .await;
+                *self.resolver_stats.lock().unwrap() = (outcome.rounds, outcome.calls);
+                if let Some(summary) = outcome.early_summary {
+                    // The summarizer answered instead of asking for context.
+                    *self.resolved_lookups.lock().unwrap() = Some(Vec::new());
+                    return Ok(LlmCompactionOutput {
+                        response: summary,
+                        thinking: String::new(),
+                    });
+                }
+                let items: Vec<ConversationItem> = outcome
+                    .lookups
+                    .map(ConversationItem::user)
+                    .into_iter()
+                    .collect();
+                *self.resolved_lookups.lock().unwrap() = Some(items.clone());
+                resolved_turns.extend(items);
+            }
+        }
+
         let chat_history = if self.use_supplied_prompt {
             let mut history = Vec::with_capacity(turns.len() + 2);
             if !prompt.system.trim().is_empty() {
                 history.push(ConversationItem::system(prompt.system.clone()));
             }
-            history.extend_from_slice(turns);
+            history.extend_from_slice(&resolved_turns);
             history.push(ConversationItem::user(prompt.user.clone()));
             history
         } else {
             // Full-replace retains the harness-selected legacy prompt.
             build_compaction_chat_history(
-                turns.to_vec(),
+                resolved_turns,
                 self.user_context.as_deref(),
                 self.use_short_prompt,
             )
@@ -198,7 +356,7 @@ impl CompactionSampler for ShellCompactionSampler {
             let route = self.routes.get(route_index).ok_or_else(|| {
                 CompactionSampleError::Build("no usable compaction route configured".to_owned())
             })?;
-            match generate_session_compact_cancellable(
+            let attempt = generate_session_compact_cancellable(
                 recovery_history
                     .as_ref()
                     .unwrap_or(&text_only_history)
@@ -221,8 +379,13 @@ impl CompactionSampler for ShellCompactionSampler {
                 self.tool_choice,
                 &self.cancel,
             )
-            .await
-            {
+            .await;
+            // Record before classification: a fallback or a terminal failure both
+            // need the route whose credential actually failed.
+            if attempt.is_err() {
+                self.record_failed_route(route);
+            }
+            match attempt {
                 Ok(output)
                     if route_index + 1 < self.routes.len()
                         && (output.content.trim().is_empty()
@@ -304,6 +467,27 @@ fn compact_failure_to_sample_error(failure: CompactFailure) -> CompactionSampleE
     } else {
         CompactionSampleError::Other(anyhow::anyhow!(message))
     }
+}
+
+/// Read the failing compaction route back off an error attached by
+/// [`attribute_compaction_error`]. `None` for any error that did not come from
+/// a compaction route (or from a pre-attribution code path).
+pub(crate) fn compaction_error_route(err: &acp::Error) -> Option<FailedCompactionRoute> {
+    let route = err.data.as_ref()?.get(COMPACTION_ROUTE_ERROR_DATA_KEY)?;
+    let field = |key: &str| {
+        route
+            .get(key)
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_owned()
+    };
+    let selection_id = field("selection_id");
+    (!selection_id.is_empty()).then_some(FailedCompactionRoute {
+        selection_id,
+        model: field("model"),
+        base_url: field("base_url"),
+        backend: field("backend"),
+    })
 }
 
 /// Render the human-readable detail an `acp::Error` carries in its `data`
@@ -618,6 +802,7 @@ mod compaction_route_tests {
             base_url: base_url.to_string(),
             model: "test-model".to_string(),
             max_completion_tokens: Some(1000),
+            max_output_ceiling: None,
             temperature: Some(0.7),
             top_p: None,
             openrouter_fallback_models: Vec::new(),
@@ -716,6 +901,7 @@ mod compaction_route_tests {
 
         let routes = vec![
             CompactionRoute {
+                selection_id: "test-compaction-route".to_owned(),
                 client: create_client(&base_url, ProviderIdentity::Xai),
                 inference_config: make_test_config(&base_url, ProviderIdentity::Xai),
                 route: xai_grok_inference::ProviderRouteContext::legacy_from_config(
@@ -723,6 +909,7 @@ mod compaction_route_tests {
                 ),
             },
             CompactionRoute {
+                selection_id: "test-compaction-route".to_owned(),
                 client: create_client(&base_url2, ProviderIdentity::Xai),
                 inference_config: make_test_config(&base_url2, ProviderIdentity::Xai),
                 route: xai_grok_inference::ProviderRouteContext::legacy_from_config(
@@ -809,6 +996,7 @@ mod compaction_route_tests {
 
         let routes = vec![
             CompactionRoute {
+                selection_id: "test-compaction-route".to_owned(),
                 client: create_client(&base_url1, ProviderIdentity::Xai),
                 inference_config: make_test_config(&base_url1, ProviderIdentity::Xai),
                 route: xai_grok_inference::ProviderRouteContext::legacy_from_config(
@@ -816,6 +1004,7 @@ mod compaction_route_tests {
                 ),
             },
             CompactionRoute {
+                selection_id: "test-compaction-route".to_owned(),
                 client: create_client(&base_url2, ProviderIdentity::Xai),
                 inference_config: make_test_config(&base_url2, ProviderIdentity::Xai),
                 route: xai_grok_inference::ProviderRouteContext::legacy_from_config(
@@ -912,6 +1101,7 @@ mod compaction_route_tests {
 
         let routes = vec![
             CompactionRoute {
+                selection_id: "test-compaction-route".to_owned(),
                 client: create_client(&base_url1, ProviderIdentity::Xai),
                 inference_config: make_test_config(&base_url1, ProviderIdentity::Xai),
                 route: xai_grok_inference::ProviderRouteContext::legacy_from_config(
@@ -919,6 +1109,7 @@ mod compaction_route_tests {
                 ),
             },
             CompactionRoute {
+                selection_id: "test-compaction-route".to_owned(),
                 client: create_client(&base_url2, ProviderIdentity::Xai),
                 inference_config: make_test_config(&base_url2, ProviderIdentity::Xai),
                 route: xai_grok_inference::ProviderRouteContext::legacy_from_config(
@@ -1012,6 +1203,7 @@ mod compaction_route_tests {
 
         let routes = vec![
             CompactionRoute {
+                selection_id: "test-compaction-route".to_owned(),
                 client: create_client(&base_url1, ProviderIdentity::Xai),
                 inference_config: make_test_config(&base_url1, ProviderIdentity::Xai),
                 route: xai_grok_inference::ProviderRouteContext::legacy_from_config(
@@ -1019,6 +1211,7 @@ mod compaction_route_tests {
                 ),
             },
             CompactionRoute {
+                selection_id: "test-compaction-route".to_owned(),
                 client: create_client(&base_url2, ProviderIdentity::Xai),
                 inference_config: make_test_config(&base_url2, ProviderIdentity::Xai),
                 route: xai_grok_inference::ProviderRouteContext::legacy_from_config(
@@ -1112,6 +1305,7 @@ mod compaction_route_tests {
 
         let routes = vec![
             CompactionRoute {
+                selection_id: "test-compaction-route".to_owned(),
                 client: create_client(&base_url1, ProviderIdentity::Xai),
                 inference_config: make_test_config(&base_url1, ProviderIdentity::Xai),
                 route: xai_grok_inference::ProviderRouteContext::legacy_from_config(
@@ -1119,6 +1313,7 @@ mod compaction_route_tests {
                 ),
             },
             CompactionRoute {
+                selection_id: "test-compaction-route".to_owned(),
                 client: create_client(&base_url2, ProviderIdentity::Xai),
                 inference_config: make_test_config(&base_url2, ProviderIdentity::Xai),
                 route: xai_grok_inference::ProviderRouteContext::legacy_from_config(
@@ -1213,6 +1408,7 @@ mod compaction_route_tests {
 
         let routes = vec![
             CompactionRoute {
+                selection_id: "test-compaction-route".to_owned(),
                 client: create_client(&base_url1, ProviderIdentity::Xai),
                 inference_config: make_test_config(&base_url1, ProviderIdentity::Xai),
                 route: xai_grok_inference::ProviderRouteContext::legacy_from_config(
@@ -1220,6 +1416,7 @@ mod compaction_route_tests {
                 ),
             },
             CompactionRoute {
+                selection_id: "test-compaction-route".to_owned(),
                 client: create_client(&base_url2, ProviderIdentity::Xai),
                 inference_config: make_test_config(&base_url2, ProviderIdentity::Xai),
                 route: xai_grok_inference::ProviderRouteContext::legacy_from_config(
@@ -1321,6 +1518,7 @@ mod compaction_route_tests {
 
         let routes = vec![
             CompactionRoute {
+                selection_id: "test-compaction-route".to_owned(),
                 client: create_client(&base_url1, ProviderIdentity::Xai),
                 inference_config: make_test_config(&base_url1, ProviderIdentity::Xai),
                 route: xai_grok_inference::ProviderRouteContext::legacy_from_config(
@@ -1328,6 +1526,7 @@ mod compaction_route_tests {
                 ),
             },
             CompactionRoute {
+                selection_id: "test-compaction-route".to_owned(),
                 client: create_client(&base_url2, ProviderIdentity::Xai),
                 inference_config: make_test_config(&base_url2, ProviderIdentity::Xai),
                 route: xai_grok_inference::ProviderRouteContext::legacy_from_config(
@@ -1436,6 +1635,7 @@ mod compaction_route_tests {
 
         let routes = vec![
             CompactionRoute {
+                selection_id: "test-compaction-route".to_owned(),
                 client: create_client(&base_url1, ProviderIdentity::Xai),
                 inference_config: make_test_config(&base_url1, ProviderIdentity::Xai),
                 route: xai_grok_inference::ProviderRouteContext::legacy_from_config(
@@ -1443,6 +1643,7 @@ mod compaction_route_tests {
                 ),
             },
             CompactionRoute {
+                selection_id: "test-compaction-route".to_owned(),
                 client: create_client(&base_url2, ProviderIdentity::Xai),
                 inference_config: make_test_config(&base_url2, ProviderIdentity::Xai),
                 route: xai_grok_inference::ProviderRouteContext::legacy_from_config(
@@ -1548,6 +1749,7 @@ mod compaction_route_tests {
 
         let routes = vec![
             CompactionRoute {
+                selection_id: "test-compaction-route".to_owned(),
                 client: create_client(&base_url, ProviderIdentity::Xai),
                 inference_config: make_test_config(&base_url, ProviderIdentity::Xai),
                 route: xai_grok_inference::ProviderRouteContext::legacy_from_config(
@@ -1555,6 +1757,7 @@ mod compaction_route_tests {
                 ),
             },
             CompactionRoute {
+                selection_id: "test-compaction-route".to_owned(),
                 client: create_client(&fallback_base_url, ProviderIdentity::Xai),
                 inference_config: make_test_config(&fallback_base_url, ProviderIdentity::Xai),
                 route: xai_grok_inference::ProviderRouteContext::legacy_from_config(
@@ -1993,6 +2196,7 @@ mod compaction_route_tests {
 
         let routes = vec![
             CompactionRoute {
+                selection_id: "test-compaction-route".to_owned(),
                 client: create_client(&base_url1, ProviderIdentity::Xai),
                 inference_config: make_test_config(&base_url1, ProviderIdentity::Xai),
                 route: xai_grok_inference::ProviderRouteContext::legacy_from_config(
@@ -2000,6 +2204,7 @@ mod compaction_route_tests {
                 ),
             },
             CompactionRoute {
+                selection_id: "test-compaction-route".to_owned(),
                 client: create_client(&base_url2, ProviderIdentity::Xai),
                 inference_config: make_test_config(&base_url2, ProviderIdentity::Xai),
                 route: xai_grok_inference::ProviderRouteContext::legacy_from_config(
@@ -2131,6 +2336,7 @@ mod compaction_route_tests {
             vec![],
             vec![
                 CompactionRoute {
+                    selection_id: "test-compaction-route".to_owned(),
                     client: create_client(&base_url, ProviderIdentity::Xai),
                     inference_config: make_test_config(&base_url, ProviderIdentity::Xai),
                     route: xai_grok_inference::ProviderRouteContext::legacy_from_config(
@@ -2138,6 +2344,7 @@ mod compaction_route_tests {
                     ),
                 },
                 CompactionRoute {
+                    selection_id: "test-compaction-route".to_owned(),
                     client: create_client(&fallback_url, ProviderIdentity::Xai),
                     inference_config: make_test_config(&fallback_url, ProviderIdentity::Xai),
                     route: xai_grok_inference::ProviderRouteContext::legacy_from_config(

@@ -371,6 +371,7 @@ impl ProviderService {
             openrouter_provider_preferences: cfg.provider_preferences.clone(),
             openrouter_plugins: cfg.plugins.clone(),
             openrouter_pacing: cfg.openrouter_pacing,
+            max_completion_tokens: cfg.max_completion_tokens.filter(|&n| n > 0),
         };
         let meta = Self::metadata_from_config(&pid, cfg, provider_ref);
         Ok((desc, meta))

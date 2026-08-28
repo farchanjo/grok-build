@@ -60,6 +60,11 @@ fn entry(wire: &str, provider: &str, base: &str, key: Option<&str>) -> ModelEntr
             supports_image_input: None,
             supports_audio_input: None,
             supports_video_input: None,
+            supports_file_input: None,
+            output_has_text: None,
+            supports_zdr: None,
+            max_output_ceiling: None,
+            provider_display_name: None,
             execution_backend: crate::agent::execution_backend::ExecutionBackend::NativeInference,
         },
         model_provider: Some(ResolvedModelProvider {
@@ -69,6 +74,7 @@ fn entry(wire: &str, provider: &str, base: &str, key: Option<&str>) -> ModelEntr
             openrouter_provider_preferences: None,
             openrouter_plugins: vec![],
             openrouter_pacing: false,
+            max_completion_tokens: None,
             command: vec![],
         }),
         api_key: key.map(str::to_owned),
@@ -96,6 +102,32 @@ fn manager(
         )),
         config,
     )
+}
+
+/// Register a provider instance in the home's on-disk runtime registry
+/// (`config.toml`). `entry()` attaches a `model_provider` descriptor to each
+/// catalog row, and the production route guard fails closed on instances that
+/// are not configured on disk. A provided `api_key` makes the OpenAI-compatible
+/// instance an API-key credential route, matching how a real BYOK provider
+/// declares its key.
+fn register_provider(
+    home: &std::path::Path,
+    id: &str,
+    kind: &str,
+    base_url: &str,
+    api_key: Option<&str>,
+) {
+    use std::fmt::Write as _;
+    let mut raw = std::fs::read_to_string(home.join("config.toml")).unwrap_or_default();
+    let _ = writeln!(
+        raw,
+        "\n[model_providers.{id}]\nkind = \"{kind}\"\nbase_url = \"{base_url}\""
+    );
+    if let Some(key) = api_key {
+        let _ = writeln!(raw, "api_key = \"{key}\"");
+    }
+    std::fs::write(home.join("config.toml"), raw).expect("write provider config");
+    crate::provider_registry::runtime_cache::invalidate_for_home(home);
 }
 
 fn frozen() -> ProviderRouteContext {
@@ -154,6 +186,13 @@ fn base_inputs<'a>(
 #[test]
 fn compaction_prep_client_carries_exact_route_and_operation() {
     let dir = tempdir().unwrap();
+    register_provider(
+        dir.path(),
+        "compact-p",
+        "openai_compatible",
+        "https://compact.example/v1",
+        Some("compact-key"),
+    );
     let mut models = IndexMap::new();
     models.insert(
         "compact".into(),
@@ -186,10 +225,83 @@ fn compaction_prep_client_carries_exact_route_and_operation() {
     assert_eq!(client.model(), "compact-wire");
 }
 
+/// Compaction inherits the request max from configuration, exactly like the
+/// main turn: catalog ceiling first, then the OpenRouter API default. Nothing
+/// on the compaction path invents or strips a request budget.
+#[test]
+fn compaction_route_inherits_resolved_request_max_tokens() {
+    use crate::agent::model_providers::OPENROUTER_DEFAULT_MAX_COMPLETION_TOKENS;
+
+    let openrouter_entry = |ceiling: Option<u32>| {
+        let mut e = entry(
+            "z-ai/glm-5.3-flash",
+            "zdr",
+            "https://openrouter.ai/api/v1",
+            Some("or-key"),
+        );
+        e.info.max_output_ceiling = ceiling;
+        if let Some(provider) = e.model_provider.as_mut() {
+            provider.kind = ModelProviderKind::OpenRouter;
+        }
+        e
+    };
+
+    let resolve_max = |ceiling: Option<u32>, home: &std::path::Path| {
+        let mut models = IndexMap::new();
+        models.insert("glm".into(), openrouter_entry(ceiling));
+        let mgr = manager(models, IndexMap::new(), "glm", home);
+        let session = session_cfg();
+        let mut resolved = resolve_auxiliary_route(base_inputs(
+            AuxiliaryPurpose::Compaction,
+            "glm",
+            &mgr,
+            &frozen(),
+            &session,
+            home,
+            None,
+        ))
+        .expect("compaction route resolves");
+        sanitize_compaction_inference(&mut resolved.inference);
+        resolved.inference
+    };
+
+    // A catalog ceiling fills the request budget, and survives sanitization.
+    let dir = tempdir().unwrap();
+    register_provider(
+        dir.path(),
+        "zdr",
+        "openrouter",
+        "https://openrouter.ai/api/v1",
+        Some("or-key"),
+    );
+    let with_ceiling = resolve_max(Some(131_072), dir.path());
+    assert_eq!(
+        with_ceiling.max_completion_tokens,
+        Some(131_072),
+        "compaction must inherit the catalog ceiling, not drop it"
+    );
+    assert_eq!(with_ceiling.max_output_ceiling, Some(131_072));
+
+    // No ceiling anywhere: the shared OpenRouter API default applies.
+    let without_ceiling = resolve_max(None, dir.path());
+    assert_eq!(
+        without_ceiling.max_completion_tokens,
+        Some(OPENROUTER_DEFAULT_MAX_COMPLETION_TOKENS),
+        "compaction must fall back to the same API default as the main turn"
+    );
+}
+
 /// Production seam: web-search resolve binds exact-route attribution (not sibling).
 #[test]
 fn web_search_prep_binds_exact_route_attribution_not_sibling() {
     let dir = tempdir().unwrap();
+    register_provider(
+        dir.path(),
+        "ws-prov",
+        "openai_compatible",
+        "https://ws.example/v1",
+        Some("ws-key"),
+    );
     let mut models = IndexMap::new();
     models.insert(
         "ws".into(),
@@ -314,6 +426,13 @@ fn legacy_and_host_fallback_web_search_tool_cb_stays_absent() {
 #[test]
 fn unverified_byok_retains_route_bound_attribution() {
     let dir = tempdir().unwrap();
+    register_provider(
+        dir.path(),
+        "byok-prov",
+        "openai_compatible",
+        "https://byok.example/v1",
+        Some("byok-key"),
+    );
     let mut models = IndexMap::new();
     models.insert(
         "byok".into(),
@@ -360,6 +479,13 @@ fn unverified_byok_retains_route_bound_attribution() {
 #[test]
 fn prompt_and_shell_suggest_clients_retain_route() {
     let dir = tempdir().unwrap();
+    register_provider(
+        dir.path(),
+        "suggest-p",
+        "openai_compatible",
+        "https://suggest.example/v1",
+        Some("suggest-key"),
+    );
     let mut models = IndexMap::new();
     models.insert(
         "suggest".into(),
@@ -402,6 +528,13 @@ fn prompt_and_shell_suggest_clients_retain_route() {
 #[test]
 fn title_pairing_and_soft_fallback_keep_primary_upstream() {
     let dir = tempdir().unwrap();
+    register_provider(
+        dir.path(),
+        "title-p",
+        "openai_compatible",
+        "https://title.example/v1",
+        Some("title-key"),
+    );
     let mut models = IndexMap::new();
     models.insert(
         "title".into(),
@@ -472,6 +605,13 @@ fn title_pairing_and_soft_fallback_keep_primary_upstream() {
 #[test]
 fn media_pdf_and_video_purposes_apply_operation_partition() {
     let dir = tempdir().unwrap();
+    register_provider(
+        dir.path(),
+        "vision-p",
+        "openai_compatible",
+        "https://vision.example/v1",
+        Some("vision-key"),
+    );
     let mut models = IndexMap::new();
     models.insert(
         "vision".into(),
@@ -596,6 +736,20 @@ fn catalog_without_credentials_is_credential_unavailable() {
 #[test]
 fn sibling_accounts_never_borrow_credentials() {
     let dir = tempdir().unwrap();
+    register_provider(
+        dir.path(),
+        "a",
+        "openai_compatible",
+        "https://a.example/v1",
+        Some("key-a"),
+    );
+    register_provider(
+        dir.path(),
+        "b",
+        "openai_compatible",
+        "https://b.example/v1",
+        Some("key-b"),
+    );
     let mut models = IndexMap::new();
     models.insert(
         "a:m".into(),
@@ -771,6 +925,13 @@ fn media_stt_requires_xai_session_route_and_rejects_foreign() {
 #[test]
 fn production_freeze_preserves_instance_and_binding_not_legacy_host() {
     let dir = tempdir().unwrap();
+    register_provider(
+        dir.path(),
+        "account-a",
+        "openai_compatible",
+        "https://account-a.example/v1",
+        Some("key-a"),
+    );
     let mut models = IndexMap::new();
     models.insert(
         "session-a".into(),
@@ -827,6 +988,13 @@ fn production_freeze_preserves_instance_and_binding_not_legacy_host() {
 #[test]
 fn compaction_route_client_operation_partition_for_two_pass_seam() {
     let dir = tempdir().unwrap();
+    register_provider(
+        dir.path(),
+        "compact-p",
+        "openai_compatible",
+        "https://compact.example/v1",
+        Some("compact-key"),
+    );
     let mut models = IndexMap::new();
     models.insert(
         "compact".into(),

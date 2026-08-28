@@ -1,7 +1,10 @@
 //! Per-provider application, administration, and OAuth secret scopes.
 
-use super::id::{ProviderId, ProviderIdError, validate_provider_id_str};
-use super::instance::ProviderIncarnation;
+use super::id::{
+    BuiltInProviderId, ProviderId, ProviderIdError, is_reserved_configured_id,
+    validate_provider_id_str,
+};
+use super::instance::{ProviderIncarnation, ProviderKind};
 use crate::auth::{
     ANTHROPIC_API_KEY_SCOPE, OPENAI_API_KEY_SCOPE, OPENROUTER_ADMIN_KEY_SCOPE,
     OPENROUTER_API_KEY_SCOPE, OPENROUTER_MANAGEMENT_KEY_SCOPE, clear_provider_api_key,
@@ -27,22 +30,60 @@ impl ProviderCredentialKind {
     }
 }
 
-/// Canonical secret scope for a configured OpenAI-compatible provider.
+/// Vault namespace for a configured-instance API key or admin key.
+///
+/// Extra `kind=openrouter` instances use [`Self::OpenRouter`]
+/// (`openrouter::<id>::api_key`). Other configured hosts stay on
+/// [`Self::OpenAiCompatible`]. Built-in OpenRouter remains the two-part
+/// `openrouter::api_key` product scope and never uses this enum.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProviderSecretNamespace {
+    OpenAiCompatible,
+    OpenRouter,
+}
+
+impl ProviderSecretNamespace {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::OpenAiCompatible => "openai_compatible",
+            Self::OpenRouter => "openrouter",
+        }
+    }
+}
+
+/// Canonical secret scope for a configured provider instance.
 #[derive(Clone, Debug, Eq, PartialEq, Hash)]
 pub struct ProviderSecretScope {
     pub provider_id: ProviderId,
     pub kind: ProviderCredentialKind,
+    pub namespace: ProviderSecretNamespace,
 }
 
 impl ProviderSecretScope {
     pub fn new(provider_id: ProviderId, kind: ProviderCredentialKind) -> Self {
-        Self { provider_id, kind }
+        Self {
+            provider_id,
+            kind,
+            namespace: ProviderSecretNamespace::OpenAiCompatible,
+        }
     }
 
-    /// `openai_compatible::<id>::api_key` or `...::admin_key`.
+    pub fn openrouter(provider_id: ProviderId, kind: ProviderCredentialKind) -> Self {
+        Self {
+            provider_id,
+            kind,
+            namespace: ProviderSecretNamespace::OpenRouter,
+        }
+    }
+
+    /// `openai_compatible::<id>::api_key` / `...::admin_key`, or
+    /// `openrouter::<id>::api_key` / `...::admin_key` for extra OpenRouter
+    /// accounts. Never the built-in two-part `openrouter::api_key`.
     pub fn as_scope_string(&self) -> String {
         format!(
-            "openai_compatible::{}::{}",
+            "{}::{}::{}",
+            self.namespace.as_str(),
             self.provider_id.as_str(),
             self.kind.as_str()
         )
@@ -130,6 +171,62 @@ pub fn admin_key_scope(provider_id: &ProviderId) -> String {
     ProviderSecretScope::new(provider_id.clone(), ProviderCredentialKind::Admin).as_scope_string()
 }
 
+/// Extra `kind=openrouter` application key: `openrouter::<id>::api_key`.
+///
+/// Distinct from the built-in two-part `openrouter::api_key` product scope.
+pub fn extra_openrouter_application_key_scope(provider_id: &ProviderId) -> String {
+    ProviderSecretScope::openrouter(provider_id.clone(), ProviderCredentialKind::Application)
+        .as_scope_string()
+}
+
+/// Extra `kind=openrouter` admin key: `openrouter::<id>::admin_key`.
+pub fn extra_openrouter_admin_key_scope(provider_id: &ProviderId) -> String {
+    ProviderSecretScope::openrouter(provider_id.clone(), ProviderCredentialKind::Admin)
+        .as_scope_string()
+}
+
+/// Whether `(kind, id)` is an extra OpenRouter account (not the built-in product).
+pub fn is_extra_openrouter_instance(kind: ProviderKind, id: &str) -> bool {
+    kind == ProviderKind::OpenRouter && BuiltInProviderId::parse(id).is_none()
+}
+
+/// Application-key vault scope for a configured instance of `kind`.
+///
+/// Extra OpenRouter accounts store `openrouter::<id>::api_key` and never
+/// `openai_compatible::<id>::api_key`. Built-in product ids must use
+/// [`built_in_application_scope`] instead of this helper.
+pub fn application_key_scope_for_kind(provider_id: &ProviderId, kind: ProviderKind) -> String {
+    if is_extra_openrouter_instance(kind, provider_id.as_str()) {
+        extra_openrouter_application_key_scope(provider_id)
+    } else {
+        application_key_scope(provider_id)
+    }
+}
+
+/// Admin-key vault scope for a configured instance of `kind`.
+pub fn admin_key_scope_for_kind(provider_id: &ProviderId, kind: ProviderKind) -> String {
+    if is_extra_openrouter_instance(kind, provider_id.as_str()) {
+        extra_openrouter_admin_key_scope(provider_id)
+    } else {
+        admin_key_scope(provider_id)
+    }
+}
+
+/// Clear leftover configured-instance API/admin keys after metadata is gone.
+///
+/// Tries both the openai_compatible and extra-OpenRouter schemes so a
+/// tombstoned extra account cannot leave `openrouter::<id>::api_key` behind.
+/// Never touches built-in two-part scopes (`openrouter::api_key`).
+pub fn clear_configured_instance_secrets(grok_home: &Path, provider_id: &ProviderId) {
+    let _ = clear_provider_secret(grok_home, &application_key_scope(provider_id));
+    let _ = clear_provider_secret(grok_home, &admin_key_scope(provider_id));
+    let _ = clear_provider_secret(
+        grok_home,
+        &extra_openrouter_application_key_scope(provider_id),
+    );
+    let _ = clear_provider_secret(grok_home, &extra_openrouter_admin_key_scope(provider_id));
+}
+
 /// Built-in scopes retained for migration and first-class product providers.
 pub fn built_in_application_scope(provider: super::id::BuiltInProviderId) -> Option<&'static str> {
     match provider {
@@ -142,10 +239,14 @@ pub fn built_in_application_scope(provider: super::id::BuiltInProviderId) -> Opt
 
 /// Parse and validate a provider secret scope. Never accepts arbitrary scopes.
 ///
-/// Built-in product scopes plus configured openai_compatible scopes. Configured
-/// OAuth is parsed separately via [`parse_configured_oauth_scope`] and is never
-/// an API-key scope. OpenRouter admin/management scopes are distinct from the
-/// application key and never alias it.
+/// Built-in product scopes, configured openai_compatible scopes, and extra
+/// OpenRouter instance scopes (`openrouter::<configured-id>::api_key`).
+/// Built-in aliases (`openai`, `chatgpt`, `xai`, `grok`, `anthropic`, plus the
+/// rest of the reserved configured-id set) are never admitted as extra
+/// OpenRouter ids. Configured OAuth is parsed separately via
+/// [`parse_configured_oauth_scope`] and is never an API-key scope. OpenRouter
+/// admin/management scopes are distinct from the application key and never
+/// alias it.
 pub fn parse_secret_scope(scope: &str) -> Result<ParsedSecretScope, ScopeParseError> {
     if scope == OPENAI_API_KEY_SCOPE {
         return Ok(ParsedSecretScope::BuiltInOpenAiApp);
@@ -165,11 +266,55 @@ pub fn parse_secret_scope(scope: &str) -> Result<ParsedSecretScope, ScopeParseEr
     if scope == "openai::admin_key" {
         return Ok(ParsedSecretScope::BuiltInOpenAiAdmin);
     }
-    let prefix = "openai_compatible::";
-    let rest = scope
-        .strip_prefix(prefix)
-        .ok_or(ScopeParseError::UnknownScheme)?;
+    if let Some(parsed) = parse_openai_compatible_scope(scope)? {
+        return Ok(parsed);
+    }
+    if let Some(parsed) = parse_extra_openrouter_scope(scope)? {
+        return Ok(parsed);
+    }
+    Err(ScopeParseError::UnknownScheme)
+}
+
+fn parse_openai_compatible_scope(
+    scope: &str,
+) -> Result<Option<ParsedSecretScope>, ScopeParseError> {
+    let Some(rest) = scope.strip_prefix("openai_compatible::") else {
+        return Ok(None);
+    };
     let (id_part, kind_part) = rest.rsplit_once("::").ok_or(ScopeParseError::Malformed)?;
+    Ok(Some(ParsedSecretScope::Configured(configured_scope(
+        id_part,
+        kind_part,
+        ProviderSecretNamespace::OpenAiCompatible,
+    )?)))
+}
+
+fn parse_extra_openrouter_scope(scope: &str) -> Result<Option<ParsedSecretScope>, ScopeParseError> {
+    let Some(rest) = scope.strip_prefix("openrouter::") else {
+        return Ok(None);
+    };
+    let Some((id_part, kind_part)) = rest.rsplit_once("::") else {
+        // Two-part leftover (`openrouter::something`) is not an extra-instance
+        // scope; built-ins were already matched.
+        return Err(ScopeParseError::Malformed);
+    };
+    if is_reserved_configured_id(id_part) || BuiltInProviderId::parse(id_part).is_some() {
+        return Err(ScopeParseError::InvalidId(ProviderIdError::Reserved {
+            id: id_part.to_owned(),
+        }));
+    }
+    Ok(Some(ParsedSecretScope::Configured(configured_scope(
+        id_part,
+        kind_part,
+        ProviderSecretNamespace::OpenRouter,
+    )?)))
+}
+
+fn configured_scope(
+    id_part: &str,
+    kind_part: &str,
+    namespace: ProviderSecretNamespace,
+) -> Result<ProviderSecretScope, ScopeParseError> {
     validate_provider_id_str(id_part).map_err(ScopeParseError::InvalidId)?;
     let kind = match kind_part {
         "api_key" => ProviderCredentialKind::Application,
@@ -177,10 +322,11 @@ pub fn parse_secret_scope(scope: &str) -> Result<ParsedSecretScope, ScopeParseEr
         _ => return Err(ScopeParseError::UnknownKind),
     };
     let provider_id = ProviderId::new(id_part).map_err(ScopeParseError::InvalidId)?;
-    Ok(ParsedSecretScope::Configured(ProviderSecretScope {
+    Ok(ProviderSecretScope {
         provider_id,
         kind,
-    }))
+        namespace,
+    })
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -275,9 +421,159 @@ mod tests {
             ParsedSecretScope::Configured(s) => {
                 assert_eq!(s.provider_id.as_str(), "local_vllm");
                 assert_eq!(s.kind, ProviderCredentialKind::Application);
+                assert_eq!(s.namespace, ProviderSecretNamespace::OpenAiCompatible);
             }
             other => panic!("unexpected {other:?}"),
         }
+    }
+
+    #[test]
+    fn parses_extra_openrouter_instance_scopes() {
+        let work = ProviderId::new("openrouter-work").unwrap();
+        let home = ProviderId::new("openrouter-home").unwrap();
+        let app = extra_openrouter_application_key_scope(&work);
+        let admin = extra_openrouter_admin_key_scope(&home);
+        assert_eq!(app, "openrouter::openrouter-work::api_key");
+        assert_eq!(admin, "openrouter::openrouter-home::admin_key");
+        assert_eq!(
+            application_key_scope_for_kind(&work, ProviderKind::OpenRouter),
+            app
+        );
+        assert_eq!(
+            application_key_scope_for_kind(&work, ProviderKind::OpenAiCompatible),
+            "openai_compatible::openrouter-work::api_key"
+        );
+        match parse_secret_scope(&app).unwrap() {
+            ParsedSecretScope::Configured(s) => {
+                assert_eq!(s.provider_id.as_str(), "openrouter-work");
+                assert_eq!(s.kind, ProviderCredentialKind::Application);
+                assert_eq!(s.namespace, ProviderSecretNamespace::OpenRouter);
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+        match parse_secret_scope(&admin).unwrap() {
+            ParsedSecretScope::Configured(s) => {
+                assert_eq!(s.provider_id.as_str(), "openrouter-home");
+                assert_eq!(s.kind, ProviderCredentialKind::Admin);
+                assert_eq!(s.namespace, ProviderSecretNamespace::OpenRouter);
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+        assert!(is_allowed_provider_scope(&app));
+        assert!(is_allowed_provider_scope(&admin));
+        // Built-in two-part scope is never an extra-instance scope.
+        assert!(matches!(
+            parse_secret_scope(OPENROUTER_API_KEY_SCOPE).unwrap(),
+            ParsedSecretScope::BuiltInOpenRouterApp
+        ));
+        assert_ne!(app, OPENROUTER_API_KEY_SCOPE);
+    }
+
+    #[test]
+    fn extra_openrouter_scope_rejects_reserved_builtin_aliases() {
+        for id in [
+            "openai",
+            "chatgpt",
+            "xai",
+            "grok",
+            "anthropic",
+            "codex",
+            "openrouter",
+            "admin",
+            "local",
+        ] {
+            let scope = format!("openrouter::{id}::api_key");
+            let err = parse_secret_scope(&scope).expect_err(id);
+            assert!(
+                matches!(
+                    err,
+                    ScopeParseError::InvalidId(ProviderIdError::Reserved { .. })
+                ),
+                "{id}: {err:?}"
+            );
+            assert!(
+                !is_allowed_provider_scope(&scope),
+                "allowlist must reject reserved OpenRouter id `{id}`"
+            );
+        }
+    }
+
+    #[test]
+    fn extra_openrouter_sibling_scopes_are_isolated() {
+        let work = ProviderId::new("openrouter-work").unwrap();
+        let home = ProviderId::new("openrouter-home").unwrap();
+        assert_ne!(
+            extra_openrouter_application_key_scope(&work),
+            extra_openrouter_application_key_scope(&home)
+        );
+        assert_ne!(
+            extra_openrouter_application_key_scope(&work),
+            application_key_scope(&work)
+        );
+        let dir = tempfile::tempdir().unwrap();
+        store_provider_secret(
+            dir.path(),
+            &extra_openrouter_application_key_scope(&work),
+            "work-only-key",
+        )
+        .unwrap();
+        store_provider_secret(
+            dir.path(),
+            &extra_openrouter_application_key_scope(&home),
+            "home-only-key",
+        )
+        .unwrap();
+        store_provider_secret(dir.path(), OPENROUTER_API_KEY_SCOPE, "builtin-or-key").unwrap();
+        store_provider_secret(
+            dir.path(),
+            &application_key_scope(&work),
+            "openai-compatible-decoy",
+        )
+        .unwrap();
+
+        assert_eq!(
+            read_provider_secret(dir.path(), &extra_openrouter_application_key_scope(&work))
+                .unwrap()
+                .as_deref(),
+            Some("work-only-key")
+        );
+        assert_eq!(
+            read_provider_secret(dir.path(), &extra_openrouter_application_key_scope(&home))
+                .unwrap()
+                .as_deref(),
+            Some("home-only-key")
+        );
+        assert_eq!(
+            read_provider_secret(dir.path(), OPENROUTER_API_KEY_SCOPE)
+                .unwrap()
+                .as_deref(),
+            Some("builtin-or-key")
+        );
+        // Extra OpenRouter never aliases the openai_compatible scheme.
+        assert_eq!(
+            read_provider_secret(dir.path(), &application_key_scope(&work))
+                .unwrap()
+                .as_deref(),
+            Some("openai-compatible-decoy")
+        );
+        clear_provider_secret(dir.path(), &extra_openrouter_application_key_scope(&work)).unwrap();
+        assert_eq!(
+            read_provider_secret(dir.path(), &extra_openrouter_application_key_scope(&work))
+                .unwrap(),
+            None
+        );
+        assert_eq!(
+            read_provider_secret(dir.path(), &extra_openrouter_application_key_scope(&home))
+                .unwrap()
+                .as_deref(),
+            Some("home-only-key")
+        );
+        assert_eq!(
+            read_provider_secret(dir.path(), OPENROUTER_API_KEY_SCOPE)
+                .unwrap()
+                .as_deref(),
+            Some("builtin-or-key")
+        );
     }
 
     #[test]
@@ -285,6 +581,9 @@ mod tests {
         assert!(parse_secret_scope("evil::api_key").is_err());
         assert!(parse_secret_scope("openai_compatible::BAD::api_key").is_err());
         assert!(parse_secret_scope("openai_compatible::ok::other").is_err());
+        assert!(parse_secret_scope("openrouter::BAD::api_key").is_err());
+        assert!(parse_secret_scope("openrouter::openrouter-work::other").is_err());
+        assert!(parse_secret_scope("openrouter::openrouter-work").is_err());
     }
 
     #[test]
@@ -349,6 +648,11 @@ mod tests {
         assert!(!is_allowed_provider_scope("provider::ok::oauth"));
         assert!(is_allowed_provider_scope(OPENAI_API_KEY_SCOPE));
         assert!(is_allowed_provider_scope("openai_compatible::ok::api_key"));
+        assert!(is_allowed_provider_scope(
+            "openrouter::openrouter-work::api_key"
+        ));
+        assert!(!is_allowed_provider_scope("openrouter::openai::api_key"));
+        assert!(!is_allowed_provider_scope("openrouter::chatgpt::api_key"));
         assert!(is_allowed_oauth_scope("provider::corp-gateway::oauth"));
         assert!(!is_allowed_oauth_scope(crate::auth::OPENAI_OAUTH_SCOPE));
         assert!(!is_allowed_oauth_scope("openai::api_key"));

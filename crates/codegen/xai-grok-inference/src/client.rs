@@ -540,6 +540,20 @@ struct StreamOptions {
     include_usage: bool,
 }
 
+/// Clamp a request max to the capability ceiling.
+///
+/// A missing request max stays omitted — the ceiling is never copied onto
+/// the wire as a default (OpenRouter catalog caps can equal the context
+/// window). OpenRouter request defaults come from the provider
+/// (`max_completion_tokens`, 16384 when unset) and are applied before this
+/// clamp via [`crate::config::InferenceConfig::max_completion_tokens`].
+fn clamp_request_max_tokens(requested: Option<u32>, ceiling: Option<u32>) -> Option<u32> {
+    match requested {
+        None => None,
+        Some(n) => Some(ceiling.map_or(n, |cap| n.min(cap))),
+    }
+}
+
 /// Add OpenRouter's documented `models` extension to an OpenAI-compatible
 /// request body. The array contains fallback models only; `model` remains the
 /// primary. Kept as a small helper so Chat Completions and Responses share the
@@ -665,6 +679,7 @@ fn auth_rejected(message: String, credential: SentCredential) -> InferenceError 
 struct ClientDefaults {
     model: String,
     max_completion_tokens: Option<u32>,
+    max_output_ceiling: Option<u32>,
     temperature: Option<f32>,
     top_p: Option<f32>,
     openrouter_fallback_models: Vec<String>,
@@ -903,6 +918,7 @@ impl InferenceClient {
         let defaults = ClientDefaults {
             model: config.model,
             max_completion_tokens: config.max_completion_tokens,
+            max_output_ceiling: config.max_output_ceiling,
             temperature: config.temperature,
             top_p: config.top_p,
             openrouter_fallback_models: config.openrouter_fallback_models,
@@ -1136,9 +1152,10 @@ impl InferenceClient {
             request.model = Some(self.defaults.model.clone());
         }
 
-        if request.max_tokens.is_none() {
-            request.max_tokens = self.defaults.max_completion_tokens;
-        }
+        request.max_tokens = clamp_request_max_tokens(
+            request.max_tokens.or(self.defaults.max_completion_tokens),
+            self.defaults.max_output_ceiling,
+        );
 
         if request.temperature.is_none() {
             request.temperature = self.defaults.temperature;
@@ -1209,6 +1226,23 @@ impl InferenceClient {
         effort.map(crate::config::OpenRouterReasoning::from_effort)
     }
 
+    /// Shape Chat Completions for the wire: identity-gated OpenRouter
+    /// `reasoning` object, and drop flat `reasoning_effort` when that object
+    /// is used so OpenRouter does not receive both forms.
+    fn shape_openrouter_chat_payload(
+        &self,
+        mut payload: ChatCompletionRequest,
+    ) -> (
+        ChatCompletionRequest,
+        Option<crate::config::OpenRouterReasoning>,
+    ) {
+        let reasoning = self.openrouter_reasoning_object(payload.reasoning_effort);
+        if reasoning.is_some() {
+            payload.reasoning_effort = None;
+        }
+        (payload, reasoning)
+    }
+
     async fn handle_response(
         &self,
         response: reqwest::Response,
@@ -1275,6 +1309,7 @@ impl InferenceClient {
         request: ChatCompletionRequest,
     ) -> Result<ChatCompletionResponse> {
         let payload = self.apply_defaults(request)?;
+        let (payload, reasoning) = self.shape_openrouter_chat_payload(payload);
         let x_grok_conv_id = &payload.x_grok_conv_id.clone().unwrap_or_default();
         let x_grok_req_id = &payload.x_grok_req_id.clone().unwrap_or_default();
         let model_id = payload.model.clone().unwrap_or_default();
@@ -1296,7 +1331,6 @@ impl InferenceClient {
             user_id: payload.x_grok_user_id.as_deref(),
             first_party: self.first_party,
         };
-        let reasoning = self.openrouter_reasoning_object(payload.reasoning_effort);
         let SentRequest {
             builder,
             sent_credential,
@@ -1342,6 +1376,7 @@ impl InferenceClient {
         Option<ResponseModelMetadata>,
     )> {
         let payload = self.apply_defaults(request)?;
+        let (payload, reasoning) = self.shape_openrouter_chat_payload(payload);
         let x_grok_conv_id = &payload.x_grok_conv_id.clone().unwrap_or_default();
         let x_grok_req_id = &payload.x_grok_req_id.clone().unwrap_or_default();
         let model_id = payload.model.clone().unwrap_or_default();
@@ -1349,7 +1384,6 @@ impl InferenceClient {
         // Wrap the request with streaming fields and serialize once.
         // Previously this path serialized twice: first to serde_json::Value
         // (to inject `stream` and `stream_options`), then to HTTP body bytes.
-        let reasoning = self.openrouter_reasoning_object(payload.reasoning_effort);
         let streaming_request = StreamingChatRequest {
             inner: &payload,
             models: self.openrouter_fallback_models(),
@@ -1559,10 +1593,15 @@ impl InferenceClient {
                 request.inner.top_p = self.defaults.top_p;
             }
 
-            // Apply max_output_tokens default if not specified
-            if request.inner.max_output_tokens.is_none() {
-                request.inner.max_output_tokens = self.defaults.max_completion_tokens;
-            }
+            // Apply max_output_tokens default if not specified, then clamp to
+            // the capability ceiling. A ceiling with no request max is omitted.
+            request.inner.max_output_tokens = clamp_request_max_tokens(
+                request
+                    .inner
+                    .max_output_tokens
+                    .or(self.defaults.max_completion_tokens),
+                self.defaults.max_output_ceiling,
+            );
 
             // Set store to false if not specified (default is true, but that breaks ZDR compliance)
             if request.inner.store.is_none() {
@@ -2007,12 +2046,13 @@ impl InferenceClient {
             request.inner.model = self.defaults.model.clone();
         }
 
-        if request.inner.max_tokens == 0 {
-            request.inner.max_tokens = self
-                .defaults
-                .max_completion_tokens
-                .unwrap_or(ANTHROPIC_DEFAULT_MAX_TOKENS);
-        }
+        request.inner.max_tokens = clamp_request_max_tokens(
+            (request.inner.max_tokens > 0)
+                .then_some(request.inner.max_tokens)
+                .or(self.defaults.max_completion_tokens),
+            self.defaults.max_output_ceiling,
+        )
+        .unwrap_or(ANTHROPIC_DEFAULT_MAX_TOKENS);
 
         // Apply temperature default if not specified
         if request.inner.temperature.is_none() {
@@ -2355,9 +2395,12 @@ impl InferenceClient {
             request.top_p = self.defaults.top_p;
         }
 
-        if request.max_output_tokens.is_none() {
-            request.max_output_tokens = self.defaults.max_completion_tokens;
-        }
+        request.max_output_tokens = clamp_request_max_tokens(
+            request
+                .max_output_tokens
+                .or(self.defaults.max_completion_tokens),
+            self.defaults.max_output_ceiling,
+        );
 
         Ok(())
     }
@@ -2620,6 +2663,7 @@ mod tests {
             base_url: "https://example.test".to_string(),
             model: "test-model".to_string(),
             max_completion_tokens: None,
+            max_output_ceiling: None,
             temperature: None,
             top_p: None,
             openrouter_fallback_models: Vec::new(),
@@ -2659,6 +2703,42 @@ mod tests {
             header_injector: None,
             provider_identity: crate::config::ProviderIdentity::default(),
         }
+    }
+
+    fn serialize_chat_wire(
+        client: &InferenceClient,
+        request: ChatCompletionRequest,
+    ) -> serde_json::Value {
+        let payload = client.apply_defaults(request).unwrap();
+        let (payload, reasoning) = client.shape_openrouter_chat_payload(payload);
+        serde_json::to_value(&ChatRequestWithFallbacks {
+            inner: &payload,
+            models: client.openrouter_fallback_models(),
+            provider: client.openrouter_provider_preferences(),
+            plugins: client.openrouter_plugins(),
+            reasoning: reasoning.as_ref(),
+            tool_stream: false,
+            thinking: None,
+        })
+        .unwrap()
+    }
+
+    fn openrouter_extension_fixture() -> (
+        crate::config::OpenRouterProviderPreferences,
+        Vec<crate::config::OpenRouterPlugin>,
+        Vec<String>,
+    ) {
+        let prefs = crate::config::OpenRouterProviderPreferences {
+            zdr: Some(true),
+            data_collection: Some("deny".into()),
+            ..Default::default()
+        };
+        let plugins = vec![crate::config::OpenRouterPlugin {
+            id: "web".into(),
+            ..Default::default()
+        }];
+        let fallbacks = vec!["openai/gpt-5-mini".into()];
+        (prefs, plugins, fallbacks)
     }
 
     /// Verify the serialized shape of StreamingChatRequest matches the
@@ -4195,9 +4275,6 @@ mod tests {
     #[test]
     fn openrouter_chat_emits_normalized_reasoning_object() {
         use xai_grok_inference_types::ReasoningEffort;
-        // Pinned OpenRouter ChatRequest inventory includes both `reasoning`
-        // (object) and flat `reasoning_effort` (string enum). Dual emission is
-        // schema-correct; assert exact wire shapes rather than presence alone.
         let cfg = InferenceConfig {
             provider_identity: crate::config::ProviderIdentity::OpenRouter,
             ..minimal_config()
@@ -4208,32 +4285,16 @@ mod tests {
             vec![ChatRequestMessage::user("think")],
         );
         request.reasoning_effort = Some(ReasoningEffort::High);
-        let payload = client.apply_defaults(request).unwrap();
-        let reasoning = client
-            .openrouter_reasoning_object(payload.reasoning_effort)
-            .expect("OpenRouter should normalize reasoning");
-        assert_eq!(reasoning.effort.as_deref(), Some("high"));
-        let serialized = serde_json::to_value(ChatRequestWithFallbacks {
-            inner: &payload,
-            models: None,
-            provider: None,
-            plugins: None,
-            reasoning: Some(&reasoning),
-            tool_stream: false,
-            thinking: None,
-        })
-        .unwrap();
+        let serialized = serialize_chat_wire(&client, request);
         assert_eq!(
             serialized["reasoning"],
             serde_json::json!({ "effort": "high" }),
             "normalized reasoning object must serialize only effort when \
              derived from flat ReasoningEffort"
         );
-        assert_eq!(
-            serialized["reasoning_effort"],
-            serde_json::json!("high"),
-            "flat reasoning_effort remains for OpenAI-compatible clients \
-             (pinned ChatRequest inventory lists both fields)"
+        assert!(
+            serialized.get("reasoning_effort").is_none(),
+            "flat reasoning_effort must be omitted when the native object is used"
         );
         let reasoning_obj = serialized["reasoning"]
             .as_object()
@@ -4442,5 +4503,228 @@ mod tests {
             chat.reasoning_effort,
             Some(xai_grok_inference_types::ReasoningEffort::Medium)
         );
+    }
+
+    #[test]
+    fn openrouter_extensions_omitted_for_custom_openai_and_xai() {
+        use crate::config::ProviderIdentity;
+        let (prefs, plugins, fallbacks) = openrouter_extension_fixture();
+        for identity in [
+            ProviderIdentity::Custom,
+            ProviderIdentity::OpenAi,
+            ProviderIdentity::Xai,
+        ] {
+            let cfg = InferenceConfig {
+                provider_identity: identity,
+                base_url: "https://openrouter.ai/api/v1".into(),
+                openrouter_provider_preferences: Some(prefs.clone()),
+                openrouter_plugins: plugins.clone(),
+                openrouter_fallback_models: fallbacks.clone(),
+                include_message_model_id: true,
+                ..minimal_config()
+            };
+            let client = InferenceClient::new(cfg).expect("client should build");
+            let request = ChatCompletionRequest::new(
+                "openai/gpt-oss-120b",
+                vec![ChatRequestMessage::user("hello")],
+            );
+            let serialized = serialize_chat_wire(&client, request);
+            assert!(
+                serialized.get("models").is_none(),
+                "{identity:?} must omit models[] even on openrouter.ai"
+            );
+            assert!(
+                serialized.get("provider").is_none(),
+                "{identity:?} must omit provider even when zdr prefs are set"
+            );
+            assert!(
+                serialized.get("plugins").is_none(),
+                "{identity:?} must omit plugins"
+            );
+            assert!(
+                serialized.get("reasoning").is_none(),
+                "{identity:?} must omit the native reasoning object"
+            );
+            assert!(
+                client.openrouter_provider_preferences().is_none()
+                    && client.openrouter_plugins().is_none()
+                    && client.openrouter_fallback_models().is_none(),
+                "{identity:?} getters must stay empty"
+            );
+        }
+    }
+
+    #[test]
+    fn openrouter_zdr_flag_only_when_identity_is_openrouter() {
+        use crate::config::ProviderIdentity;
+        let prefs = crate::config::OpenRouterProviderPreferences {
+            zdr: Some(true),
+            ..Default::default()
+        };
+
+        let openrouter = InferenceClient::new(InferenceConfig {
+            provider_identity: ProviderIdentity::OpenRouter,
+            openrouter_provider_preferences: Some(prefs.clone()),
+            ..minimal_config()
+        })
+        .unwrap();
+        let request = ChatCompletionRequest::new(
+            "openai/gpt-oss-120b",
+            vec![ChatRequestMessage::user("hello")],
+        );
+        let serialized = serialize_chat_wire(&openrouter, request.clone());
+        assert_eq!(
+            serialized["provider"]["zdr"], true,
+            "OpenRouter identity must send provider.zdr when the instance sets it"
+        );
+
+        for identity in [
+            ProviderIdentity::Custom,
+            ProviderIdentity::OpenAi,
+            ProviderIdentity::Xai,
+        ] {
+            let client = InferenceClient::new(InferenceConfig {
+                provider_identity: identity,
+                openrouter_provider_preferences: Some(prefs.clone()),
+                ..minimal_config()
+            })
+            .unwrap();
+            let serialized = serialize_chat_wire(&client, request.clone());
+            assert!(
+                serialized.get("provider").is_none(),
+                "{identity:?} must not emit provider.zdr"
+            );
+        }
+    }
+
+    #[test]
+    fn openrouter_clamps_request_max_to_output_ceiling() {
+        let cfg = InferenceConfig {
+            provider_identity: crate::config::ProviderIdentity::OpenRouter,
+            max_completion_tokens: Some(32_000),
+            max_output_ceiling: Some(8_192),
+            ..minimal_config()
+        };
+        let client = InferenceClient::new(cfg).unwrap();
+        let request = ChatCompletionRequest::new(
+            "openai/gpt-oss-120b",
+            vec![ChatRequestMessage::user("hello")],
+        );
+        let payload = client.apply_defaults(request).unwrap();
+        assert_eq!(payload.max_tokens, Some(8_192));
+
+        let mut oversized = ChatCompletionRequest::new(
+            "openai/gpt-oss-120b",
+            vec![ChatRequestMessage::user("hello")],
+        );
+        oversized.max_tokens = Some(64_000);
+        let payload = client.apply_defaults(oversized).unwrap();
+        assert_eq!(payload.max_tokens, Some(8_192));
+
+        let mut under = ChatCompletionRequest::new(
+            "openai/gpt-oss-120b",
+            vec![ChatRequestMessage::user("hello")],
+        );
+        under.max_tokens = Some(1_024);
+        let payload = client.apply_defaults(under).unwrap();
+        assert_eq!(payload.max_tokens, Some(1_024));
+    }
+
+    #[test]
+    fn openrouter_provider_default_is_clamped_to_ceiling() {
+        let cfg = InferenceConfig {
+            provider_identity: crate::config::ProviderIdentity::OpenRouter,
+            max_completion_tokens: Some(8_192),
+            max_output_ceiling: Some(4_096),
+            ..minimal_config()
+        };
+        let client = InferenceClient::new(cfg).unwrap();
+        let payload = client
+            .apply_defaults(ChatCompletionRequest::new(
+                "openai/gpt-oss-120b",
+                vec![ChatRequestMessage::user("hello")],
+            ))
+            .unwrap();
+        assert_eq!(payload.max_tokens, Some(4_096));
+        let serialized = serialize_chat_wire(
+            &client,
+            ChatCompletionRequest::new(
+                "openai/gpt-oss-120b",
+                vec![ChatRequestMessage::user("hello")],
+            ),
+        );
+        assert_eq!(
+            serialized.get("max_tokens").and_then(|v| v.as_u64()),
+            Some(4_096)
+        );
+    }
+
+    #[test]
+    fn openrouter_omits_max_tokens_when_no_request_max() {
+        let cfg = InferenceConfig {
+            provider_identity: crate::config::ProviderIdentity::OpenRouter,
+            max_completion_tokens: None,
+            max_output_ceiling: Some(8_192),
+            ..minimal_config()
+        };
+        let client = InferenceClient::new(cfg).unwrap();
+        let payload = client
+            .apply_defaults(ChatCompletionRequest::new(
+                "openai/gpt-oss-120b",
+                vec![ChatRequestMessage::user("hello")],
+            ))
+            .unwrap();
+        assert!(
+            payload.max_tokens.is_none(),
+            "catalog ceiling must not become a request default"
+        );
+    }
+
+    #[test]
+    fn clamp_request_max_tokens_does_not_copy_ceiling() {
+        assert_eq!(clamp_request_max_tokens(None, Some(8_192)), None);
+        assert_eq!(clamp_request_max_tokens(None, None), None);
+        assert_eq!(
+            clamp_request_max_tokens(Some(32_000), Some(8_192)),
+            Some(8_192)
+        );
+        assert_eq!(
+            clamp_request_max_tokens(Some(1_024), Some(8_192)),
+            Some(1_024)
+        );
+        assert_eq!(clamp_request_max_tokens(Some(4_096), None), Some(4_096));
+    }
+
+    #[test]
+    fn conversation_and_messages_use_provider_default_clamped_to_ceiling() {
+        let client = InferenceClient::new(InferenceConfig {
+            provider_identity: crate::config::ProviderIdentity::OpenRouter,
+            max_completion_tokens: Some(8_192),
+            max_output_ceiling: Some(4_096),
+            ..minimal_config()
+        })
+        .unwrap();
+
+        let mut conversation = ConversationRequest::default();
+        client
+            .apply_conversation_defaults(&mut conversation)
+            .unwrap();
+        assert_eq!(conversation.max_output_tokens, Some(4_096));
+
+        let mut messages = MessagesRequestWrapper::new(messages::MessagesRequest {
+            model: "anthropic/claude-sonnet-4".into(),
+            max_tokens: 0,
+            ..Default::default()
+        });
+        client.apply_message_defaults(&mut messages).unwrap();
+        assert_eq!(messages.inner.max_tokens, 4_096);
+
+        let mut oversized = MessagesRequestWrapper::new(messages::MessagesRequest {
+            model: "anthropic/claude-sonnet-4".into(),
+            max_tokens: 64_000,
+            ..Default::default()
+        });
+        client.apply_message_defaults(&mut oversized).unwrap();
+        assert_eq!(oversized.inner.max_tokens, 4_096);
     }
 }

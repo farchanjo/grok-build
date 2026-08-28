@@ -1630,6 +1630,7 @@ impl SessionActor {
                 }
             },
             rolling_band_count: resolved.rolling_band_count,
+            resolver_tools: resolved.resolver_tools,
             ..current
         };
         self.agent.borrow_mut().set_compaction_policy(updated);
@@ -1637,6 +1638,7 @@ impl SessionActor {
             strategy = ?resolved.strategy,
             trigger_policy = ?resolved.trigger_policy,
             rolling_band_count = resolved.rolling_band_count,
+            resolver_tools = resolved.resolver_tools,
             models = ?resolved.models,
             "updated live compaction policy",
         );

@@ -66,7 +66,7 @@ pub fn validate_models_next_url(
         }
         if matches!(
             key.as_str(),
-            "offset" | "limit" | "after" | "before" | "page" | "cursor"
+            "offset" | "limit" | "after" | "before" | "page" | "cursor" | "zdr"
         ) {
             safe_pairs.push((key, v.into_owned()));
         }

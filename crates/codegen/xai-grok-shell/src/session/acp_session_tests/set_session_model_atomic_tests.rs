@@ -62,6 +62,7 @@ async fn unusable_route_leaves_selection_inference_credentials_and_route_unchang
                     openrouter_provider_preferences: None,
                     openrouter_plugins: Vec::new(),
                     openrouter_pacing: false,
+                    max_completion_tokens: None,
                     command: Vec::new(),
                 }),
                 api_key: Some("must-not-be-installed".to_owned()),

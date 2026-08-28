@@ -4014,6 +4014,11 @@ fn test_model_entry(model_id: &str) -> crate::agent::config::ModelEntry {
             supports_image_input: None,
             supports_audio_input: None,
             supports_video_input: None,
+            supports_file_input: None,
+            output_has_text: None,
+            supports_zdr: None,
+            max_output_ceiling: None,
+            provider_display_name: None,
             execution_backend: crate::agent::execution_backend::ExecutionBackend::NativeInference,
         },
         model_provider: None,
@@ -4040,6 +4045,7 @@ fn openrouter_model_entry(model_id: &str) -> crate::agent::config::ModelEntry {
             openrouter_provider_preferences: None,
             openrouter_plugins: Vec::new(),
             openrouter_pacing: false,
+            max_completion_tokens: None,
             command: Vec::new(),
         }),
         ..test_model_entry(model_id)
@@ -4055,6 +4061,7 @@ fn openai_provider_model_entry(model_id: &str) -> crate::agent::config::ModelEnt
             openrouter_provider_preferences: None,
             openrouter_plugins: Vec::new(),
             openrouter_pacing: false,
+            max_completion_tokens: None,
             command: Vec::new(),
         }),
         ..test_model_entry(model_id)

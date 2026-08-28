@@ -32,6 +32,8 @@ pub struct ProviderTomlPatch {
     pub openrouter_fallback_models: Option<Vec<String>>,
     /// Explicit OpenRouter request-pacing opt-in.
     pub openrouter_pacing: Option<bool>,
+    /// Provider-wide request `max_tokens`.
+    pub max_completion_tokens: Option<u32>,
     /// Optional additive sidecar `api_surface`.
     pub api_surface: Option<String>,
     /// Optional additive sidecar `credential_route`.
@@ -186,6 +188,9 @@ fn apply_patch_to_table(table: &mut toml_edit::Table, patch: &ProviderTomlPatch)
     }
     if let Some(v) = patch.openrouter_pacing {
         table["openrouter_pacing"] = toml_edit::value(v);
+    }
+    if let Some(v) = patch.max_completion_tokens {
+        table["max_completion_tokens"] = toml_edit::value(i64::from(v));
     }
     if let Some(v) = &patch.api_surface {
         table["api_surface"] = toml_edit::value(v.as_str());

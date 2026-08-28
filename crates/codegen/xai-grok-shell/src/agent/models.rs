@@ -146,16 +146,19 @@ fn is_task_visible_and_credentialed(entry: &ModelEntry, is_session_auth: bool) -
 ///   `supports_tools == Some(true)`; `None`/`Some(false)` are rejected
 ///   because the OpenRouter catalog populates the flag from
 ///   `supported_parameters`, so `None` means the flag was missing on a
-///   catalog entry rather than a first-party model.
+///   catalog entry rather than a first-party model. When the catalog
+///   advertises `output_has_text == Some(false)` the model is also
+///   rejected (image/audio-only routes cannot run the agent loop).
 /// - **All other providers**: reject only when `supports_tools == Some(false)`;
 ///   `None` remains eligible (first-party models and hand-written TOML
-///   entries without the field).
+///   entries without the field). Unknown `output_has_text` does not
+///   tighten xAI / OpenAI / Anthropic eligibility.
 fn passes_task_tools_gate(entry: &ModelEntry) -> bool {
     let is_openrouter = entry.model_provider.as_ref().is_some_and(|provider| {
         provider.kind == crate::agent::model_providers::ModelProviderKind::OpenRouter
     });
     if is_openrouter {
-        entry.info.supports_tools == Some(true)
+        entry.info.supports_tools == Some(true) && entry.info.output_has_text != Some(false)
     } else {
         entry.info.supports_tools != Some(false)
     }
@@ -2176,6 +2179,13 @@ pub(crate) fn selectable_catalog_key_for_persisted_with_origins(
         }
         return Some(id.clone());
     }
+    // Provider-qualified canonical ids (`openrouter:<slug>`,
+    // `<instance>:<slug>`, `openai:<slug>`, …) that are missing from the
+    // selectable catalog stay missing. A ZDR-filtered row must never remap
+    // to a sibling OpenRouter account or Grok via unique-alias matching.
+    if id.0.as_ref().contains(':') {
+        return None;
+    }
     let selectable: IndexMap<String, ModelEntry> = models
         .iter()
         .filter(|(key, _)| available.contains_key(&acp::ModelId::new((*key).clone())))
@@ -2529,6 +2539,7 @@ fn resolve_model_catalog_with_origins_and_gated(
         &cfg.claude_cli.models,
     );
     crate::agent::external_runtime::capability_matrix::apply_catalog_visibility(&mut catalog);
+    crate::agent::config::apply_openrouter_zdr_picker_filter(&mut catalog);
     let gated_additional_entries = if crate::provider_registry::multi_account_rollout_enabled() {
         IndexMap::new()
     } else {
@@ -4403,6 +4414,7 @@ mod tests {
                 openrouter_provider_preferences: None,
                 openrouter_plugins: Vec::new(),
                 openrouter_pacing: false,
+                max_completion_tokens: None,
                 command: Vec::new(),
             }),
             api_key: None,
@@ -4476,6 +4488,10 @@ mod tests {
             supports_image_input: None,
             supports_audio_input: None,
             supports_video_input: None,
+            supports_file_input: None,
+            output_has_text: None,
+            supports_zdr: None,
+            max_output_ceiling: None,
             compactions_remaining: None,
             compaction_at_tokens: None,
             show_model_fingerprint: false,
@@ -4572,6 +4588,7 @@ mod tests {
                 openrouter_provider_preferences: None,
                 openrouter_plugins: vec![],
                 openrouter_pacing: false,
+                max_completion_tokens: None,
                 command: vec![],
             });
             entry.api_key = Some("test-key".into());
@@ -4745,6 +4762,61 @@ mod tests {
         assert_eq!(key.0.as_ref(), "grok-build");
     }
 
+    #[test]
+    fn missing_zdr_slug_on_resume_is_not_remapped_to_sibling_or_grok() {
+        use crate::agent::model_providers::{ModelProviderKind, ResolvedModelProvider};
+
+        fn sibling(instance: &str, kind: ModelProviderKind, slug: &str) -> ModelEntry {
+            let mut entry = make_model_entry(slug);
+            entry.info.model = slug.to_string();
+            entry.info.user_selectable = true;
+            entry.model_provider = Some(ResolvedModelProvider {
+                id: instance.into(),
+                kind,
+                openrouter_fallback_models: vec![],
+                openrouter_provider_preferences: None,
+                openrouter_plugins: vec![],
+                openrouter_pacing: false,
+                max_completion_tokens: None,
+                command: vec![],
+            });
+            entry
+        }
+
+        let mut models = IndexMap::new();
+        models.insert(
+            "openrouter:acme/open".into(),
+            sibling("openrouter", ModelProviderKind::OpenRouter, "acme/open"),
+        );
+        models.insert(
+            "openrouter-work:acme/open".into(),
+            sibling(
+                "openrouter-work",
+                ModelProviderKind::OpenRouter,
+                "acme/open",
+            ),
+        );
+        models.insert("grok-4.5".into(), make_model_entry("grok-4.5"));
+
+        // Work instance is selectable; the built-in ZDR-filtered slug is not.
+        let available = test_available_keys(&["openrouter-work:acme/open", "grok-4.5"]);
+        let persisted = acp::ModelId::new("openrouter:acme/open");
+        assert!(
+            selectable_catalog_key_for_persisted(&models, &available, &persisted).is_none(),
+            "missing ZDR slug must not remap to a sibling OpenRouter account or Grok"
+        );
+        assert_eq!(
+            selectable_catalog_key_for_persisted(
+                &models,
+                &available,
+                &acp::ModelId::new("openrouter-work:acme/open")
+            )
+            .as_ref()
+            .map(|id| id.0.as_ref()),
+            Some("openrouter-work:acme/open")
+        );
+    }
+
     fn test_available_keys(keys: &[&str]) -> IndexMap<acp::ModelId, acp::ModelInfo> {
         keys.iter()
             .map(|k| {
@@ -4776,6 +4848,7 @@ mod tests {
                 openrouter_provider_preferences: None,
                 openrouter_plugins: Vec::new(),
                 openrouter_pacing: false,
+                max_completion_tokens: None,
                 command: Vec::new(),
             }),
             api_key: Some("configured-for-test".to_owned()),
@@ -4839,6 +4912,63 @@ mod tests {
         assert!(
             err.contains("does not advertise tool support"),
             "rejection message must explain the tool-support gap: {err}"
+        );
+    }
+
+    #[test]
+    fn openrouter_output_has_text_false_is_rejected_even_with_tools() {
+        let mut catalog = IndexMap::new();
+        let mut entry = entry_with_provider_and_tools(
+            "openrouter:acme/image-only",
+            crate::agent::model_providers::ModelProviderKind::OpenRouter,
+            Some(true),
+        );
+        entry.info.output_has_text = Some(false);
+        catalog.insert("openrouter:acme/image-only".to_owned(), entry);
+        let err = task_model_error_for_catalog("openrouter:acme/image-only", &catalog, false)
+            .expect("OpenRouter image-only model must be rejected for subagents");
+        assert!(
+            err.contains("does not advertise tool support"),
+            "rejection message must stay on the tools-gate surface: {err}"
+        );
+    }
+
+    #[test]
+    fn openrouter_output_has_text_unknown_stays_eligible_when_tools_true() {
+        let mut catalog = IndexMap::new();
+        catalog.insert(
+            "openrouter:acme/tools".to_owned(),
+            entry_with_provider_and_tools(
+                "openrouter:acme/tools",
+                crate::agent::model_providers::ModelProviderKind::OpenRouter,
+                Some(true),
+            ),
+        );
+        assert!(
+            catalog["openrouter:acme/tools"]
+                .info
+                .output_has_text
+                .is_none()
+        );
+        assert!(
+            task_model_error_for_catalog("openrouter:acme/tools", &catalog, false).is_none(),
+            "unknown output_has_text must not tighten OpenRouter tools=true eligibility"
+        );
+    }
+
+    #[test]
+    fn xai_unknown_output_has_text_does_not_tighten_tools_eligibility() {
+        let mut catalog = IndexMap::new();
+        let mut entry = entry_with_provider_and_tools(
+            "grok-4.5",
+            crate::agent::model_providers::ModelProviderKind::Xai,
+            None,
+        );
+        entry.info.output_has_text = Some(false);
+        catalog.insert("grok-4.5".to_owned(), entry);
+        assert!(
+            task_model_error_for_catalog("grok-4.5", &catalog, false).is_none(),
+            "xAI unknown-tools eligibility must not be tightened by output_has_text"
         );
     }
 

@@ -92,6 +92,10 @@ pub struct CatalogRefreshTarget {
     pub credential: CatalogCredential,
     pub manual_capabilities: IndexMap<String, bool>,
     pub bounds: CatalogFetchBounds,
+    /// OpenRouter `provider_preferences.zdr` for this instance only.
+    /// `Some(true)` fetches `GET /models?zdr=true`. False/unset fetches the
+    /// full list and still tags `supports_zdr` from `GET /endpoints/zdr`.
+    pub zdr: Option<bool>,
 }
 
 impl fmt::Debug for CatalogRefreshTarget {
@@ -102,6 +106,7 @@ impl fmt::Debug for CatalogRefreshTarget {
             .field("credential", &self.credential)
             .field("manual_capabilities_len", &self.manual_capabilities.len())
             .field("bounds", &self.bounds)
+            .field("zdr", &self.zdr)
             .finish()
     }
 }
@@ -311,6 +316,7 @@ async fn refresh_one_account(
                 target.credential.token(),
                 &target.identity,
                 &target.manual_capabilities,
+                target.zdr,
                 target.bounds,
                 registry_at_start,
                 publication_generation,
@@ -457,6 +463,7 @@ fn store_account_catalog(
                 "description": m.description,
                 "context_window": m.context_window,
                 "max_completion_tokens": m.max_completion_tokens,
+                "max_output_ceiling": m.max_output_ceiling,
                 "capabilities": m.capabilities,
             })
         })
@@ -570,7 +577,7 @@ fn models_from_cache_entry(
                 .and_then(|v| v.as_str())
                 .map(str::to_owned)
                 .unwrap_or_else(|| canonical_selection_id(identity, upstream));
-            let capabilities = m
+            let capabilities: super::types::ProjectedCapabilities = m
                 .get("capabilities")
                 .and_then(|v| serde_json::from_value(v.clone()).ok())
                 .unwrap_or_default();
@@ -590,6 +597,11 @@ fn models_from_cache_entry(
                     .get("max_completion_tokens")
                     .and_then(|v| v.as_u64())
                     .and_then(|n| u32::try_from(n).ok()),
+                max_output_ceiling: m
+                    .get("max_output_ceiling")
+                    .and_then(|v| v.as_u64())
+                    .and_then(|n| u32::try_from(n).ok())
+                    .or(capabilities.max_output_ceiling),
                 capabilities,
                 provider_instance_id: identity.instance_id.as_str().to_owned(),
                 provider_kind: kind,

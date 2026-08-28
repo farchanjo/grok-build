@@ -201,6 +201,15 @@ pub(crate) async fn run_request_task(
                     sampling_span.record("output_tokens", usage.completion_tokens);
                     sampling_span.record("reasoning_tokens", usage.reasoning_tokens);
                 }
+                // TODO(openrouter): attach GET /generation after a completed
+                // OpenRouter turn via the existing OpenRouterClient and record
+                // provider / finish / tokens on secret-free diagnostics. Skipped:
+                // that would add a second platform-client actor path
+                // (PlatformClientConfig + OpenRouterClient + generation-id
+                // extraction from the success stream). ConversationResponse does
+                // not currently carry a generation_id on the happy path, so
+                // wiring it here would be a half-done actor change rather than a
+                // small existing-client hook.
                 // Emit Completed only after the loop succeeds; the L2
                 // stream's terminal event was suppressed by
                 // `run_one_attempt`.

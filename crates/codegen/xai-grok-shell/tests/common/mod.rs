@@ -327,6 +327,7 @@ pub fn test_inference_config(
         base_url: base_url.to_string(),
         model: "test-model".to_string(),
         max_completion_tokens: Some(1000),
+        max_output_ceiling: None,
         temperature: Some(0.7),
         top_p: None,
         openrouter_fallback_models: Vec::new(),

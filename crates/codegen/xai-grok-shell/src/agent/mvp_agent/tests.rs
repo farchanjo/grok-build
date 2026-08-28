@@ -1137,9 +1137,7 @@ fn make_test_handle_with_channels(
     yolo: bool,
     client_id: Option<&str>,
     cmd_tx: tokio::sync::mpsc::UnboundedSender<crate::session::SessionCommand>,
-    persistence_tx: tokio::sync::mpsc::UnboundedSender<
-        crate::session::persistence::PersistenceMsg,
-    >,
+    persistence_tx: tokio::sync::mpsc::UnboundedSender<crate::session::persistence::PersistenceMsg>,
 ) -> crate::session::SessionHandle {
     let (hunk_event_tx, _hunk_event_rx) = tokio::sync::mpsc::unbounded_channel();
     let hunk_cancel = tokio_util::sync::CancellationToken::new();
@@ -2178,6 +2176,11 @@ fn find_model_by_id_prefers_key_then_falls_back_to_slug() {
             supports_image_input: None,
             supports_audio_input: None,
             supports_video_input: None,
+            supports_file_input: None,
+            output_has_text: None,
+            supports_zdr: None,
+            max_output_ceiling: None,
+            provider_display_name: None,
             execution_backend: crate::agent::execution_backend::ExecutionBackend::NativeInference,
         },
         model_provider: None,
@@ -3461,8 +3464,7 @@ fn spawn_model_switch_actor(
             }
         }
     });
-    let mut handle =
-        make_test_handle_with_channels(model_id, false, None, cmd_tx, persistence_tx);
+    let mut handle = make_test_handle_with_channels(model_id, false, None, cmd_tx, persistence_tx);
     handle.info.id = session_id.clone();
     (handle, persistence_rx)
 }
@@ -3486,7 +3488,10 @@ async fn run_authoritative_load_model_switch(
         assert_eq!(request.session_id, session_id);
     }
     let (handle, mut persistence_rx) = spawn_model_switch_actor(&session_id, model_id);
-    agent.sessions.borrow_mut().insert(session_id.clone(), handle);
+    agent
+        .sessions
+        .borrow_mut()
+        .insert(session_id.clone(), handle);
 
     let backend = crate::agent::execution_backend::ExecutionBackend::ExternalAgent(
         crate::agent::execution_backend::ExternalAgentKind::ClaudeCli,
@@ -3517,7 +3522,10 @@ async fn run_authoritative_load_model_switch(
     while let Ok(message) = persistence_rx.try_recv() {
         writes.push(message);
     }
-    assert!(!writes.is_empty(), "model application must persist CurrentModel");
+    assert!(
+        !writes.is_empty(),
+        "model application must persist CurrentModel"
+    );
     for message in &writes {
         let crate::session::persistence::PersistenceMsg::CurrentModel {
             execution_backend,
@@ -3556,7 +3564,10 @@ fn failed_load_restore_preserves_external_summary_without_any_write() {
         insert_native_catalog_model(&agent, model_id);
         let session_id = acp::SessionId::new("failed-external-load");
         let (handle, mut persistence_rx) = spawn_model_switch_actor(&session_id, model_id);
-        agent.sessions.borrow_mut().insert(session_id.clone(), handle);
+        agent
+            .sessions
+            .borrow_mut()
+            .insert(session_id.clone(), handle);
         let backend = crate::agent::execution_backend::ExecutionBackend::ExternalAgent(
             crate::agent::execution_backend::ExternalAgentKind::ClaudeCli,
         );
@@ -3567,11 +3578,7 @@ fn failed_load_restore_preserves_external_summary_without_any_write() {
         original_envelope.session_pointer = Some("claude-session-original".into());
         let original_summary = (backend, original_envelope.clone());
         agent
-            .restore_summary_execution_mode(
-                &session_id,
-                backend,
-                Some(original_envelope.clone()),
-            )
+            .restore_summary_execution_mode(&session_id, backend, Some(original_envelope.clone()))
             .await
             .expect("valid original external summary mode must restore");
         let mut invalid = original_envelope;
@@ -5261,15 +5268,15 @@ mod soft_default_settings_emit {
     // validation context.
     #[tokio::test(flavor = "current_thread")]
     async fn production_chain_snapshot_to_authority_to_gate_to_selection() {
-        use xai_grok_agent::config::AgentDefinition;
-        use xai_grok_agent::plugins::discovery::{PluginId, PluginScope};
-        use xai_grok_agent::plugins::manifest::PluginManifest;
-        use xai_grok_agent::plugins::{DiscoveredPlugin, PluginOrigin, PluginRegistry};
-        use xai_grok_agent::plugins::SharedPluginRegistryHandle;
-        use xai_grok_config_types::AgentPrimeConfig;
         use crate::session::prime::agents::{
             AgentGateVerdict, AgentInput, run_prime_agent_selection,
         };
+        use xai_grok_agent::config::AgentDefinition;
+        use xai_grok_agent::plugins::SharedPluginRegistryHandle;
+        use xai_grok_agent::plugins::discovery::{PluginId, PluginScope};
+        use xai_grok_agent::plugins::manifest::PluginManifest;
+        use xai_grok_agent::plugins::{DiscoveredPlugin, PluginOrigin, PluginRegistry};
+        use xai_grok_config_types::AgentPrimeConfig;
 
         let tmp = tempfile::tempdir().unwrap();
         let root = dunce::canonicalize(tmp.path()).unwrap();
@@ -5426,16 +5433,15 @@ mod soft_default_settings_emit {
     }
     #[tokio::test(flavor = "current_thread")]
     async fn production_chain_negative_gates() {
+        use crate::session::prime::agents::{AgentInput, run_prime_agent_selection};
         use xai_grok_agent::plugins::SharedPluginRegistryHandle;
         use xai_grok_config_types::AgentPrimeConfig;
         use xai_grok_tools::implementations::grok_build::task::MAX_SUBAGENT_DEPTH;
-        use crate::session::prime::agents::{AgentInput, run_prime_agent_selection};
 
         // (a) global `subagents_enabled = false` → task_available false → empty.
         {
             let mut agent = build_minimal_agent_for_tests();
-            agent.plugin_registry_handle =
-                SharedPluginRegistryHandle::new(None, Vec::new());
+            agent.plugin_registry_handle = SharedPluginRegistryHandle::new(None, Vec::new());
             {
                 let mut cfg = agent.cfg.borrow_mut();
                 cfg.subagents_enabled = false;
@@ -5475,8 +5481,7 @@ mod soft_default_settings_emit {
         // (b) parent at max depth (Task stripped) → task_available false → empty.
         {
             let mut agent = build_minimal_agent_for_tests();
-            agent.plugin_registry_handle =
-                SharedPluginRegistryHandle::new(None, Vec::new());
+            agent.plugin_registry_handle = SharedPluginRegistryHandle::new(None, Vec::new());
             let sid = acp::SessionId::new("neg-depth");
             let mut handle = make_test_handle("test-model", false, None);
             handle.info.id = sid.clone();

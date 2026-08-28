@@ -215,6 +215,7 @@ impl ShellToolsetConfig {
             base_url: "https://api.x.ai/v1".to_string(),
             model: String::new(),
             max_completion_tokens: None,
+            max_output_ceiling: None,
             temperature: None,
             top_p: None,
             openrouter_fallback_models: Vec::new(),

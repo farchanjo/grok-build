@@ -13,7 +13,7 @@ use crate::provider_registry::instance::{
     ApiSurface, CredentialRoute, ProviderInstanceDescriptor, ProviderKind,
 };
 use crate::provider_registry::secrets::{
-    admin_key_scope, application_key_scope, read_provider_secret,
+    admin_key_scope_for_kind, application_key_scope_for_kind, read_provider_secret,
 };
 use crate::provider_registry::{ProviderService, ProviderServiceError};
 use indexmap::IndexMap;
@@ -416,11 +416,11 @@ fn resolve_app_token(instance: &SelectedInstance, home: &Path, pid: &ProviderId)
             {
                 return Some(v);
             }
-            read_provider_secret(home, &application_key_scope(pid))
+            read_provider_secret(home, &application_key_scope_for_kind(pid, instance.kind))
                 .ok()
                 .flatten()
         }
-        _ => read_provider_secret(home, &application_key_scope(pid))
+        _ => read_provider_secret(home, &application_key_scope_for_kind(pid, instance.kind))
             .ok()
             .flatten(),
     }
@@ -460,7 +460,7 @@ fn resolve_admin_token(
             {
                 return Some(v);
             }
-            read_provider_secret(home, &admin_key_scope(pid))
+            read_provider_secret(home, &admin_key_scope_for_kind(pid, instance.kind))
                 .ok()
                 .flatten()
         }
@@ -474,12 +474,12 @@ fn resolve_admin_token(
                 .ok()
                 .flatten()
                 .or_else(|| {
-                    read_provider_secret(home, &admin_key_scope(pid))
+                    read_provider_secret(home, &admin_key_scope_for_kind(pid, instance.kind))
                         .ok()
                         .flatten()
                 })
         }
-        _ => read_provider_secret(home, &admin_key_scope(pid))
+        _ => read_provider_secret(home, &admin_key_scope_for_kind(pid, instance.kind))
             .ok()
             .flatten(),
     }

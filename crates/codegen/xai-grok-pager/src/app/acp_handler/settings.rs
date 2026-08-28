@@ -897,6 +897,7 @@ mod providers_update_handler_tests {
             openrouter_quantizations: vec![],
             openrouter_sort: None,
             openrouter_pacing: false,
+            max_completion_tokens: None,
             openrouter_plugin_ids: vec![],
             credentials: CredentialPresence::default(),
             generation: RegistryGeneration(generation),

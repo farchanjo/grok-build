@@ -13,6 +13,7 @@ pub mod collect;
 pub mod messages;
 pub mod responses;
 pub mod structured_output;
+pub mod tir_fallback;
 
 pub use chat_completions::stream_chat_completions;
 pub use collect::collect_response;

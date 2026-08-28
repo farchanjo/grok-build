@@ -30,7 +30,7 @@ use super::lifecycle::{CapabilityMode, ProviderAuthScheme, ProviderMetadata};
 use super::lifecycle_state::{ProviderLifecycleState, load_lifecycle_state};
 use super::route_guard::{RouteGuardError, RouteGuardRequest, assert_route_usable};
 use super::runtime_cache::load_runtime;
-use super::secrets::{application_key_scope, read_provider_secret};
+use super::secrets::{application_key_scope_for_kind, read_provider_secret};
 use crate::auth::{OPENAI_API_KEY_SCOPE, OPENROUTER_API_KEY_SCOPE, read_provider_api_key};
 use crate::retrieval_config::validate::ProviderCapabilityView;
 
@@ -704,8 +704,9 @@ fn validate_and_collect_headers(
 ///
 /// Rules:
 /// - Configured ids: ordered `env_keys` from the descriptor (full list), then
-///   one vault read of `openai_compatible::<id>::api_key`. Never built-in
-///   OPENAI/OPENROUTER/xAI env or vault for configured siblings.
+///   one vault read of that instance's scope (`openai_compatible::<id>::api_key`,
+///   or `openrouter::<id>::api_key` for extra OpenRouter accounts). Never
+///   built-in OPENAI/OPENROUTER/xAI env or vault for configured siblings.
 /// - Built-in openai/openrouter: only their matching built-in scopes/env.
 /// - Built-in xai: only when selected route is ApiKey (`XAI_API_KEY`); never
 ///   session material.
@@ -744,17 +745,18 @@ fn resolve_application_credential(
         return resolve_builtin_application(home, provider_id);
     }
 
-    // Configured instance: single namespaced vault read only.
+    // Configured instance: single namespaced vault read only. Kind selects
+    // the extra-OpenRouter vs openai_compatible scheme; it must not unlock
+    // sibling or built-in product scopes.
     let pid = ProviderId::new(provider_id)
         .map_err(|e| RetrievalRuntimeError::InvalidConfig(format!("invalid provider id: {e}")))?;
-    let scope = application_key_scope(&pid);
+    let scope = application_key_scope_for_kind(&pid, kind);
     if let Ok(Some(v)) = read_provider_secret(home, &scope)
         && !v.trim().is_empty()
     {
         return Ok(v);
     }
 
-    let _ = kind; // kind must not unlock sibling/built-in scopes.
     Err(RetrievalRuntimeError::MissingCredential {
         id: provider_id.to_owned(),
     })
@@ -925,7 +927,9 @@ mod tests {
     use crate::provider_registry::management::ProviderManagementService;
     use crate::provider_registry::management::dto::ProviderAddRequest;
     use crate::provider_registry::runtime_cache::invalidate_for_home;
-    use crate::provider_registry::secrets::store_provider_secret;
+    use crate::provider_registry::secrets::{
+        application_key_scope, extra_openrouter_application_key_scope, store_provider_secret,
+    };
     use tempfile::TempDir;
 
     fn write_two_siblings(home: &Path) {
@@ -1028,6 +1032,119 @@ rerank = true
         unsafe {
             std::env::remove_var("OPENAI_API_KEY");
             std::env::remove_var("OPENROUTER_API_KEY");
+        }
+    }
+
+    fn write_two_openrouter_siblings(home: &Path) {
+        let svc = ProviderManagementService::new(home);
+        let g = svc.current_generation();
+        assert!(
+            svc.add(ProviderAddRequest {
+                id: "openrouter-home".into(),
+                kind: "openrouter".into(),
+                base_url: "https://openrouter.ai/api/v1".into(),
+                display_name: Some("Home".into()),
+                admin_base_url: None,
+                enabled: true,
+                expected_generation: g,
+            })
+            .ok
+        );
+        let g = svc.current_generation();
+        assert!(
+            svc.add(ProviderAddRequest {
+                id: "openrouter-work".into(),
+                kind: "openrouter".into(),
+                base_url: "https://openrouter.ai/api/v1".into(),
+                display_name: Some("Work".into()),
+                admin_base_url: None,
+                enabled: true,
+                expected_generation: g,
+            })
+            .ok
+        );
+        let path = home.join("config.toml");
+        let mut raw = std::fs::read_to_string(&path).unwrap();
+        raw.push_str(
+            r#"
+
+[model_providers.openrouter-home.capabilities]
+embeddings = true
+
+[model_providers.openrouter-work.capabilities]
+embeddings = true
+"#,
+        );
+        std::fs::write(&path, raw).unwrap();
+        invalidate_for_home(home);
+    }
+
+    #[test]
+    fn extra_openrouter_credentials_are_instance_scoped_and_fail_closed() {
+        let dir = TempDir::new().unwrap();
+        let home = dir.path();
+        write_two_openrouter_siblings(home);
+        let work = ProviderId::new("openrouter-work").unwrap();
+        let home_id = ProviderId::new("openrouter-home").unwrap();
+        store_provider_secret(
+            home,
+            &extra_openrouter_application_key_scope(&work),
+            "work-only-key",
+        )
+        .unwrap();
+        store_provider_secret(
+            home,
+            &extra_openrouter_application_key_scope(&home_id),
+            "home-only-key",
+        )
+        .unwrap();
+        store_provider_secret(home, crate::auth::OPENROUTER_API_KEY_SCOPE, "builtin-or").unwrap();
+        store_provider_secret(
+            home,
+            &application_key_scope(&work),
+            "openai-compatible-decoy",
+        )
+        .unwrap();
+        unsafe {
+            std::env::set_var("OPENROUTER_API_KEY", "env-builtin-or-must-not-leak");
+            std::env::set_var("OPENAI_API_KEY", "env-openai-must-not-leak");
+        }
+
+        let cfg_work = EmbeddingModelConfig {
+            provider: "openrouter-work".into(),
+            model: "e".into(),
+            ..Default::default()
+        };
+        let rt_work =
+            resolve_embedding_runtime(home, &cfg_work, &RetrievalResolveOptions::default(), None)
+                .unwrap();
+        assert_eq!(rt_work.credential.as_str(), Some("work-only-key"));
+
+        let cfg_home = EmbeddingModelConfig {
+            provider: "openrouter-home".into(),
+            model: "e".into(),
+            ..Default::default()
+        };
+        let rt_home =
+            resolve_embedding_runtime(home, &cfg_home, &RetrievalResolveOptions::default(), None)
+                .unwrap();
+        assert_eq!(rt_home.credential.as_str(), Some("home-only-key"));
+
+        let _ = crate::provider_registry::secrets::clear_provider_secret(
+            home,
+            &extra_openrouter_application_key_scope(&work),
+        );
+        let err =
+            resolve_embedding_runtime(home, &cfg_work, &RetrievalResolveOptions::default(), None)
+                .unwrap_err();
+        assert!(matches!(
+            err,
+            RetrievalRuntimeError::MissingCredential { .. }
+        ));
+
+        unsafe {
+            std::env::remove_var("OPENROUTER_API_KEY");
+            std::env::remove_var("OPENAI_API_KEY");
         }
     }
 

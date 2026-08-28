@@ -118,6 +118,7 @@ mod tests {
             base_url: "https://example.test".into(),
             model: "test-model".into(),
             max_completion_tokens: None,
+            max_output_ceiling: None,
             temperature: None,
             top_p: None,
             openrouter_fallback_models: Vec::new(),

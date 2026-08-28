@@ -2698,10 +2698,7 @@ mod tests {
         let text = buffer_text(&buf);
         assert!(!text.contains("127.0.0.1"), "{text}");
         assert!(!text.contains("http://"), "{text}");
-        assert!(
-            text.contains(PRIME_UNAVAILABLE_PROFILE),
-            "{text}"
-        );
+        assert!(text.contains(PRIME_UNAVAILABLE_PROFILE), "{text}");
         assert!(
             s.handle_key(key(KeyCode::Char('y'))).is_none(),
             "y on an unsanitary confirm must not start a job"
@@ -3277,7 +3274,10 @@ mod tests {
         assert!(s.handle_key(key(KeyCode::Esc)).is_none());
         assert!(matches!(
             s.edit,
-            RetrievalEditMode::EditFields { editing_value: false, .. }
+            RetrievalEditMode::EditFields {
+                editing_value: false,
+                ..
+            }
         ));
         assert!(s.handle_key(key(KeyCode::Esc)).is_none());
         assert!(

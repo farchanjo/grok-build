@@ -303,6 +303,14 @@ pub struct InferenceConfig {
     pub base_url: String,
     pub model: String,
     pub max_completion_tokens: Option<u32>,
+    /// Capability ceiling for output tokens (OpenRouter `top_provider.max_completion_tokens`).
+    /// Distinct from [`Self::max_completion_tokens`]: the latter is the request
+    /// budget (user/model override, or the OpenRouter provider default of 8192).
+    /// When a request max is set, the sampler clamps it to this ceiling. The
+    /// ceiling is never used as a request default and is never copied onto
+    /// `ModelInfo.max_completion_tokens`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_output_ceiling: Option<u32>,
     pub temperature: Option<f32>,
     pub top_p: Option<f32>,
     /// OpenRouter model fallbacks, tried in order after [`Self::model`].
@@ -458,6 +466,7 @@ impl std::fmt::Debug for InferenceConfig {
             .field("base_url", &self.base_url)
             .field("model", &self.model)
             .field("max_completion_tokens", &self.max_completion_tokens)
+            .field("max_output_ceiling", &self.max_output_ceiling)
             .field("temperature", &self.temperature)
             .field("top_p", &self.top_p)
             .field(
@@ -522,6 +531,7 @@ impl Default for InferenceConfig {
             base_url: String::new(),
             model: String::new(),
             max_completion_tokens: None,
+            max_output_ceiling: None,
             temperature: None,
             top_p: None,
             openrouter_fallback_models: Vec::new(),

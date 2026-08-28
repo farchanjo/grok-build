@@ -912,20 +912,45 @@ impl SessionActor {
             provider_credential_repair_message,
         };
         let detailed = Self::acp_error_message(&err);
-        let model_id = self
+        // Compaction samples on its own configured routes, which can be a
+        // different provider entirely (e.g. a session on a self-hosted endpoint
+        // compacting through OpenRouter). Attribute the failure to the route that
+        // actually answered; fall back to the session model only when the error
+        // carries no route.
+        let failed_route =
+            crate::session::helpers::full_replace_compaction::compaction_error_route(&err);
+        let session_model_id = self
             .chat_state_handle
             .get_inference_settings()
             .await
             .map(|c| c.model)
             .unwrap_or_default();
-        let provider = self
-            .provider_credential_failure_context(
-                &model_id,
-                Some(401),
-                PROVIDER_CREDENTIAL_ERROR_TYPE,
-                None,
-            )
-            .await;
+        let model_id = failed_route
+            .as_ref()
+            .map(|route| route.selection_id.clone())
+            .unwrap_or(session_model_id);
+        let provider = match failed_route.as_ref() {
+            Some(route) => {
+                self.provider_credential_failure_context_for_route(
+                    &model_id,
+                    (!route.base_url.is_empty()).then_some(route.base_url.as_str()),
+                    (!route.backend.is_empty()).then(|| route.backend.clone()),
+                    Some(401),
+                    PROVIDER_CREDENTIAL_ERROR_TYPE,
+                    None,
+                )
+                .await
+            }
+            None => {
+                self.provider_credential_failure_context(
+                    &model_id,
+                    Some(401),
+                    PROVIDER_CREDENTIAL_ERROR_TYPE,
+                    None,
+                )
+                .await
+            }
+        };
 
         let (retry_state, message, acp_err, binding_meta) = if let Some(provider) = provider {
             let mut msg = provider_credential_repair_message(&provider.provider_name);
@@ -1107,6 +1132,8 @@ impl SessionActor {
             compaction_input_overflow_rejections = tracing::field::Empty,
             compaction_deterministic_rejections = tracing::field::Empty,
             compaction_transient_rejections = tracing::field::Empty,
+            compaction_resolver_rounds = tracing::field::Empty,
+            compaction_resolver_calls = tracing::field::Empty,
             compaction_attempts = tracing::field::Empty,
             compaction_trigger = tracing::field::Empty,
             compaction_trigger_pct = tracing::field::Empty,
@@ -1298,6 +1325,14 @@ impl SessionActor {
         } else {
             0
         };
+        // Specs for the summarizer's read-only artifact resolver. Taken from the
+        // session toolset so the summarizer is never offered a tool the registry
+        // would reject; `WorkspaceCompactionResolver` narrows this further.
+        let resolver_specs: Vec<xai_grok_inference_types::ToolSpec> = effective_tool_defs
+            .iter()
+            .cloned()
+            .map(xai_grok_inference_types::ToolSpec::from)
+            .collect();
         let compaction_tools: Vec<xai_grok_inference_types::ToolSpec> = if compaction_tools_enabled
         {
             effective_tool_defs
@@ -1366,6 +1401,19 @@ impl SessionActor {
                 self.compaction.tool_choice,
             )
             .with_cancel(cancel.clone());
+        // Let the summarizer resolve the files, logs, and segments its history
+        // references before it commits to what it claims happened.
+        let sampler = if self.agent.borrow().compaction_policy().resolver_tools {
+            sampler.with_resolver(std::sync::Arc::new(
+                crate::session::helpers::compaction_tools::WorkspaceCompactionResolver::new(
+                    self.workspace_ops.clone(),
+                    self.session_info.id.0.to_string(),
+                    &resolver_specs,
+                ),
+            ))
+        } else {
+            sampler
+        };
         let observer =
             crate::session::helpers::full_replace_compaction::ShellFullReplaceObserver::new(
                 trigger,
@@ -1570,10 +1618,19 @@ impl SessionActor {
                     "compaction_transient_rejections",
                     telemetry.transient_rejections as i64,
                 );
+                let (resolver_rounds, resolver_calls) = sampler.resolver_stats();
+                span.record("compaction_resolver_rounds", resolver_rounds as i64);
+                span.record("compaction_resolver_calls", resolver_calls as i64);
                 span.record("compaction_outcome", last_failure_outcome.as_str());
-                return Err(last_error.unwrap_or_else(|| {
-                    acp::Error::internal_error().data("compaction failed: unknown error")
-                }));
+                return Err(
+                    crate::session::helpers::full_replace_compaction::attribute_compaction_error(
+                        last_error.unwrap_or_else(|| {
+                            acp::Error::internal_error()
+                                .data("compaction failed: unknown error")
+                        }),
+                        sampler.last_failed_route().as_ref(),
+                    ),
+                );
             }
         };
         let generate_session_compact = compact_output.content.clone();
@@ -2116,6 +2173,9 @@ impl SessionActor {
             );
             let stop_reason = compact_output.stop_reason.as_deref().unwrap_or("stop");
             span.record("compaction_stop_reason", stop_reason);
+            let (resolver_rounds, resolver_calls) = sampler.resolver_stats();
+            span.record("compaction_resolver_rounds", resolver_rounds as i64);
+            span.record("compaction_resolver_calls", resolver_calls as i64);
             let outcome = if compact_output.truncated {
                 CompactionOutcome::Truncated
             } else {
@@ -2494,13 +2554,9 @@ impl SessionActor {
         } else {
             "detailed"
         };
-        let error_str = error.map(|e| {
-            e.data
-                .as_ref()
-                .and_then(|d| d.as_str())
-                .unwrap_or("<no error data>")
-                .to_owned()
-        });
+        // Tolerant read: an attributed compaction failure carries
+        // `{message, compaction_route}` rather than a bare string.
+        let error_str = error.map(|e| Self::acp_error_message(e));
         let artifact = CompactionRequestFile {
             schema_version: 2,
             request_id,
@@ -3254,6 +3310,7 @@ mod inline_auto_compact_flow_tests {
                         openrouter_provider_preferences: None,
                         openrouter_plugins: Vec::new(),
                         openrouter_pacing: false,
+                        max_completion_tokens: None,
                         command: Vec::new(),
                     }),
                     api_key: None,
@@ -3349,6 +3406,7 @@ mod inline_auto_compact_flow_tests {
                         openrouter_provider_preferences: None,
                         openrouter_plugins: Vec::new(),
                         openrouter_pacing: false,
+                        max_completion_tokens: None,
                         command: Vec::new(),
                     }),
                     api_key: None,
@@ -3436,6 +3494,7 @@ mod inline_auto_compact_flow_tests {
                         openrouter_provider_preferences: None,
                         openrouter_plugins: Vec::new(),
                         openrouter_pacing: false,
+                        max_completion_tokens: None,
                         command: Vec::new(),
                     }),
                     api_key: None,

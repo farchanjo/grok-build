@@ -4254,8 +4254,7 @@ pub fn render_extensions_modal(
     if let Some(ref msg) = state.modal_message {
         let safe_overlay = overlay_prime_safe_text(msg);
         let missing_profile = matches!(msg, ModalMessage::Error(_))
-            && safe_overlay
-                == crate::views::retrieval_settings_modal::PRIME_UNAVAILABLE_PROFILE;
+            && safe_overlay == crate::views::retrieval_settings_modal::PRIME_UNAVAILABLE_PROFILE;
         let (text, fg) = match msg {
             ModalMessage::Error(_) => (safe_overlay.as_str(), theme.accent_error),
             ModalMessage::Confirmation { .. } => (safe_overlay.as_str(), theme.accent_tool),
@@ -4293,12 +4292,7 @@ pub fn render_extensions_modal(
                 } else {
                     msg_content_height
                 };
-                let msg_area = Rect::new(
-                    msg_content_x,
-                    msg_content_y,
-                    msg_content_width,
-                    banner_h,
-                );
+                let msg_area = Rect::new(msg_content_x, msg_content_y, msg_content_width, banner_h);
                 let clear_style = Style::reset().bg(theme.bg_base);
                 let text_style = Style::reset().fg(fg).bg(theme.bg_base);
                 for y in msg_area.y..msg_area.y + msg_area.height {
@@ -5818,9 +5812,11 @@ mod tests {
     #[test]
     fn missing_retrieval_profile_banner_keeps_skills_list_visible() {
         let mut state = ExtensionsModalState::new(ExtensionsTab::Skills);
-        state.skills_data = TabDataState::Loaded(SkillsTabSnapshot::from_skill_infos(vec![
-            make_skill("commit", "Create well-formatted git commits."),
-        ]));
+        state.skills_data =
+            TabDataState::Loaded(SkillsTabSnapshot::from_skill_infos(vec![make_skill(
+                "commit",
+                "Create well-formatted git commits.",
+            )]));
         state.modal_message = Some(ModalMessage::Error(
             crate::views::retrieval_settings_modal::PRIME_UNAVAILABLE_PROFILE.to_string(),
         ));

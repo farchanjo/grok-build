@@ -48,6 +48,7 @@ pub enum EditorField {
     OrZdr,
     OrSort,
     OrPacing,
+    OrMaxCompletionTokens,
     OrFallbacks,
     OrOrder,
     OrOnly,
@@ -102,6 +103,7 @@ impl EditorField {
             Self::OrZdr => "OR zdr",
             Self::OrSort => "OR sort",
             Self::OrPacing => "OR pacing",
+            Self::OrMaxCompletionTokens => "Max completion tokens",
             Self::OrFallbacks => "OR fallback models",
             Self::OrOrder => "OR order (slugs)",
             Self::OrOnly => "OR only (slugs)",
@@ -180,6 +182,7 @@ fn fields_for_page(page: ProviderEditorPage) -> &'static [EditorField] {
             EditorField::OrZdr,
             EditorField::OrSort,
             EditorField::OrPacing,
+            EditorField::OrMaxCompletionTokens,
             EditorField::OrFallbacks,
             EditorField::OrOrder,
             EditorField::OrOnly,
@@ -400,6 +403,11 @@ impl ProviderEditorState {
                 .request_timeout_secs
                 .map(|v| v.to_string())
                 .unwrap_or_default(),
+            EditorField::OrMaxCompletionTokens => self
+                .draft
+                .max_completion_tokens
+                .map(|v| v.to_string())
+                .unwrap_or_default(),
             EditorField::Organization => self.draft.organization.clone().unwrap_or_default(),
             EditorField::Project => self.draft.project.clone().unwrap_or_default(),
             EditorField::OrDataCollection => self
@@ -533,6 +541,10 @@ impl ProviderEditorState {
             }
             EditorField::RequestTimeout => {
                 self.draft.request_timeout_secs = text.trim().parse().ok();
+            }
+            EditorField::OrMaxCompletionTokens => {
+                self.draft.max_completion_tokens =
+                    text.trim().parse::<u32>().ok().filter(|&n| n > 0);
             }
             EditorField::Organization => {
                 self.draft.organization = if text.trim().is_empty() {
@@ -1292,6 +1304,20 @@ fn field_value_display(state: &ProviderEditorState, field: EditorField) -> Strin
             .flatten()
             .unwrap_or_else(|| "(unset)".into()),
         EditorField::OrPacing => yn(state.draft.openrouter_pacing.unwrap_or(false)).into(),
+        EditorField::OrMaxCompletionTokens => state
+            .draft
+            .max_completion_tokens
+            .map(|v| v.to_string())
+            .unwrap_or_else(|| {
+                if state.draft.kind.as_deref() == Some("openrouter") {
+                    format!(
+                        "{} (default)",
+                        xai_grok_shell::agent::model_providers::OPENROUTER_DEFAULT_MAX_COMPLETION_TOKENS
+                    )
+                } else {
+                    "(unset)".into()
+                }
+            }),
         EditorField::OrFallbacks => {
             let n = state
                 .draft
@@ -1461,6 +1487,7 @@ fn draft_from_detail(detail: &ProviderDetailDto) -> ProviderSavePatch {
         openrouter_quantizations: Some(detail.openrouter_quantizations.clone()),
         openrouter_sort: Some(detail.openrouter_sort.clone()),
         openrouter_pacing: Some(detail.openrouter_pacing),
+        max_completion_tokens: detail.max_completion_tokens,
         ..Default::default()
     }
 }
@@ -1560,6 +1587,9 @@ fn dirty_patch_against_baseline(
     if draft.openrouter_pacing != Some(baseline.openrouter_pacing) {
         out.openrouter_pacing = draft.openrouter_pacing;
     }
+    if draft.max_completion_tokens != baseline.max_completion_tokens {
+        out.max_completion_tokens = draft.max_completion_tokens;
+    }
     // api_surface / credential_route: only when user changed them (advanced).
     if draft.api_surface != baseline.api_surface {
         out.api_surface = draft.api_surface.clone();
@@ -1616,6 +1646,7 @@ mod tests {
             openrouter_quantizations: Vec::new(),
             openrouter_sort: None,
             openrouter_pacing: false,
+            max_completion_tokens: None,
             openrouter_plugin_ids: Vec::new(),
             credentials: CredentialPresence::default(),
             generation: RegistryGeneration(3),

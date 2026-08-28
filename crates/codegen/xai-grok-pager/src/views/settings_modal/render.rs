@@ -1374,11 +1374,8 @@ fn render_picking_group(
             }
             None => "—".into(),
         };
-        let value_text: std::borrow::Cow<'_, str> = if matches!(
-            &value,
-            Some(SettingValue::Bool(_))
-        ) || (*child_key == "language.artifact"
-            && state.pager_snapshot.language_artifact_locked)
+        let value_text: std::borrow::Cow<'_, str> = if matches!(&value, Some(SettingValue::Bool(_)))
+            || (*child_key == "language.artifact" && state.pager_snapshot.language_artifact_locked)
         {
             // Bool children toggle in place; a locked artifact language
             // cannot open a picker — no chevron in either case.

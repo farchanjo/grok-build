@@ -146,27 +146,51 @@ fn split_trailing_token(args: &str) -> Option<(&str, &str)> {
     Some((prefix, last))
 }
 
+/// True when `/model` should chain into the effort sub-menu.
+///
+/// A supports-flag without a menu (OpenRouter `Unknown`) must not open an
+/// empty effort dropdown. Exact / unrestricted / legacy-fallback menus do.
+fn offers_effort_menu(models: &ModelState, id: &acp::ModelId, info: &acp::ModelInfo) -> bool {
+    supports_reasoning_effort(info) && !models.reasoning_effort_options_for(id).is_empty()
+}
+
 /// Returns the matched model id when `args_query` is `"<reasoning-model> ..."`.
 /// Longest-name-first to disambiguate names that share a prefix.
 fn detect_effort_phase(models: &ModelState, args_query: &str) -> Option<acp::ModelId> {
-    let mut candidates: Vec<(&acp::ModelId, &str)> = models
+    let mut candidates: Vec<(&acp::ModelId, String)> = models
         .available
         .iter()
-        .filter(|(_, info)| supports_reasoning_effort(info))
-        .map(|(id, info)| (id, info.name.as_str()))
+        .filter(|(id, info)| offers_effort_menu(models, id, info))
+        .flat_map(|(id, info)| {
+            let mut labels = vec![info.name.clone(), id.0.as_ref().to_string()];
+            labels.sort();
+            labels.dedup();
+            labels.into_iter().map(move |label| (id, label))
+        })
         .collect();
     candidates.sort_by_key(|(_, name)| std::cmp::Reverse(name.len()));
 
     for (id, name) in candidates {
         if args_query.len() > name.len()
             && args_query.is_char_boundary(name.len())
-            && args_query[..name.len()].eq_ignore_ascii_case(name)
+            && args_query[..name.len()].eq_ignore_ascii_case(&name)
             && args_query[name.len()..].starts_with(char::is_whitespace)
         {
             return Some(id.clone());
         }
     }
     None
+}
+
+/// Catalog title shown next to a namespaced id (`zdr:…`, `dr:…`).
+fn complete_model_title(id: &acp::ModelId, info: &acp::ModelInfo) -> Option<String> {
+    info.description
+        .as_deref()
+        .map(str::trim)
+        .filter(|title| !title.is_empty())
+        .filter(|title| !title.eq_ignore_ascii_case(info.name.as_str()))
+        .filter(|title| !title.eq_ignore_ascii_case(id.0.as_ref()))
+        .map(str::to_owned)
 }
 
 /// One row per logical model. Reasoning models get a trailing space in
@@ -176,35 +200,40 @@ fn build_model_items(models: &ModelState) -> Vec<ArgItem> {
     let mut items: Vec<ArgItem> = Vec::with_capacity(models.available.len());
     for (id, info) in &models.available {
         let is_current = current_id == Some(id);
-        let supports = supports_reasoning_effort(info);
+        let chains_to_effort = offers_effort_menu(models, id, info);
 
+        // Namespaced catalog ids (`zdr:…`, `dr:…`) insert the canonical id so
+        // `/model` keeps kind. The complete OpenRouter title sits in
+        // description and is also folded into the visible label.
+        let label = info.name.clone();
+        let title = complete_model_title(id, info);
+        let display_label = match title.as_deref() {
+            Some(title) => format!("{label} · {title}"),
+            None => label.clone(),
+        };
         let display = if is_current {
-            format!("{} (current)", info.name)
+            format!("{display_label} (current)")
         } else {
-            info.name.clone()
+            display_label
         };
 
-        // Trailing space on reasoning models: signals "more input
-        // expected" to the prompt widget so Enter advances to effort
-        // phase instead of submitting.
-        let insert_text = if supports {
-            format!("{} ", info.name)
+        // Trailing space on models that actually offer an effort menu.
+        let insert_text = if chains_to_effort {
+            format!("{label} ")
         } else {
-            info.name.clone()
+            label
         };
 
         items.push(ArgItem {
             display,
             match_text: model_match_text(id, info),
             insert_text,
-            // Keep the slug visible when a config `[model."…"] name =` override
-            // strips the catalog date suffix (e.g. "DeepSeek V4 Flash" for
-            // `…flash-0731`). The filter also matches this field.
-            description: info
-                .description
-                .clone()
-                .filter(|d| !d.trim().is_empty())
-                .unwrap_or_else(|| id.0.as_ref().to_string()),
+            description: title.unwrap_or_else(|| {
+                info.description
+                    .clone()
+                    .filter(|d| !d.trim().is_empty())
+                    .unwrap_or_else(|| id.0.as_ref().to_string())
+            }),
         });
     }
     items
@@ -214,19 +243,18 @@ fn build_model_items(models: &ModelState) -> Vec<ArgItem> {
 ///
 /// Display names are often shortened in `config.toml` (`name = "DeepSeek V4
 /// Flash"` for `openrouter:deepseek/deepseek-v4-flash-0731`). Include the
-/// canonical selection id and the upstream slug so typing `0731` or
-/// `deepseek-v4-flash-0731` still finds the row.
+/// canonical selection id, the upstream slug, and the account label so
+/// typing `0731`, `deepseek-v4-flash-0731`, or `Work` still finds the row.
 fn model_match_text(id: &acp::ModelId, info: &acp::ModelInfo) -> String {
     let mut parts = vec![info.name.as_str(), id.0.as_ref()];
-    if let Some(upstream) = info
-        .meta
-        .as_ref()
-        .and_then(|m| m.get("upstreamModelId"))
-        .and_then(|v| v.as_str())
-        && !upstream.is_empty()
-        && !parts.iter().any(|part| part.eq_ignore_ascii_case(upstream))
-    {
-        parts.push(upstream);
+    let meta = info.meta.as_ref();
+    for key in ["upstreamModelId", "accountLabel", "providerInstanceId"] {
+        if let Some(value) = meta.and_then(|m| m.get(key)).and_then(|v| v.as_str())
+            && !value.is_empty()
+            && !parts.iter().any(|part| part.eq_ignore_ascii_case(value))
+        {
+            parts.push(value);
+        }
     }
     parts.join(" ")
 }
@@ -379,6 +407,120 @@ mod tests {
             items[0].description,
             "openrouter:deepseek/deepseek-v4-flash-0731"
         );
+    }
+
+    #[test]
+    fn match_text_includes_canonical_id_and_account_label() {
+        let mut state = ModelState::default();
+        let id = acp::ModelId::new(Arc::from("openrouter-work:z-ai/glm-5.3-flash"));
+        let info = acp::ModelInfo::new(id.clone(), "GLM 5.3 Flash · Work · ZDR".to_string()).meta(
+            serde_json::json!({
+                "upstreamModelId": "z-ai/glm-5.3-flash",
+                "accountLabel": "Work",
+                "providerInstanceId": "openrouter-work",
+                "canonicalSelectionId": "openrouter-work:z-ai/glm-5.3-flash",
+            })
+            .as_object()
+            .cloned(),
+        );
+        state.available.insert(id, info);
+
+        let items = build_model_items(&state);
+        assert_eq!(items.len(), 1);
+        let haystack = items[0].match_text.to_lowercase();
+        assert!(
+            haystack.contains("openrouter-work:z-ai/glm-5.3-flash"),
+            "canonical id must be in haystack: {}",
+            items[0].match_text
+        );
+        assert!(
+            haystack.contains("work"),
+            "account label must be in haystack: {}",
+            items[0].match_text
+        );
+        assert_eq!(
+            items[0].insert_text, "GLM 5.3 Flash · Work · ZDR",
+            "insert_text follows ACP display name (canonical id once the catalog qualifies it)"
+        );
+    }
+
+    #[test]
+    fn namespaced_catalog_id_is_the_insert_text() {
+        let mut state = ModelState::default();
+        let id = acp::ModelId::new(Arc::from("zdr:z-ai/glm-5.3-flash"));
+        let info = acp::ModelInfo::new(id.clone(), "zdr:z-ai/glm-5.3-flash".to_string())
+            .description(Some("Z.ai: GLM 5.3 Flash".into()));
+        state.available.insert(id, info);
+
+        let items = build_model_items(&state);
+        assert_eq!(items.len(), 1);
+        assert_eq!(
+            items[0].display,
+            "zdr:z-ai/glm-5.3-flash · Z.ai: GLM 5.3 Flash"
+        );
+        assert_eq!(items[0].insert_text, "zdr:z-ai/glm-5.3-flash");
+        assert_eq!(items[0].description, "Z.ai: GLM 5.3 Flash");
+        assert!(items[0].match_text.contains("zdr:z-ai/glm-5.3-flash"));
+    }
+
+    fn model_with_exact_efforts(
+        id: &str,
+        name: &str,
+        title: &str,
+        efforts: &[&str],
+    ) -> (acp::ModelId, acp::ModelInfo) {
+        let id = acp::ModelId::new(Arc::from(id));
+        let mut meta = serde_json::Map::new();
+        meta.insert(
+            "supportsReasoningEffort".into(),
+            serde_json::Value::Bool(true),
+        );
+        meta.insert(
+            "reasoningEffortSelection".into(),
+            serde_json::Value::String("exact".into()),
+        );
+        meta.insert("reasoningEfforts".into(), serde_json::json!(efforts));
+        let info = acp::ModelInfo::new(id.clone(), name.to_string())
+            .description(Some(title.to_string()))
+            .meta(serde_json::Value::Object(meta).as_object().cloned());
+        (id, info)
+    }
+
+    #[test]
+    fn namespaced_reasoning_model_lists_complete_name_and_enters_effort_phase() {
+        let mut state = ModelState::default();
+        let (id, info) = model_with_exact_efforts(
+            "zdr:z-ai/glm-5.3-flash",
+            "zdr:z-ai/glm-5.3-flash",
+            "Z.ai: GLM 5.3 Flash",
+            &["max", "high", "low"],
+        );
+        state.available.insert(id, info);
+
+        let cmd = ModelCommand;
+        let ctx = AppCtx {
+            models: &state,
+            cwd: std::path::Path::new("."),
+            has_session_announcements: false,
+            billing_surface_visible: true,
+            workflows_available: true,
+            screen_mode: crate::app::ScreenMode::Fullscreen,
+        };
+        let items = cmd.suggest_args(&ctx, "").unwrap();
+        assert_eq!(items.len(), 1);
+        assert_eq!(
+            items[0].display,
+            "zdr:z-ai/glm-5.3-flash · Z.ai: GLM 5.3 Flash"
+        );
+        assert_eq!(items[0].insert_text, "zdr:z-ai/glm-5.3-flash ");
+        assert_eq!(items[0].description, "Z.ai: GLM 5.3 Flash");
+
+        let efforts = cmd.suggest_args(&ctx, "zdr:z-ai/glm-5.3-flash ").unwrap();
+        assert_eq!(efforts.len(), 3);
+        assert_eq!(efforts[0].insert_text, "zdr:z-ai/glm-5.3-flash max");
+        assert_eq!(efforts[1].insert_text, "zdr:z-ai/glm-5.3-flash high");
+        assert_eq!(efforts[2].insert_text, "zdr:z-ai/glm-5.3-flash low");
+        assert_eq!(efforts[0].display, "Max");
     }
 
     #[test]
@@ -571,6 +713,59 @@ mod tests {
                 assert_eq!(resolved_id, id);
             }
             other => panic!("expected Action::SetDefaultModel(<id>), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn run_ambiguous_openrouter_short_name_fails_closed_with_both_canonical_ids() {
+        let mut state = ModelState::default();
+        let home = acp::ModelId::new(Arc::from("openrouter:z-ai/glm-5.3-flash"));
+        let work = acp::ModelId::new(Arc::from("openrouter-work:z-ai/glm-5.3-flash"));
+        state.available.insert(
+            home.clone(),
+            acp::ModelInfo::new(home, "GLM 5.3 Flash · Home".to_string()).meta(
+                serde_json::json!({
+                    "upstreamModelId": "z-ai/glm-5.3-flash",
+                    "accountLabel": "Home",
+                    "providerInstanceId": "openrouter",
+                })
+                .as_object()
+                .cloned(),
+            ),
+        );
+        state.available.insert(
+            work.clone(),
+            acp::ModelInfo::new(work, "GLM 5.3 Flash · Work · ZDR".to_string()).meta(
+                serde_json::json!({
+                    "upstreamModelId": "z-ai/glm-5.3-flash",
+                    "accountLabel": "Work",
+                    "providerInstanceId": "openrouter-work",
+                })
+                .as_object()
+                .cloned(),
+            ),
+        );
+
+        let mut ctx = dummy_exec_ctx(&state);
+        let result = ModelCommand.run(&mut ctx, "z-ai/glm-5.3-flash");
+        match result {
+            CommandResult::Error(msg) => {
+                assert!(
+                    msg.contains("Ambiguous model"),
+                    "short name must fail closed: {msg}"
+                );
+                assert!(msg.contains("openrouter:z-ai/glm-5.3-flash"));
+                assert!(msg.contains("openrouter-work:z-ai/glm-5.3-flash"));
+            }
+            other => panic!("expected Ambiguous error, got {other:?}"),
+        }
+
+        let result = ModelCommand.run(&mut ctx, "openrouter-work:z-ai/glm-5.3-flash");
+        match result {
+            CommandResult::Action(Action::SetDefaultModel(id)) => {
+                assert_eq!(id.0.as_ref(), "openrouter-work:z-ai/glm-5.3-flash");
+            }
+            other => panic!("canonical id must resolve uniquely, got {other:?}"),
         }
     }
 }

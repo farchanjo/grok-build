@@ -469,9 +469,11 @@ impl SessionActor {
 
 /// Synthetic tool the model calls to return its schema-constrained final answer
 /// on backends that cannot constrain output natively (custom Messages, or
-/// Messages without model-level native-schema capability). Direct Anthropic
-/// capable models use `output_config.format` instead and leave this unused.
-/// Intercepted in the loop, never executed as a real tool.
+/// Messages without model-level native-schema capability), and for the
+/// dual-language envelope on every backend. Native `response_format` /
+/// `output_config.format` cannot represent tool calls, so the language
+/// envelope is advertised here instead of on the request. Intercepted in
+/// the loop, never executed as a real tool.
 const STRUCTURED_OUTPUT_TOOL: &str = "StructuredOutput";
 /// Max times the model may re-call `StructuredOutput` with non-conforming args
 /// before the turn ends with the last validation error.
@@ -508,6 +510,24 @@ fn validate_structured_output(
 /// missing or not a string.
 fn extract_language_response(value: &serde_json::Value) -> Option<String> {
     value.get("response")?.as_str().map(str::to_owned)
+}
+
+/// Decide how a turn applies a JSON schema.
+///
+/// User-supplied schemas keep the native `response_format` /
+/// `output_config.format` path when the backend supports it. The dual-language
+/// envelope never uses native schema: that object cannot represent tool calls,
+/// and Chat Completions `json_schema` makes models skip tools. The envelope is
+/// advertised as the [`STRUCTURED_OUTPUT_TOOL`] instead, while
+/// `<language_policy>` remains on the prompt and as a per-turn reminder.
+fn structured_output_modes(
+    schema_ok: bool,
+    native_backend: bool,
+    language_envelope_active: bool,
+) -> (bool, bool) {
+    let structured_output_native = schema_ok && native_backend && !language_envelope_active;
+    let structured_output_tool = schema_ok && (!native_backend || language_envelope_active);
+    (structured_output_native, structured_output_tool)
 }
 
 /// True when `text` is a language-envelope JSON object. Used to keep raw
@@ -2950,10 +2970,12 @@ impl SessionActor {
             jsonschema::validator_for(schema).map_err(|e| format!("invalid output schema: {e}"))
         });
         let schema_ok = matches!(structured_output_validator, Some(Ok(_)));
-        // Provider/model-aware: ChatCompletions/Responses always native;
-        // Messages uses native output_config.format only when the durable
-        // model capability (supports_native_schema) opts in — direct Anthropic
-        // curated/capable models. Custom Messages keeps StructuredOutput-tool
+        // Provider/model-aware: ChatCompletions/Responses always native for
+        // user-supplied schemas; Messages uses native output_config.format
+        // only when the durable model capability (supports_native_schema)
+        // opts in. The language envelope is the exception: it always uses
+        // the StructuredOutput-tool path so native json_schema cannot steal
+        // the tool-call channel. Custom Messages keeps StructuredOutput-tool
         // fallback unless explicitly capable.
         let native_backend = if json_schema.is_some() {
             match self.chat_state_handle.get_inference_settings().await {
@@ -2968,11 +2990,13 @@ impl SessionActor {
         } else {
             false
         };
-        let structured_output_native = schema_ok && native_backend;
-        let structured_output_tool = schema_ok && !native_backend;
+        let (structured_output_native, structured_output_tool) =
+            structured_output_modes(schema_ok, native_backend, language_envelope_active);
         self.language_envelope_turn.set(language_envelope_active);
-        self.suppress_language_envelope_text
-            .set(language_envelope_active && structured_output_tool);
+        // Language envelope no longer uses native json_schema, so live prose
+        // must stream. Envelope JSON that still arrives as text is decoded
+        // at persist time rather than buffered here.
+        self.suppress_language_envelope_text.set(false);
         struct ClearLanguageEnvelopeTurn<'a>(&'a SessionActor);
         impl Drop for ClearLanguageEnvelopeTurn<'_> {
             fn drop(&mut self) {
@@ -2993,11 +3017,18 @@ Preserve identifiers, file paths, and quoted text verbatim; do not translate the
                 policy.conversation, policy.artifact
             ));
         }
-        if structured_output_tool {
+        if structured_output_tool && !language_envelope_active {
             self.push_system_reminder(
                 "A response schema is required. After any tool use, call the \
                  `StructuredOutput` tool exactly once with your final answer as its \
                  arguments; do not return the answer as text.",
+            );
+        } else if language_envelope_active && structured_output_tool {
+            self.push_system_reminder(
+                "You may call tools freely. When you are ready to give the \
+user-visible answer, you MAY call the `StructuredOutput` tool exactly once \
+with conversation_language, artifact_language, and response; you may also \
+write the answer as ordinary text.",
             );
         }
         loop {
@@ -3150,9 +3181,6 @@ Preserve identifiers, file paths, and quoted text verbatim; do not translate the
             }
             if structured_output_native {
                 request.json_schema = json_schema.clone();
-                if language_envelope_active {
-                    request.project_response_field = true;
-                }
             }
             request.hosted_tools = self.hosted_tools_for_turn();
             request.max_output_tokens = self
@@ -3444,10 +3472,13 @@ Preserve identifiers, file paths, and quoted text verbatim; do not translate the
             let final_answer_text = json_schema.is_some().then(|| response.assistant_text());
             let mut language_envelope_error: Option<String> = None;
             let mut items = response.items;
-            // Rewrite/decode assistant content for every language-envelope round,
-            // including tool-call rounds. Only the final no-tool round is the
-            // user-visible answer, but no round may persist the raw envelope.
+            // Native language-envelope rounds still decode/validate assistant
+            // JSON. The StructuredOutput-tool path (the default for language)
+            // must not treat ordinary prose as a schema failure — that is
+            // what blocked tools after `[language].conversation` was set.
+            // Opportunistically rewrite leftover envelope JSON below.
             if language_envelope_active
+                && structured_output_native
                 && let Some(validator) = structured_output_validator.as_ref()
                 && !turn_refused
                 && stop_reason != Some(xai_grok_inference_types::StopReason::Length)
@@ -3673,6 +3704,14 @@ Preserve identifiers, file paths, and quoted text verbatim; do not translate the
                     (_, Some(_), _, _, Some(xai_grok_inference_types::StopReason::Length)) => Some(
                         Err("model hit max_tokens before completing structured output".to_string()),
                     ),
+                    // Language envelope uses StructuredOutput-tool; a prose
+                    // final answer is valid. Do not treat assistant text as
+                    // the envelope unless the native path produced one.
+                    (_, Some(_), _, false, _)
+                        if language_envelope_active && structured_output_tool =>
+                    {
+                        None
+                    }
                     (_, Some(validator), Some(text), false, _) => {
                         Some(validate_structured_output(validator, text))
                     }
@@ -3982,7 +4021,8 @@ mod user_echo_broadcast_tests {
 mod structured_output_validation_tests {
     use super::{
         decode_language_envelope_text, extract_language_response, is_language_envelope_json,
-        rewrite_assistant_content, rewrite_assistant_items, validate_structured_output,
+        rewrite_assistant_content, rewrite_assistant_items, structured_output_modes,
+        validate_structured_output,
     };
     use crate::inference::ConversationItem;
     fn validator() -> Result<jsonschema::Validator, String> {
@@ -4014,6 +4054,34 @@ mod structured_output_validation_tests {
         let bad: Result<jsonschema::Validator, String> = Err("invalid output schema: boom".into());
         let err = validate_structured_output(&bad, r#"{"name":"alice","age":1}"#).unwrap_err();
         assert_eq!(err, "invalid output schema: boom");
+    }
+
+    #[test]
+    fn language_envelope_uses_structured_output_tool_even_on_native_backends() {
+        let (native, tool) = structured_output_modes(true, true, true);
+        assert!(!native);
+        assert!(tool);
+    }
+
+    #[test]
+    fn user_schema_stays_native_on_capable_backends() {
+        let (native, tool) = structured_output_modes(true, true, false);
+        assert!(native);
+        assert!(!tool);
+    }
+
+    #[test]
+    fn user_schema_uses_tool_when_backend_cannot() {
+        let (native, tool) = structured_output_modes(true, false, false);
+        assert!(!native);
+        assert!(tool);
+    }
+
+    #[test]
+    fn no_schema_disables_both_modes() {
+        let (native, tool) = structured_output_modes(false, true, true);
+        assert!(!native);
+        assert!(!tool);
     }
 
     #[test]

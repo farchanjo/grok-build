@@ -675,9 +675,10 @@ impl ConversationRequest {
 /// JSON Schema for the dual-language sampling envelope.
 ///
 /// When `conversation_language` is set and the prompt has no user
-/// `json_schema`, the shell injects this object schema onto
-/// [`ConversationRequest::json_schema`] so native structured-output routes
-/// constrain the model to:
+/// `json_schema`, the shell advertises this object as the `StructuredOutput`
+/// tool — not as native `ConversationRequest::json_schema`. Native
+/// `response_format` cannot represent tool calls and makes Chat Completions
+/// models skip tools. The model may call this tool for the final answer:
 ///
 /// ```json
 /// {

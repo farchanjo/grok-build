@@ -75,6 +75,7 @@ fn test_config(base_url: String, model: &str) -> InferenceConfig {
         base_url,
         model: model.into(),
         max_completion_tokens: Some(1024),
+        max_output_ceiling: None,
         temperature: None,
         top_p: None,
         openrouter_fallback_models: Vec::new(),
@@ -1214,7 +1215,10 @@ fn assert_openrouter_chat_wire(body: &serde_json::Value) {
     assert_eq!(body["provider"]["data_collection"], "deny");
     assert_eq!(body["plugins"][0]["id"], "response-healing");
     assert_eq!(body["reasoning"]["effort"], "medium");
-    assert_eq!(body["reasoning_effort"], "medium");
+    assert!(
+        body.get("reasoning_effort").is_none(),
+        "flat reasoning_effort must be omitted when the native object is used: {body}"
+    );
     assert!(
         body["tools"].as_array().is_some_and(|t| !t.is_empty()),
         "tools must be present on the wire: {body}"

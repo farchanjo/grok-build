@@ -732,6 +732,7 @@ impl SessionActor {
             base_url: cfg.base_url,
             model: cfg.model,
             max_completion_tokens: cfg.max_completion_tokens,
+            max_output_ceiling: resolved_entry.and_then(|e| e.info().max_output_ceiling),
             temperature: cfg.temperature,
             top_p: cfg.top_p,
             openrouter_fallback_models: self.openrouter_fallback_models.borrow().clone(),
@@ -1165,6 +1166,7 @@ impl SessionActor {
                 crate::session::helpers::full_replace_compaction::CompactionRoute {
                     client,
                     inference_config: config,
+                    selection_id: model_ref.clone(),
                     route: resolved.route,
                 },
             );
@@ -1612,6 +1614,32 @@ impl SessionActor {
         error_category: &str,
         diagnostics: Option<&xai_grok_inference_types::ApiErrorDiagnostics>,
     ) -> Option<crate::extensions::notification::ProviderCredentialFailure> {
+        self.provider_credential_failure_context_for_route(
+            failed_model_id,
+            None,
+            None,
+            status_code,
+            error_category,
+            diagnostics,
+        )
+        .await
+    }
+
+    /// Credential failure context for a request that ran on a route other than
+    /// the session primary (compaction, auxiliary media, web search).
+    ///
+    /// `route_base_url` / `route_backend` describe the endpoint that actually
+    /// answered. Without them the session's own endpoint would be reported,
+    /// which sends the user to repair the wrong provider.
+    pub(crate) async fn provider_credential_failure_context_for_route(
+        &self,
+        failed_model_id: &str,
+        route_base_url: Option<&str>,
+        route_backend: Option<String>,
+        status_code: Option<u16>,
+        error_category: &str,
+        diagnostics: Option<&xai_grok_inference_types::ApiErrorDiagnostics>,
+    ) -> Option<crate::extensions::notification::ProviderCredentialFailure> {
         use crate::agent::model_providers::ModelProviderKind;
         use crate::extensions::notification::{
             approved_provider_for_exact_host, host_from_base_url,
@@ -1640,10 +1668,13 @@ impl SessionActor {
         }
 
         let settings = self.chat_state_handle.get_inference_settings().await;
-        let base_url = settings.as_ref().map(|c| c.base_url.as_str()).unwrap_or("");
-        let backend = settings
-            .as_ref()
-            .map(|c| format!("{:?}", c.api_backend).to_ascii_lowercase());
+        let session_base_url = settings.as_ref().map(|c| c.base_url.as_str()).unwrap_or("");
+        let base_url = route_base_url.unwrap_or(session_base_url);
+        let backend = route_backend.or_else(|| {
+            settings
+                .as_ref()
+                .map(|c| format!("{:?}", c.api_backend).to_ascii_lowercase())
+        });
 
         // Exact-host fallback only when catalog identity is unknown/custom.
         // Never substring-match URLs (suffix-confusion / query spoofs).

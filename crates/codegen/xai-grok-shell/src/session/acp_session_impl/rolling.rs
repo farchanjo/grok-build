@@ -191,6 +191,50 @@ impl SessionActor {
             .borrow()
             .compaction_policy()
             .wall_clock_budget_secs;
+        // Resolve referenced artifacts once for the whole cold source instead
+        // of per chunk: a per-chunk resolver would repay the round budget on
+        // every chunk and each chunk would only see its own references. The
+        // folded lookup block then rides along on every chunk and merge call.
+        let mut resolved_lookups: Vec<ConversationItem> = Vec::new();
+        if self.agent.borrow().compaction_policy().resolver_tools
+            && let Some(route) = routes.first()
+        {
+            let resolver_specs: Vec<xai_grok_inference_types::ToolSpec> = self
+                .prepare_tool_definitions()
+                .await
+                .into_iter()
+                .map(xai_grok_inference_types::ToolSpec::from)
+                .collect();
+            let resolver =
+                crate::session::helpers::compaction_tools::WorkspaceCompactionResolver::new(
+                    self.workspace_ops.clone(),
+                    self.session_info.id.0.to_string(),
+                    &resolver_specs,
+                );
+            let outcome = crate::session::helpers::compaction_tools::run_resolver_rounds(
+                &route.client,
+                &route.inference_config,
+                self.session_info.id.0.to_string().as_str(),
+                &job.source_items,
+                &resolver,
+                &cancel,
+            )
+            .await;
+            if outcome.rounds > 0 {
+                tracing::info!(
+                    rounds = outcome.rounds,
+                    calls = outcome.calls,
+                    "rolling compaction resolved referenced artifacts"
+                );
+            }
+            // An early prose answer is not a usable chunk summary here, so
+            // only the folded lookup block carries over into the sample rounds.
+            resolved_lookups = outcome
+                .lookups
+                .map(ConversationItem::user)
+                .into_iter()
+                .collect();
+        }
         let sampler = ShellCompactionSampler::new(
             false,
             None,
@@ -204,7 +248,8 @@ impl SessionActor {
             crate::util::config::CompactionToolChoice::None,
         )
         .with_cancel(cancel)
-        .with_supplied_prompt();
+        .with_supplied_prompt()
+        .with_resolved_lookups(resolved_lookups);
         let chunk_prompt = xai_grok_compaction::CompactionPrompt {
             system: "You compress coding-agent history without losing actionable state."
                 .to_owned(),

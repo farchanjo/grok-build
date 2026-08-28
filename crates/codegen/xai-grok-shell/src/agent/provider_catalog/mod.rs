@@ -35,9 +35,10 @@ pub use openrouter_adapter::{
     fetch_openrouter_bounded_list_body, fetch_openrouter_catalog, parse_openrouter_models_body,
 };
 pub use project::{
-    apply_manual_capability_overrides, canonical_selection_id, dedupe_and_sort_models,
-    is_built_in_compatibility_instance, is_exact_built_in_slug, project_openai_capabilities,
-    project_openrouter_capabilities,
+    apply_manual_capability_overrides, canonical_selection_id,
+    conservative_openrouter_context_window, conservative_openrouter_max_output_ceiling,
+    dedupe_and_sort_models, is_built_in_compatibility_instance, is_exact_built_in_slug,
+    project_openai_capabilities, project_openrouter_capabilities,
 };
 pub use publish::{
     AccountRefreshOutcome, CatalogPublisher, CatalogSnapshot, GatedCatalogProjection,

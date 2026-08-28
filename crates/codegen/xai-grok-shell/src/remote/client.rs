@@ -988,6 +988,26 @@ pub fn parse_remote_model_value(
             "video",
             &["supportsVideoInput", "supports_video_input"],
         ),
+        supports_file_input: parse_input_modality_capability(
+            obj,
+            meta,
+            "file",
+            &["supportsFileInput", "supports_file_input"],
+        ),
+        output_has_text: obj
+            .get("outputHasText")
+            .or_else(|| obj.get("output_has_text"))
+            .or_else(|| meta.and_then(|m| m.get("outputHasText")))
+            .and_then(|v| v.as_bool()),
+        supports_zdr: obj
+            .get("supportsZdr")
+            .or_else(|| obj.get("supports_zdr"))
+            .or_else(|| meta.and_then(|m| m.get("supportsZdr")))
+            .and_then(|v| v.as_bool()),
+        max_output_ceiling: get_u64(obj, "maxOutputTokens")
+            .or_else(|| get_u64(obj, "max_output_ceiling"))
+            .or_else(|| meta.and_then(|m| get_u64(m, "maxOutputTokens")))
+            .and_then(|v| u32::try_from(v).ok()),
         execution_backend: parse_remote_execution_backend(obj, meta),
         reasoning_effort_selection,
     })

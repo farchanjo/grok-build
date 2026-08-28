@@ -46,6 +46,7 @@ pub(crate) fn ctx_with_toggle(toggle: HashMap<String, bool>) -> SubagentSpawnCon
             base_url: String::new(),
             model: String::new(),
             max_completion_tokens: None,
+            max_output_ceiling: None,
             temperature: None,
             top_p: None,
             openrouter_fallback_models: Vec::new(),

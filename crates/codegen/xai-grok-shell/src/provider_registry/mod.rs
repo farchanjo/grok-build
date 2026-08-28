@@ -76,9 +76,12 @@ pub use route_guard::{
     assert_route_usable,
 };
 pub use secrets::{
-    ProviderCredentialKind, ProviderOAuthBinding, ProviderSecretScope, admin_key_scope,
-    application_key_scope, clear_provider_secret, is_allowed_oauth_scope, oauth_scope_string,
-    parse_secret_scope, read_provider_secret, store_provider_secret,
+    ProviderCredentialKind, ProviderOAuthBinding, ProviderSecretNamespace, ProviderSecretScope,
+    admin_key_scope, admin_key_scope_for_kind, application_key_scope,
+    application_key_scope_for_kind, clear_configured_instance_secrets, clear_provider_secret,
+    extra_openrouter_admin_key_scope, extra_openrouter_application_key_scope,
+    is_allowed_oauth_scope, is_extra_openrouter_instance, oauth_scope_string, parse_secret_scope,
+    read_provider_secret, store_provider_secret,
 };
 pub use service::{ProviderService, ProviderServiceError};
 pub use toml_edit::{

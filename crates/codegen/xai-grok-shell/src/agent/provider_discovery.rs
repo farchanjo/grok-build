@@ -95,6 +95,10 @@ pub async fn discover_provider_models(
                 &token,
                 &identity,
                 &provider.capabilities,
+                provider
+                    .provider_preferences
+                    .as_ref()
+                    .and_then(|prefs| prefs.zdr),
                 bounds,
                 0,
                 0,
@@ -197,6 +201,7 @@ pub async fn discover_with_identity(
                 credential.token(),
                 identity,
                 manual_capabilities,
+                None,
                 bounds,
                 registry_generation,
                 publication_generation,
@@ -445,6 +450,11 @@ pub fn refresh_target_from_config(
         bounds: CatalogFetchBounds::default().with_request_timeout(std::time::Duration::from_secs(
             provider.request_timeout_secs.unwrap_or(30),
         )),
+        zdr: provider
+            .provider_preferences
+            .as_ref()
+            .and_then(|prefs| prefs.zdr)
+            .filter(|_| kind == ProviderKind::OpenRouter),
     })
 }
 

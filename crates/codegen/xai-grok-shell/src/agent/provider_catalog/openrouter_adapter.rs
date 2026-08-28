@@ -16,7 +16,10 @@ use super::http_body::{effective_request_timeout, read_body_bounded, send_cancel
 use super::origin::{
     enforce_same_origin, list_path_of, validate_list_url_origin, validate_models_next_url,
 };
-use super::project::{dedupe_and_sort_models, openrouter_discovered_model};
+use super::project::{
+    conservative_openrouter_context_window, conservative_openrouter_max_output_ceiling,
+    dedupe_and_sort_models, openrouter_discovered_model,
+};
 use super::types::{
     CatalogAccountIdentity, CatalogAdapterError, CatalogFetchSource, CatalogTruncationReason,
     DiscoveredModel, InstanceCatalogResult,
@@ -24,6 +27,7 @@ use super::types::{
 use indexmap::IndexMap;
 use serde::Deserialize;
 use serde_json::Value;
+use std::collections::HashSet;
 use tokio_util::sync::CancellationToken;
 
 #[derive(Debug, Deserialize)]
@@ -63,18 +67,36 @@ struct OpenRouterModelRow {
     reasoning_effort_options: Option<Vec<String>>,
     #[serde(default)]
     reasoning: Option<OpenRouterReasoningMetadata>,
+    #[serde(default)]
+    per_request_limits: Option<OpenRouterPerRequestLimits>,
 }
 
 #[derive(Debug, Deserialize)]
 struct OpenRouterTopProvider {
     #[serde(default)]
+    context_length: Option<u64>,
+    #[serde(default)]
     max_completion_tokens: Option<u64>,
+    #[serde(default)]
+    #[allow(dead_code)]
+    is_moderated: Option<bool>,
 }
 
 #[derive(Debug, Default, Deserialize)]
 struct OpenRouterArchitecture {
     #[serde(default)]
     input_modalities: Vec<String>,
+    #[serde(default)]
+    output_modalities: Vec<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct OpenRouterPerRequestLimits {
+    #[serde(default)]
+    #[allow(dead_code)]
+    prompt_tokens: Option<Value>,
+    #[serde(default)]
+    completion_tokens: Option<Value>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -85,6 +107,9 @@ struct OpenRouterReasoningMetadata {
     default_effort: Option<String>,
     #[serde(default)]
     mandatory: bool,
+    #[serde(default)]
+    #[allow(dead_code)]
+    supports_max_tokens: Option<bool>,
 }
 
 #[derive(Debug, Default)]
@@ -242,20 +267,34 @@ pub async fn fetch_openrouter_bounded_list_body(
 }
 
 /// Live fetch for one OpenRouter account with provider-specific pagination.
+///
+/// When `zdr` is `Some(true)`, this instance fetches `GET /models?zdr=true`
+/// (that instance only) and stamps `supports_zdr` on every retained row.
+/// When `zdr` is false/unset the full list is fetched. In both cases a
+/// best-effort `GET /endpoints/zdr` hop tags (or optionally intersects)
+/// ZDR-capable slugs. Failure of the optional endpoints hop never fails
+/// the models catalog.
 pub async fn fetch_openrouter_catalog(
     models_url: &str,
     bearer_token: &str,
     identity: &CatalogAccountIdentity,
     manual_capabilities: &IndexMap<String, bool>,
+    zdr: Option<bool>,
     bounds: CatalogFetchBounds,
     registry_generation: u64,
     publication_generation: u64,
     cancel: &CancellationToken,
 ) -> Result<InstanceCatalogResult, CatalogAdapterError> {
+    let zdr_filtered = zdr == Some(true);
+    let list_url = if zdr_filtered {
+        with_zdr_query(models_url)?
+    } else {
+        models_url.to_owned()
+    };
     // Reuse the bounded body fetch so pagination/bounds stay single-sourced,
     // then project through the adapter's typed path for multi-account catalog.
     let body = fetch_openrouter_bounded_list_body(
-        models_url,
+        &list_url,
         bearer_token,
         &identity.endpoint_origin,
         bounds,
@@ -263,7 +302,15 @@ pub async fn fetch_openrouter_catalog(
     )
     .await?;
     let page = parse_openrouter_page(&body)?;
-    let models = dedupe_and_sort_models(project_page(&page, identity, manual_capabilities));
+    let zdr_slugs =
+        fetch_zdr_endpoint_slugs(&list_url, bearer_token, identity, bounds, cancel).await;
+    let models = dedupe_and_sort_models(project_page(
+        &page,
+        identity,
+        manual_capabilities,
+        &zdr_slugs,
+        zdr_filtered,
+    ));
     Ok(InstanceCatalogResult {
         provider_instance_id: identity.instance_id.as_str().to_owned(),
         provider_kind: identity.kind,
@@ -287,37 +334,170 @@ fn project_page(
     page: &OpenRouterPage,
     identity: &CatalogAccountIdentity,
     manual: &IndexMap<String, bool>,
+    zdr_slugs: &HashSet<String>,
+    zdr_filtered: bool,
 ) -> Vec<DiscoveredModel> {
     page.data
         .iter()
         .filter_map(|row| {
+            let upstream = row.id.trim();
+            if zdr_filtered && !zdr_slugs.is_empty() && !zdr_slugs.contains(upstream) {
+                // Optional intersection with GET /endpoints/zdr when both
+                // lists are available. An empty/failed endpoints hop keeps
+                // the ?zdr=true models list intact.
+                return None;
+            }
             let (efforts, default_effort, supports_reasoning) = effort_metadata(row);
-            let modalities = row
-                .architecture
-                .as_ref()
+            let architecture = row.architecture.as_ref();
+            let input_modalities = architecture
                 .map(|a| a.input_modalities.as_slice())
                 .unwrap_or(&[]);
-            let max_tokens = row
+            let output_modalities = architecture
+                .map(|a| a.output_modalities.as_slice())
+                .unwrap_or(&[]);
+            let routed_window = row.top_provider.as_ref().and_then(|t| t.context_length);
+            let top_max = row
                 .top_provider
                 .as_ref()
-                .and_then(|t| t.max_completion_tokens)
-                .and_then(|n| u32::try_from(n).ok());
+                .and_then(|t| t.max_completion_tokens);
+            let per_request_max = row
+                .per_request_limits
+                .as_ref()
+                .and_then(|l| positive_token_count(l.completion_tokens.as_ref()));
+            let ceiling = conservative_openrouter_max_output_ceiling(top_max, per_request_max);
+            let supports_zdr = if zdr_filtered {
+                Some(true)
+            } else if zdr_slugs.contains(upstream) {
+                Some(true)
+            } else {
+                None
+            };
             openrouter_discovered_model(
                 identity,
                 &row.id,
                 row.name.clone(),
                 row.description.clone(),
-                row.context_length,
-                max_tokens,
+                conservative_openrouter_context_window(row.context_length, routed_window),
+                ceiling,
                 &row.supported_parameters,
-                modalities,
+                input_modalities,
+                output_modalities,
                 efforts,
                 default_effort,
                 supports_reasoning,
+                supports_zdr,
                 manual,
             )
         })
         .collect()
+}
+
+fn positive_token_count(value: Option<&Value>) -> Option<u64> {
+    let value = value?;
+    match value {
+        Value::Number(n) => n
+            .as_u64()
+            .or_else(|| n.as_f64().and_then(positive_f64_tokens)),
+        Value::String(s) => s.trim().parse().ok().filter(|n| *n > 0),
+        _ => None,
+    }
+}
+
+fn positive_f64_tokens(n: f64) -> Option<u64> {
+    if n.is_finite() && n > 0.0 && n <= u64::MAX as f64 {
+        Some(n as u64)
+    } else {
+        None
+    }
+}
+
+fn with_zdr_query(models_url: &str) -> Result<String, CatalogAdapterError> {
+    let mut url =
+        reqwest::Url::parse(models_url).map_err(|_| CatalogAdapterError::InvalidOrigin {
+            detail: "models list URL is not absolute".into(),
+        })?;
+    let already = url
+        .query_pairs()
+        .any(|(k, v)| k.eq_ignore_ascii_case("zdr") && v.eq_ignore_ascii_case("true"));
+    if !already {
+        url.query_pairs_mut().append_pair("zdr", "true");
+    }
+    Ok(url.to_string())
+}
+
+fn endpoints_zdr_url(models_url: &str) -> Result<String, CatalogAdapterError> {
+    let mut url =
+        reqwest::Url::parse(models_url).map_err(|_| CatalogAdapterError::InvalidOrigin {
+            detail: "models list URL is not absolute".into(),
+        })?;
+    let path = url.path().trim_end_matches('/');
+    let Some(prefix) = path.strip_suffix("/models") else {
+        return Err(CatalogAdapterError::InvalidOrigin {
+            detail: "cannot derive /endpoints/zdr from models list path".into(),
+        });
+    };
+    url.set_path(&format!("{prefix}/endpoints/zdr"));
+    url.set_query(None);
+    Ok(url.to_string())
+}
+
+fn parse_zdr_endpoint_slugs(body: &[u8]) -> HashSet<String> {
+    let Ok(value) = serde_json::from_slice::<Value>(body) else {
+        return HashSet::new();
+    };
+    let Some(data) = value.get("data").and_then(|d| d.as_array()) else {
+        return HashSet::new();
+    };
+    data.iter()
+        .filter_map(|item| {
+            item.get("model_id")
+                .or_else(|| item.get("id"))
+                .and_then(|v| v.as_str())
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_owned)
+        })
+        .collect()
+}
+
+async fn fetch_zdr_endpoint_slugs(
+    models_url: &str,
+    bearer_token: &str,
+    identity: &CatalogAccountIdentity,
+    bounds: CatalogFetchBounds,
+    cancel: &CancellationToken,
+) -> HashSet<String> {
+    if cancel.is_cancelled() {
+        return HashSet::new();
+    }
+    let Ok(url) = endpoints_zdr_url(models_url) else {
+        return HashSet::new();
+    };
+    if super::origin::enforce_same_origin(&url, &identity.endpoint_origin).is_err() {
+        return HashSet::new();
+    }
+    let Ok(client) = reqwest::Client::builder()
+        .timeout(bounds.request_timeout)
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+    else {
+        return HashSet::new();
+    };
+    let mut budget = CatalogFetchBudget::new(bounds);
+    let request = client
+        .get(&url)
+        .timeout(effective_request_timeout(&budget))
+        .bearer_auth(bearer_token.trim());
+    let Ok(response) = send_cancellable(request, cancel, &budget).await else {
+        return HashSet::new();
+    };
+    if !response.status().is_success() {
+        return HashSet::new();
+    }
+    let Ok(bytes) = read_body_bounded(response, &mut budget, cancel).await else {
+        return HashSet::new();
+    };
+    parse_zdr_endpoint_slugs(&bytes)
 }
 
 fn effort_metadata(model: &OpenRouterModelRow) -> (Vec<String>, Option<String>, bool) {
@@ -465,9 +645,23 @@ pub fn parse_openrouter_models_body(
     identity: &CatalogAccountIdentity,
     manual: &IndexMap<String, bool>,
 ) -> Result<Vec<DiscoveredModel>, CatalogAdapterError> {
+    parse_openrouter_models_body_with_zdr(body, identity, manual, &HashSet::new(), false)
+}
+
+fn parse_openrouter_models_body_with_zdr(
+    body: &[u8],
+    identity: &CatalogAccountIdentity,
+    manual: &IndexMap<String, bool>,
+    zdr_slugs: &HashSet<String>,
+    zdr_filtered: bool,
+) -> Result<Vec<DiscoveredModel>, CatalogAdapterError> {
     let page = parse_openrouter_page(body)?;
     Ok(dedupe_and_sort_models(project_page(
-        &page, identity, manual,
+        &page,
+        identity,
+        manual,
+        zdr_slugs,
+        zdr_filtered,
     )))
 }
 
@@ -511,7 +705,148 @@ mod tests {
         let models = parse_openrouter_models_body(body, &id(), &IndexMap::new()).unwrap();
         assert_eq!(models.len(), 1);
         assert_eq!(models[0].canonical_selection_id, "openrouter:acme/reasoner");
+        assert_eq!(models[0].context_window, Some(262144));
+        assert_eq!(models[0].max_completion_tokens, None);
+        assert_eq!(models[0].max_output_ceiling, Some(8192));
+        assert_eq!(models[0].capabilities.max_output_ceiling, Some(8192));
+        assert_eq!(models[0].capabilities.supports_tools, Some(true));
+        assert_eq!(models[0].capabilities.supports_image_input, Some(true));
         assert_eq!(models[0].capabilities.supports_embeddings, None);
+    }
+
+    #[test]
+    fn prefers_smaller_routed_provider_context_window() {
+        let body = br#"{
+          "data": [
+            {
+              "id": "z-ai/glm-5.3-flash",
+              "name": "Z.ai: GLM 5.3 Flash",
+              "context_length": 1310720,
+              "top_provider": {
+                "context_length": 1048576,
+                "max_completion_tokens": 131072
+              }
+            }
+          ]
+        }"#;
+        let models = parse_openrouter_models_body(body, &id(), &IndexMap::new()).unwrap();
+        assert_eq!(models[0].context_window, Some(1_048_576));
+        assert_eq!(models[0].max_completion_tokens, None);
+        assert_eq!(models[0].max_output_ceiling, Some(131072));
+    }
+
+    #[test]
+    fn ceiling_is_min_of_top_provider_and_per_request_limits() {
+        let body = br#"{
+          "data": [
+            {
+              "id": "acme/capped",
+              "context_length": 262144,
+              "top_provider": { "max_completion_tokens": 131072 },
+              "per_request_limits": { "prompt_tokens": 200000, "completion_tokens": 8192 }
+            }
+          ]
+        }"#;
+        let models = parse_openrouter_models_body(body, &id(), &IndexMap::new()).unwrap();
+        assert_eq!(models[0].context_window, Some(262144));
+        assert_eq!(models[0].max_completion_tokens, None);
+        assert_eq!(models[0].max_output_ceiling, Some(8192));
+    }
+
+    #[test]
+    fn does_not_invent_window_or_ceiling_when_absent() {
+        let body = br#"{
+          "data": [{ "id": "acme/unknown", "supported_parameters": [] }]
+        }"#;
+        let models = parse_openrouter_models_body(body, &id(), &IndexMap::new()).unwrap();
+        assert_eq!(models[0].context_window, None);
+        assert_eq!(models[0].max_completion_tokens, None);
+        assert_eq!(models[0].max_output_ceiling, None);
+    }
+
+    #[test]
+    fn projects_modalities_native_schema_and_never_guesses_embeddings() {
+        let body = br#"{
+          "data": [
+            {
+              "id": "acme/multimodal",
+              "architecture": {
+                "input_modalities": ["text", "image", "file", "audio", "video"],
+                "output_modalities": ["text", "embeddings"]
+              },
+              "supported_parameters": ["tools", "tool_choice", "structured_outputs", "response_format"]
+            }
+          ]
+        }"#;
+        let models = parse_openrouter_models_body(body, &id(), &IndexMap::new()).unwrap();
+        let caps = &models[0].capabilities;
+        assert_eq!(caps.supports_tools, Some(true));
+        assert_eq!(caps.supports_image_input, Some(true));
+        assert_eq!(caps.supports_file_input, Some(true));
+        assert_eq!(caps.supports_audio_input, Some(true));
+        assert_eq!(caps.supports_video_input, Some(true));
+        assert_eq!(caps.output_has_text, Some(true));
+        assert_eq!(caps.supports_native_schema, Some(true));
+        assert_eq!(caps.supports_embeddings, None);
+        assert_eq!(caps.supports_rerank, None);
+    }
+
+    #[test]
+    fn tags_supports_zdr_from_endpoint_list_without_filtering_full_catalog() {
+        let body = br#"{
+          "data": [
+            { "id": "acme/zdr" },
+            { "id": "acme/open" }
+          ]
+        }"#;
+        let zdr = HashSet::from(["acme/zdr".to_owned()]);
+        let models =
+            parse_openrouter_models_body_with_zdr(body, &id(), &IndexMap::new(), &zdr, false)
+                .unwrap();
+        assert_eq!(models.len(), 2);
+        let by_id: std::collections::HashMap<_, _> = models
+            .iter()
+            .map(|m| (m.upstream_model_id.as_str(), m))
+            .collect();
+        assert_eq!(by_id["acme/zdr"].capabilities.supports_zdr, Some(true));
+        assert_eq!(by_id["acme/open"].capabilities.supports_zdr, None);
+    }
+
+    #[test]
+    fn zdr_filtered_list_intersects_endpoint_slugs_when_present() {
+        let body = br#"{
+          "data": [
+            { "id": "acme/zdr" },
+            { "id": "acme/other" }
+          ]
+        }"#;
+        let zdr = HashSet::from(["acme/zdr".to_owned()]);
+        let models =
+            parse_openrouter_models_body_with_zdr(body, &id(), &IndexMap::new(), &zdr, true)
+                .unwrap();
+        assert_eq!(models.len(), 1);
+        assert_eq!(models[0].upstream_model_id, "acme/zdr");
+        assert_eq!(models[0].capabilities.supports_zdr, Some(true));
+    }
+
+    #[test]
+    fn with_zdr_query_appends_true_once() {
+        let url = with_zdr_query("https://openrouter.ai/api/v1/models").unwrap();
+        assert!(url.contains("zdr=true"));
+        let again = with_zdr_query(&url).unwrap();
+        assert_eq!(again.matches("zdr=true").count(), 1);
+    }
+
+    #[test]
+    fn endpoints_zdr_url_replaces_models_path() {
+        assert_eq!(
+            endpoints_zdr_url("https://openrouter.ai/api/v1/models").unwrap(),
+            "https://openrouter.ai/api/v1/endpoints/zdr"
+        );
+        assert_eq!(
+            endpoints_zdr_url("http://127.0.0.1:9/models").unwrap(),
+            "http://127.0.0.1:9/endpoints/zdr"
+        );
     }
 
     #[test]

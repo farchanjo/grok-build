@@ -173,10 +173,27 @@ pub struct ResolvedModelProvider {
     /// override replaces the provider-level value; absent override inherits.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub openrouter_pacing: bool,
+    /// Provider-wide request `max_tokens` used when a model does not set
+    /// [`super::config::ConfigModelOverride::max_completion_tokens`].
+    /// OpenRouter (`kind = "openrouter"`) treats an unset value as
+    /// [`OPENROUTER_DEFAULT_MAX_COMPLETION_TOKENS`]. Other kinds leave the
+    /// request unset unless this is explicit. Never copied onto
+    /// `ModelInfo.max_completion_tokens`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_completion_tokens: Option<u32>,
     /// Unused; retained for forward-compatible TOML round-trips only.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub command: Vec<String>,
 }
+
+/// Default OpenRouter request `max_tokens` when the model, provider, and
+/// catalog ceiling are all unset. When the catalog advertises a ceiling, that
+/// value is used instead (and still clamped).
+///
+/// Every sampler path that resolves a request max inherits this one value,
+/// including compaction: a compaction call is built from the resolved route
+/// config, so it never needs its own budget constant.
+pub const OPENROUTER_DEFAULT_MAX_COMPLETION_TOKENS: u32 = 16_384;
 
 #[derive(Clone, Debug, serde::Deserialize)]
 #[serde(default)]
@@ -238,6 +255,10 @@ pub struct ModelProviderConfig {
     /// override replaces this value for that model.
     #[serde(default)]
     pub openrouter_pacing: bool,
+    /// Provider-wide default request `max_tokens`. Absent OpenRouter
+    /// instances use [`OPENROUTER_DEFAULT_MAX_COMPLETION_TOKENS`].
+    #[serde(default)]
+    pub max_completion_tokens: Option<u32>,
     pub extra_headers: IndexMap<String, String>,
     pub auth_provider: Option<String>,
     pub auth: Option<crate::auth::AuthProviderConfig>,
@@ -274,6 +295,7 @@ impl Default for ModelProviderConfig {
             provider_preferences: None,
             plugins: Vec::new(),
             openrouter_pacing: false,
+            max_completion_tokens: None,
             extra_headers: IndexMap::new(),
             auth_provider: None,
             auth: None,
@@ -315,8 +337,28 @@ impl ModelProviderConfig {
             // need an explicit way to enable spacing without claiming native
             // OpenRouter request extensions.
             openrouter_pacing,
+            max_completion_tokens: self.max_completion_tokens.filter(|&n| n > 0),
             command: self.command.clone(),
         }
+    }
+}
+
+impl ResolvedModelProvider {
+    /// Request budget when the model row has no `max_completion_tokens`.
+    ///
+    /// Order: explicit provider TOML > OpenRouter catalog ceiling >
+    /// [`OPENROUTER_DEFAULT_MAX_COMPLETION_TOKENS`] (16384) for
+    /// `kind = "openrouter"`. Other kinds stay unset unless the provider set
+    /// an explicit positive value. The catalog ceiling is a capability cap
+    /// and a fill-in; it is never stored on `ModelInfo.max_completion_tokens`.
+    pub fn request_max_completion_tokens(&self, catalog_ceiling: Option<u32>) -> Option<u32> {
+        self.max_completion_tokens
+            .filter(|&n| n > 0)
+            .or_else(|| catalog_ceiling.filter(|&n| n > 0))
+            .or_else(|| {
+                (self.kind == ModelProviderKind::OpenRouter)
+                    .then_some(OPENROUTER_DEFAULT_MAX_COMPLETION_TOKENS)
+            })
     }
 }
 
@@ -588,7 +630,7 @@ impl ConfigModelOverride {
             kind: _,
             api_surface: _,
             credential_route: _,
-            display_name: _,
+            display_name,
             base_url,
             api_base_url,
             admin_base_url: _,
@@ -610,6 +652,7 @@ impl ConfigModelOverride {
             provider_preferences,
             plugins,
             openrouter_pacing,
+            max_completion_tokens: _,
             extra_headers,
             auth_provider,
             auth,
@@ -647,6 +690,9 @@ impl ConfigModelOverride {
             effective_plugins,
             effective_openrouter_pacing,
         ));
+        if merged.provider_display_name.is_none() {
+            merged.provider_display_name = display_name.clone();
+        }
         merged.base_url = merged.base_url.or_else(|| base_url.clone());
         merged.api_base_url = merged.api_base_url.or_else(|| api_base_url.clone());
         merged.api_backend = merged.api_backend.or_else(|| api_backend.clone());
@@ -1988,6 +2034,184 @@ mod tests {
             provider.openrouter_plugins.is_empty(),
             "non-OpenRouter providers must never carry plugins"
         );
+    }
+
+    #[test]
+    fn openrouter_provider_defaults_max_completion_tokens_to_16k() {
+        use super::OPENROUTER_DEFAULT_MAX_COMPLETION_TOKENS;
+        let raw_config: toml::Value = toml::from_str(
+            r#"
+            [model_providers.zdr]
+            kind = "openrouter"
+            base_url = "https://openrouter.ai/api/v1"
+
+            [model."zdr:acme/reasoner"]
+            model = "acme/reasoner"
+            model_provider = "zdr"
+            "#,
+        )
+        .unwrap();
+        let cfg = Config::new_from_toml_cfg(&raw_config).expect("config should parse");
+        let resolved = resolve_model_list(&cfg, None);
+        let model = &resolved["zdr:acme/reasoner"];
+        assert_eq!(
+            model.info.max_completion_tokens, None,
+            "provider default must not reserve context via ModelInfo"
+        );
+        let sampling = inference_config_for_model(
+            model,
+            resolve_credentials(model, None),
+            None,
+            None,
+            None,
+            None,
+        );
+        assert_eq!(
+            sampling.max_completion_tokens,
+            Some(OPENROUTER_DEFAULT_MAX_COMPLETION_TOKENS)
+        );
+        assert_eq!(sampling.max_output_ceiling, None);
+    }
+
+    #[test]
+    fn openrouter_uses_catalog_ceiling_when_provider_max_is_unset() {
+        let raw_config: toml::Value = toml::from_str(
+            r#"
+            [model_providers.zdr]
+            kind = "openrouter"
+            base_url = "https://openrouter.ai/api/v1"
+
+            [model."zdr:z-ai/glm-5.3-flash"]
+            model = "z-ai/glm-5.3-flash"
+            model_provider = "zdr"
+            max_output_ceiling = 131072
+            "#,
+        )
+        .unwrap();
+        let cfg = Config::new_from_toml_cfg(&raw_config).expect("config should parse");
+        let resolved = resolve_model_list(&cfg, None);
+        let model = &resolved["zdr:z-ai/glm-5.3-flash"];
+        assert_eq!(model.info.max_completion_tokens, None);
+        assert_eq!(model.info.max_output_ceiling, Some(131_072));
+        let sampling = inference_config_for_model(
+            model,
+            resolve_credentials(model, None),
+            None,
+            None,
+            None,
+            None,
+        );
+        assert_eq!(
+            sampling.max_completion_tokens,
+            Some(131_072),
+            "catalog ceiling must become the request max when nothing is set"
+        );
+    }
+
+    #[test]
+    fn openrouter_provider_max_completion_tokens_is_configurable() {
+        let raw_config: toml::Value = toml::from_str(
+            r#"
+            [model_providers.zdr]
+            kind = "openrouter"
+            base_url = "https://openrouter.ai/api/v1"
+            max_completion_tokens = 4096
+
+            [model."zdr:acme/reasoner"]
+            model = "acme/reasoner"
+            model_provider = "zdr"
+            "#,
+        )
+        .unwrap();
+        let cfg = Config::new_from_toml_cfg(&raw_config).expect("config should parse");
+        let resolved = resolve_model_list(&cfg, None);
+        let model = &resolved["zdr:acme/reasoner"];
+        assert_eq!(
+            model
+                .model_provider
+                .as_ref()
+                .and_then(|p| p.max_completion_tokens),
+            Some(4096)
+        );
+        let sampling = inference_config_for_model(
+            model,
+            resolve_credentials(model, None),
+            None,
+            None,
+            None,
+            None,
+        );
+        assert_eq!(sampling.max_completion_tokens, Some(4096));
+    }
+
+    #[test]
+    fn model_max_completion_tokens_wins_over_openrouter_provider_default() {
+        let raw_config: toml::Value = toml::from_str(
+            r#"
+            [model_providers.zdr]
+            kind = "openrouter"
+            max_completion_tokens = 8192
+
+            [model."zdr:acme/reasoner"]
+            model = "acme/reasoner"
+            model_provider = "zdr"
+            max_completion_tokens = 2048
+            "#,
+        )
+        .unwrap();
+        let cfg = Config::new_from_toml_cfg(&raw_config).expect("config should parse");
+        let resolved = resolve_model_list(&cfg, None);
+        let model = &resolved["zdr:acme/reasoner"];
+        assert_eq!(model.info.max_completion_tokens, Some(2048));
+        let sampling = inference_config_for_model(
+            model,
+            resolve_credentials(model, None),
+            None,
+            None,
+            None,
+            None,
+        );
+        assert_eq!(sampling.max_completion_tokens, Some(2048));
+    }
+
+    #[test]
+    fn xai_and_openai_compatible_do_not_inherit_openrouter_16k_default() {
+        let raw_config: toml::Value = toml::from_str(
+            r#"
+            [model_providers.xai]
+            kind = "xai"
+
+            [model_providers.lab]
+            kind = "openai_compatible"
+            base_url = "http://127.0.0.1:8000/v1"
+
+            [model.grok-local]
+            model = "grok-4.5"
+            model_provider = "xai"
+
+            [model.lab-model]
+            model = "local-model"
+            model_provider = "lab"
+            "#,
+        )
+        .unwrap();
+        let cfg = Config::new_from_toml_cfg(&raw_config).expect("config should parse");
+        let resolved = resolve_model_list(&cfg, None);
+        for key in ["grok-local", "lab-model"] {
+            let model = &resolved[key];
+            let sampling = inference_config_for_model(
+                model,
+                resolve_credentials(model, None),
+                None,
+                None,
+                None,
+                None,
+            );
+            assert_eq!(
+                sampling.max_completion_tokens, None,
+                "{key} must not receive the OpenRouter 16k default"
+            );
+        }
     }
 
     #[test]

@@ -1105,6 +1105,7 @@ async fn read_parent_inference_config(
                     base_url: cfg.base_url.clone(),
                     model: cfg.model.clone(),
                     max_completion_tokens: cfg.max_completion_tokens,
+                    max_output_ceiling: ctx.inference_config.max_output_ceiling,
                     temperature: cfg.temperature,
                     top_p: cfg.top_p,
                     openrouter_fallback_models: ctx

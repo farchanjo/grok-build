@@ -2,10 +2,12 @@
 
 use crate::agent::providers::{ProviderId as BuiltInProviderId, ProviderManager};
 use crate::provider_registry::id::{ProviderId, ProviderRef};
+use crate::provider_registry::instance::ProviderKind;
 use crate::provider_registry::remove_all_provider_caches;
 use crate::provider_registry::secrets::{
-    ProviderCredentialKind, admin_key_scope, application_key_scope, clear_provider_secret,
-    store_provider_secret,
+    ProviderCredentialKind, admin_key_scope_for_kind, application_key_scope_for_kind,
+    clear_configured_instance_secrets, clear_provider_secret, extra_openrouter_admin_key_scope,
+    extra_openrouter_application_key_scope, store_provider_secret,
 };
 use clap::{Parser, Subcommand};
 use serde_json::json;
@@ -150,6 +152,13 @@ fn config_path(explicit: Option<PathBuf>) -> PathBuf {
 
 fn grok_home() -> PathBuf {
     xai_grok_config::grok_home()
+}
+
+fn configured_instance_kind(home: &std::path::Path, id: &str) -> Option<ProviderKind> {
+    crate::provider_registry::ProviderManagementService::new(home)
+        .detail(id)
+        .ok()
+        .and_then(|d| ProviderKind::parse(&d.kind))
 }
 
 /// Run the provider lifecycle CLI. Returns process exit code.
@@ -368,8 +377,7 @@ async fn run_inner(args: ProviderLifecycleArgs) -> Result<i32, String> {
                     // Only after successful metadata remove (same as force path ordering).
                     if let Ok(pid) = ProviderId::new(&id) {
                         if remove_secrets {
-                            let _ = clear_provider_secret(svc.home(), &application_key_scope(&pid));
-                            let _ = clear_provider_secret(svc.home(), &admin_key_scope(&pid));
+                            clear_configured_instance_secrets(svc.home(), &pid);
                         }
                         if remove_caches {
                             let _ = remove_all_provider_caches(svc.home(), &pid);
@@ -446,8 +454,17 @@ async fn run_inner(args: ProviderLifecycleArgs) -> Result<i32, String> {
                 return Ok(0);
             }
             let pid = ProviderId::new(&id).map_err(|e| e.to_string())?;
-            clear_provider_secret(&grok_home(), &application_key_scope(&pid))
-                .map_err(|e| e.to_string())?;
+            let home = grok_home();
+            if let Some(kind) = configured_instance_kind(&home, &id) {
+                clear_provider_secret(&home, &application_key_scope_for_kind(&pid, kind))
+                    .map_err(|e| e.to_string())?;
+            } else {
+                let _ = clear_provider_secret(
+                    &home,
+                    &crate::provider_registry::secrets::application_key_scope(&pid),
+                );
+                let _ = clear_provider_secret(&home, &extra_openrouter_application_key_scope(&pid));
+            }
             Ok(0)
         }
         SetAdminKey {
@@ -460,8 +477,17 @@ async fn run_inner(args: ProviderLifecycleArgs) -> Result<i32, String> {
         }
         ClearAdminKey { id } => {
             let pid = ProviderId::new(&id).map_err(|e| e.to_string())?;
-            clear_provider_secret(&grok_home(), &admin_key_scope(&pid))
-                .map_err(|e| e.to_string())?;
+            let home = grok_home();
+            if let Some(kind) = configured_instance_kind(&home, &id) {
+                clear_provider_secret(&home, &admin_key_scope_for_kind(&pid, kind))
+                    .map_err(|e| e.to_string())?;
+            } else {
+                let _ = clear_provider_secret(
+                    &home,
+                    &crate::provider_registry::secrets::admin_key_scope(&pid),
+                );
+                let _ = clear_provider_secret(&home, &extra_openrouter_admin_key_scope(&pid));
+            }
             Ok(0)
         }
         Capabilities { id, json: _ } => {
@@ -555,11 +581,14 @@ fn set_secret(
     }
 
     let pid = ProviderId::new(id).map_err(|e| e.to_string())?;
+    let home = grok_home();
+    let instance_kind =
+        configured_instance_kind(&home, id).unwrap_or(ProviderKind::OpenAiCompatible);
     let scope = match kind {
-        ProviderCredentialKind::Application => application_key_scope(&pid),
-        ProviderCredentialKind::Admin => admin_key_scope(&pid),
+        ProviderCredentialKind::Application => application_key_scope_for_kind(&pid, instance_kind),
+        ProviderCredentialKind::Admin => admin_key_scope_for_kind(&pid, instance_kind),
     };
-    store_provider_secret(&grok_home(), &scope, secret.trim()).map_err(|e| e.to_string())?;
+    store_provider_secret(&home, &scope, secret.trim()).map_err(|e| e.to_string())?;
     // Never print the secret.
     crate::cli::output::write_json(&json!({
         "ok": true,

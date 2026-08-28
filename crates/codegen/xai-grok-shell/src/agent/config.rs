@@ -1118,6 +1118,11 @@ pub struct CompactionConfig {
     /// Default: 4. Validated range: 3..=8.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rolling_band_count: Option<usize>,
+    /// Let the compaction summarizer open artifacts (files, logs, transcript
+    /// segments) on a read-only allowlist before it writes the summary.
+    /// Default: true.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resolver_tools: Option<bool>,
 }
 
 impl CompactionConfig {
@@ -1163,6 +1168,7 @@ impl CompactionConfig {
             strategy,
             trigger_policy,
             rolling_band_count,
+            resolver_tools: self.resolver_tools.unwrap_or(true),
         })
     }
 }
@@ -1178,6 +1184,8 @@ pub struct ResolvedCompactionConfig {
     pub trigger_policy: CompactionTriggerPolicy,
     /// Rolling band count (validated 3..=8).
     pub rolling_band_count: usize,
+    /// Whether the summarizer may run read-only artifact lookups first.
+    pub resolver_tools: bool,
 }
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(default)]
@@ -4171,6 +4179,10 @@ fn default_models(endpoints: &EndpointsConfig) -> IndexMap<String, ModelEntryCon
                 supports_image_input: m.supports_image_input,
                 supports_audio_input: m.supports_audio_input,
                 supports_video_input: m.supports_video_input,
+                supports_file_input: None,
+                output_has_text: None,
+                supports_zdr: None,
+                max_output_ceiling: None,
                 compactions_remaining: m.compactions_remaining,
                 compaction_at_tokens: m.compaction_at_tokens,
                 show_model_fingerprint: m.show_model_fingerprint,
@@ -4320,6 +4332,20 @@ pub struct ModelEntryConfig {
     pub supports_audio_input: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub supports_video_input: Option<bool>,
+    /// File/document input advertised by the catalog. `None` means unknown.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supports_file_input: Option<bool>,
+    /// True when the catalog advertises a text output modality.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_has_text: Option<bool>,
+    /// OpenRouter zero-data-retention capability. Never inferred from xAI team ZDR.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supports_zdr: Option<bool>,
+    /// OpenRouter routed completion-token ceiling. Distinct from
+    /// [`Self::max_completion_tokens`]. The sampler clamps a request max to
+    /// this ceiling; it is never stored as a model-info request budget.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_output_ceiling: Option<u32>,
     /// How turns execute for this model. Defaults to native HTTP inference.
     /// Distinct from [`ApiBackend`] (wire protocol) and from provider kind.
     #[serde(
@@ -4437,6 +4463,16 @@ pub struct ConfigModelOverride {
     pub supports_image_input: Option<bool>,
     pub supports_audio_input: Option<bool>,
     pub supports_video_input: Option<bool>,
+    pub supports_file_input: Option<bool>,
+    pub output_has_text: Option<bool>,
+    pub supports_zdr: Option<bool>,
+    /// OpenRouter routed completion-token ceiling. Never merged into
+    /// `max_completion_tokens` (the user/model override). The sampler clamps
+    /// the request max to this ceiling.
+    pub max_output_ceiling: Option<u32>,
+    /// Human-readable provider-instance label inherited from
+    /// `[model_providers.<id>].display_name`.
+    pub provider_display_name: Option<String>,
     /// Normalized reasoning effort selection state (additive to legacy bool/list/default fields).
     /// - Unknown: no information available
     /// - Unsupported: model does not support reasoning effort
@@ -4583,6 +4619,24 @@ impl ConfigModelOverride {
         if let Some(v) = self.supports_video_input {
             entry.info.supports_video_input = Some(v);
         }
+        if let Some(v) = self.supports_file_input {
+            entry.info.supports_file_input = Some(v);
+        }
+        if let Some(v) = self.output_has_text {
+            entry.info.output_has_text = Some(v);
+        }
+        if let Some(v) = self.supports_zdr {
+            entry.info.supports_zdr = Some(v);
+        }
+        if self.max_output_ceiling.is_some() {
+            entry.info.max_output_ceiling = self.max_output_ceiling;
+        }
+        if self.provider_display_name.is_some() {
+            entry
+                .info
+                .provider_display_name
+                .clone_from(&self.provider_display_name);
+        }
         if let Some(backend) = self.execution_backend {
             entry.info.execution_backend = backend;
         }
@@ -4726,6 +4780,27 @@ pub struct ModelInfo {
     pub supports_audio_input: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub supports_video_input: Option<bool>,
+    /// File/document input advertised by the catalog. `None` means unknown.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supports_file_input: Option<bool>,
+    /// True when the catalog advertises a text output modality.
+    /// `Some(false)` means the model is not a text agent (image/audio-only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_has_text: Option<bool>,
+    /// OpenRouter zero-data-retention capability for this model row.
+    /// Never inferred from xAI team ZDR (`GrokAuth::is_zdr_team`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supports_zdr: Option<bool>,
+    /// Routed completion-token capability ceiling (OpenRouter
+    /// `top_provider.max_completion_tokens` / per-request limit min).
+    /// Distinct from [`Self::max_completion_tokens`]. Used only as a clamp.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_output_ceiling: Option<u32>,
+    /// Human-readable provider-instance label
+    /// (`[model_providers.<id>].display_name`). Used to qualify `/model`
+    /// rows when multiple OpenRouter accounts are enabled.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_display_name: Option<String>,
     /// How turns execute for this model. Defaults to native HTTP inference.
     /// Distinct from [`ApiBackend`] and provider identity.
     #[serde(
@@ -4776,6 +4851,11 @@ impl ModelInfo {
             supports_image_input: None,
             supports_audio_input: None,
             supports_video_input: None,
+            supports_file_input: None,
+            output_has_text: None,
+            supports_zdr: None,
+            max_output_ceiling: None,
+            provider_display_name: None,
             execution_backend: crate::agent::execution_backend::ExecutionBackend::NativeInference,
         }
     }
@@ -4822,6 +4902,11 @@ impl ModelInfo {
             supports_image_input: entry.supports_image_input,
             supports_audio_input: entry.supports_audio_input,
             supports_video_input: entry.supports_video_input,
+            supports_file_input: entry.supports_file_input,
+            output_has_text: entry.output_has_text,
+            supports_zdr: entry.supports_zdr,
+            max_output_ceiling: entry.max_output_ceiling,
+            provider_display_name: None,
             execution_backend: entry.execution_backend,
         }
     }
@@ -5082,12 +5167,13 @@ where
 }
 /// `[language]` section: opt-in dual-language sampling policy.
 ///
-/// When `conversation` is set, the shell injects a JSON Schema envelope and
-/// a durable `<language_policy>` prompt section. Artifact language defaults
-/// to `en-US` while the policy is active. `artifact_locked` is set by
-/// project/managed/requirements layers so session and user settings cannot
-/// override it. `validate_prose` is reserved for a follow-up markdown-aware
-/// check and is ignored in v1.
+/// When `conversation` is set, the shell injects a durable `<language_policy>`
+/// prompt section and advertises the language envelope as the
+/// `StructuredOutput` tool (never as native `response_format`, which would
+/// steal the tool-call channel). Artifact language defaults to `en-US` while
+/// the policy is active. `artifact_locked` is set by project/managed/requirements
+/// layers so session and user settings cannot override it. `validate_prose`
+/// is reserved for a follow-up markdown-aware check and is ignored in v1.
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default)]
 pub struct LanguageConfig {
@@ -5874,6 +5960,11 @@ pub fn resolve_aux_model_inference_config(
                 supports_image_input: None,
                 supports_audio_input: None,
                 supports_video_input: None,
+                supports_file_input: None,
+                output_has_text: None,
+                supports_zdr: None,
+                max_output_ceiling: None,
+                provider_display_name: None,
                 execution_backend:
                     crate::agent::execution_backend::ExecutionBackend::NativeInference,
             },
@@ -6042,7 +6133,13 @@ fn build_inference_config_for_model(
     model_name: String,
 ) -> InferenceConfig {
     let info = model.info();
-    let max_completion_tokens = info.max_completion_tokens;
+    let max_completion_tokens = info.max_completion_tokens.or_else(|| {
+        model
+            .model_provider
+            .as_ref()
+            .and_then(|provider| provider.request_max_completion_tokens(info.max_output_ceiling))
+    });
+    let max_output_ceiling = info.max_output_ceiling;
     let temperature = info.temperature;
     let top_p = info.top_p;
     let mut extra_headers = info.extra_headers.clone();
@@ -6135,6 +6232,7 @@ fn build_inference_config_for_model(
         model: model_name,
         base_url: credentials.base_url,
         max_completion_tokens,
+        max_output_ceiling,
         temperature,
         top_p,
         openrouter_fallback_models,
@@ -6276,6 +6374,11 @@ fn resolve_hidden_default_web_search_inference_config(
             supports_image_input: None,
             supports_audio_input: None,
             supports_video_input: None,
+            supports_file_input: None,
+            output_has_text: None,
+            supports_zdr: None,
+            max_output_ceiling: None,
+            provider_display_name: None,
             execution_backend: crate::agent::execution_backend::ExecutionBackend::NativeInference,
         },
         model_provider: None,
@@ -6347,6 +6450,11 @@ pub const META_UPSTREAM_MODEL_ID: &str = "upstreamModelId";
 pub const META_CANONICAL_SELECTION_ID: &str = "canonicalSelectionId";
 /// Catalog publication generation stamped on `SessionModelState._meta`.
 pub const META_CATALOG_GENERATION: &str = "catalogGeneration";
+pub const META_ACCOUNT_LABEL: &str = "accountLabel";
+pub const META_SUPPORTS_ZDR: &str = "supportsZdr";
+pub const META_MAX_OUTPUT_TOKENS: &str = "maxOutputTokens";
+pub const META_SUPPORTS_FILE_INPUT: &str = "supportsFileInput";
+pub const META_OUTPUT_HAS_TEXT: &str = "outputHasText";
 
 /// Secret-free provider instance id for a catalog entry.
 ///
@@ -6419,17 +6527,111 @@ pub fn bare_display_name_for_entry(model: &ModelEntry) -> String {
         .unwrap_or_else(|| info.model.clone())
 }
 
+/// Human-readable account label: provider `display_name` or instance id.
+pub fn account_label_for_entry(model: &ModelEntry) -> String {
+    model
+        .info()
+        .provider_display_name
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned)
+        .unwrap_or_else(|| provider_instance_id_for_entry(model))
+}
+
+/// True when this OpenRouter instance has `provider.zdr = true`.
+///
+/// xAI team ZDR (`GrokAuth::is_zdr_team`) is a different flag and is never
+/// consulted here.
+pub fn openrouter_instance_requires_zdr(model: &ModelEntry) -> bool {
+    model.model_provider.as_ref().is_some_and(|provider| {
+        provider.kind == crate::agent::model_providers::ModelProviderKind::OpenRouter
+            && provider
+                .openrouter_provider_preferences
+                .as_ref()
+                .and_then(|prefs| prefs.zdr)
+                == Some(true)
+    })
+}
+
+/// Hide non-ZDR rows for OpenRouter instances that have `provider.zdr = true`.
+///
+/// Filter is instance-local: other OpenRouter accounts and every
+/// xAI / ChatGPT / OpenAI / Anthropic row stay visible. Hidden rows stay in
+/// the full catalog so resume of a missing ZDR slug is missing (never
+/// remapped to a sibling or Grok).
+pub fn apply_openrouter_zdr_picker_filter(catalog: &mut IndexMap<String, ModelEntry>) {
+    for entry in catalog.values_mut() {
+        // Hide only rows the catalog proved are not ZDR. Unknown (legacy
+        // LKG / singleton projection) stays listed so `/model` is not empty
+        // before a native `?zdr=true` refresh stamps the flag.
+        if openrouter_instance_requires_zdr(entry) && entry.info.supports_zdr == Some(false) {
+            entry.info.user_selectable = false;
+            entry.info.hidden = true;
+        }
+    }
+}
+
+fn is_openrouter_entry(model: &ModelEntry) -> bool {
+    model.model_provider.as_ref().is_some_and(|provider| {
+        provider.kind == crate::agent::model_providers::ModelProviderKind::OpenRouter
+    })
+}
+
+fn openrouter_instance_count(models: &IndexMap<String, ModelEntry>) -> usize {
+    let mut ids = std::collections::BTreeSet::new();
+    for model in models.values() {
+        if is_openrouter_entry(model) {
+            ids.insert(provider_instance_id_for_entry(model));
+        }
+    }
+    ids.len()
+}
+
+fn qualify_openrouter_display_name(model: &ModelEntry, bare: &str) -> String {
+    let account = account_label_for_entry(model);
+    let mut name = format!("{bare} · {account}");
+    if model.info().supports_zdr == Some(true) || openrouter_instance_requires_zdr(model) {
+        name.push_str(" · ZDR");
+    }
+    name
+}
+
+/// Short picker title: complete OpenRouter catalog name, never the API paragraph.
+fn catalog_title_for_picker(raw: Option<&str>, key: &str, display_name: &str) -> Option<String> {
+    let title = raw.map(str::trim).filter(|s| !s.is_empty())?;
+    if title.eq_ignore_ascii_case(key) || title.eq_ignore_ascii_case(display_name) {
+        return None;
+    }
+    if title.contains('\n') || title.len() > 80 {
+        return None;
+    }
+    Some(title.to_owned())
+}
+
 /// Qualify display names when multiple catalog entries share the same bare
 /// label so sibling OpenAI/OpenRouter accounts remain distinguishable.
 ///
-/// Exact canonical selection ids always remain unique keys; this only affects
-/// the human-readable `ModelInfo.name` field.
+/// Namespaced catalog keys (`zdr:…`, `dr:…`, `openrouter:…`, `openai:…`)
+/// always display as the canonical id so `/model` lists the kind. First-party
+/// Grok ids stay on the friendly name. When two or more OpenRouter instances
+/// are enabled and the key is *not* namespaced (should not happen), OpenRouter
+/// rows still get the account label. Exact canonical selection ids always
+/// remain unique keys.
 pub fn qualify_display_name(
     key: &str,
     model: &ModelEntry,
     bare_name_counts: &std::collections::HashMap<String, usize>,
+    openrouter_instances: usize,
 ) -> String {
+    // Complete picker integration: every namespaced catalog row shows kind.
+    if xai_grok_models::split_first_colon(key).is_some() {
+        return key.to_owned();
+    }
     let bare = bare_display_name_for_entry(model);
+    if is_openrouter_entry(model) && openrouter_instances >= 2 {
+        return qualify_openrouter_display_name(model, &bare);
+    }
     let count = bare_name_counts
         .get(&bare.to_ascii_lowercase())
         .copied()
@@ -6460,6 +6662,7 @@ pub fn to_acp_model_info(
         let bare = bare_display_name_for_entry(model).to_ascii_lowercase();
         *bare_name_counts.entry(bare).or_default() += 1;
     }
+    let openrouter_instances = openrouter_instance_count(models);
 
     models
         .iter()
@@ -6468,12 +6671,25 @@ pub fn to_acp_model_info(
             let model_id = acp::ModelId::new(Arc::from(key.clone()));
             let total_context_tokens = info.context_window.get();
             let instance_id = provider_instance_id_for_entry(model);
+            let account_label = account_label_for_entry(model);
             let provider_kind = model
                 .model_provider
                 .as_ref()
                 .map(|p| provider_kind_label(p.kind).to_string())
                 .unwrap_or_else(|| provider_identity_label(model));
-            let display_name = qualify_display_name(key, model, &bare_name_counts);
+            let display_name =
+                qualify_display_name(key, model, &bare_name_counts, openrouter_instances);
+            let human_name = bare_display_name_for_entry(model);
+            let description = if xai_grok_models::split_first_colon(key).is_some() {
+                // Prefer a short catalog title (stashed when a config `name =`
+                // override shortened the OpenRouter label) over the long API
+                // paragraph. Fall back to the entry's human name.
+                catalog_title_for_picker(info.description.as_deref(), key, &display_name).or_else(
+                    || catalog_title_for_picker(Some(human_name.as_str()), key, &display_name),
+                )
+            } else {
+                info.description.clone()
+            };
             let meta = {
                 let mut map = serde_json::Map::new();
                 map.insert(
@@ -6493,6 +6709,10 @@ pub fn to_acp_model_info(
                 map.insert(
                     META_PROVIDER_INSTANCE_ID.to_string(),
                     serde_json::Value::String(instance_id),
+                );
+                map.insert(
+                    META_ACCOUNT_LABEL.to_string(),
+                    serde_json::Value::String(account_label),
                 );
                 map.insert(
                     META_PROVIDER_KIND.to_string(),
@@ -6538,15 +6758,41 @@ pub fn to_acp_model_info(
                         serde_json::Value::Bool(supports),
                     );
                 }
+                if let Some(supports) = info.supports_file_input {
+                    map.insert(
+                        META_SUPPORTS_FILE_INPUT.to_string(),
+                        serde_json::Value::Bool(supports),
+                    );
+                }
+                if let Some(has_text) = info.output_has_text {
+                    map.insert(
+                        META_OUTPUT_HAS_TEXT.to_string(),
+                        serde_json::Value::Bool(has_text),
+                    );
+                }
+                if let Some(supports) = info.supports_zdr {
+                    map.insert(
+                        META_SUPPORTS_ZDR.to_string(),
+                        serde_json::Value::Bool(supports),
+                    );
+                }
+                if let Some(ceiling) = info.max_output_ceiling {
+                    map.insert(
+                        META_MAX_OUTPUT_TOKENS.to_string(),
+                        serde_json::Value::Number(ceiling.into()),
+                    );
+                }
                 if info.supports_image_input.is_some()
                     || info.supports_audio_input.is_some()
                     || info.supports_video_input.is_some()
+                    || info.supports_file_input.is_some()
                 {
                     let mut input_modalities = vec![serde_json::Value::String("text".to_owned())];
                     for (modality, supported) in [
                         ("image", info.supports_image_input),
                         ("audio", info.supports_audio_input),
                         ("video", info.supports_video_input),
+                        ("file", info.supports_file_input),
                     ] {
                         if supported == Some(true) {
                             input_modalities.push(serde_json::Value::String(modality.to_owned()));
@@ -6579,7 +6825,7 @@ pub fn to_acp_model_info(
             (
                 model_id.clone(),
                 acp::ModelInfo::new(model_id, display_name)
-                    .description(info.description.clone())
+                    .description(description)
                     .meta(meta),
             )
         })
@@ -7624,6 +7870,11 @@ reasoning_effort = "low"
                 supports_image_input: None,
                 supports_audio_input: None,
                 supports_video_input: None,
+                supports_file_input: None,
+                output_has_text: None,
+                supports_zdr: None,
+                max_output_ceiling: None,
+                provider_display_name: None,
                 execution_backend:
                     crate::agent::execution_backend::ExecutionBackend::NativeInference,
             },
@@ -8264,6 +8515,7 @@ reasoning_effort = "low"
             openrouter_provider_preferences: None,
             openrouter_plugins: Vec::new(),
             openrouter_pacing: false,
+            max_completion_tokens: None,
             command: Vec::new(),
         });
         assert!(!openrouter.has_own_credentials());
@@ -8281,6 +8533,7 @@ reasoning_effort = "low"
             openrouter_provider_preferences: None,
             openrouter_plugins: Vec::new(),
             openrouter_pacing: false,
+            max_completion_tokens: None,
             command: Vec::new(),
         });
         assert!(openai.is_provider_scoped_byok());
@@ -8297,6 +8550,7 @@ reasoning_effort = "low"
             openrouter_provider_preferences: None,
             openrouter_plugins: Vec::new(),
             openrouter_pacing: false,
+            max_completion_tokens: None,
             command: Vec::new(),
         });
         assert!(custom.is_provider_scoped_byok());
@@ -8326,6 +8580,7 @@ reasoning_effort = "low"
             openrouter_provider_preferences: None,
             openrouter_plugins: Vec::new(),
             openrouter_pacing: false,
+            max_completion_tokens: None,
             command: Vec::new(),
         });
         assert!(!or.has_own_credentials());
@@ -8344,6 +8599,7 @@ reasoning_effort = "low"
             openrouter_provider_preferences: None,
             openrouter_plugins: Vec::new(),
             openrouter_pacing: false,
+            max_completion_tokens: None,
             command: Vec::new(),
         });
         assert!(!oai.has_own_credentials());
@@ -8364,6 +8620,7 @@ reasoning_effort = "low"
             openrouter_provider_preferences: None,
             openrouter_plugins: Vec::new(),
             openrouter_pacing: false,
+            max_completion_tokens: None,
             command: Vec::new(),
         });
         chatgpt.auth_provider = Some(crate::auth::AuthProviderRef::unresolved(
@@ -8386,6 +8643,7 @@ reasoning_effort = "low"
             openrouter_provider_preferences: None,
             openrouter_plugins: Vec::new(),
             openrouter_pacing: false,
+            max_completion_tokens: None,
             command: Vec::new(),
         });
         assert!(custom.is_provider_scoped_byok());
@@ -8687,6 +8945,98 @@ reasoning_effort = "low"
         );
         assert_eq!(config.context_window, 256_000);
     }
+
+    #[test]
+    fn inference_config_for_openrouter_keeps_ceiling_separate_zdr_and_omits_message_model_id() {
+        use crate::agent::model_providers::{OpenRouterProviderPreferences, ResolvedModelProvider};
+        let mut model = test_model_entry(
+            "z-ai/glm-5.3-flash",
+            "https://openrouter.ai/api/v1",
+            Some("or-key"),
+            None,
+            None,
+        );
+        model.info.max_completion_tokens = Some(32_000);
+        model.info.max_output_ceiling = Some(8_192);
+        model.model_provider = Some(ResolvedModelProvider {
+            id: "openrouter-work".into(),
+            kind: ModelProviderKind::OpenRouter,
+            openrouter_fallback_models: vec!["openai/gpt-5-mini".into()],
+            openrouter_provider_preferences: Some(OpenRouterProviderPreferences {
+                zdr: Some(true),
+                ..Default::default()
+            }),
+            openrouter_plugins: vec![],
+            openrouter_pacing: false,
+            max_completion_tokens: None,
+            command: vec![],
+        });
+        let config = inference_config_for_model(
+            &model,
+            resolve_credentials(&model, None),
+            None,
+            None,
+            None,
+            None,
+        );
+        assert_eq!(config.provider_identity, ProviderIdentity::OpenRouter);
+        assert!(
+            !config.include_message_model_id,
+            "OpenRouter must not send messages[].model_id"
+        );
+        assert_eq!(config.max_completion_tokens, Some(32_000));
+        assert_eq!(config.max_output_ceiling, Some(8_192));
+        assert_eq!(
+            config
+                .openrouter_provider_preferences
+                .as_ref()
+                .and_then(|p| p.zdr),
+            Some(true),
+            "instance ZDR must reach the request provider flag"
+        );
+
+        let mut compatible = test_model_entry(
+            "proxy-model",
+            "https://openrouter.ai/api/v1",
+            Some("or-key"),
+            None,
+            None,
+        );
+        compatible.info.max_output_ceiling = Some(8_192);
+        compatible.model_provider = Some(ResolvedModelProvider {
+            id: "custom-or-proxy".into(),
+            kind: ModelProviderKind::OpenAiCompatible,
+            openrouter_fallback_models: vec!["should-not-copy".into()],
+            openrouter_provider_preferences: Some(OpenRouterProviderPreferences {
+                zdr: Some(true),
+                ..Default::default()
+            }),
+            openrouter_plugins: vec![],
+            openrouter_pacing: true,
+            max_completion_tokens: None,
+            command: vec![],
+        });
+        let compatible_cfg = inference_config_for_model(
+            &compatible,
+            resolve_credentials(&compatible, None),
+            None,
+            None,
+            None,
+            None,
+        );
+        assert_eq!(
+            compatible_cfg.provider_identity,
+            ProviderIdentity::Custom,
+            "openai_compatible stays Custom even on openrouter.ai"
+        );
+        assert!(compatible_cfg.include_message_model_id);
+        assert!(compatible_cfg.openrouter_fallback_models.is_empty());
+        assert!(compatible_cfg.openrouter_provider_preferences.is_none());
+        assert!(
+            compatible_cfg.openrouter_pacing,
+            "pacing opt-in may still propagate without OpenRouter identity"
+        );
+    }
     #[test]
     fn parses_model_api_backend_responses() {
         let raw_config: toml::Value = toml::from_str(
@@ -8867,6 +9217,7 @@ reasoning_effort = "low"
             openrouter_provider_preferences: None,
             openrouter_plugins: Vec::new(),
             openrouter_pacing: false,
+            max_completion_tokens: None,
             command: Vec::new(),
         });
         let applied = override_entry.apply(
@@ -9001,6 +9352,10 @@ reasoning_effort = "low"
             supports_image_input: None,
             supports_audio_input: None,
             supports_video_input: None,
+            supports_file_input: None,
+            output_has_text: None,
+            supports_zdr: None,
+            max_output_ceiling: None,
             compactions_remaining: None,
             compaction_at_tokens: None,
             show_model_fingerprint: false,
@@ -9167,6 +9522,10 @@ reasoning_effort = "low"
             supports_image_input: None,
             supports_audio_input: None,
             supports_video_input: None,
+            supports_file_input: None,
+            output_has_text: None,
+            supports_zdr: None,
+            max_output_ceiling: None,
             compactions_remaining: None,
             compaction_at_tokens: None,
             show_model_fingerprint: false,
@@ -9198,6 +9557,7 @@ reasoning_effort = "low"
             openrouter_provider_preferences: None,
             openrouter_plugins: vec![],
             openrouter_pacing: false,
+            max_completion_tokens: None,
             command: vec![],
         });
         models.insert("openai:gpt-4o".to_string(), home);
@@ -9218,6 +9578,7 @@ reasoning_effort = "low"
             openrouter_provider_preferences: None,
             openrouter_plugins: vec![],
             openrouter_pacing: false,
+            max_completion_tokens: None,
             command: vec![],
         });
         models.insert("openai_work:gpt-4o".to_string(), work);
@@ -9280,6 +9641,281 @@ reasoning_effort = "low"
         assert!(unknown_meta.get("supportsAudioInput").is_none());
         assert!(unknown_meta.get("supportsVideoInput").is_none());
         assert!(unknown_meta.get("inputModalities").is_none());
+    }
+
+    #[test]
+    fn acp_model_meta_includes_openrouter_catalog_capability_flags() {
+        use crate::agent::model_providers::{ModelProviderKind, ResolvedModelProvider};
+
+        let mut models = IndexMap::new();
+        let mut entry = test_model_entry(
+            "openrouter:z-ai/glm-5.3-flash",
+            "https://openrouter.ai/api/v1",
+            None,
+            None,
+            None,
+        );
+        entry.info.name = Some("GLM 5.3 Flash".to_string());
+        entry.info.model = "z-ai/glm-5.3-flash".to_string();
+        entry.info.supports_zdr = Some(true);
+        entry.info.max_output_ceiling = Some(8192);
+        entry.info.supports_file_input = Some(true);
+        entry.info.output_has_text = Some(true);
+        entry.info.supports_image_input = Some(true);
+        entry.info.provider_display_name = Some("Work".to_string());
+        entry.model_provider = Some(ResolvedModelProvider {
+            id: "openrouter-work".into(),
+            kind: ModelProviderKind::OpenRouter,
+            openrouter_fallback_models: vec![],
+            openrouter_provider_preferences: None,
+            openrouter_plugins: vec![],
+            openrouter_pacing: false,
+            max_completion_tokens: None,
+            command: vec![],
+        });
+        models.insert("openrouter-work:z-ai/glm-5.3-flash".to_string(), entry);
+
+        let acp_models = to_acp_model_info(&models);
+        let meta = acp_models
+            .get(&acp::ModelId::new("openrouter-work:z-ai/glm-5.3-flash"))
+            .and_then(|model| model.meta.as_ref())
+            .expect("openrouter catalog metadata");
+        assert_eq!(meta[META_SUPPORTS_ZDR], true);
+        assert_eq!(meta[META_MAX_OUTPUT_TOKENS], 8192);
+        assert_eq!(meta[META_SUPPORTS_FILE_INPUT], true);
+        assert_eq!(meta[META_OUTPUT_HAS_TEXT], true);
+        assert_eq!(meta[META_PROVIDER_INSTANCE_ID], "openrouter-work");
+        assert_eq!(meta[META_ACCOUNT_LABEL], "Work");
+        assert_eq!(
+            meta[META_CANONICAL_SELECTION_ID],
+            "openrouter-work:z-ai/glm-5.3-flash"
+        );
+        assert_eq!(
+            meta["inputModalities"],
+            serde_json::json!(["text", "image", "file"])
+        );
+        assert!(
+            meta.get("maxCompletionTokens").is_none(),
+            "ceiling must not be advertised as a request max"
+        );
+    }
+
+    #[test]
+    fn two_openrouter_instances_always_qualify_display_with_account_and_zdr() {
+        use crate::agent::model_providers::{
+            ModelProviderKind, OpenRouterProviderPreferences, ResolvedModelProvider,
+        };
+
+        fn openrouter_entry(
+            instance: &str,
+            display_name: Option<&str>,
+            zdr: bool,
+            slug: &str,
+            label: &str,
+        ) -> ModelEntry {
+            let mut entry = test_model_entry(
+                slug,
+                "https://openrouter.ai/api/v1",
+                Some("or-key"),
+                None,
+                None,
+            );
+            entry.info.name = Some(label.to_string());
+            entry.info.model = slug.to_string();
+            entry.info.supports_zdr = zdr.then_some(true);
+            entry.info.provider_display_name = display_name.map(str::to_owned);
+            entry.model_provider = Some(ResolvedModelProvider {
+                id: instance.into(),
+                kind: ModelProviderKind::OpenRouter,
+                openrouter_fallback_models: vec![],
+                openrouter_provider_preferences: zdr.then_some(OpenRouterProviderPreferences {
+                    zdr: Some(true),
+                    ..Default::default()
+                }),
+                openrouter_plugins: vec![],
+                openrouter_pacing: false,
+                max_completion_tokens: None,
+                command: vec![],
+            });
+            entry
+        }
+
+        let mut models = IndexMap::new();
+        models.insert(
+            "openrouter:z-ai/glm-5.3-flash".to_string(),
+            openrouter_entry(
+                "openrouter",
+                Some("Home"),
+                false,
+                "z-ai/glm-5.3-flash",
+                "GLM 5.3 Flash",
+            ),
+        );
+        models.insert(
+            "openrouter-work:z-ai/glm-5.3-flash".to_string(),
+            openrouter_entry(
+                "openrouter-work",
+                Some("Work"),
+                true,
+                "z-ai/glm-5.3-flash",
+                "GLM 5.3 Flash",
+            ),
+        );
+
+        let acp_models = to_acp_model_info(&models);
+        let home = acp_models
+            .get(&acp::ModelId::new("openrouter:z-ai/glm-5.3-flash"))
+            .expect("home");
+        let work = acp_models
+            .get(&acp::ModelId::new("openrouter-work:z-ai/glm-5.3-flash"))
+            .expect("work");
+        assert_eq!(home.name, "openrouter:z-ai/glm-5.3-flash");
+        assert_eq!(work.name, "openrouter-work:z-ai/glm-5.3-flash");
+        assert_eq!(home.description.as_deref(), Some("GLM 5.3 Flash"));
+        assert_eq!(work.description.as_deref(), Some("GLM 5.3 Flash"));
+        // Canonical persist ids stay instance-qualified and are the list label.
+        assert!(acp_models.contains_key(&acp::ModelId::new("openrouter:z-ai/glm-5.3-flash")));
+        assert!(acp_models.contains_key(&acp::ModelId::new("openrouter-work:z-ai/glm-5.3-flash")));
+    }
+
+    #[test]
+    fn single_openrouter_instance_does_not_force_account_qualification() {
+        use crate::agent::model_providers::{ModelProviderKind, ResolvedModelProvider};
+
+        let mut models = IndexMap::new();
+        let mut entry = test_model_entry(
+            "z-ai/glm-5.3-flash",
+            "https://openrouter.ai/api/v1",
+            None,
+            None,
+            None,
+        );
+        entry.info.name = Some("GLM 5.3 Flash".to_string());
+        entry.info.model = "z-ai/glm-5.3-flash".to_string();
+        entry.model_provider = Some(ResolvedModelProvider {
+            id: "openrouter".into(),
+            kind: ModelProviderKind::OpenRouter,
+            openrouter_fallback_models: vec![],
+            openrouter_provider_preferences: None,
+            openrouter_plugins: vec![],
+            openrouter_pacing: false,
+            max_completion_tokens: None,
+            command: vec![],
+        });
+        models.insert("openrouter:z-ai/glm-5.3-flash".to_string(), entry);
+
+        let acp_models = to_acp_model_info(&models);
+        let info = acp_models
+            .get(&acp::ModelId::new("openrouter:z-ai/glm-5.3-flash"))
+            .expect("single openrouter row");
+        assert_eq!(info.name, "openrouter:z-ai/glm-5.3-flash");
+        assert_eq!(info.description.as_deref(), Some("GLM 5.3 Flash"));
+    }
+
+    #[test]
+    fn openrouter_zdr_filter_is_instance_local() {
+        use crate::agent::model_providers::{
+            ModelProviderKind, OpenRouterProviderPreferences, ResolvedModelProvider,
+        };
+
+        fn entry(
+            instance: &str,
+            kind: ModelProviderKind,
+            slug: &str,
+            zdr_row: Option<bool>,
+            instance_zdr: bool,
+        ) -> ModelEntry {
+            let mut entry = test_model_entry(slug, "https://example/v1", Some("k"), None, None);
+            entry.info.model = slug.to_string();
+            entry.info.supports_zdr = zdr_row;
+            entry.info.user_selectable = true;
+            entry.info.hidden = false;
+            entry.model_provider = Some(ResolvedModelProvider {
+                id: instance.into(),
+                kind,
+                openrouter_fallback_models: vec![],
+                openrouter_provider_preferences: instance_zdr.then_some(
+                    OpenRouterProviderPreferences {
+                        zdr: Some(true),
+                        ..Default::default()
+                    },
+                ),
+                openrouter_plugins: vec![],
+                openrouter_pacing: false,
+                max_completion_tokens: None,
+                command: vec![],
+            });
+            entry
+        }
+
+        let mut catalog = IndexMap::new();
+        catalog.insert(
+            "openrouter-work:acme/zdr".into(),
+            entry(
+                "openrouter-work",
+                ModelProviderKind::OpenRouter,
+                "acme/zdr",
+                Some(true),
+                true,
+            ),
+        );
+        catalog.insert(
+            "openrouter-work:acme/open".into(),
+            entry(
+                "openrouter-work",
+                ModelProviderKind::OpenRouter,
+                "acme/open",
+                None,
+                true,
+            ),
+        );
+        catalog.insert(
+            "openrouter-work:acme/denied".into(),
+            entry(
+                "openrouter-work",
+                ModelProviderKind::OpenRouter,
+                "acme/denied",
+                Some(false),
+                true,
+            ),
+        );
+        catalog.insert(
+            "openrouter:acme/open".into(),
+            entry(
+                "openrouter",
+                ModelProviderKind::OpenRouter,
+                "acme/open",
+                None,
+                false,
+            ),
+        );
+        catalog.insert(
+            "openai:gpt-4o".into(),
+            entry("openai", ModelProviderKind::OpenAi, "gpt-4o", None, false),
+        );
+        catalog.insert(
+            "grok-4.5".into(),
+            entry("xai", ModelProviderKind::Xai, "grok-4.5", None, false),
+        );
+
+        apply_openrouter_zdr_picker_filter(&mut catalog);
+
+        assert!(catalog["openrouter-work:acme/zdr"].info.user_selectable);
+        assert!(!catalog["openrouter-work:acme/zdr"].info.hidden);
+        assert!(
+            catalog["openrouter-work:acme/open"].info.user_selectable,
+            "unknown ZDR stays listed so /model is not emptied before a native refresh"
+        );
+        assert!(!catalog["openrouter-work:acme/open"].info.hidden);
+        assert!(!catalog["openrouter-work:acme/denied"].info.user_selectable);
+        assert!(catalog["openrouter-work:acme/denied"].info.hidden);
+        assert!(
+            catalog["openrouter:acme/open"].info.user_selectable,
+            "non-ZDR sibling OpenRouter instance must stay visible"
+        );
+        assert!(!catalog["openrouter:acme/open"].info.hidden);
+        assert!(catalog["openai:gpt-4o"].info.user_selectable);
+        assert!(catalog["grok-4.5"].info.user_selectable);
     }
 
     #[test]
@@ -9740,6 +10376,10 @@ reasoning_effort = "low"
             supports_image_input: None,
             supports_audio_input: None,
             supports_video_input: None,
+            supports_file_input: None,
+            output_has_text: None,
+            supports_zdr: None,
+            max_output_ceiling: None,
             compactions_remaining: None,
             compaction_at_tokens: None,
             show_model_fingerprint: false,
@@ -13522,6 +14162,11 @@ default = "grok-4.5"
                 supports_image_input: None,
                 supports_audio_input: None,
                 supports_video_input: None,
+                supports_file_input: None,
+                output_has_text: None,
+                supports_zdr: None,
+                max_output_ceiling: None,
+                provider_display_name: None,
                 execution_backend:
                     crate::agent::execution_backend::ExecutionBackend::NativeInference,
             },
@@ -14498,12 +15143,14 @@ default = "grok-4.5"
             strategy: CompactionStrategy::Auto,
             trigger_policy: CompactionTriggerPolicy::Fixed,
             rolling_band_count: 4,
+            resolver_tools: true,
         };
         let resolved2 = ResolvedCompactionConfig {
             models: vec![CompactionModelRef::new("@session".to_string()).unwrap()],
             strategy: CompactionStrategy::Auto,
             trigger_policy: CompactionTriggerPolicy::Fixed,
             rolling_band_count: 4,
+            resolver_tools: true,
         };
         assert_eq!(resolved1, resolved2);
     }
@@ -14526,6 +15173,29 @@ default = "grok-4.5"
             cfg.compaction.models[1].model_id(),
             "openrouter:poolside/laguna-xs-2.1"
         );
+    }
+
+    /// Compaction resolution is on unless the user turns it off, so a summarizer
+    /// can resolve the files, logs, and segments its history references.
+    #[test]
+    fn compaction_resolver_tools_default_on_and_overridable() {
+        let default_cfg = CompactionConfig::default();
+        assert_eq!(default_cfg.resolver_tools, None);
+        assert!(
+            default_cfg.normalize_validate().unwrap().resolver_tools,
+            "artifact resolution must default to enabled"
+        );
+
+        let raw: toml::Value = toml::from_str(
+            r#"
+            [compaction]
+            resolver_tools = false
+            "#,
+        )
+        .unwrap();
+        let cfg = Config::new_from_toml_cfg(&raw).expect("config should parse");
+        assert_eq!(cfg.compaction.resolver_tools, Some(false));
+        assert!(!cfg.compaction.normalize_validate().unwrap().resolver_tools);
     }
 
     #[test]

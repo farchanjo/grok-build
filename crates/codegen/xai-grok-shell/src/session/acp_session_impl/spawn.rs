@@ -828,6 +828,7 @@ pub(crate) async fn spawn_session_actor(
             }
         },
         rolling_band_count: resolved_compaction.rolling_band_count,
+        resolver_tools: resolved_compaction.resolver_tools,
         memory_flush_enabled: memory_config.as_ref().is_some_and(|mc| mc.flush.enabled),
         wall_clock_budget_secs: crate::util::config::resolve_compaction_wall_clock_budget_secs(
             remote_settings

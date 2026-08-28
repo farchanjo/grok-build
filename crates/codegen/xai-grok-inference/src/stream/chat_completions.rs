@@ -267,7 +267,7 @@ pub fn stream_chat_completions<'a>(
         }
 
         // ── Build the final response ─────────────────────────────────
-        let tool_calls: Vec<ToolCall> = tool_call_acc
+        let mut tool_calls: Vec<ToolCall> = tool_call_acc
             .into_values()
             .map(|(id, name, arguments)| ToolCall {
                 id: std::sync::Arc::<str>::from(id),
@@ -275,6 +275,18 @@ pub fn stream_chat_completions<'a>(
                 arguments: std::sync::Arc::<str>::from(arguments),
             })
             .collect();
+
+        // Some tool-integrated-reasoning models (for example GLM-family
+        // models served through OpenRouter) occasionally leak their native
+        // XML tool-call markup into the assistant prose instead of the
+        // structured `tool_calls` deltas. Recover those calls from the prose
+        // only when the structured channel produced nothing at all, so
+        // well-behaved responses are never touched.
+        if tool_calls.is_empty() {
+            let (prose, recovered) = crate::stream::tir_fallback::recover_tool_calls(&content_acc);
+            content_acc = prose;
+            tool_calls = recovered;
+        }
 
         // Honor tool calls by overriding the stop reason if the model
         // forgot to set it (mirrors the shell's behavior).

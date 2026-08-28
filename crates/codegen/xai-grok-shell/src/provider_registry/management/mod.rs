@@ -16,8 +16,10 @@ pub mod dto;
 use super::id::{BuiltInProviderId, ProviderId, ProviderRef, is_reserved_configured_id};
 use super::lifecycle::validate_http_base_url;
 use super::secrets::{
-    admin_key_scope, application_key_scope, clear_provider_secret, oauth_scope_string,
-    read_provider_secret, store_provider_secret,
+    admin_key_scope, admin_key_scope_for_kind, application_key_scope,
+    application_key_scope_for_kind, clear_provider_secret, extra_openrouter_admin_key_scope,
+    extra_openrouter_application_key_scope, oauth_scope_string, read_provider_secret,
+    store_provider_secret,
 };
 use super::toml_edit::{
     OpenRouterPrefsPatch, ProviderTomlPatch, apply_provider_patch_with_openrouter,
@@ -238,6 +240,7 @@ impl ProviderManagementService {
             openrouter_sort: prefs
                 .and_then(|p| p.sort.as_ref().and_then(|s| s.as_name()).map(str::to_owned)),
             openrouter_pacing: desc.openrouter_pacing,
+            max_completion_tokens: desc.max_completion_tokens,
             openrouter_plugin_ids: plugin_ids,
             credentials: self.credential_presence(id),
             generation,
@@ -552,6 +555,7 @@ impl ProviderManagementService {
                 openrouter_quantizations: Some(source.openrouter_quantizations.clone()),
                 openrouter_sort: Some(source.openrouter_sort.clone()),
                 openrouter_pacing: Some(source.openrouter_pacing),
+                max_completion_tokens: source.max_completion_tokens,
                 ..Default::default()
             },
         };
@@ -771,9 +775,15 @@ impl ProviderManagementService {
                 // TOML gone: now safe to clear opt-in secrets/caches.
                 if req.clear.clear_application_key {
                     let _ = clear_provider_secret(&self.home, &application_key_scope(&pid));
+                    let _ = clear_provider_secret(
+                        &self.home,
+                        &extra_openrouter_application_key_scope(&pid),
+                    );
                 }
                 if req.clear.clear_admin_key {
                     let _ = clear_provider_secret(&self.home, &admin_key_scope(&pid));
+                    let _ =
+                        clear_provider_secret(&self.home, &extra_openrouter_admin_key_scope(&pid));
                 }
                 if req.clear.clear_oauth {
                     let _ =
@@ -924,10 +934,15 @@ impl ProviderManagementService {
             return presence;
         }
         if let Ok(pid) = ProviderId::new(id) {
-            if let Ok(Some(_)) = read_provider_secret(&self.home, &application_key_scope(&pid)) {
+            let kind = self.configured_provider_kind(id);
+            if let Ok(Some(_)) =
+                read_provider_secret(&self.home, &application_key_scope_for_kind(&pid, kind))
+            {
                 presence.has_application_key = true;
             }
-            if let Ok(Some(_)) = read_provider_secret(&self.home, &admin_key_scope(&pid)) {
+            if let Ok(Some(_)) =
+                read_provider_secret(&self.home, &admin_key_scope_for_kind(&pid, kind))
+            {
                 presence.has_admin_key = true;
             }
             // OAuth presence via dedicated scope (token may exist).
@@ -1017,6 +1032,22 @@ impl ProviderManagementService {
         Ok(())
     }
 
+    fn configured_provider_kind(&self, id: &str) -> super::instance::ProviderKind {
+        // Must never call self.detail() from here: detail() computes
+        // credential_presence(), which calls back into this fn, and a
+        // config-table miss (preset alias ids such as `grok_build_openrouter`,
+        // retired instances, unknown ids) then becomes unbounded mutual
+        // recursion that stack-overflows /providers. Resolve built-ins from
+        // their parsed product id only — no DTO round-trip.
+        if let Some(config) = self.provider_config(id) {
+            return super::instance::ProviderKind::from(config.kind);
+        }
+        if let Ok(ProviderRef::BuiltIn(built_in)) = ProviderRef::parse(id) {
+            return super::instance::ProviderKind::from(built_in);
+        }
+        super::instance::ProviderKind::OpenAiCompatible
+    }
+
     fn store_application_key(&self, id: &str, secret: &str) -> Result<(), String> {
         if let Some(backend) = built_in_backend(id) {
             let manager = ProviderManager::new(&self.home);
@@ -1026,8 +1057,13 @@ impl ProviderManagementService {
             return Ok(());
         }
         let pid = ProviderId::new(id).map_err(|e| e.to_string())?;
-        store_provider_secret(&self.home, &application_key_scope(&pid), secret)
-            .map_err(|e| e.to_string())
+        let kind = self.configured_provider_kind(id);
+        store_provider_secret(
+            &self.home,
+            &application_key_scope_for_kind(&pid, kind),
+            secret,
+        )
+        .map_err(|e| e.to_string())
     }
 
     fn clear_application_key(&self, id: &str) -> Result<(), String> {
@@ -1037,7 +1073,9 @@ impl ProviderManagementService {
             return Ok(());
         }
         let pid = ProviderId::new(id).map_err(|e| e.to_string())?;
-        clear_provider_secret(&self.home, &application_key_scope(&pid)).map_err(|e| e.to_string())
+        let kind = self.configured_provider_kind(id);
+        clear_provider_secret(&self.home, &application_key_scope_for_kind(&pid, kind))
+            .map_err(|e| e.to_string())
     }
 
     fn store_admin_key(&self, id: &str, secret: &str) -> Result<(), String> {
@@ -1047,7 +1085,9 @@ impl ProviderManagementService {
             return Ok(());
         }
         let pid = ProviderId::new(id).map_err(|e| e.to_string())?;
-        store_provider_secret(&self.home, &admin_key_scope(&pid), secret).map_err(|e| e.to_string())
+        let kind = self.configured_provider_kind(id);
+        store_provider_secret(&self.home, &admin_key_scope_for_kind(&pid, kind), secret)
+            .map_err(|e| e.to_string())
     }
 
     fn clear_admin_key(&self, id: &str) -> Result<(), String> {
@@ -1057,7 +1097,9 @@ impl ProviderManagementService {
             return Ok(());
         }
         let pid = ProviderId::new(id).map_err(|e| e.to_string())?;
-        clear_provider_secret(&self.home, &admin_key_scope(&pid)).map_err(|e| e.to_string())
+        let kind = self.configured_provider_kind(id);
+        clear_provider_secret(&self.home, &admin_key_scope_for_kind(&pid, kind))
+            .map_err(|e| e.to_string())
     }
 
     /// Real connection test (built-ins via ProviderManager; configured via live
@@ -1541,7 +1583,9 @@ impl ProviderManagementService {
             "openai" => OPENAI_API_KEY_SCOPE.to_owned(),
             "openrouter" => OPENROUTER_API_KEY_SCOPE.to_owned(),
             "anthropic" => ANTHROPIC_API_KEY_SCOPE.to_owned(),
-            _ => application_key_scope(&pid),
+            _ => {
+                application_key_scope_for_kind(&pid, super::instance::ProviderKind::from(cfg.kind))
+            }
         };
         let token = match read_provider_api_key(&self.home, &scope) {
             Ok(Some(t)) if !t.trim().is_empty() => t,
@@ -1958,6 +2002,10 @@ impl ProviderManagementService {
         );
         push("openrouter_sort", patch.openrouter_sort.is_some());
         push("openrouter_pacing", patch.openrouter_pacing.is_some());
+        push(
+            "max_completion_tokens",
+            patch.max_completion_tokens.is_some(),
+        );
         fields
     }
 
@@ -2168,6 +2216,7 @@ fn save_patch_to_toml(patch: &ProviderSavePatch) -> ProviderTomlPatch {
         capabilities: patch.capabilities.clone(),
         openrouter_fallback_models: patch.openrouter_fallback_models.clone(),
         openrouter_pacing: patch.openrouter_pacing,
+        max_completion_tokens: patch.max_completion_tokens,
         api_surface: patch.api_surface.clone(),
         credential_route: patch.credential_route.clone(),
         ..Default::default()
@@ -2220,6 +2269,7 @@ fn is_empty_toml_patch(p: &ProviderTomlPatch) -> bool {
         && p.capabilities.is_none()
         && p.openrouter_fallback_models.is_none()
         && p.openrouter_pacing.is_none()
+        && p.max_completion_tokens.is_none()
         && p.api_surface.is_none()
         && p.credential_route.is_none()
 }
@@ -2257,7 +2307,8 @@ fn restrict_builtin_patch(patch: &mut ProviderSavePatch) -> Result<(), String> {
         || patch.openrouter_ignore.is_some()
         || patch.openrouter_quantizations.is_some()
         || patch.openrouter_sort.is_some()
-        || patch.openrouter_pacing.is_some();
+        || patch.openrouter_pacing.is_some()
+        || patch.max_completion_tokens.is_some();
     if disallowed {
         return Err(
             "built-in providers only allow enable and display_name edits; \
@@ -2771,6 +2822,149 @@ mod tests {
         );
         assert!(restored.ok, "{:?}", restored.error);
         assert_eq!(restored.incarnation.as_deref(), Some(inc1.as_str()));
+    }
+
+    #[test]
+    fn extra_openrouter_keys_use_instance_scope_not_openai_compatible() {
+        let dir = TempDir::new().unwrap();
+        let s = svc(&dir);
+        let add_home = s.add(ProviderAddRequest {
+            id: "openrouter-home".into(),
+            kind: "openrouter".into(),
+            base_url: "https://openrouter.ai/api/v1".into(),
+            display_name: Some("Home".into()),
+            admin_base_url: None,
+            enabled: true,
+            expected_generation: s.current_generation(),
+        });
+        assert!(add_home.ok, "{:?}", add_home.error);
+        let add_work = s.add(ProviderAddRequest {
+            id: "openrouter-work".into(),
+            kind: "openrouter".into(),
+            base_url: "https://openrouter.ai/api/v1".into(),
+            display_name: Some("Work".into()),
+            admin_base_url: None,
+            enabled: true,
+            expected_generation: s.current_generation(),
+        });
+        assert!(add_work.ok, "{:?}", add_work.error);
+
+        let work_save = s.save_with_credentials(
+            ProviderSaveRequest {
+                id: "openrouter-work".into(),
+                expected_generation: s.current_generation(),
+                patch: ProviderSavePatch::default(),
+            },
+            &CredentialSlotUpdate {
+                application: SecretFieldUpdate::Set,
+                ..Default::default()
+            },
+            Some("work-key-AAAA"),
+            None,
+        );
+        assert!(work_save.ok, "{:?}", work_save.error);
+        let home_save = s.save_with_credentials(
+            ProviderSaveRequest {
+                id: "openrouter-home".into(),
+                expected_generation: s.current_generation(),
+                patch: ProviderSavePatch::default(),
+            },
+            &CredentialSlotUpdate {
+                application: SecretFieldUpdate::Set,
+                ..Default::default()
+            },
+            Some("home-key-BBBB"),
+            None,
+        );
+        assert!(home_save.ok, "{:?}", home_save.error);
+
+        let work = ProviderId::new("openrouter-work").unwrap();
+        let home = ProviderId::new("openrouter-home").unwrap();
+        assert_eq!(
+            read_provider_secret(dir.path(), &extra_openrouter_application_key_scope(&work))
+                .unwrap()
+                .as_deref(),
+            Some("work-key-AAAA")
+        );
+        assert_eq!(
+            read_provider_secret(dir.path(), &extra_openrouter_application_key_scope(&home))
+                .unwrap()
+                .as_deref(),
+            Some("home-key-BBBB")
+        );
+        assert_eq!(
+            read_provider_secret(dir.path(), &application_key_scope(&work)).unwrap(),
+            None,
+            "extra OpenRouter must not write openai_compatible::<id>::api_key"
+        );
+        assert!(s.credential_presence("openrouter-work").has_application_key);
+        assert!(s.credential_presence("openrouter-home").has_application_key);
+        assert!(!s.credential_presence("openrouter").has_application_key);
+
+        let auth = std::fs::read_to_string(dir.path().join("auth.json")).unwrap();
+        assert!(auth.contains("openrouter::openrouter-work::api_key"));
+        assert!(auth.contains("openrouter::openrouter-home::api_key"));
+        assert!(!auth.contains("openai_compatible::openrouter-work::api_key"));
+        assert!(!auth.contains("\"openrouter::api_key\""));
+    }
+
+    #[test]
+    fn credential_presence_unknown_or_alias_ids_terminate_without_recursing() {
+        let dir = TempDir::new().unwrap();
+        let s = svc(&dir);
+        // Before the fix, configured_provider_kind() fell back to self.detail()
+        // for any id missing from the config table; detail() re-computes
+        // credential_presence(), so /providers list_snapshot overflowed the
+        // stack (SIGBUS) whenever a listed id had no [model_providers] entry.
+        for id in [
+            "grok_build_openrouter", // historical preset alias id
+            "grok_build_openai",
+            "retired-instance",
+            "totally-unknown",
+            "zdr",
+            "dr",
+        ] {
+            let presence = s.credential_presence(id);
+            assert!(
+                !presence.has_application_key,
+                "{id}: no credentials expected"
+            );
+            let detail_kind = s
+                .detail(id)
+                .map(|d| d.kind)
+                .unwrap_or_else(|_| "missing".to_owned());
+            assert!(!detail_kind.is_empty(), "{id}: detail kind must be set");
+        }
+    }
+
+    #[test]
+    fn extra_openrouter_reserved_ids_cannot_be_added() {
+        let dir = TempDir::new().unwrap();
+        let s = svc(&dir);
+        for id in [
+            "openai",
+            "chatgpt",
+            "xai",
+            "grok",
+            "anthropic",
+            "openrouter",
+        ] {
+            let result = s.add(ProviderAddRequest {
+                id: id.into(),
+                kind: "openrouter".into(),
+                base_url: "https://openrouter.ai/api/v1".into(),
+                display_name: None,
+                admin_base_url: None,
+                enabled: true,
+                expected_generation: s.current_generation(),
+            });
+            assert!(!result.ok, "reserved id `{id}` must be rejected");
+            assert!(
+                result.error.as_deref().unwrap_or("").contains("reserved"),
+                "{id}: {:?}",
+                result.error
+            );
+        }
     }
 
     #[test]

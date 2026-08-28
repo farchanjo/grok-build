@@ -173,16 +173,22 @@ async fn four_accounts_distinct_canonical_ids_gate_open_selectable() {
         200,
         r#"{"data":[{"id":"shared-model"}]}"#,
     )]);
-    let (or1, rec3, h3) = spawn_scripted_server(vec![hop(
-        "/models",
-        200,
-        r#"{"data":[{"id":"shared-model","name":"Shared","supported_parameters":["tools"]}]}"#,
-    )]);
-    let (or2, rec4, h4) = spawn_scripted_server(vec![hop(
-        "/models",
-        200,
-        r#"{"data":[{"id":"shared-model","name":"Shared","supported_parameters":["tools"]}]}"#,
-    )]);
+    let (or1, rec3, h3) = spawn_scripted_server(vec![
+        hop(
+            "/models",
+            200,
+            r#"{"data":[{"id":"shared-model","name":"Shared","supported_parameters":["tools"]}]}"#,
+        ),
+        hop("/endpoints/zdr", 200, r#"{"data":[]}"#),
+    ]);
+    let (or2, rec4, h4) = spawn_scripted_server(vec![
+        hop(
+            "/models",
+            200,
+            r#"{"data":[{"id":"shared-model","name":"Shared","supported_parameters":["tools"]}]}"#,
+        ),
+        hop("/endpoints/zdr", 200, r#"{"data":[]}"#),
+    ]);
 
     let targets = vec![
         CatalogRefreshTarget {
@@ -191,6 +197,7 @@ async fn four_accounts_distinct_canonical_ids_gate_open_selectable() {
             credential: cred(1, "token-oa1"),
             manual_capabilities: IndexMap::new(),
             bounds: CatalogFetchBounds::default(),
+            zdr: None,
         },
         CatalogRefreshTarget {
             identity: identity("openai_work", ProviderKind::OpenAi, &oa2, 2, false),
@@ -198,6 +205,7 @@ async fn four_accounts_distinct_canonical_ids_gate_open_selectable() {
             credential: cred(2, "token-oa2"),
             manual_capabilities: IndexMap::new(),
             bounds: CatalogFetchBounds::default(),
+            zdr: None,
         },
         CatalogRefreshTarget {
             identity: identity("openrouter", ProviderKind::OpenRouter, &or1, 3, true),
@@ -205,6 +213,7 @@ async fn four_accounts_distinct_canonical_ids_gate_open_selectable() {
             credential: cred(3, "token-or1"),
             manual_capabilities: IndexMap::new(),
             bounds: CatalogFetchBounds::default(),
+            zdr: None,
         },
         CatalogRefreshTarget {
             identity: identity("openrouter_team", ProviderKind::OpenRouter, &or2, 4, false),
@@ -212,6 +221,7 @@ async fn four_accounts_distinct_canonical_ids_gate_open_selectable() {
             credential: cred(4, "token-or2"),
             manual_capabilities: IndexMap::new(),
             bounds: CatalogFetchBounds::default(),
+            zdr: None,
         },
     ];
 
@@ -369,6 +379,7 @@ async fn openrouter_origin_escape_and_secret_query_rejected() {
         "sk-or",
         &id,
         &IndexMap::new(),
+        None,
         CatalogFetchBounds::default(),
         1,
         1,
@@ -496,6 +507,7 @@ async fn first_time_failure_omits_account_not_empty_lkg() {
         credential: cred(1, "bad"),
         manual_capabilities: IndexMap::new(),
         bounds: CatalogFetchBounds::default(),
+        zdr: None,
     };
     let outcome = coord
         .refresh_all(vec![target], CancellationToken::new())
@@ -537,6 +549,7 @@ async fn partial_second_page_retains_lkg_and_siblings() {
                     credential: cred(1, "ta"),
                     manual_capabilities: IndexMap::new(),
                     bounds: CatalogFetchBounds::default(),
+                    zdr: None,
                 },
                 CatalogRefreshTarget {
                     identity: id_b.clone(),
@@ -544,6 +557,7 @@ async fn partial_second_page_retains_lkg_and_siblings() {
                     credential: cred(2, "tb"),
                     manual_capabilities: IndexMap::new(),
                     bounds: CatalogFetchBounds::default(),
+                    zdr: None,
                 },
             ],
             CancellationToken::new(),
@@ -586,6 +600,7 @@ async fn partial_second_page_retains_lkg_and_siblings() {
                     credential: cred(1, "ta"),
                     manual_capabilities: IndexMap::new(),
                     bounds: CatalogFetchBounds::default(),
+                    zdr: None,
                 },
                 CatalogRefreshTarget {
                     identity: id_b2,
@@ -593,6 +608,7 @@ async fn partial_second_page_retains_lkg_and_siblings() {
                     credential: cred(2, "tb"),
                     manual_capabilities: IndexMap::new(),
                     bounds: CatalogFetchBounds::default(),
+                    zdr: None,
                 },
             ],
             CancellationToken::new(),
@@ -711,13 +727,19 @@ async fn concurrent_sibling_refresh_atomic_snapshot() {
     let addr = listener.local_addr().unwrap();
     let base = format!("http://{addr}");
     let server = std::thread::spawn(move || {
-        for i in 0..2 {
+        // OpenAI /models + OpenRouter /models + OpenRouter /endpoints/zdr.
+        for i in 0..3 {
             let (mut s, _) = listener.accept().unwrap();
             let mut buf = [0u8; 4096];
-            let _ = s.read(&mut buf);
+            let n = s.read(&mut buf).unwrap_or(0);
+            let req = String::from_utf8_lossy(&buf[..n]);
             hits_c.fetch_add(1, Ordering::SeqCst);
             std::thread::sleep(Duration::from_millis(20));
-            let body = format!(r#"{{"data":[{{"id":"m{i}"}}]}}"#);
+            let body = if req.contains("/endpoints/zdr") {
+                r#"{"data":[]}"#.to_owned()
+            } else {
+                format!(r#"{{"data":[{{"id":"m{i}"}}]}}"#)
+            };
             let _ = write!(
                 s,
                 "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
@@ -746,6 +768,7 @@ async fn concurrent_sibling_refresh_atomic_snapshot() {
                     credential: cred(1, "t1"),
                     manual_capabilities: IndexMap::new(),
                     bounds: CatalogFetchBounds::default(),
+                    zdr: None,
                 },
                 CatalogRefreshTarget {
                     identity: identity("openrouter", ProviderKind::OpenRouter, &base, 2, true),
@@ -753,6 +776,7 @@ async fn concurrent_sibling_refresh_atomic_snapshot() {
                     credential: cred(2, "t2"),
                     manual_capabilities: IndexMap::new(),
                     bounds: CatalogFetchBounds::default(),
+                    zdr: None,
                 },
             ],
             CancellationToken::new(),
@@ -836,6 +860,7 @@ fn gate_off_omits_additional_from_projection_and_get() {
                 description: None,
                 context_window: None,
                 max_completion_tokens: None,
+                max_output_ceiling: None,
                 capabilities: ProjectedCapabilities::default(),
                 provider_instance_id: "openai".into(),
                 provider_kind: ProviderKind::OpenAi,
@@ -869,6 +894,7 @@ fn gate_off_omits_additional_from_projection_and_get() {
                 description: None,
                 context_window: None,
                 max_completion_tokens: None,
+                max_output_ceiling: None,
                 capabilities: ProjectedCapabilities::default(),
                 provider_instance_id: "openai_work".into(),
                 provider_kind: ProviderKind::OpenAi,
@@ -972,6 +998,7 @@ async fn pre_cancel_does_not_bump_or_store() {
                 credential: cred(1, "t"),
                 manual_capabilities: IndexMap::new(),
                 bounds: CatalogFetchBounds::default(),
+                zdr: None,
             }],
             cancel,
         )
@@ -998,6 +1025,7 @@ async fn mid_flight_cancel_leaves_prior_snapshot() {
                 credential: cred(1, "t"),
                 manual_capabilities: IndexMap::new(),
                 bounds: CatalogFetchBounds::default(),
+                zdr: None,
             }],
             CancellationToken::new(),
         )
@@ -1028,6 +1056,7 @@ async fn mid_flight_cancel_leaves_prior_snapshot() {
             credential: cred(1, "t"),
             manual_capabilities: IndexMap::new(),
             bounds: short_bounds,
+            zdr: None,
         }],
         cancel.clone(),
     );
@@ -1068,4 +1097,174 @@ fn built_in_compatibility_ids_stable() {
         ),
         "openai:gpt-4o"
     );
+}
+
+fn extra_openrouter_identity(origin: &str) -> CatalogAccountIdentity {
+    identity(
+        "openrouter_home",
+        ProviderKind::OpenRouter,
+        origin,
+        7,
+        false,
+    )
+}
+
+#[tokio::test]
+async fn zdr_true_fetches_models_zdr_query_for_that_instance_only() {
+    let (zdr_base, zdr_rec, zdr_h) = spawn_scripted_server(vec![
+        hop(
+            "zdr=true",
+            200,
+            r#"{"data":[{"id":"acme/zdr","supported_parameters":["tools"]}]}"#,
+        ),
+        hop(
+            "/endpoints/zdr",
+            200,
+            r#"{"data":[{"model_id":"acme/zdr"}]}"#,
+        ),
+    ]);
+    let (full_base, full_rec, full_h) = spawn_scripted_server(vec![
+        hop(
+            "/models",
+            200,
+            r#"{"data":[{"id":"acme/zdr"},{"id":"acme/open"}]}"#,
+        ),
+        hop(
+            "/endpoints/zdr",
+            200,
+            r#"{"data":[{"model_id":"acme/zdr"}]}"#,
+        ),
+    ]);
+
+    let zdr_id = identity(
+        "openrouter_work",
+        ProviderKind::OpenRouter,
+        &zdr_base,
+        5,
+        false,
+    );
+    let full_id = identity("openrouter", ProviderKind::OpenRouter, &full_base, 6, true);
+
+    let zdr_result = fetch_openrouter_catalog(
+        &format!("{zdr_base}/models"),
+        "token-zdr",
+        &zdr_id,
+        &IndexMap::new(),
+        Some(true),
+        CatalogFetchBounds::default(),
+        1,
+        1,
+        &CancellationToken::new(),
+    )
+    .await
+    .unwrap();
+    let full_result = fetch_openrouter_catalog(
+        &format!("{full_base}/models"),
+        "token-full",
+        &full_id,
+        &IndexMap::new(),
+        None,
+        CatalogFetchBounds::default(),
+        1,
+        1,
+        &CancellationToken::new(),
+    )
+    .await
+    .unwrap();
+
+    zdr_h.join().unwrap();
+    full_h.join().unwrap();
+
+    let zdr_reqs = zdr_rec.lock().unwrap();
+    assert!(
+        zdr_reqs[0].contains("zdr=true"),
+        "ZDR instance must fetch GET /models?zdr=true, got:\n{}",
+        zdr_reqs[0]
+    );
+    let full_reqs = full_rec.lock().unwrap();
+    assert!(
+        !full_reqs[0].contains("zdr=true"),
+        "unset zdr must fetch the full list, got:\n{}",
+        full_reqs[0]
+    );
+
+    assert_eq!(zdr_result.models.len(), 1);
+    assert_eq!(zdr_result.models[0].upstream_model_id, "acme/zdr");
+    assert_eq!(zdr_result.models[0].capabilities.supports_zdr, Some(true));
+
+    assert_eq!(full_result.models.len(), 2);
+    let by_id: std::collections::HashMap<_, _> = full_result
+        .models
+        .iter()
+        .map(|m| (m.upstream_model_id.as_str(), m))
+        .collect();
+    assert_eq!(by_id["acme/zdr"].capabilities.supports_zdr, Some(true));
+    assert_eq!(by_id["acme/open"].capabilities.supports_zdr, None);
+}
+
+#[tokio::test]
+async fn extra_openrouter_account_uses_native_adapter_and_skips_singleton_cache() {
+    let home = tempfile::tempdir().unwrap();
+    let publisher = Arc::new(CatalogPublisher::new());
+    let coord = CatalogRefreshCoordinator::with_fixed_registry(home.path(), publisher.clone(), 1);
+    let (base, rec, handle) = spawn_scripted_server(vec![
+        hop(
+            "/models",
+            200,
+            r#"{"data":[{"id":"acme/reasoner","name":"Acme","context_length":262144,"top_provider":{"max_completion_tokens":8192},"architecture":{"input_modalities":["text","image","file"],"output_modalities":["text"]},"supported_parameters":["tools","structured_outputs"]}]}"#,
+        ),
+        hop("/endpoints/zdr", 200, r#"{"data":[]}"#),
+    ]);
+    let id = extra_openrouter_identity(&base);
+    let pub_gen = coord
+        .refresh_all(
+            vec![CatalogRefreshTarget {
+                identity: id.clone(),
+                models_list_url: format!("{base}/models"),
+                credential: cred(7, "token-extra"),
+                manual_capabilities: IndexMap::new(),
+                bounds: CatalogFetchBounds::default(),
+                zdr: None,
+            }],
+            CancellationToken::new(),
+        )
+        .await
+        .expect("publish extra openrouter account");
+    handle.join().unwrap();
+    assert_eq!(publisher.load().generation, pub_gen);
+    assert!(
+        !home.path().join("openrouter_models_cache.json").exists(),
+        "extra kind=openrouter accounts must not write the built-in singleton cache"
+    );
+
+    let reqs = rec.lock().unwrap();
+    assert!(
+        !reqs[0].contains("zdr=true"),
+        "unset zdr extra account fetches the full native list"
+    );
+
+    let snap = publisher.load();
+    let entry = snap
+        .get("openrouter_home:acme/reasoner")
+        .expect("native extra-account selection id");
+    assert_eq!(entry.info.supports_tools, Some(true));
+    assert_eq!(entry.info.supports_image_input, Some(true));
+    assert_eq!(entry.info.supports_native_schema, Some(true));
+    assert_eq!(entry.info.context_window.get(), 262144);
+    assert_eq!(
+        entry.info.max_completion_tokens, None,
+        "OpenRouter ceiling must not become the per-request max"
+    );
+    let model = snap
+        .gated_projection()
+        .accounts
+        .get("openrouter_home")
+        .unwrap()
+        .models
+        .iter()
+        .find(|m| m.upstream_model_id == "acme/reasoner")
+        .unwrap();
+    assert_eq!(model.max_output_ceiling, Some(8192));
+    assert_eq!(model.capabilities.supports_file_input, Some(true));
+    assert_eq!(model.capabilities.output_has_text, Some(true));
 }

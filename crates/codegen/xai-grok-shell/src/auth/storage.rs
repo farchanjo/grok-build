@@ -440,7 +440,8 @@ pub const ANTHROPIC_API_KEY_SCOPE: &str = "anthropic::api_key";
 pub const OPENAI_ADMIN_KEY_SCOPE: &str = "openai::admin_key";
 
 fn validate_provider_scope(scope: &str) -> std::io::Result<()> {
-    // Built-in product scopes plus validated per-instance openai_compatible scopes.
+    // Built-in product scopes plus validated per-instance openai_compatible
+    // and extra OpenRouter (`openrouter::<id>::api_key`) scopes.
     if matches!(
         scope,
         OPENAI_API_KEY_SCOPE

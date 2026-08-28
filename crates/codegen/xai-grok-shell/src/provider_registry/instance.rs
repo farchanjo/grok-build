@@ -151,6 +151,19 @@ impl ProviderKind {
         }
     }
 
+    /// Parse a config/CLI kind spelling. `"custom"` is openai_compatible.
+    pub fn parse(raw: &str) -> Option<Self> {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "xai" => Some(Self::Xai),
+            "openai" => Some(Self::OpenAi),
+            "openrouter" => Some(Self::OpenRouter),
+            "anthropic" => Some(Self::Anthropic),
+            "openai_compatible" | "custom" => Some(Self::OpenAiCompatible),
+            "zai" => Some(Self::Zai),
+            _ => None,
+        }
+    }
+
     pub const fn display_name(self) -> &'static str {
         match self {
             Self::Xai => "xAI",
@@ -373,6 +386,8 @@ pub struct ProviderInstanceDescriptor {
     pub openrouter_plugins: Vec<OpenRouterPlugin>,
     #[serde(default)]
     pub openrouter_pacing: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_completion_tokens: Option<u32>,
 }
 
 impl ProviderInstanceDescriptor {
@@ -431,6 +446,15 @@ mod tests {
             ProviderKind::from(BuiltInProviderId::OpenAi),
             ProviderKind::OpenAi
         );
+        assert_eq!(
+            ProviderKind::parse("openrouter"),
+            Some(ProviderKind::OpenRouter)
+        );
+        assert_eq!(
+            ProviderKind::parse("custom"),
+            Some(ProviderKind::OpenAiCompatible)
+        );
+        assert!(ProviderKind::parse("not-a-kind").is_none());
     }
 
     #[test]
@@ -604,6 +628,7 @@ mod tests {
             openrouter_provider_preferences: None,
             openrouter_plugins: Vec::new(),
             openrouter_pacing: false,
+            max_completion_tokens: None,
         }
     }
 }

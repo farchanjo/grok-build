@@ -325,11 +325,24 @@ fn discovered_to_model_entry(model: &DiscoveredModel) -> ModelEntry {
     if let Some(ctx) = model.context_window.and_then(NonZeroU64::new) {
         info.context_window = ctx;
     }
-    if let Some(max) = model.max_completion_tokens {
+    // OpenRouter `top_provider.max_completion_tokens` /
+    // `max_output_ceiling` must not become `ModelInfo.max_completion_tokens`.
+    // Forwarding it there (e.g. 131072 on a 131072-wide model) makes every
+    // non-empty prompt fail local context validation. The sampler sends the
+    // provider default (16384) and clamps it to this ceiling. xAI, ChatGPT,
+    // and OpenAI keep advertised request budgets unchanged.
+    if model.provider_kind != ProviderKind::OpenRouter
+        && let Some(max) = model.max_completion_tokens
+    {
         info.max_completion_tokens = Some(max);
     }
+    info.max_output_ceiling = model
+        .max_output_ceiling
+        .or(model.capabilities.max_output_ceiling);
     info.supports_tools = model.capabilities.supports_tools;
+    info.supports_native_schema = model.capabilities.supports_native_schema;
     info.supports_reasoning_effort = model.capabilities.supports_reasoning_effort;
+    let default_effort = model.capabilities.default_reasoning_effort.as_deref();
     info.reasoning_efforts = model
         .capabilities
         .reasoning_efforts
@@ -343,13 +356,22 @@ fn discovered_to_model_entry(model: &DiscoveredModel) -> ModelEntry {
                 value: effort,
                 label: raw.clone(),
                 description: None,
-                default: false,
+                default: Some(raw.as_str()) == default_effort,
             })
         })
         .collect();
+    info.reasoning_effort = default_effort.and_then(|raw| raw.parse().ok());
+    info.reasoning_effort_selection =
+        xai_grok_inference_types::ReasoningEffortSelection::from_legacy(
+            info.supports_reasoning_effort,
+            &info.reasoning_efforts,
+        );
     info.supports_image_input = model.capabilities.supports_image_input;
     info.supports_audio_input = model.capabilities.supports_audio_input;
     info.supports_video_input = model.capabilities.supports_video_input;
+    info.supports_file_input = model.capabilities.supports_file_input;
+    info.output_has_text = model.capabilities.output_has_text;
+    info.supports_zdr = model.capabilities.supports_zdr;
     info.user_selectable = true;
     info.hidden = false;
 
@@ -362,6 +384,7 @@ fn discovered_to_model_entry(model: &DiscoveredModel) -> ModelEntry {
             openrouter_provider_preferences: None,
             openrouter_plugins: Vec::new(),
             openrouter_pacing: false,
+            max_completion_tokens: None,
             command: Vec::new(),
         }),
         api_key: None,
@@ -444,6 +467,7 @@ mod tests {
                 description: None,
                 context_window: None,
                 max_completion_tokens: None,
+                max_output_ceiling: None,
                 capabilities: Default::default(),
                 provider_instance_id: instance.into(),
                 provider_kind: kind,
@@ -636,5 +660,128 @@ mod tests {
             );
             assert!(!snap2.gated_projection().collisions.is_empty());
         });
+    }
+
+    fn discovered(
+        kind: ProviderKind,
+        instance: &str,
+        upstream: &str,
+        window: Option<u64>,
+        max_tokens: Option<u32>,
+    ) -> DiscoveredModel {
+        DiscoveredModel {
+            canonical_selection_id: format!("{instance}:{upstream}"),
+            upstream_model_id: upstream.into(),
+            display_name: Some(upstream.into()),
+            description: None,
+            context_window: window,
+            max_completion_tokens: max_tokens,
+            max_output_ceiling: max_tokens,
+            capabilities: Default::default(),
+            provider_instance_id: instance.into(),
+            provider_kind: kind,
+            api_surface: ApiSurface::OpenAiPlatform,
+            credential_route: CredentialRoute::ApiKey,
+            endpoint_origin: "https://api.example.com".into(),
+        }
+    }
+
+    #[test]
+    fn openrouter_discovery_does_not_set_request_max_completion_tokens() {
+        let entry = discovered_to_model_entry(&discovered(
+            ProviderKind::OpenRouter,
+            "openrouter",
+            "z-ai/glm-5.3-flash",
+            Some(1_048_576),
+            Some(131_072),
+        ));
+        assert_eq!(entry.info.context_window.get(), 1_048_576);
+        assert_eq!(
+            entry.info.max_completion_tokens, None,
+            "OpenRouter ceiling must not become the per-request max_tokens default"
+        );
+        let mut with_ceiling = discovered(
+            ProviderKind::OpenRouter,
+            "openrouter",
+            "z-ai/glm-5.3-flash",
+            Some(1_048_576),
+            None,
+        );
+        with_ceiling.max_output_ceiling = Some(131_072);
+        with_ceiling.capabilities.max_output_ceiling = Some(131_072);
+        let entry = discovered_to_model_entry(&with_ceiling);
+        assert_eq!(entry.info.max_completion_tokens, None);
+        assert_eq!(entry.info.max_output_ceiling, Some(131_072));
+        assert_eq!(entry.info.context_window.get(), 1_048_576);
+    }
+
+    #[test]
+    fn discovered_to_model_entry_copies_openrouter_catalog_capabilities() {
+        let mut model = discovered(
+            ProviderKind::OpenRouter,
+            "openrouter_work",
+            "z-ai/glm-5.3-flash",
+            Some(1_048_576),
+            None,
+        );
+        model.max_output_ceiling = Some(8192);
+        model.capabilities.supports_tools = Some(true);
+        model.capabilities.supports_native_schema = Some(true);
+        model.capabilities.supports_reasoning_effort = Some(true);
+        model.capabilities.reasoning_efforts = vec!["low".into(), "high".into()];
+        model.capabilities.default_reasoning_effort = Some("high".into());
+        model.capabilities.supports_image_input = Some(true);
+        model.capabilities.supports_audio_input = Some(false);
+        model.capabilities.supports_video_input = Some(false);
+        model.capabilities.supports_file_input = Some(true);
+        model.capabilities.output_has_text = Some(true);
+        model.capabilities.supports_zdr = Some(true);
+        model.capabilities.max_output_ceiling = Some(8192);
+
+        let entry = discovered_to_model_entry(&model);
+        assert_eq!(entry.info.supports_tools, Some(true));
+        assert_eq!(entry.info.supports_native_schema, Some(true));
+        assert_eq!(entry.info.supports_reasoning_effort, Some(true));
+        assert_eq!(entry.info.reasoning_efforts.len(), 2);
+        assert_eq!(
+            entry.info.reasoning_effort_selection,
+            xai_grok_inference_types::ReasoningEffortSelection::Exact
+        );
+        assert_eq!(entry.info.supports_image_input, Some(true));
+        assert_eq!(entry.info.supports_audio_input, Some(false));
+        assert_eq!(entry.info.supports_video_input, Some(false));
+        assert_eq!(entry.info.supports_file_input, Some(true));
+        assert_eq!(entry.info.output_has_text, Some(true));
+        assert_eq!(entry.info.supports_zdr, Some(true));
+        assert_eq!(entry.info.max_output_ceiling, Some(8192));
+        assert_eq!(entry.info.max_completion_tokens, None);
+        assert_eq!(entry.info.context_window.get(), 1_048_576);
+        assert_eq!(
+            entry.model_provider.as_ref().map(|p| p.id.as_str()),
+            Some("openrouter_work")
+        );
+    }
+
+    #[test]
+    fn openai_and_xai_discovery_keep_advertised_max_completion_tokens() {
+        let openai = discovered_to_model_entry(&discovered(
+            ProviderKind::OpenAi,
+            "openai",
+            "gpt-4o",
+            Some(128_000),
+            Some(16_384),
+        ));
+        assert_eq!(openai.info.context_window.get(), 128_000);
+        assert_eq!(openai.info.max_completion_tokens, Some(16_384));
+
+        let xai = discovered_to_model_entry(&discovered(
+            ProviderKind::Xai,
+            "xai",
+            "grok-4",
+            Some(2_000_000),
+            Some(64_000),
+        ));
+        assert_eq!(xai.info.context_window.get(), 2_000_000);
+        assert_eq!(xai.info.max_completion_tokens, Some(64_000));
     }
 }

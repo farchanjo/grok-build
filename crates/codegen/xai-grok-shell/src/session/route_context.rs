@@ -23,7 +23,9 @@ use crate::auth::{
 use crate::provider_registry::ProviderService;
 use crate::provider_registry::id::{BuiltInProviderId, ProviderId, canonical_descriptor_id};
 use crate::provider_registry::instance::{ApiSurface, CredentialRoute, ProviderIncarnation};
-use crate::provider_registry::secrets::application_key_scope;
+use crate::provider_registry::secrets::{
+    application_key_scope, application_key_scope_for_kind, extra_openrouter_application_key_scope,
+};
 
 /// Inputs for one production route resolution.
 #[derive(Clone, Copy)]
@@ -50,7 +52,7 @@ pub fn resolve_production_route_context(inputs: RouteResolutionInputs<'_>) -> Pr
 
     let incarnation = inputs.descriptor_incarnation.filter(|s| !s.is_empty());
     let (binding_generation, authority) =
-        resolve_binding_authority(inputs, instance_id, credential_route, incarnation);
+        resolve_binding_authority(inputs, instance_id, credential_route, incarnation, kind);
 
     let mut builder = ProviderRouteContext::builder()
         .instance_id(instance_id)
@@ -434,6 +436,7 @@ fn resolve_binding_authority(
     instance_id: &str,
     credential_route: RouteCredentialRoute,
     incarnation: Option<&str>,
+    kind: RouteProviderKind,
 ) -> (u64, RouteAuthority) {
     match credential_route {
         RouteCredentialRoute::None => (0, RouteAuthority::Authoritative),
@@ -449,7 +452,13 @@ fn resolve_binding_authority(
             live_oauth_binding(inputs.grok_home, instance_id, incarnation)
         }
         RouteCredentialRoute::ApiKey | RouteCredentialRoute::OpenAiPlatform => {
-            live_api_key_binding(inputs.grok_home, instance_id, credential_route, incarnation)
+            live_api_key_binding(
+                inputs.grok_home,
+                instance_id,
+                credential_route,
+                incarnation,
+                kind,
+            )
         }
     }
 }
@@ -459,6 +468,7 @@ fn live_api_key_binding(
     instance_id: &str,
     credential_route: RouteCredentialRoute,
     incarnation: Option<&str>,
+    kind: RouteProviderKind,
 ) -> (u64, RouteAuthority) {
     // Lifecycle incarnation is route identity, not an API-key vault key.
     // Built-in providers always attach a stable incarnation via
@@ -469,7 +479,7 @@ fn live_api_key_binding(
     let Some(home) = grok_home else {
         return (0, RouteAuthority::Unverified);
     };
-    let Some(scope) = api_key_scope_for_instance(instance_id, credential_route) else {
+    let Some(scope) = api_key_scope_for_instance(instance_id, credential_route, Some(kind)) else {
         return (0, RouteAuthority::Unverified);
     };
     let key_present = matches!(read_provider_api_key(home, &scope), Ok(Some(_)));
@@ -563,7 +573,12 @@ pub fn live_binding_generation_for_route(
                 "openai" => OPENAI_API_KEY_SCOPE.to_owned(),
                 "openrouter" => OPENROUTER_API_KEY_SCOPE.to_owned(),
                 "anthropic" => ANTHROPIC_API_KEY_SCOPE.to_owned(),
-                id => application_key_scope(&ProviderId::new(id).ok()?),
+                id => {
+                    let pid = ProviderId::new(id).ok()?;
+                    let kind = configured_kind_from_home(grok_home, id)
+                        .unwrap_or(crate::provider_registry::ProviderKind::OpenAiCompatible);
+                    application_key_scope_for_kind(&pid, kind)
+                }
             };
             if !matches!(read_provider_api_key(grok_home, &scope), Ok(Some(_))) {
                 return None;
@@ -582,6 +597,7 @@ pub fn live_binding_generation_for_route(
 fn api_key_scope_for_instance(
     instance_id: &str,
     credential_route: RouteCredentialRoute,
+    kind: Option<RouteProviderKind>,
 ) -> Option<String> {
     match instance_id {
         "openai"
@@ -596,10 +612,26 @@ fn api_key_scope_for_instance(
         "anthropic" => Some(ANTHROPIC_API_KEY_SCOPE.to_owned()),
         id if BuiltInProviderId::parse(id).is_none() => {
             let pid = ProviderId::new(id).ok()?;
-            Some(application_key_scope(&pid))
+            if matches!(kind, Some(RouteProviderKind::OpenRouter)) {
+                Some(extra_openrouter_application_key_scope(&pid))
+            } else {
+                Some(application_key_scope(&pid))
+            }
         }
         _ => None,
     }
+}
+
+fn configured_kind_from_home(
+    grok_home: &Path,
+    id: &str,
+) -> Option<crate::provider_registry::ProviderKind> {
+    let raw = std::fs::read_to_string(grok_home.join("config.toml")).ok()?;
+    let val: toml::Value = toml::from_str(&raw).ok()?;
+    let (entries, _) = crate::agent::model_providers::parse_model_providers(&val);
+    entries
+        .get(id)
+        .map(|c| crate::provider_registry::ProviderKind::from(c.kind))
 }
 
 #[cfg(test)]
@@ -627,6 +659,7 @@ mod tests {
             openrouter_provider_preferences: None,
             openrouter_plugins: vec![],
             openrouter_pacing: kind == ModelProviderKind::OpenRouter,
+            max_completion_tokens: None,
             command: vec![],
         }
     }
@@ -780,6 +813,77 @@ mod tests {
     }
 
     #[test]
+    fn extra_openrouter_work_key_is_authoritative_and_isolated_from_builtin() {
+        use crate::provider_registry::management::ProviderManagementService;
+        use crate::provider_registry::management::dto::ProviderAddRequest;
+        use crate::provider_registry::runtime_cache;
+        use crate::provider_registry::secrets::extra_openrouter_application_key_scope;
+
+        let dir = tempdir().unwrap();
+        runtime_cache::invalidate_for_home(dir.path());
+        let svc = ProviderManagementService::new(dir.path());
+        let add = svc.add(ProviderAddRequest {
+            id: "openrouter-work".into(),
+            kind: "openrouter".into(),
+            base_url: "https://openrouter.ai/api/v1".into(),
+            display_name: Some("Work".into()),
+            admin_base_url: None,
+            enabled: true,
+            expected_generation: svc.current_generation(),
+        });
+        assert!(add.ok, "{:?}", add.error);
+        let work = crate::provider_registry::ProviderId::new("openrouter-work").unwrap();
+        let generation = store_provider_api_key(
+            dir.path(),
+            &extra_openrouter_application_key_scope(&work),
+            "work-or-key-aaaaaaaa",
+        )
+        .unwrap();
+        let _ = store_provider_api_key(dir.path(), OPENROUTER_API_KEY_SCOPE, "builtin-or-key");
+
+        let inference = cfg("https://openrouter.ai/api/v1", "vendor/model");
+        let r = resolved("openrouter-work", ModelProviderKind::OpenRouter);
+        let ctx = resolve_production_route_context(RouteResolutionInputs {
+            inference: &inference,
+            resolved: Some(&r),
+            provider_config: None,
+            registry_generation: 0,
+            descriptor_incarnation: None,
+            descriptor_api_surface: None,
+            descriptor_credential_route: None,
+            grok_home: Some(dir.path()),
+        });
+        assert_eq!(ctx.instance_id(), "openrouter-work");
+        assert_eq!(ctx.provider_kind(), RouteProviderKind::OpenRouter);
+        assert_eq!(ctx.authority(), RouteAuthority::Authoritative);
+        assert_eq!(ctx.binding_generation(), generation);
+        assert_eq!(
+            live_binding_generation_for_route(dir.path(), "openrouter-work", "api_key", None),
+            Some(generation)
+        );
+        assert_eq!(
+            live_binding_generation_for_route(dir.path(), "openrouter", "api_key", None),
+            Some(1),
+            "built-in OpenRouter keeps its own scope generation"
+        );
+        crate::auth::clear_provider_api_key(
+            dir.path(),
+            &extra_openrouter_application_key_scope(&work),
+        )
+        .unwrap();
+        assert!(
+            live_binding_generation_for_route(dir.path(), "openrouter-work", "api_key", None)
+                .is_none(),
+            "cleared Work key must fail closed"
+        );
+        assert_eq!(
+            live_binding_generation_for_route(dir.path(), "openrouter", "api_key", None),
+            Some(1),
+            "clearing Work must not drop built-in OpenRouter"
+        );
+    }
+
+    #[test]
     fn built_in_openrouter_with_stored_key_is_authoritative_api_key() {
         let dir = tempdir().unwrap();
         let generation =
@@ -848,6 +952,7 @@ mod tests {
                 "helper",
                 RouteCredentialRoute::AuthHelper,
                 None,
+                RouteProviderKind::Custom,
             ),
             (0, RouteAuthority::Unverified)
         );
@@ -870,6 +975,7 @@ mod tests {
                 "public",
                 RouteCredentialRoute::None,
                 None,
+                RouteProviderKind::Custom,
             ),
             (0, RouteAuthority::Authoritative)
         );

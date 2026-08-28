@@ -87,6 +87,10 @@ pub struct ProviderDetailDto {
     pub openrouter_quantizations: Vec<String>,
     pub openrouter_sort: Option<String>,
     pub openrouter_pacing: bool,
+    /// Explicit provider `max_completion_tokens`. `None` means use the kind
+    /// default (16384 for OpenRouter).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_completion_tokens: Option<u32>,
     /// Plugin ids only (safe labels; full plugin JSON stays in config).
     pub openrouter_plugin_ids: Vec<String>,
     pub credentials: CredentialPresence,
@@ -166,6 +170,9 @@ pub struct ProviderSavePatch {
     pub openrouter_quantizations: Option<Vec<String>>,
     pub openrouter_sort: Option<Option<String>>,
     pub openrouter_pacing: Option<bool>,
+    /// Provider-wide request `max_tokens`. `None` in a patch means omit;
+    /// a positive value is written to `[model_providers.<id>]`.
+    pub max_completion_tokens: Option<u32>,
 }
 
 /// Add-provider request (new configured instance).
