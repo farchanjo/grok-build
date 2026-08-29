@@ -46,7 +46,7 @@ pub use commands::{CasSpliceResult, ModelMetadata, StrictAppendAck, StrictAppend
 pub use compaction_mode::CompactionMode;
 pub use compaction_transcript::CompactionDetail;
 pub use events::ChatStateEvent;
-pub use handle::ChatStateHandle;
+pub use handle::{ChatStateHandle, TersifyTransform};
 pub use persistence::{
     ChatPersistence, CompactionPersistenceError, CompactionPersistenceMetadata,
     CompactionPersistenceRequest, MockChatPersistence, MockPersistenceReceiver,

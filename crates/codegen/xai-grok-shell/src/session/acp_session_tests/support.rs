@@ -236,6 +236,8 @@ pub(crate) async fn create_test_actor_ex(
     );
     chat_state_handle.record_token_usage(total_tokens);
     let actor = SessionActor {
+        tersify_transform: None,
+        tersify_level_meta: std::sync::Mutex::new(None),
         session_info: SessionInfo {
             id: acp::SessionId::new("test-actor"),
             cwd: cwd.as_str().to_string(),

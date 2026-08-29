@@ -1,6 +1,7 @@
 //! Handle to communicate with ChatStateActor.
 
 use std::collections::BTreeSet;
+use std::sync::Arc;
 
 use tokio::sync::{mpsc, oneshot};
 use xai_grok_inference_types::{
@@ -22,6 +23,11 @@ use crate::types::{
 pub struct ChatStateHandle {
     cmd_tx: mpsc::UnboundedSender<ChatStateCommand>,
 }
+
+/// An opaque pre-persist transform for tool results, injected by the session
+/// layer. `chat-state` stays dependency-free: it calls `apply` and appends
+/// whatever comes back.
+pub type TersifyTransform = Arc<dyn Fn(ConversationItem) -> ConversationItem + Send + Sync>;
 
 impl ChatStateHandle {
     /// Create a new handle with the given command sender.
@@ -108,6 +114,25 @@ impl ChatStateHandle {
         let _ = self
             .cmd_tx
             .send(ChatStateCommand::PushAssistantResponse { item });
+    }
+
+    /// Record a tool result.
+    ///
+    /// `tersify` is an optional pre-persist transform applied by the actor
+    /// before the item lands in the conversation: a scope-allowed main
+    /// session runs its lossy (S4) compressors over large tool outputs and
+    /// appends a recovery pointer to the original. `None` (the default) keeps
+    /// the raw bytes — subagent sessions and tersify-off setups pass `None`.
+    pub fn push_tool_result_tersified(
+        &self,
+        item: ConversationItem,
+        tersify: Option<&TersifyTransform>,
+    ) {
+        let item = match tersify {
+            Some(t) => t(item),
+            None => item,
+        };
+        let _ = self.cmd_tx.send(ChatStateCommand::PushToolResult { item });
     }
 
     /// Record a tool result.

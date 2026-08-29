@@ -805,6 +805,10 @@ pub struct AgentView {
     /// Multiline input mode: swap Enter (insert newline) and Shift+Enter (send).
     /// Toggled by `Ctrl+M` or `/multiline`. Not persisted across sessions.
     pub multiline_mode: bool,
+    /// `/tersify` session override (`Some("lite"|"full"|"ultra")`), or `None`
+    /// when `/tersify off` cleared it. Ephemeral: rides on the next prompt's
+    /// session meta (`tersifyLevel`) and never persists to `[hints]`.
+    pub session_tersify_level_override: Option<String>,
     /// Vim-mode scrollback keybindings. When `false` (default), bare-letter
     /// and Shift+letter scrollback bindings (j/k, h/l, g/G, y/Y, o/O, r,
     /// x, e/E, L/H, plus the `i` FocusPrompt alt) are suppressed and the

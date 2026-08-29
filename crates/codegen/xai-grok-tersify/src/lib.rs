@@ -30,6 +30,7 @@ pub mod safety;
 pub mod store;
 pub mod style;
 pub mod tokens;
+pub mod transform;
 
 pub use detect::ContentType;
 pub use engine::{Engine, Mode, Options, Result as CompressResult};

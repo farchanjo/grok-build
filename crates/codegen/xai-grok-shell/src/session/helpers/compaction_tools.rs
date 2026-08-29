@@ -186,10 +186,9 @@ pub async fn run_resolver_rounds(
 
         let Some((tool_calls, answer_text)) =
             response.items.iter().rev().find_map(|item| match item {
-                ConversationItem::Assistant(assistant) => Some((
-                    assistant.tool_calls.clone(),
-                    assistant.content.to_string(),
-                )),
+                ConversationItem::Assistant(assistant) => {
+                    Some((assistant.tool_calls.clone(), assistant.content.to_string()))
+                }
                 _ => None,
             })
         else {
@@ -250,16 +249,17 @@ async fn execute_lookup(
     call: &ToolCall,
     cancel: &tokio_util::sync::CancellationToken,
 ) -> String {
-    let header = format!("<compaction_lookup tool=\"{}\" args={}>", call.name, call.arguments);
+    let header = format!(
+        "<compaction_lookup tool=\"{}\" args={}>",
+        call.name, call.arguments
+    );
     if cancel.is_cancelled() {
         return format!("{header}\n[cancelled before execution]\n</compaction_lookup>");
     }
     let args: serde_json::Value = match serde_json::from_str(&call.arguments) {
         Ok(args) => args,
         Err(error) => {
-            return format!(
-                "{header}\n[invalid tool arguments: {error}]\n</compaction_lookup>",
-            );
+            return format!("{header}\n[invalid tool arguments: {error}]\n</compaction_lookup>",);
         }
     };
     if !COMPACTION_TOOL_ALLOWLIST.contains(&call.name.as_str()) {
@@ -354,7 +354,11 @@ mod tests {
             fn specs(&self) -> Vec<ToolSpec> {
                 vec![]
             }
-            async fn resolve(&self, _name: &str, _args: serde_json::Value) -> Result<String, String> {
+            async fn resolve(
+                &self,
+                _name: &str,
+                _args: serde_json::Value,
+            ) -> Result<String, String> {
                 unreachable!("only allowlisted tools may execute")
             }
         }
@@ -382,7 +386,11 @@ mod tests {
             fn specs(&self) -> Vec<ToolSpec> {
                 vec![]
             }
-            async fn resolve(&self, _name: &str, _args: serde_json::Value) -> Result<String, String> {
+            async fn resolve(
+                &self,
+                _name: &str,
+                _args: serde_json::Value,
+            ) -> Result<String, String> {
                 unreachable!("arguments never parsed successfully")
             }
         }
@@ -431,17 +439,15 @@ mod tests {
     }
 }
 
-
-
 #[cfg(test)]
 mod resolver_round_tests {
     use super::*;
     use crate::inference::{ApiBackend, Client, InferenceConfig};
     use axum::extract::State;
+    use axum::http::StatusCode;
     use axum::response::IntoResponse;
     use axum::response::sse::{Event, KeepAlive, Sse};
     use axum::routing::post;
-    use axum::http::StatusCode;
     use axum::{Json, Router};
     use futures_util::stream;
     use serde_json::json;

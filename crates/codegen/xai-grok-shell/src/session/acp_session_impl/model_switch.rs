@@ -432,3 +432,72 @@ impl SessionActor {
         }
     }
 }
+
+impl SessionActor {
+    /// Re-stamp the `<tersify_style>` block in the system head from the stashed
+    /// `/tersify` session override.
+    ///
+    /// Semantics:
+    /// - `Some(level)` replaces the current block (or appends one when absent).
+    /// - `None` clears the block: the persisted `[hints] tersify_*` governs the
+    ///   next full rebuild (spawn), matching `/tersify off`'s documented behavior.
+    ///
+    /// No-op when the head has no block AND no override is set — the common case
+    /// for every session that never touched `/tersify`, so this costs one mutex
+    /// read and one string scan per turn.
+    pub(super) async fn refresh_tersify_style_impl(&self) {
+        let level = self
+            .tersify_level_meta
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        let Some(current) = crate::session::acp_session::load_system_prompt(&self.session_info)
+        else {
+            return;
+        };
+        let rebuilt = match level.as_deref() {
+            Some("off") => Self::remove_tersify_style(&current),
+            Some(level) => {
+                let instruction = xai_grok_tersify::style::style_instruction(level);
+                Self::upsert_tersify_style(&current, instruction)
+            }
+            None => current.clone(),
+        };
+        if rebuilt != current {
+            self.handle_replace_system_prompt(rebuilt).await;
+        }
+    }
+
+    /// Replace or insert the `<tersify_style>` block in a system prompt.
+    #[must_use]
+    fn upsert_tersify_style(prompt: &str, instruction: &str) -> String {
+        let block = format!("<tersify_style>\n{instruction}\n</tersify_style>");
+        match prompt.find("<tersify_style>") {
+            Some(start) => {
+                let Some(end_rel) = prompt[start..].find("</tersify_style>") else {
+                    return format!("{prompt}\n\n{block}");
+                };
+                let end = start + end_rel + "</tersify_style>".len();
+                format!("{}{}{}", &prompt[..start], block, &prompt[end..])
+            }
+            None => format!("{prompt}\n\n{block}"),
+        }
+    }
+
+    /// Remove the block entirely; whitespace-normalized tail.
+    #[must_use]
+    fn remove_tersify_style(prompt: &str) -> String {
+        let Some(start) = prompt.find("<tersify_style>") else {
+            return prompt.to_string();
+        };
+        let Some(end_rel) = prompt[start..].find("</tersify_style>") else {
+            return prompt.to_string();
+        };
+        let end = start + end_rel + "</tersify_style>".len();
+        let mut out = String::with_capacity(prompt.len());
+        out.push_str(prompt[..start].trim_end());
+        out.push('\n');
+        out.push_str(prompt[end..].trim_start());
+        out.trim_end().to_string()
+    }
+}

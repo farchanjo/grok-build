@@ -58,6 +58,7 @@ pub mod session_info;
 pub mod settings_cmd;
 pub mod share;
 pub mod tasks;
+pub mod tersify_cmd;
 pub mod theme;
 pub mod timeline;
 pub mod timestamps;
@@ -101,6 +102,7 @@ pub fn builtin_commands() -> Vec<Arc<dyn SlashCommand>> {
         Arc::new(multiline::MultilineCommand),
         Arc::new(compact_mode::CompactModeCommand),
         Arc::new(vim_mode::VimModeCommand),
+        Arc::new(tersify_cmd::TersifyCommand),
         Arc::new(plugin::HooksCommand),
         Arc::new(plugin::PluginsCommand),
         Arc::new(plugin::MarketplaceCommand),

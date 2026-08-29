@@ -1625,8 +1625,7 @@ impl SessionActor {
                 return Err(
                     crate::session::helpers::full_replace_compaction::attribute_compaction_error(
                         last_error.unwrap_or_else(|| {
-                            acp::Error::internal_error()
-                                .data("compaction failed: unknown error")
+                            acp::Error::internal_error().data("compaction failed: unknown error")
                         }),
                         sampler.last_failed_route().as_ref(),
                     ),
@@ -2687,6 +2686,8 @@ mod inline_auto_compact_flow_tests {
         );
         chat_state_handle.record_token_usage(total_tokens);
         SessionActor {
+            tersify_transform: None,
+            tersify_level_meta: std::sync::Mutex::new(None),
             unattributed_background_usage: std::sync::atomic::AtomicBool::new(false),
             session_info: SessionInfo {
                 id: acp::SessionId::new("test-auto-compact"),

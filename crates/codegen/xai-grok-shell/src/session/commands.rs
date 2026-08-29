@@ -173,6 +173,10 @@ pub enum SessionCommand {
         artifact_upload_ctx: Option<crate::upload::manifest::ArtifactUploadContext>,
         /// Optional client identifier from the prompt request meta (overrides session-level one)
         client_identifier: Option<String>,
+        /// Session-scoped tersify level override from the prompt request meta
+        /// (`_meta.tersifyLevel`, `/tersify`). `None` falls back to the
+        /// persisted `[hints] tersify_level`.
+        tersify_level: Option<String>,
         /// Optional screen mode from the prompt request meta (`_meta.screenMode`,
         /// pager-only: `fullscreen` | `inline` | `minimal` | `headless`).
         /// Telemetry-only; `None` for other clients and synthetic prompts.

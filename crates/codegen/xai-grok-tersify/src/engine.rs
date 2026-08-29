@@ -75,7 +75,7 @@ pub struct Result {
 /// Keeps original bytes addressable by handle. Implementations must return the
 /// bytes byte-for-byte or nothing at all — a lost `get` must read as an unknown
 /// handle, never as a guess.
-pub trait RecoveryStore {
+pub trait RecoveryStore: Send {
     /// Store `original` and return its handle. Idempotent: the handle is
     /// derived from the bytes, so storing twice returns the same handle.
     fn put(&mut self, original: &[u8]) -> String;
@@ -192,12 +192,15 @@ impl Engine {
             return self.passthrough(detected, before, input);
         }
         if self.mode == Mode::Record {
-            // The dry run measured everything and still hands back the original.
+            // The dry run measured everything and still hands back the
+            // original. The ratio stays: it is the measurement that makes
+            // record mode useful ("this payload WOULD compress to N%"), while
+            // applied=false and handle=None keep the emit contract honest.
             return Result {
                 body: input.to_vec(),
                 content_type: detected,
                 applied: false,
-                ratio: 0.0,
+                ratio: ratio(before.tokens, after.tokens),
                 before,
                 after,
                 handle: None,

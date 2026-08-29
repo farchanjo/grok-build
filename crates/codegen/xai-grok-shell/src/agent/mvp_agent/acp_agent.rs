@@ -2803,6 +2803,12 @@ impl acp::Agent for MvpAgent {
             .and_then(|m| m.get("screenMode"))
             .and_then(|v| v.as_str())
             .map(|s| s.to_string());
+        let prompt_tersify_level = arguments
+            .meta
+            .as_ref()
+            .and_then(|m| m.get("tersifyLevel"))
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
         let origin = classify_acp_prompt_origin(arguments.meta.as_ref(), &prompt_id);
         let json_schema = arguments
             .meta
@@ -2845,6 +2851,7 @@ impl acp::Agent for MvpAgent {
                     .map(|ctx| ctx.artifact_upload_context()),
                 client_identifier: prompt_client_identifier,
                 screen_mode: prompt_screen_mode,
+                tersify_level: prompt_tersify_level,
                 verbatim,
                 traceparent: xai_file_utils::trace_context::current_traceparent(),
                 json_schema,

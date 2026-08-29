@@ -16,7 +16,7 @@ pub mod marker;
 use crate::safety::Class;
 
 /// Compresses one content type.
-pub trait Compressor {
+pub trait Compressor: Send + Sync {
     /// Registry key of the content type this compressor handles.
     fn content_type(&self) -> &'static str;
 

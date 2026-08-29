@@ -2947,3 +2947,60 @@ pub(in crate::app::dispatch) fn clear_media_file_model(app: &mut AppView) -> Vec
         rollback_value: crate::settings::SettingValue::String(prev),
     }]
 }
+
+/// Set THIS session's tersify level override (`/tersify lite|full|ultra|off`).
+///
+/// SESSION-EPHEMERAL by design: the value rides on the next prompt's session
+/// meta (`tersifyLevel`), which `build_spawn_system_prompt` folds into the
+/// style block for the coming turn. Nothing touches `[hints]` — the persisted
+/// level keeps applying to every other and future session. `off` clears the
+/// override so the persisted config applies again.
+///
+/// Requires an active agent session: on the welcome screen there is nothing
+/// to override, so the command no-ops with a toast (same shape as
+/// `set_multiline_mode`'s no-agent arm).
+pub(in crate::app::dispatch) fn set_session_tersify_level(
+    app: &mut AppView,
+    level: String,
+) -> Vec<Effect> {
+    let ActiveView::Agent(id) = app.active_view else {
+        app.show_toast("Tersify: open a session first (/tersify lite|full|ultra|off)");
+        return vec![];
+    };
+    let Some(agent) = app.agents.get_mut(&id) else {
+        return vec![];
+    };
+    let normalized = match level.as_str() {
+        "lite" | "full" | "ultra" => level.clone(),
+        "off" => String::new(),
+        other => {
+            tracing::warn!(
+                target: "settings",
+                value = other,
+                "SetSessionTersifyLevel dispatched with unknown level — no-op",
+            );
+            return vec![];
+        }
+    };
+    let label = if normalized.is_empty() {
+        "config default".to_string()
+    } else {
+        normalized.clone()
+    };
+    agent.session_tersify_level_override = if normalized.is_empty() {
+        None
+    } else {
+        Some(normalized)
+    };
+    tracing::info!(
+        target: "settings",
+        key = "tersify_level",
+        value = %label,
+        surface = "session",
+        "setting changed",
+    );
+    app.show_toast(&format!(
+        "\u{2713} Tersify ({label}) — next turn, this session only"
+    ));
+    vec![]
+}

@@ -3848,6 +3848,15 @@ fn process_effects(
         chat_mode: app.chat_mode,
         screen_mode_label: Some(app.screen_mode.meta_label()),
         is_api_key_auth: app.is_api_key_auth,
+        // /tersify session override rides on every prompt so mid-session
+        // level switches apply from the very next turn.
+        tersify_level_override: match app.active_view {
+            ActiveView::Agent(id) => app
+                .agents
+                .get(&id)
+                .and_then(|a| a.session_tersify_level_override.clone()),
+            _ => None,
+        },
     };
     for eff in effs {
         let (quit, meta) = effects::execute(eff, tasks, &app.acp_tx, &app.cwd, &flags, progress_tx);

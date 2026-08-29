@@ -434,6 +434,7 @@ async fn handle_notification(
                         artifact_upload_ctx: None,
                         client_identifier: None,
                         screen_mode: None,
+                        tersify_level: None,
                         verbatim: true,
                         traceparent: xai_file_utils::trace_context::current_traceparent(),
                         json_schema: None,

@@ -2472,6 +2472,7 @@ fn inject_subagent_completed_prompt(
             artifact_upload_ctx: None,
             client_identifier: None,
             screen_mode: None,
+            tersify_level: None,
             verbatim: true,
             traceparent: None,
             json_schema: None,

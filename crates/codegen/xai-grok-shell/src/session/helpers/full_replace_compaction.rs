@@ -40,9 +40,7 @@ use xai_chat_state::compaction_utils::{
 };
 
 use crate::inference::Client as OaiCompatClient;
-use crate::session::helpers::compaction_tools::{
-    CompactionToolResolver, run_resolver_rounds,
-};
+use crate::session::helpers::compaction_tools::{CompactionToolResolver, run_resolver_rounds};
 use crate::session::helpers::session_compact::{
     CompactFailure, CompactOutput, build_compaction_chat_history,
     generate_session_compact_cancellable,
@@ -308,9 +306,21 @@ impl CompactionSampler for ShellCompactionSampler {
                 *self.resolver_stats.lock().unwrap() = (outcome.rounds, outcome.calls);
                 if let Some(summary) = outcome.early_summary {
                     // The summarizer answered instead of asking for context.
+                    // Stash the output like the streaming path below, otherwise
+                    // the caller finds `last_success` empty and panics.
                     *self.resolved_lookups.lock().unwrap() = Some(Vec::new());
+                    let response = summary.clone();
+                    *self.last_success.lock().unwrap() = Some(CompactOutput {
+                        content: summary,
+                        stop_reason: None,
+                        truncated: false,
+                        ttft_ms: None,
+                        stream_ms: None,
+                        delta_count: 0,
+                        itl_max_ms: None,
+                    });
                     return Ok(LlmCompactionOutput {
-                        response: summary,
+                        response,
                         thinking: String::new(),
                     });
                 }

@@ -83,7 +83,7 @@ fn plain_prompt_block_no_meta_when_ranges_empty() {
 /// (the shell threads the latter into `prompt_submitted.screen_mode`).
 #[test]
 fn prompt_request_meta_stamps_screen_mode() {
-    let meta = prompt_request_meta("p-1", Some("minimal"));
+    let meta = prompt_request_meta("p-1", Some("minimal"), None);
     assert_eq!(
             meta,
             serde_json::json!({ "promptId": "p-1", "screenMode": "minimal" })
@@ -93,13 +93,13 @@ fn prompt_request_meta_stamps_screen_mode() {
 /// omitted — the legacy `{"promptId": …}` wire shape stays byte-identical.
 #[test]
 fn prompt_request_meta_omits_screen_mode_when_unset() {
-    let meta = prompt_request_meta("p-2", None);
+    let meta = prompt_request_meta("p-2", None, None);
     assert_eq!(meta, serde_json::json!({ "promptId": "p-2" }));
 }
 
 #[test]
 fn stamp_prompt_origin_meta_writes_scheduler_tag() {
-    let mut meta = prompt_request_meta("p-3", None);
+    let mut meta = prompt_request_meta("p-3", None, None);
     stamp_prompt_origin_meta(
         &mut meta,
         Some(crate::app::actions::PromptOriginTag::SchedulerFired),

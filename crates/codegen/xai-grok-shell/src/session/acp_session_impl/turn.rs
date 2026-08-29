@@ -1170,6 +1170,10 @@ impl SessionActor {
             .sum();
         tracing::Span::current().record("prompt_length", prompt_length as i64);
         *self.active_skill.lock() = None;
+        // Mid-session tersify level switch: re-stamp the style block in the
+        // system head so the coming turn sees the new level. Cheap: string
+        // swap + one head replace; skipped when nothing changed.
+        self.refresh_tersify_style_impl().await;
         xai_grok_telemetry::unified_log::info(
             "shell.handle_prompt.start",
             Some(self.session_info.id.0.as_ref()),

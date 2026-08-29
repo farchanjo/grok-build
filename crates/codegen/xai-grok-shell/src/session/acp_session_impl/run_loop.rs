@@ -1035,9 +1035,18 @@ pub(super) async fn run_session(
                         SessionCommand::SetToolOverrides { overrides } => {
                             session.set_tool_overrides(overrides);
                         }
-                        SessionCommand::Prompt { prompt_id, prompt_blocks, origin, prompt_mode, artifact_upload_ctx, client_identifier, screen_mode, verbatim, traceparent, json_schema, send_now, admission, tool_overrides_update, respond_to, persist_ack, parsed_prompt_tx } => {
+                        SessionCommand::Prompt { prompt_id, prompt_blocks, origin, prompt_mode, artifact_upload_ctx, client_identifier, screen_mode, tersify_level, verbatim, traceparent, json_schema, send_now, admission, tool_overrides_update, respond_to, persist_ack, parsed_prompt_tx } => {
                             // The typed `origin` is carried by the producer
                             // (PR19); it is never re-inferred here from the id.
+                            // Session-scoped /tersify override: stash for the
+                            // next model turn's style assembly.
+                            {
+                                let mut lvl = session
+                                    .tersify_level_meta
+                                    .lock()
+                                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                                *lvl = tersify_level.clone();
+                            }
                             let (actor_admitted, task_wake_fallback) = match admission {
                                 Some(admission) => {
                                     let fallback = session

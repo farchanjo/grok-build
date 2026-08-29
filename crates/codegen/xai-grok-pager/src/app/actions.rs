@@ -589,6 +589,11 @@ pub enum Action {
     SetContextualHintSshWrap(bool),
     /// Commit the active theme (canonical name, e.g. `"groknight"`, `"auto"`).
     SetTheme(String),
+    /// Set the tersify level override for THIS session only (`lite` | `full` |
+    /// `ultra` | `off`). Never persisted; the shell reads it from session meta
+    /// when assembling the next turn's system prompt. `off` clears the
+    /// override so the persisted `[hints] tersify_*` applies again.
+    SetSessionTersifyLevel(String),
     /// Commit `[hints] tersify_scope` (`main_only` | `all` | `off`). Takes
     /// effect for newly spawned sessions (system prompt is built at spawn).
     SetTersifyScope(String),

@@ -89,6 +89,8 @@ pub(super) async fn make_replay_send_update_fixture() -> ReplaySendUpdateFixture
     });
     let (event_tx, event_rx) = mpsc::unbounded_channel::<SessionEvent>();
     let actor = SessionActor {
+        tersify_transform: None,
+        tersify_level_meta: std::sync::Mutex::new(None),
         session_info: SessionInfo {
             id: acp::SessionId::new("test-session"),
             cwd: cwd.as_str().to_string(),

@@ -61,10 +61,16 @@ pub fn elide_lines(input: &str) -> Vec<u8> {
         let same =
             i < bare.len() && normalized_shape(&bare[i]) == normalized_shape(&bare[run_start]);
         if !same {
-            if i - run_start >= MIN_RUN && keep[run_start] {
-                // Middle of the run: candidates for elision. Ends stay: the run
-                // boundary is information (it started and it stopped).
-                for slot in keep[run_start + 1..i - 1].iter_mut() {
+            if i - run_start >= MIN_RUN {
+                // Middle of the run becomes elision candidates. The run's first
+                // line stays as the representative (keep was set for it above
+                // when it is signal/edge; otherwise the run's own head marks
+                // it), and the tail boundary stays for the same reason.
+                keep[run_start] = true;
+                if i >= 2 {
+                    keep[i - 1] = true;
+                }
+                for slot in keep[run_start + 1..i.saturating_sub(1)].iter_mut() {
                     *slot = false;
                 }
             }

@@ -837,6 +837,13 @@ pub(crate) struct SessionActor {
     /// Also stores credentials (api_key, optional extra access key,
     /// client_version) opaquely.
     pub(crate) chat_state_handle: xai_chat_state::ChatStateHandle,
+    /// Optional tool-result compression for this session. `Some` only for a
+    /// MAIN session under an active tersify scope; `None` for subagents and
+    /// tersify-off setups, whose tool output must reach the model raw.
+    pub(crate) tersify_transform: Option<xai_chat_state::TersifyTransform>,
+    /// Session-scoped `/tersify` level from the most recent prompt's meta.
+    /// Set per turn, read by the style assembly at the next model turn.
+    pub(crate) tersify_level_meta: std::sync::Mutex<Option<String>>,
     /// Current running prompt/turn id, shared with SessionHandle.
     pub(crate) current_prompt_id: std::sync::Arc<std::sync::Mutex<Option<String>>>,
     /// Per-session conversation language (BCP-47). `None` means inherit from
@@ -1735,7 +1742,6 @@ fn save_system_prompt(session_info: &SessionInfo, system_prompt: &str) {
 ///
 /// Returns `None` for sessions created before this artifact existed.
 /// Callers should fall back to extracting from `chat_history.jsonl` if absent.
-#[expect(dead_code, reason = "API for future viewers/debug tools")]
 pub(crate) fn load_system_prompt(session_info: &SessionInfo) -> Option<String> {
     let dir = crate::session::persistence::session_dir(session_info);
     load_system_prompt_from_dir(&dir)

@@ -18,7 +18,7 @@ use serde::{Deserialize, Serialize};
 /// Implementations must be deterministic: the same bytes always produce the
 /// same count. A counter that drifts between calls silently rewrites history
 /// in every ratio and cache key derived from it.
-pub trait Counter: core::fmt::Debug {
+pub trait Counter: core::fmt::Debug + Send + Sync {
     /// Local token estimate for `bytes`.
     fn count(&self, bytes: &[u8]) -> usize;
 

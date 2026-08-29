@@ -252,6 +252,11 @@ pub(crate) struct SessionFlags {
     /// Mutual exclusivity with Build plan profiles: profiles are omitted and a
     /// warn is logged when plan flags are also set (K12).
     pub chat_mode: bool,
+    /// Session-scoped tersify level override (`/tersify`), or `None` when the
+    /// session has no override (persisted `[hints] tersify_*` applies).
+    /// Stamped as `tersifyLevel` into every `PromptRequest._meta` so the
+    /// shell's style assembly reads it per turn.
+    pub tersify_level_override: Option<String>,
     /// Effective screen mode label (`ScreenMode::meta_label`), stamped into
     /// every `PromptRequest._meta.screenMode` for minimal-vs-regular usage
     /// telemetry. `None` (key omitted) only under `Default` in tests; real

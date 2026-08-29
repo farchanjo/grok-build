@@ -89,9 +89,10 @@ use super::settings::setters::{
     set_media_audio_model, set_media_file_model, set_media_image_model, set_media_routing,
     set_media_video_model, set_multiline_mode, set_page_flip_on_send, set_prompt_suggestions,
     set_remember_tool_approvals, set_render_mermaid, set_respect_manual_folds, set_screen_mode,
-    set_scroll_lines, set_scroll_mode, set_scroll_speed, set_show_thinking_blocks, set_show_tips,
-    set_simple_mode, set_tersify_level, set_tersify_scope, set_theme, set_timeline, set_timestamps,
-    set_vim_mode, set_voice_capture_mode, set_voice_stt_language,
+    set_scroll_lines, set_scroll_mode, set_scroll_speed, set_session_tersify_level,
+    set_show_thinking_blocks, set_show_tips, set_simple_mode, set_tersify_level, set_tersify_scope,
+    set_theme, set_timeline, set_timestamps, set_vim_mode, set_voice_capture_mode,
+    set_voice_stt_language,
 };
 use super::settings::ui::{
     dispatch_confirm_reset_setting, dispatch_open_command_palette, dispatch_open_howto_guides,
@@ -1122,6 +1123,7 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
         Action::SetContextualHintWordSelect(v) => set_contextual_hint_word_select(app, v),
         Action::SetContextualHintSshWrap(v) => set_contextual_hint_ssh_wrap(app, v),
         Action::SetTheme(v) => set_theme(app, v),
+        Action::SetSessionTersifyLevel(v) => set_session_tersify_level(app, v),
         Action::SetTersifyScope(v) => set_tersify_scope(app, v),
         Action::SetTersifyLevel(v) => set_tersify_level(app, v),
         Action::SetAutoDarkTheme(v) => set_auto_dark_theme(app, v),

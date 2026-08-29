@@ -1136,7 +1136,7 @@ pub(crate) fn execute(
                     let prompt = vec![plain_prompt_content_block(text, &skill_token_ranges)];
                     let req = acp::PromptRequest::new(session_id.clone(), prompt)
                         .meta(
-                            prompt_request_meta(&prompt_id, screen_mode)
+                            prompt_request_meta(&prompt_id, screen_mode, None)
                                 .as_object()
                                 .cloned(),
                         );
@@ -1189,7 +1189,7 @@ pub(crate) fn execute(
                         ),
                     );
                     let send_start = std::time::Instant::now();
-                    let mut meta = prompt_request_meta(&prompt_id, screen_mode);
+                    let mut meta = prompt_request_meta(&prompt_id, screen_mode, None);
                     stamp_prompt_origin_meta(&mut meta, prompt_origin);
                     if send_now && let Some(map) = meta.as_object_mut() {
                         map.insert("sendNow".into(), serde_json::Value::Bool(true));
@@ -1263,7 +1263,7 @@ pub(crate) fn execute(
                 )];
                     let req = acp::PromptRequest::new(session_id.clone(), prompt)
                         .meta(
-                            prompt_request_meta(&prompt_id, screen_mode)
+                            prompt_request_meta(&prompt_id, screen_mode, None)
                                 .as_object()
                                 .cloned(),
                         );
@@ -1545,7 +1545,7 @@ pub(crate) fn execute(
                     let prompt = vec![plain_prompt_content_block(text, &skill_token_ranges)];
                     let req = acp::PromptRequest::new(session_id.clone(), prompt)
                         .meta(
-                            prompt_request_meta(&prompt_id, screen_mode)
+                            prompt_request_meta(&prompt_id, screen_mode, None)
                                 .as_object()
                                 .cloned(),
                         );
@@ -4961,11 +4961,15 @@ fn stamp_prompt_origin_meta(
 fn prompt_request_meta(
     prompt_id: &str,
     screen_mode: Option<&'static str>,
+    tersify_level_override: Option<&str>,
 ) -> serde_json::Value {
     let mut map = serde_json::Map::new();
     map.insert("promptId".into(), serde_json::Value::String(prompt_id.into()));
     if let Some(mode) = screen_mode {
         map.insert("screenMode".into(), serde_json::Value::String(mode.into()));
+    }
+    if let Some(level) = tersify_level_override {
+        map.insert("tersifyLevel".into(), serde_json::Value::String(level.into()));
     }
     serde_json::Value::Object(map)
 }

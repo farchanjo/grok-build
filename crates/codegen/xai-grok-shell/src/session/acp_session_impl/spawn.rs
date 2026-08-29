@@ -574,6 +574,23 @@ pub(crate) async fn spawn_session_actor(
     };
     let (chat_state_event_tx, chat_state_event_rx) = mpsc::unbounded_channel();
     let chat_state_cancellation = tokio_util::sync::CancellationToken::new();
+    // Tersify transform: only a MAIN session under an active scope compresses
+    // its tool results. Subagents always pass `None` — their output reaches
+    // the parent raw by product rule.
+    let tersify_transform: Option<xai_chat_state::TersifyTransform> = if startup_hints.is_subagent {
+        None
+    } else {
+        crate::util::config::TersifyConfig::load()
+            .applies_to_main_context()
+            .then(|| {
+                let tersify = std::sync::Arc::new(xai_grok_tersify::transform::Tersify::open(
+                    &crate::util::grok_home::grok_home(),
+                    xai_grok_tersify::engine::Mode::Compress,
+                ));
+                xai_grok_tersify::transform::Tersify::transform_fn(&tersify)
+                    as xai_chat_state::TersifyTransform
+            })
+    };
     let chat_state_handle = xai_chat_state::ChatStateActor::spawn_with_pruning_and_image_budget(
         conversation.clone(),
         chat_state_inference_settings,
@@ -1683,6 +1700,8 @@ pub(crate) async fn spawn_session_actor(
         mcp_strategy,
         initial_client_mcp_servers: initial_client_mcp_servers.clone(),
         chat_state_handle,
+        tersify_transform: tersify_transform.clone(),
+        tersify_level_meta: std::sync::Mutex::new(None),
         unattributed_background_usage: std::sync::atomic::AtomicBool::new(false),
         current_prompt_id: current_prompt_id.clone(),
         conversation_language: std::cell::RefCell::new(startup_hints.conversation_language.clone()),
