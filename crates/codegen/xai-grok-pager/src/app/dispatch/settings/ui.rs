@@ -1490,8 +1490,6 @@ pub(in crate::app::dispatch) fn action_for_reset(
         ("multiline_mode", SettingValue::Bool(b)) => Some(Action::SetMultilineMode(*b)),
         ("tersify_scope", SettingValue::Enum(s)) => Some(Action::SetTersifyScope((*s).to_owned())),
         ("tersify_level", SettingValue::Enum(s)) => Some(Action::SetTersifyLevel((*s).to_owned())),
-        ("tersify_scope", SettingValue::Enum(s)) => Some(Action::SetTersifyScope((*s).to_owned())),
-        ("tersify_level", SettingValue::Enum(s)) => Some(Action::SetTersifyLevel((*s).to_owned())),
         ("render_mermaid", SettingValue::Enum(s)) => {
             crate::appearance::RenderMermaid::from_canonical(s).map(Action::SetRenderMermaid)
         }
