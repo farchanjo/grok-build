@@ -887,7 +887,9 @@ fn rows_contain_categories_and_settings_through_pr_14() {
             "toolset.ask_user_question.timeout_enabled",
             // PAGER-owned plan_mode (Agent category).
             "plan_mode",
-            // PAGER-owned tersify rows (Agent category).
+            // PAGER-owned repetition_guard + tersify rows (Agent category;
+            // repetition_guard is declared before the tersify rows).
+            "repetition_guard",
             "tersify_scope",
             "tersify_level",
             // SHELL-owned coding_data_sharing (Privacy category).

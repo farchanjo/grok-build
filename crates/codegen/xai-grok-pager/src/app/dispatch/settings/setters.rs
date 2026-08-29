@@ -3004,3 +3004,38 @@ pub(in crate::app::dispatch) fn set_session_tersify_level(
     ));
     vec![]
 }
+
+/// Commit `[hints] repetition_guard` (on/off) and persist it.
+///
+/// Default-on streaming guard: aborts a turn when the model degenerates into
+/// a repetition loop. Applies to new sessions — the guard state is built at
+/// session spawn, so the toast says so (same semantics as tersify scope).
+pub(super) fn set_repetition_guard_inner(app: &mut AppView, enabled: bool) {
+    // The guard state lives in the session actor; a flipped setting applies
+    // to new sessions. No in-memory mirror to update here (the snapshot
+    // builder re-reads [hints] from disk).
+    let _ = (app, enabled);
+}
+
+pub(in crate::app::dispatch) fn set_repetition_guard(app: &mut AppView, new: bool) -> Vec<Effect> {
+    let prev = xai_grok_shell::util::config::repetition_guard_enabled_from_disk();
+    if prev == new {
+        return vec![];
+    }
+    refresh_open_settings_modals(app);
+    tracing::info!(
+        target: "settings",
+        key = "repetition_guard",
+        value = new,
+        "setting changed",
+    );
+    app.show_toast(&format!(
+        "\u{2713} Repetition loop guard: {} (new sessions)",
+        if new { "on" } else { "off" }
+    ));
+    vec![Effect::PersistSetting {
+        key: "repetition_guard",
+        value: crate::settings::SettingValue::Bool(new),
+        rollback_value: crate::settings::SettingValue::Bool(prev),
+    }]
+}

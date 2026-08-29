@@ -236,6 +236,10 @@ pub(crate) async fn create_test_actor_ex(
     );
     chat_state_handle.record_token_usage(total_tokens);
     let actor = SessionActor {
+        repetition_guard: std::cell::RefCell::new(Some(
+            crate::session::repetition_guard::RepetitionGuard::default(),
+        )),
+        repetition_guard_enabled: true,
         tersify_transform: None,
         tersify_level_meta: std::sync::Mutex::new(None),
         session_info: SessionInfo {

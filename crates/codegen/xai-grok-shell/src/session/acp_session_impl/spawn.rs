@@ -1702,6 +1702,10 @@ pub(crate) async fn spawn_session_actor(
         chat_state_handle,
         tersify_transform: tersify_transform.clone(),
         tersify_level_meta: std::sync::Mutex::new(None),
+        repetition_guard: std::cell::RefCell::new(Some(
+            crate::session::repetition_guard::RepetitionGuard::default(),
+        )),
+        repetition_guard_enabled: crate::util::config::repetition_guard_enabled_from_disk(),
         unattributed_background_usage: std::sync::atomic::AtomicBool::new(false),
         current_prompt_id: current_prompt_id.clone(),
         conversation_language: std::cell::RefCell::new(startup_hints.conversation_language.clone()),

@@ -9,6 +9,7 @@ pub mod notifications;
 pub mod pending_interaction;
 pub mod prime;
 pub mod prompt_queue;
+pub(crate) mod repetition_guard;
 pub(crate) mod rolling_compaction;
 pub mod two_pass;
 pub use self::acp_session::*;

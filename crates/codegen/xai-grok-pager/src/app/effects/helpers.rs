@@ -815,6 +815,20 @@ pub(crate) async fn persist_setting(
         format!("persist_setting({key}) expected {expected}, got {got:?}")
     }
     match key {
+        "repetition_guard" => {
+            let SettingValue::Bool(b) = value else {
+                return Err(kind_mismatch("repetition_guard", "Bool", &value));
+            };
+            // Default-on guard: an explicit true may simply drop the key
+            // (normalize keeps it explicit for clarity, matching the tersify
+            // pattern of writing the normalized value).
+            tokio::task::spawn_blocking(move || {
+                crate::config_toml_edit::set_hint("repetition_guard", b)
+            })
+            .await
+            .map_err(|e| e.to_string())?
+            .map_err(|e| e.to_string())
+        }
         "tersify_scope" => {
             let SettingValue::Enum(s) = value else {
                 return Err(kind_mismatch("tersify_scope", "Enum", &value));

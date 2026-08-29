@@ -841,6 +841,14 @@ pub(crate) struct SessionActor {
     /// MAIN session under an active tersify scope; `None` for subagents and
     /// tersify-off setups, whose tool output must reach the model raw.
     pub(crate) tersify_transform: Option<xai_chat_state::TersifyTransform>,
+    /// Streaming repetition-loop guard state. Fed each Text-channel token;
+    /// when it detects a degenerate loop the turn is aborted (default on,
+    /// TUI-toggleable via the `repetition_guard` setting).
+    pub(crate) repetition_guard:
+        std::cell::RefCell<Option<crate::session::repetition_guard::RepetitionGuard>>,
+    /// Whether the guard is active for this session (snapshot from
+    /// `[hints] repetition_guard` at spawn; default true).
+    pub(crate) repetition_guard_enabled: bool,
     /// Session-scoped `/tersify` level from the most recent prompt's meta.
     /// Set per turn, read by the style assembly at the next model turn.
     pub(crate) tersify_level_meta: std::sync::Mutex<Option<String>>,

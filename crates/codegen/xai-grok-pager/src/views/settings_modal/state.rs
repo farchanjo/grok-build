@@ -874,6 +874,7 @@ pub(super) fn action_for_bool(key: SettingKey, new: bool) -> Option<Action> {
         "contextual_hints.word_select" => Some(Action::SetContextualHintWordSelect(new)),
         "contextual_hints.ssh_wrap" => Some(Action::SetContextualHintSshWrap(new)),
         "multiline_mode" => Some(Action::SetMultilineMode(new)),
+        "repetition_guard" => Some(Action::SetRepetitionGuard(new)),
         "vim_mode" => Some(Action::SetVimMode(new)),
         "remember_tool_approvals" => Some(Action::SetRememberToolApprovals(new)),
         "toolset.ask_user_question.timeout_enabled" => {

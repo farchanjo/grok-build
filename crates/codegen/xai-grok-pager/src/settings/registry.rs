@@ -607,6 +607,8 @@ pub struct PagerLocalSnapshot {
     pub tersify_scope: String,
     /// `[hints] tersify_level` mirror, resolved fail-closed at snapshot time.
     pub tersify_level: String,
+    /// `[hints] repetition_guard` mirror, fail-closed default true.
+    pub repetition_guard_enabled: bool,
     /// `[language].artifact` BCP-47 tag (default `en-US`).
     pub language_artifact: String,
     /// Whether artifact language is locked by project/managed config.
@@ -662,6 +664,7 @@ impl Default for PagerLocalSnapshot {
             language_conversation: "off".to_string(),
             tersify_scope: "main_only".to_string(),
             tersify_level: "full".to_string(),
+            repetition_guard_enabled: true,
             language_artifact: "en-US".to_string(),
             language_artifact_locked: false,
             // Compaction config defaults - match registry defaults in defs.rs
@@ -972,6 +975,7 @@ pub fn current_value_for(
         )),
         // PAGER — read from snapshot.
         "multiline_mode" => Some(SettingValue::Bool(pager.multiline_mode)),
+        "repetition_guard" => Some(SettingValue::Bool(pager.repetition_guard_enabled)),
         "tersify_scope" => Some(SettingValue::Enum(Box::leak(
             pager.tersify_scope.clone().into_boxed_str(),
         ))),
@@ -1806,6 +1810,12 @@ mod tests {
                 // Tersify defaults mirror the shell resolver's fail-closed
                 // defaults, which is also what PagerLocalSnapshot::default()
                 // carries (both read through TersifyConfig semantics).
+                ("repetition_guard", SettingKind::Bool { default }) => {
+                    assert_eq!(
+                        *default, pager.repetition_guard_enabled,
+                        "repetition_guard default drifts from PagerLocalSnapshot::default()"
+                    );
+                }
                 ("tersify_scope", SettingKind::Enum { default, .. }) => {
                     assert_eq!(
                         *default, pager.tersify_scope,

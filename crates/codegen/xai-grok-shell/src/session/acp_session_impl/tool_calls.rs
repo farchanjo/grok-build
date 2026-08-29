@@ -2947,6 +2947,13 @@ impl SessionActor {
                     .await;
                 }
                 self.chat_state_handle.record_stream_start(timestamp_ms);
+                // Fresh streaming attempt: reset the repetition guard so a
+                // loop detected in one attempt cannot latch the next.
+                if self.repetition_guard_enabled
+                    && let Some(guard) = self.repetition_guard.borrow_mut().as_mut()
+                {
+                    guard.reset();
+                }
             }
             InferenceEvent::FirstToken { .. } => {
                 self.emit_event(crate::session::events::Event::FirstToken);
@@ -2970,6 +2977,38 @@ impl SessionActor {
                             cap.attempt_count += 1;
                         }
                         cap.append(false, &text);
+                    }
+                    // Repetition-loop guard: abort the turn when the model
+                    // degenerates into emitting the same fragment over and
+                    // over (the `!!!!!` wall). Default on; TUI-toggleable.
+                    if self.repetition_guard_enabled {
+                        let looping = {
+                            let mut guard_slot = self.repetition_guard.borrow_mut();
+                            match guard_slot.as_mut() {
+                                Some(guard) => {
+                                    guard.push(&text);
+                                    guard.looping()
+                                }
+                                None => false,
+                            }
+                        };
+                        if looping {
+                            if let Some(guard) = self.repetition_guard.borrow_mut().as_mut() {
+                                guard.latch();
+                            }
+                            self.send_update(
+                                acp::SessionUpdate::AgentMessageChunk(acp::ContentChunk::new(
+                                    acp::ContentBlock::Text(acp::TextContent::new(
+                                        "\n\n[turn aborted: the model fell into a repetition                                          loop — the partial output above is all it produced.                                          This guard is on by default; disable it in settings                                          (Repetition loop guard) if it fires on legitimate                                          output.]"
+                                            .to_string(),
+                                    )),
+                                )),
+                                None,
+                            )
+                            .await;
+                            self.turn_cancel.borrow().cancel();
+                            return;
+                        }
                     }
                     self.emit_event(crate::session::events::Event::PhaseChanged {
                         phase: crate::session::events::Phase::StreamingText,

@@ -594,6 +594,9 @@ pub enum Action {
     /// when assembling the next turn's system prompt. `off` clears the
     /// override so the persisted `[hints] tersify_*` applies again.
     SetSessionTersifyLevel(String),
+    /// Commit `[hints] repetition_guard` (on/off). Default on; applies to
+    /// new sessions (the guard state is built at session spawn).
+    SetRepetitionGuard(bool),
     /// Commit `[hints] tersify_scope` (`main_only` | `all` | `off`). Takes
     /// effect for newly spawned sessions (system prompt is built at spawn).
     SetTersifyScope(String),

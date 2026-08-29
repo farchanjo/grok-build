@@ -2688,6 +2688,10 @@ mod inline_auto_compact_flow_tests {
         SessionActor {
             tersify_transform: None,
             tersify_level_meta: std::sync::Mutex::new(None),
+            repetition_guard: std::cell::RefCell::new(Some(
+                crate::session::repetition_guard::RepetitionGuard::default(),
+            )),
+            repetition_guard_enabled: true,
             unattributed_background_usage: std::sync::atomic::AtomicBool::new(false),
             session_info: SessionInfo {
                 id: acp::SessionId::new("test-auto-compact"),

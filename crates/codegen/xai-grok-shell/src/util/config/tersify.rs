@@ -164,6 +164,31 @@ impl TersifyConfig {
 
 /// Test-only: parse a TOML string via the crate's own `toml` (which does not
 /// re-export `IntoDeserializer` at this path; `from_str` is its entry point).
+
+/// Whether the streaming repetition-loop guard is enabled.
+///
+/// Default ON: a model stuck emitting the same character or n-gram floods
+/// the scrollback and burns tokens; the guard aborts the turn with a clear
+/// notice instead. Persisted as `[hints] repetition_guard` (a Bool);
+/// absent/unparseable reads as enabled. Applies at the next session spawn.
+#[must_use]
+pub fn repetition_guard_enabled_from_disk() -> bool {
+    crate::config::load_effective_config()
+        .ok()
+        .as_ref()
+        .and_then(|root| root.get("hints"))
+        .and_then(|hints| hints.get("repetition_guard"))
+        .and_then(TomlValue::as_bool)
+        .unwrap_or(true)
+}
+
+/// Fail-closed normalizer for persisted values: anything but an explicit
+/// `false` keeps the guard on.
+#[must_use]
+pub fn normalize_repetition_guard(value: bool) -> bool {
+    value
+}
+
 #[cfg(test)]
 fn toml_src(s: &str) -> TomlValue {
     toml::from_str(s).expect("test TOML must parse")

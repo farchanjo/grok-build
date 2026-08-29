@@ -1328,6 +1328,9 @@ fn move_setting_away_from_default(app: &mut AppView, key: crate::settings::Setti
         "tersify_scope" => {
             let _ = dispatch(Action::SetTersifyScope("all".into()), app);
         }
+        "repetition_guard" => {
+            let _ = dispatch(Action::SetRepetitionGuard(false), app);
+        }
         "tersify_level" => {
             let _ = dispatch(Action::SetTersifyLevel("lite".into()), app);
         }

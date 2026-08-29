@@ -1704,6 +1704,27 @@ pub fn default_settings() -> Vec<SettingMeta> {
         // Contextual-hint children (hidden from the top-level list; reached via
         // the group sub-sheet). Default ON — `None` (inherit) reads as `true`.
         SettingMeta {
+            key: "repetition_guard",
+            category: SettingCategory::Agent,
+            owner: SettingOwner::Pager,
+            label: "Repetition loop guard",
+            description: "Abort a turn when the model degenerates into emitting the same \
+                          character or fragment over and over (a degenerate repetition \
+                          wall). Default on. Applies to new sessions. Writes \
+                          [hints] repetition_guard in config.toml.",
+            keywords: &[
+                "repetition",
+                "loop",
+                "guard",
+                "abort",
+                "streaming",
+                "degenerate",
+            ],
+            kind: SettingKind::Bool { default: true },
+            restart_required: false,
+            hidden_in_minimal: false,
+        },
+        SettingMeta {
             key: "tersify_scope",
             category: SettingCategory::Agent,
             owner: SettingOwner::Pager,
