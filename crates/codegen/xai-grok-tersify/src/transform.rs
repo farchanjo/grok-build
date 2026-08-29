@@ -163,7 +163,11 @@ impl Tersify {
     > {
         let this = Arc::clone(self);
         Arc::new(move |item| match item {
-            xai_grok_inference_types::ConversationItem::ToolResult(mut tr) => {
+            // Error results keep their bytes: the decisive line must stay
+            // byte-exact, and errors are rarely the oversize payload anyway.
+            xai_grok_inference_types::ConversationItem::ToolResult(mut tr)
+                if tr.is_error != Some(true) =>
+            {
                 tr.content = std::sync::Arc::from(this.apply_tool_result(&tr.content));
                 xai_grok_inference_types::ConversationItem::ToolResult(tr)
             }
@@ -262,6 +266,36 @@ mod tests {
             Some(input.as_bytes()),
             "handle from the pointer must resolve through the same store"
         );
+    }
+
+    #[test]
+    fn error_results_are_never_compressed() {
+        let t = Tersify::open(&unique_home("errors"), Mode::Compress);
+        let transform = Tersify::transform_fn(&{
+            let arc = std::sync::Arc::new(t);
+            arc
+        });
+        let big_error = "ERROR line\n".repeat(600);
+        let item = xai_grok_inference_types::ConversationItem::ToolResult(
+            xai_grok_inference_types::ToolResultItem {
+                tool_call_id: "call-1".into(),
+                content: big_error.clone().into(),
+                images: Vec::new(),
+                is_error: Some(true),
+            },
+        );
+        let out = transform(item);
+        match out {
+            xai_grok_inference_types::ConversationItem::ToolResult(tr) => {
+                assert_eq!(
+                    tr.content.as_ref(),
+                    big_error,
+                    "error payload must stay byte-exact"
+                );
+                assert_eq!(tr.is_error, Some(true));
+            }
+            other => panic!("unexpected item {other:?}"),
+        }
     }
 
     #[test]

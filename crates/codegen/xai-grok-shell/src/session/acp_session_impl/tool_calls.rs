@@ -2771,7 +2771,12 @@ impl SessionActor {
                 tool_failed,
             )
         };
-        self.chat_state_handle.push_tool_result(tool_chat);
+        // Tersify: a main session under an active scope compresses oversized
+        // textual tool output here and appends the recovery pointer. Images
+        // ride in `tr.images` and are untouched; error results skip
+        // compression so the decisive line stays byte-exact.
+        self.chat_state_handle
+            .push_tool_result_tersified(tool_chat, self.tersify_transform.as_ref());
         let mut deferred_followups = Vec::new();
         if !extracted_images.is_empty() {
             let count = extracted_images.len();
