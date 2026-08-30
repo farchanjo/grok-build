@@ -1567,6 +1567,24 @@ pub struct Config {
     /// flagged as an unrecognized key.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hints: Option<toml::Value>,
+    /// Retrieval graph sections consumed out-of-band by the per-home
+    /// retrieval registry (`crate::retrieval`), which reads `config.toml`
+    /// directly. Absorbed so they aren't flagged as unrecognized keys.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retrieval_profiles: Option<toml::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub embedding_models: Option<toml::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reranker_models: Option<toml::Value>,
+    /// `[prime]` consumer configuration (`[prime.skills]` / `[prime.agents]`),
+    /// also part of the retrieval graph and consumed out-of-band by the
+    /// retrieval registry. Absorbed so it isn't flagged as an unrecognized key.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prime: Option<toml::Value>,
+    /// Written and read by the client (privacy banner acknowledgment);
+    /// absorbed so it isn't flagged as an unrecognized key.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub privacy: Option<toml::Value>,
     #[serde(default)]
     pub ui: UiConfig,
     #[serde(default)]
@@ -2002,6 +2020,11 @@ impl Default for Config {
             model_providers: IndexMap::new(),
             shortcuts: None,
             hints: None,
+            retrieval_profiles: None,
+            embedding_models: None,
+            reranker_models: None,
+            prime: None,
+            privacy: None,
             ui: UiConfig::default(),
             toolset: ShellToolsetConfig::default(),
             voice: xai_grok_voice::VoiceConfig::from_config_table(
@@ -12792,6 +12815,25 @@ agent_type = "cursor"
             respect_gitignore = false
             [desktop]
             some_key = "value"
+            [privacy]
+            privacy_banner_acked = "2026-08-27T01:02:17Z"
+            [embedding_models.dev-emb]
+            provider = "dev-prime"
+            model = "dev-embedding"
+            [reranker_models.dev-rr]
+            provider = "dev-prime"
+            model = "dev-reranker"
+            [retrieval_profiles.dev-deterministic]
+            embedding_models = ["dev-emb"]
+            fallback_strategy = "deterministic"
+            max_candidates = 8
+            max_results = 3
+            [prime.skills]
+            enabled = true
+            retrieval_profile = "dev-deterministic"
+            [prime.agents]
+            enabled = true
+            retrieval_profile = "dev-deterministic"
         "#,
         );
         assert!(
