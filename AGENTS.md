@@ -285,24 +285,67 @@ regions) and replaces manual clicking entirely.
 ### Screenshots (PNG)
 
 The text captures above are the default evidence. When a real image is
-required, convert the colored capture with `freeze` (one-time install:
-`brew install freeze`):
+required — layout review, spacing/rendering bugs, color issues — convert the
+colored capture with `freeze` (one-time install: `brew install freeze`):
 
 ```sh
 tmux capture-pane -e -p -t grok-dev > /tmp/grok-pane.ansi
 freeze --ansi /tmp/grok-pane.ansi -o /tmp/grok-pane.png
 ```
 
-`screencapture` photographs the physical screen, which is a user-visible
-action on macOS; never use it unless the user explicitly asks.
+Read the image back and inspect the actual rendered layout before concluding
+anything visual. Text captures prove content; screenshots prove layout.
+
+### Screen recording (motion / interaction debug)
+
+For layout behavior that depends on time — streaming renders, spinner/fold
+animations, modal transitions, resize behavior — record the run and render a
+GIF (one-time install: `brew install asciinema agg`):
+
+```sh
+# Launch the run inside an asciinema recording.
+tmux new-session -d -s grok-dev -x 200 -y 50 \
+  "export GROK_HOME=\"\$HOME/.grokdev\" GROK_DISABLE_AUTOUPDATER=1; \
+   asciinema rec -c './target-dev/debug/xai-grok-pager --no-leader \
+   --no-auto-update' /tmp/grok-run.cast"
+
+# After reproducing the issue, render to GIF and inspect it.
+agg /tmp/grok-run.cast /tmp/grok-run.gif
+```
+
+`screencapture` (physical screen, still or with `-V` video) photographs the
+user's actual desktop, requires macOS Screen Recording permission, and can
+capture unrelated windows; never use it unless the user explicitly asks.
+
+### Operating the user's installed grok (explicit request only)
+
+Agents normally never touch the deployed binary or production profiles. The
+exception is an explicit user request to operate their grok — resuming a
+crashed session, re-binding a model with `/model`, inspecting `/context`.
+When authorized:
+
+- Run the deployed binary in a dedicated tmux session with the user's own
+  `GROK_HOME`. Do **not** add `--debug` unless the user asks for it.
+- Drive it exactly like a dev session: `capture-pane` to read, `send-keys`
+  (including SGR mouse clicks) to interact.
+- Resume flow: `/` search by title in the resume dialog, arrow to the entry,
+  `Enter`.
+- Send **no prompts** unless the user asked for that specific interaction; a
+  resumed session with live background tasks must not be nudged into new
+  work.
+- Finish with `/quit` and kill the tmux session. Report any state left
+  behind — a model re-bind or a sent prompt is a state change the user must
+  know about.
 
 ### Rules
 
 - Never `tmux attach`: the agent interacts only through `send-keys` /
   `capture-pane`. Attaching would take over the user's terminal.
-- Always launch with the canonical environment inline and
-  `--no-leader --no-auto-update`. Every isolation rule of this file applies
-  inside the tmux session, including never touching production profiles.
+- Development sessions always launch with the canonical environment inline
+  and `--no-leader --no-auto-update`, and every isolation rule of this file
+  applies inside them, including never touching production profiles. The
+  only exception is the explicit user-request path above, which has its own
+  rules and stays read-mostly.
 - One development console per tmux session. Kill the session when
   verification ends so a stale TUI cannot hold the development profile:
 
