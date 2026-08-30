@@ -39,6 +39,12 @@ Before every normal edit loop, verify:
    reproducible builds.
 9. No production profile, installed `grok` binary, deployed wrapper, or
    production leader socket is used.
+10. Interactive TUI verification runs in a detached tmux session per the
+    "Interactive TUI Verification via tmux" section below; `tmux attach` and
+    physical-screen captures are never used by agents. Any change that
+    touches the console (TUI rendering, input, sessions, model routing,
+    slash commands, settings) is validated interactively in tmux before
+    handoff — passing tests alone do not substitute for a live drive-through.
 
 ## Language Policy
 
@@ -183,6 +189,130 @@ process uses the same isolated environment.
 Do not assume exports from a previous terminal command are still active. When
 commands are executed in separate shells, export the development environment
 again in the same command invocation.
+
+## Interactive TUI Verification via tmux
+
+The agent's shell is non-interactive: each command runs, captures output, and
+exits. A full-screen TUI needs a real PTY plus a persistent session the agent
+can type into and read between commands. Use a detached tmux session for that.
+This is the sanctioned way to exercise the console interactively; it does not
+replace the PTY test harness for automated coverage.
+
+### One-time setup
+
+tmux is not preinstalled on every host. Install it once (an agent must ask the
+user before installing software):
+
+```sh
+brew install tmux
+```
+
+### Session lifecycle
+
+Create the session with the canonical environment inline — a detached tmux
+session does not inherit exports from the current shell. Build the binary
+first so the session runs fresh code:
+
+```sh
+# Build if needed (shares ./target-dev with the helpers; run under bash,
+# because ./grok-dev-env.sh uses bash arrays).
+bash -c 'source ./grok-dev-env.sh && cargo build -p xai-grok-pager-bin'
+
+# Create the detached session. One session per task; never point it at
+# ~/.grok or any production profile.
+tmux new-session -d -s grok-dev -x 200 -y 50 \
+  "export GROK_HOME=\"\$HOME/.grokdev\" \
+   GROK_LEADER_SOCKET=\"\$HOME/.grokdev/leader.sock\" \
+   GROK_DISABLE_AUTOUPDATER=1 \
+   GROK_CURSOR_SKILLS_ENABLED=0 GROK_CURSOR_RULES_ENABLED=0 GROK_CURSOR_AGENTS_ENABLED=0 \
+   GROK_CURSOR_MCPS_ENABLED=0 GROK_CURSOR_HOOKS_ENABLED=0 GROK_CURSOR_SESSIONS_ENABLED=0 \
+   GROK_CLAUDE_SKILLS_ENABLED=0 GROK_CLAUDE_RULES_ENABLED=0 GROK_CLAUDE_AGENTS_ENABLED=0 \
+   GROK_CLAUDE_MCPS_ENABLED=0 GROK_CLAUDE_HOOKS_ENABLED=0 GROK_CLAUDE_SESSIONS_ENABLED=0 \
+   GROK_CODEX_SKILLS_ENABLED=0 GROK_CODEX_RULES_ENABLED=0 GROK_CODEX_AGENTS_ENABLED=0 \
+   GROK_CODEX_MCPS_ENABLED=0 GROK_CODEX_HOOKS_ENABLED=0 GROK_CODEX_SESSIONS_ENABLED=0; \
+   ./target-dev/debug/xai-grok-pager --no-leader --no-auto-update; exec zsh"
+```
+
+Ordinary verification always passes `--no-leader --no-auto-update`, exactly
+like the direct-run path.
+
+### Reading the screen
+
+`capture-pane` is how an agent observes full-screen TUI state. Run it after
+every interaction step and treat its output as ground truth for rendering,
+modals, and footer state:
+
+```sh
+# Current pane as plain text (the agent's "screenshot").
+tmux capture-pane -p -t grok-dev
+
+# Include the last 500 lines of scrollback.
+tmux capture-pane -p -t grok-dev -S -500
+
+# Capture with ANSI colors preserved (input for the PNG pipeline below).
+tmux capture-pane -e -p -t grok-dev
+```
+
+### Sending input
+
+```sh
+tmux send-keys -t grok-dev '/tersify lite' Enter  # type + submit
+tmux send-keys -t grok-dev Escape                 # special keys by name
+tmux send-keys -t grok-dev C-c C-q                # control combos as C-<key>
+```
+
+Wait briefly after each `send-keys` before the next `capture-pane` so async
+TUI effects settle.
+
+### Synthetic mouse clicks
+
+Click-driven UI (hit-tested regions such as the context/status-bar segment
+that opens the context view) is exercised by injecting raw SGR mouse
+sequences — `send-keys -M` does not accept coordinates. Compute the target
+column from a `capture-pane` line (`awk '{print index($0, "TARGET")}'`, row
+from the line number), then send press + release with 1-based SGR
+coordinates (`ESC [ < 0 ; COL ; ROW M` then `… m`):
+
+```sh
+# Left-click at column 138, row 1 (the "21K / 1.0M" context segment).
+tmux send-keys -t grok-dev -H 1b 5b 3c 30 3b 31 33 38 3b 31 4d
+tmux send-keys -t grok-dev -H 1b 5b 3c 30 3b 31 33 38 3b 31 6d
+```
+
+This requires the TUI's mouse capture to be active (it is, for hit-tested
+regions) and replaces manual clicking entirely.
+
+### Screenshots (PNG)
+
+The text captures above are the default evidence. When a real image is
+required, convert the colored capture with `freeze` (one-time install:
+`brew install freeze`):
+
+```sh
+tmux capture-pane -e -p -t grok-dev > /tmp/grok-pane.ansi
+freeze --ansi /tmp/grok-pane.ansi -o /tmp/grok-pane.png
+```
+
+`screencapture` photographs the physical screen, which is a user-visible
+action on macOS; never use it unless the user explicitly asks.
+
+### Rules
+
+- Never `tmux attach`: the agent interacts only through `send-keys` /
+  `capture-pane`. Attaching would take over the user's terminal.
+- Always launch with the canonical environment inline and
+  `--no-leader --no-auto-update`. Every isolation rule of this file applies
+  inside the tmux session, including never touching production profiles.
+- One development console per tmux session. Kill the session when
+  verification ends so a stale TUI cannot hold the development profile:
+
+```sh
+tmux kill-session -t grok-dev
+```
+
+- Automated regression coverage still belongs in the PTY harness
+  (`crates/codegen/xai-grok-pager-pty-harness`, `tests/pty_e2e/`); tmux is for
+  interactive diagnosis and manual verification.
 
 ## Build and Validation
 

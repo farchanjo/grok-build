@@ -214,6 +214,39 @@ candidate is available.
   sensitive text stored inside a selected skill becomes model-visible; do not
   put secrets in skill bodies.
 
+### Enabling prime (configuration requirements)
+
+Prime is **disabled by default** and fails closed when misconfigured — a
+missing or invalid configuration never turns prime on partially, and the
+runtime does not log a turn-level error. To enable it in `config.toml`:
+
+1. Define a provider instance (`[model_providers.<id>]`, `openai_compatible`),
+   an embedding model that references it (`[embedding_models.<id>]`), and a
+   retrieval profile that lists at least that embedding model id
+   (`[retrieval_profiles.<id>]`).
+2. Point each consumer at the profile:
+   `[prime.skills] enabled = true` + `retrieval_profile = "<profile-id>"`, and
+   likewise for `[prime.agents]`.
+
+An enabled consumer without a `retrieval_profile`, a profile that references
+no embedding model, or a dangling provider reference makes the whole graph
+invalid; the registry then keeps its disabled snapshot and prime stays off.
+The authoritative status is the **Retrieval & Prime** section of the `inspect`
+output (`validity`, `enabled`, `prime: skills.enabled=… agents.enabled=…`),
+not any turn log.
+
+Two further behaviors matter in practice:
+
+- **Semantic vs deterministic.** The semantic refinement calls the profile's
+  embedding provider per eligible turn. With `fallback_strategy =
+  "deterministic"` and an unreachable provider, the run degrades
+  (`degrade_on_error` defaults to `true`) and selection falls back to the
+  deterministic ranking — useful for local validation without a live endpoint.
+- **Body containment.** Selected skill bodies load only from the session
+  workspace (cwd and git root) or from the Grok home — which is where bundled
+  and user-scope skills live. Skills elsewhere on disk are ranked but dropped
+  at load time (`NotContained`).
+
 ---
 
 ## Budgets and diagnostics

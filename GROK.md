@@ -33,7 +33,8 @@ workspace. It supports:
 - filesystem, shell, VCS, search, MCP, and media tools;
 - session persistence, worktrees, checkpoints, memory, and compaction;
 - permission policies and operating-system sandboxing;
-- retrieval and Prime (skill/agent ranking, metadata index, strict skills).
+- retrieval and Prime (skill/agent ranking, metadata index, strict skills);
+- token conservation (tersify) and a streaming repetition-loop guard.
 
 The composition-root package is `xai-grok-pager-bin`. It builds the
 `xai-grok-pager` artifact, which official releases expose as `grok`.
@@ -59,6 +60,7 @@ The composition-root package is `xai-grok-pager-bin`. It builds the
 | `crates/codegen/xai-grok-sandbox` | Workspace, strict, devbox, custom, and disabled sandbox profiles |
 | `crates/codegen/xai-grok-mcp` | MCP server transports, credentials, OAuth, liveness, and ACP bridging |
 | `crates/codegen/xai-grok-agent` | Agent prompt templates and skill-related prompt construction |
+| `crates/codegen/xai-grok-tersify` | Token-saving engine: safety ladder, compression, retrieval handles, and tool-result transforms |
 | `crates/codegen/xai-grok-memory` | Cross-session memory, indexing, search, and consolidation |
 | `crates/codegen/xai-grok-pager-render` | Themes, syntax presentation, terminal glyphs, and rendering primitives |
 | `crates/codegen/xai-grok-pager-pty-harness` | PTY-based test infrastructure |
@@ -173,6 +175,47 @@ metrics live beside the Prime code. Operator docs:
 
 - [`crates/codegen/xai-grok-pager/docs/user-guide/30-retrieval-and-prime.md`](crates/codegen/xai-grok-pager/docs/user-guide/30-retrieval-and-prime.md)
 - [`crates/codegen/xai-grok-pager/docs/user-guide/31-strict-skills-migration.md`](crates/codegen/xai-grok-pager/docs/user-guide/31-strict-skills-migration.md)
+
+### Token Conservation (Tersify)
+
+`crates/codegen/xai-grok-tersify` is the token-saving engine;
+`xai-grok-shell` integrates it into the session runtime.
+
+Engine responsibilities:
+
+- safety ladder S0–S4 as an exhaustive match, gating what a compressor may
+  claim (coverage is never overstated);
+- deterministic token counting through the `Counter` trait (default
+  `approx-chars/4`, rune-based);
+- payload routing (`detect`) across JSON, terminal, diff, code, log, and
+  search shapes, failing open to plain text;
+- compressors: `marker` (asserts only verified facts; credentials and
+  free-form text are retained whole) and `log` (S4: signal/edge lines and
+  boundaries survive; identical runs collapse to a representative plus a
+  marker);
+- a persistent SQLite store (WAL, size budget; on refusal the engine passes
+  the original through) with content-addressed `rcv_<handle>` retrieval
+  pointers;
+- record mode is fail-closed: engine failures never emit compressed bytes.
+
+Integration points:
+
+- the spawn gate (`build_spawn_system_prompt`) appends `<tersify_style>` only
+  where the configured scope allows it (`main_only` default, `all`, or
+  `off`); subagent outputs stay raw by default;
+- `/tersify lite|full|ultra|off` sets a session-only level through
+  `PromptRequest._meta.tersifyLevel` (`SetSessionTersifyLevel`), and the
+  style block is restamped each turn (`refresh_tersify_style_impl` via
+  `ReplaceSystemHead`);
+- tool results larger than 4 KiB route through `push_tool_result_tersified`
+  with `Tersify::transform_fn()`; error results are never compressed and
+  inline images are untouched.
+
+The streaming repetition-loop guard (`xai-grok-shell/src/session/repetition_guard.rs`)
+consumes each Text token and detects non-alphanumeric character floods and
+n-gram loops; on detection it surfaces a visible warning, latches, and
+cancels the turn. It is on by default and toggleable via the `repetition_guard`
+setting (persisted under `[hints]`).
 
 ### MCP
 
@@ -452,6 +495,50 @@ cargo run -p xai-grok-pager-bin -- \
 Use the alternate-screen TUI when testing full-screen rendering. Use
 `--no-alt-screen` only when persistent diagnostic output is more useful.
 
+### Interactive TUI verification with tmux
+
+A full-screen TUI cannot be exercised from a non-interactive command shell: it
+needs a real PTY and a session that persists between commands. The sanctioned
+pattern is a detached tmux session the agent drives with `send-keys` and
+observes with `capture-pane`. The enforceable policy (setup, full command set,
+PNG screenshots, and rules) is in
+[`AGENTS.md`](AGENTS.md#interactive-tui-verification-via-tmux); the minimum
+shape is:
+
+```sh
+# Build the binary first so the session runs fresh code.
+bash -c 'source ./grok-dev-env.sh && cargo build -p xai-grok-pager-bin'
+
+# Detached session with the canonical environment inline (tmux does not
+# inherit shell exports) and the ordinary --no-leader / --no-auto-update flags.
+tmux new-session -d -s grok-dev -x 200 -y 50 \
+  "export GROK_HOME=\"\$HOME/.grokdev\" \
+   GROK_LEADER_SOCKET=\"\$HOME/.grokdev/leader.sock\" \
+   GROK_DISABLE_AUTOUPDATER=1; \
+   ./target-dev/debug/xai-grok-pager --no-leader --no-auto-update; exec zsh"
+
+# Observe (text is the default evidence; -S -N includes N lines of
+# scrollback; -e preserves ANSI colors).
+tmux capture-pane -p -t grok-dev
+tmux capture-pane -p -t grok-dev -S -500
+tmux capture-pane -e -p -t grok-dev
+
+# Interact, wait briefly, then capture again.
+tmux send-keys -t grok-dev '/tersify lite' Enter
+```
+
+Caveats that bite in practice:
+
+- The agent must never `tmux attach`; attaching takes over the user's
+  terminal. All interaction goes through `send-keys` and all observation
+  through `capture-pane`.
+- A detached tmux session does not inherit the current shell's exports; the
+  canonical environment must be set inside the session command string.
+- The first capture after startup may be blank while the binary initializes;
+  wait briefly and capture again before diagnosing.
+- Kill the session when verification ends so a stale console cannot hold the
+  development profile.
+
 ### Headless mode
 
 ```sh
@@ -639,6 +726,9 @@ sccache --show-stats
 - `crates/codegen/xai-grok-workspace/src/permission`: permission system.
 - `crates/codegen/xai-grok-sandbox/src/lib.rs`: sandbox manager.
 - `crates/codegen/xai-grok-config/src/paths.rs`: `GROK_HOME` behavior.
+- `crates/codegen/xai-grok-tersify/src/lib.rs`: tersify engine entry point.
+- `crates/codegen/xai-grok-shell/src/session/repetition_guard.rs`:
+  repetition-loop guard.
 - `crates/common/xai-tool-runtime/src/tool.rs`: tool abstraction.
 - `crates/codegen/xai-grok-pager/docs/user-guide`: user documentation.
 
@@ -654,4 +744,7 @@ A change is ready for handoff when:
 5. focused tests pass;
 6. formatting and applicable lints pass;
 7. security-sensitive changes include failure-path coverage;
-8. the handoff lists the exact validation commands and their results.
+8. interactive TUI behavior was exercised through the tmux workflow (see
+   "Interactive TUI verification with tmux") when the change affects live TUI
+   interaction;
+9. the handoff lists the exact validation commands and their results.
