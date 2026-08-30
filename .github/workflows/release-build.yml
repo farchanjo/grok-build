@@ -42,7 +42,12 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Install pinned toolchain (rust-toolchain.toml)
-        uses: dtolnay/rust-toolchain@master
+        shell: bash
+        run: |
+          channel="$(awk -F'"' '/^[[:space:]]*channel/{print $2}' rust-toolchain.toml)"
+          echo "Installing pinned toolchain: $channel"
+          rustup toolchain install "$channel" --profile minimal
+          rustup default "$channel"
 
       - uses: Swatinem/rust-cache@v2
         with:
