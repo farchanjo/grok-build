@@ -53,9 +53,13 @@ jobs:
         with:
           key: ${{ matrix.target }}
 
-      - name: Install Linux linker dependencies
+      - name: Install Linux linker and protobuf dependencies
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y lld
+        run: sudo apt-get update && sudo apt-get install -y lld protobuf-compiler
+
+      - name: Install macOS protobuf compiler
+        if: runner.os == 'macOS'
+        run: brew install protobuf
 
       - name: Build release-dist
         run: cargo build -p xai-grok-pager-bin --profile release-dist --locked
