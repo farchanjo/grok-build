@@ -74,6 +74,56 @@ pub(crate) fn execute(
             let tx = acp_tx.clone();
             tasks.spawn(run_provider_operation(agent_id, operation, repair, tx));
         }
+        Effect::SaveModelParam {
+            agent_id,
+            model_id,
+            param,
+            value,
+        } => {
+            let saved_model_id = model_id.clone();
+            tasks.spawn(async move {
+                let result = tokio::task::spawn_blocking(move || {
+                    let model_id = model_id.clone();
+                    match param {
+                        crate::config_toml_edit::ModelParam::Temperature => {
+                            crate::config_toml_edit::write_model_param_f64(
+                                &model_id,
+                                crate::config_toml_edit::ModelParam::Temperature,
+                                value,
+                            )
+                        }
+                        crate::config_toml_edit::ModelParam::TopP => {
+                            crate::config_toml_edit::write_model_param_f64(
+                                &model_id,
+                                crate::config_toml_edit::ModelParam::TopP,
+                                value,
+                            )
+                        }
+                        crate::config_toml_edit::ModelParam::MaxCompletionTokens => {
+                            let value = match value {
+                                Some(v) => Some(u64::try_from(v as i64).unwrap_or(0)),
+                                None => None,
+                            };
+                            crate::config_toml_edit::write_model_param_u64(
+                                &model_id,
+                                crate::config_toml_edit::ModelParam::MaxCompletionTokens,
+                                value,
+                            )
+                        }
+                    }
+                })
+                .await
+                .map_err(|error| error.to_string())
+                .and_then(std::convert::identity);
+                TaskResult::ModelParamSaved {
+                    agent_id,
+                    model_id: saved_model_id,
+                    param,
+                    value,
+                    result,
+                }
+            });
+        }
         Effect::SaveChatgptContextWindow {
             agent_id,
             model_id,

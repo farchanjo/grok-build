@@ -224,6 +224,34 @@ fn build_model_items(models: &ModelState) -> Vec<ArgItem> {
             label
         };
 
+        // Capability badges: what the model can actually do, straight from
+        // the ACP meta the catalog projected (`supportsZdr`, image/file
+        // input, output ceiling). Compact and only when true.
+        let meta = info.meta.as_ref();
+        let mut badges = String::new();
+        if meta
+            .and_then(|m| m.get("supportsZdr"))
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false)
+        {
+            badges.push_str(" [zdr]");
+        }
+        if meta
+            .and_then(|m| m.get("supportsImageInput"))
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false)
+        {
+            badges.push_str(" [img]");
+        }
+        if meta
+            .and_then(|m| m.get("supportsFileInput"))
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false)
+        {
+            badges.push_str(" [file]");
+        }
+        let display = format!("{display}{badges}");
+
         items.push(ArgItem {
             display,
             match_text: model_match_text(id, info),

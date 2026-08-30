@@ -29,6 +29,10 @@ impl SlashCommand for TersifyCommand {
         "/tersify [lite|full|ultra|off]"
     }
 
+    fn takes_args(&self) -> bool {
+        true
+    }
+
     fn suggest_args(
         &self,
         _ctx: &AppCtx,

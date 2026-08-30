@@ -1768,11 +1768,12 @@ fn inject_configured_instance_catalogs(
                 .as_ref()
                 .and_then(|prefs| prefs.zdr)
                 == Some(true);
-            // Instance-local ZDR picker filter: skip only rows the catalog
-            // proved are not ZDR. Unknown (legacy singleton projection) is
-            // still listed so `/model` is populated before a native
-            // `?zdr=true` refresh stamps the flag.
-            if instance_zdr && capabilities.supports_zdr == Some(false) {
+            // Instance-local ZDR picker filter: a ZDR-enforcing instance lists
+            // only rows with a confirmed GET /endpoints/zdr endpoint. Unknown
+            // (legacy singleton projection, pending native refresh) is hidden
+            // too: unconfirmed rows 404 at call time under the instance's ZDR
+            // data policy.
+            if instance_zdr && capabilities.supports_zdr != Some(true) {
                 continue;
             }
             let max_output_ceiling = model
@@ -1955,6 +1956,11 @@ fn builtin_openrouter_catalog_source_rows(
 /// instances (`zdr`, `dr`, …) so `/model` lists the complete name, effort
 /// menu, and modalities before a per-account cache exists.
 ///
+/// ZDR-enforcing instances (`provider_preferences.zdr = true`) mirror only
+/// rows the singleton has confirmed via `GET /endpoints/zdr`
+/// (`supports_zdr = Some(true)`); unconfirmed rows would 404 at call time
+/// under the instance's ZDR data policy.
+///
 /// A user `[model."zdr:…"]` stub merges with the catalog row instead of
 /// hiding the rest of that instance.
 fn mirror_builtin_openrouter_catalog_to_extra_instances(
@@ -1982,7 +1988,7 @@ fn mirror_builtin_openrouter_catalog_to_extra_instances(
             let Some(upstream) = src_key.strip_prefix("openrouter:") else {
                 continue;
             };
-            if instance_zdr && src.supports_zdr == Some(false) {
+            if instance_zdr && src.supports_zdr != Some(true) {
                 continue;
             }
             let canonical = format!("{id}:{upstream}");
@@ -4028,6 +4034,76 @@ mod tests {
     }
 
     #[test]
+    fn zdr_instance_mirrors_only_confirmed_zdr_rows() {
+        use super::super::config::ConfigModelOverride;
+        use super::super::model_providers::{
+            ModelProviderConfig, ModelProviderKind, OpenRouterProviderPreferences,
+        };
+
+        let mut providers = indexmap::IndexMap::new();
+        providers.insert(
+            "zdr".to_owned(),
+            ModelProviderConfig {
+                kind: ModelProviderKind::OpenRouter,
+                enabled: true,
+                catalog_enabled: true,
+                display_name: Some("ZDR".into()),
+                provider_preferences: Some(OpenRouterProviderPreferences {
+                    zdr: Some(true),
+                    ..Default::default()
+                }),
+                ..ModelProviderConfig::default()
+            },
+        );
+        providers.insert(
+            "dr".to_owned(),
+            ModelProviderConfig {
+                kind: ModelProviderKind::OpenRouter,
+                enabled: true,
+                catalog_enabled: true,
+                display_name: Some("DR".into()),
+                ..ModelProviderConfig::default()
+            },
+        );
+        let mut models = indexmap::IndexMap::new();
+        models.insert(
+            "openrouter:z-ai/glm-5.3-flash".to_owned(),
+            ConfigModelOverride {
+                model: Some("z-ai/glm-5.3-flash".into()),
+                model_provider: Some("openrouter".into()),
+                supports_zdr: Some(true),
+                ..Default::default()
+            },
+        );
+        models.insert(
+            "openrouter:acme/unconfirmed".to_owned(),
+            ConfigModelOverride {
+                model: Some("acme/unconfirmed".into()),
+                model_provider: Some("openrouter".into()),
+                supports_zdr: None,
+                ..Default::default()
+            },
+        );
+        let dir = tempfile::tempdir().unwrap();
+        ProviderManager::inject_configured_instance_catalogs_for_test(
+            &providers,
+            &mut models,
+            dir.path(),
+        );
+        assert!(models.contains_key("zdr:z-ai/glm-5.3-flash"));
+        assert!(
+            !models.contains_key("zdr:acme/unconfirmed"),
+            "a ZDR-enforcing instance must not offer rows without a confirmed \
+             GET /endpoints/zdr endpoint (they 404 under the ZDR data policy)"
+        );
+        assert!(models.contains_key("dr:z-ai/glm-5.3-flash"));
+        assert!(
+            models.contains_key("dr:acme/unconfirmed"),
+            "a non-ZDR instance still lists unconfirmed rows"
+        );
+    }
+
+    #[test]
     fn extra_openrouter_mirrors_from_singleton_cache_file() {
         use super::super::config::ConfigModelOverride;
         use super::super::model_providers::{ModelProviderConfig, ModelProviderKind};
@@ -5750,7 +5826,12 @@ mod tests {
             .unwrap(),
             fetched_at: None,
         };
-        assert_eq!(cached.models[0].max_completion_tokens, Some(64000));
+        // OpenRouter discovery keeps the per-request budget unset; the routed
+        // `top_provider.max_completion_tokens` figure is a capability ceiling
+        // stored on `max_output_ceiling` (matches the native adapter and the
+        // publish projection under test in provider_catalog).
+        assert_eq!(cached.models[0].max_completion_tokens, None);
+        assert_eq!(cached.models[0].max_output_ceiling, Some(64000));
         save_openrouter_catalog_cache(home.path(), &cached).unwrap();
         let config = super::super::config::Config::default();
         assert!(

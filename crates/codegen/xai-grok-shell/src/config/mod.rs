@@ -531,23 +531,26 @@ pub struct ManagedMcpsConfig {
 impl Default for ManagedMcpsConfig {
     fn default() -> Self {
         Self {
-            enabled: true,
+            enabled: false,
             gateway_tools_enabled: false,
         }
     }
 }
 impl ManagedMcpsConfig {
-    /// Priority: env var > TOML > remote > default (enabled interactive, disabled headless).
+    /// Priority: env var > TOML > remote > default (disabled; opt in via env,
+    /// config.toml, or remote settings).
     pub fn resolve(
         config: &toml::Value,
         remote: Option<&crate::util::config::RemoteSettings>,
-        is_headless: bool,
+        // Kept for call-site compatibility: the default is now uniformly
+        // disabled, so interactive vs. headless no longer changes the outcome.
+        _is_headless: bool,
     ) -> Self {
         let mut result: Self = config
             .get("managed_mcps")
             .and_then(|v| v.clone().try_into().ok())
             .unwrap_or(Self {
-                enabled: !is_headless,
+                enabled: false,
                 gateway_tools_enabled: false,
             });
         let managed_mcps_table = config.get("managed_mcps").and_then(|v| v.as_table());
@@ -558,7 +561,7 @@ impl ManagedMcpsConfig {
             result.enabled,
             has_local_enabled,
             remote.and_then(|r| r.managed_mcps_enabled),
-            !is_headless,
+            false,
         );
         result.enabled = resolved.value;
         let has_local_gateway_tools =

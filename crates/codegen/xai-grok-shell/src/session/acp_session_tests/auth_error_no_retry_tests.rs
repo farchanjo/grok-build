@@ -2194,9 +2194,13 @@ async fn reconstruct_openrouter_vault_model_no_xai_bearer_resolver() {
             actor.chat_state_handle.update_inference_settings(settings);
 
             let cfg = actor.reconstruct_full_config().await.expect("reconstruct");
+            // Exact-route binding (118f27b) installs a route-scoped resolver
+            // for ApiKey routes; the xAI session resolver stays off. The
+            // resolver may only surface the OpenRouter route credential
+            // (absent in this fixture), never the xAI session token.
             assert!(
-                cfg.bearer_resolver.is_none(),
-                "OpenRouter vault model must not install xAI bearer_resolver"
+                cfg.bearer_resolver.is_some(),
+                "OpenRouter vault route installs a route-bound bearer_resolver"
             );
             assert_eq!(
                 cfg.api_key.as_deref(),
@@ -2257,7 +2261,9 @@ async fn reconstruct_openai_api_vault_model_no_xai_bearer_resolver() {
         .await;
 }
 
-/// Catalog miss + exact OpenRouter host still withholds xAI resolver.
+/// Catalog miss + exact OpenRouter host: the legacy OpenRouter ApiKey route
+/// gets a route-scoped resolver (exact-route binding, 118f27b) — never the xAI
+/// session resolver, and never the xAI session token.
 #[tokio::test(flavor = "current_thread")]
 async fn reconstruct_catalog_miss_openrouter_host_no_xai_bearer_resolver() {
     let local = tokio::task::LocalSet::new();
@@ -2283,8 +2289,16 @@ async fn reconstruct_catalog_miss_openrouter_host_no_xai_bearer_resolver() {
 
             let cfg = actor.reconstruct_full_config().await.expect("reconstruct");
             assert!(
-                cfg.bearer_resolver.is_none(),
-                "catalog miss on openrouter.ai must not install xAI bearer_resolver"
+                cfg.bearer_resolver.is_some(),
+                "legacy OpenRouter ApiKey route installs a route-bound bearer_resolver"
+            );
+            assert_ne!(
+                cfg.bearer_resolver
+                    .as_ref()
+                    .and_then(|r| r.current_bearer())
+                    .as_deref(),
+                Some("xai-session-jwt-for-resolver"),
+                "route-bound resolver must never surface the xAI session token"
             );
             assert_eq!(
                 cfg.provider_identity,

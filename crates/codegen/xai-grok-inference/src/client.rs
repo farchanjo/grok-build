@@ -1439,6 +1439,17 @@ impl InferenceClient {
 
         let status = response.status();
         let response_headers = response.headers().clone();
+        // TODO(openrouter-post-call-diagnostics): after a completed OpenRouter
+        // turn, `GET /generation?id=<x-generation-id>` via the platform
+        // `OpenRouterClient` could record provider/finish/tokens on
+        // secret-free post-call diagnostics. Deliberately not wired: it needs
+        // (1) success-path `x-generation-id` capture (today the header is
+        // extracted on the error path only), (2) an `OpenRouterClient` built
+        // inside the session actor, and (3) a post-turn hook in the actor's
+        // multi-exit turn state machine (streaming generations only exist
+        // after the SSE ends, so the follow-up GET cannot run inside this
+        // client). Skipping rather than half-wiring; land all three pieces
+        // together in one change.
         let span = tracing::Span::current();
         span.record("status_code", status.as_u16() as i64);
         span.record("success", status.is_success());

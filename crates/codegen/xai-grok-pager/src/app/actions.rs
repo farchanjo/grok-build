@@ -438,6 +438,13 @@ pub enum Action {
         model_id: acp::ModelId,
         effort: Option<ReasoningEffort>,
     },
+    /// Persist or clear a per-model API request override
+    /// (`[model."<id>"]` in `config.toml`). `None` clears the override.
+    SaveModelParam {
+        model_id: String,
+        param: crate::config_toml_edit::ModelParam,
+        value: Option<f64>,
+    },
     /// Cancel the currently running turn.
     CancelTurn,
     /// User confirmed a cancel-turn choice from the panel.
@@ -1841,6 +1848,14 @@ pub enum Effect {
         /// `SwitchModelComplete` so `IncompatibleAgent` can roll back.
         prev_model_id: Option<acp::ModelId>,
     },
+    /// Persist or clear a per-model API request override
+    /// (`[model."<id>"]` in `config.toml`). `None` clears the override.
+    SaveModelParam {
+        agent_id: AgentId,
+        model_id: String,
+        param: crate::config_toml_edit::ModelParam,
+        value: Option<f64>,
+    },
     /// Fetch changelog from CDN (both markdown + structured JSON).
     /// Runs off the render path via `spawn_blocking`. Result is cached
     /// on `AppView` so `/release-notes` and the welcome screen share it.
@@ -2729,6 +2744,14 @@ pub enum TaskResult {
         agent_id: AgentId,
         model_id: String,
         tokens: Option<u64>,
+        result: Result<(), String>,
+    },
+    /// Result of persisting or clearing a per-model request override.
+    ModelParamSaved {
+        agent_id: AgentId,
+        model_id: String,
+        param: crate::config_toml_edit::ModelParam,
+        value: Option<f64>,
         result: Result<(), String>,
     },
     /// Safe result of persisting or clearing a per-model ChatGPT

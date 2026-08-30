@@ -98,6 +98,97 @@ pub(crate) fn chatgpt_context_window_in_range(tokens: u64) -> bool {
     (CHATGPT_CONTEXT_WINDOW_MIN..=CHATGPT_CONTEXT_WINDOW_MAX).contains(&tokens)
 }
 
+/// Safe model id for per-model request overrides. Catalog ids may carry an
+/// instance prefix and upstream slashes (`zdr:z-ai/glm-5.3-flash`).
+fn is_overridable_model_id(model_id: &str) -> bool {
+    !model_id.is_empty()
+        && model_id.len() <= 160
+        && model_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b':' | b'/'))
+}
+
+/// TOML table path for a per-model override, such as `model."dr:z-ai/glm-5.3-flash"`.
+fn model_param_table(model_id: &str) -> Option<String> {
+    is_overridable_model_id(model_id).then(|| format!("model.{model_id:?}"))
+}
+
+/// A per-model API request override persisted in `[model."<id>"]`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ModelParam {
+    Temperature,
+    TopP,
+    MaxCompletionTokens,
+}
+
+impl ModelParam {
+    pub(crate) fn key(self) -> &'static str {
+        match self {
+            ModelParam::Temperature => "temperature",
+            ModelParam::TopP => "top_p",
+            ModelParam::MaxCompletionTokens => "max_completion_tokens",
+        }
+    }
+}
+
+/// Persist or clear `[model."<id>"].<param>` for any catalog model.
+///
+/// `None` removes the key (reverting to the model default). Performs blocking
+/// I/O under the same surgical `toml_edit` discipline as the ChatGPT
+/// overrides: unrelated tables and formatting are preserved, and an
+/// unparseable file is refused without clobbering.
+pub(crate) fn write_model_param_f64(
+    model_id: &str,
+    param: ModelParam,
+    value: Option<f64>,
+) -> Result<(), String> {
+    let table = model_param_table(model_id).ok_or_else(|| "invalid model id".to_owned())?;
+    match value {
+        Some(value) => {
+            if !value.is_finite() {
+                return Err("value must be finite".to_owned());
+            }
+            set_table_field(&table, param.key(), value).map_err(|error| error.to_string())
+        }
+        None => remove_table_key(&table, param.key()).map_err(|error| error.to_string()),
+    }
+}
+
+/// Integer variant of [`write_model_param_f64`] for token counts.
+pub(crate) fn write_model_param_u64(
+    model_id: &str,
+    param: ModelParam,
+    value: Option<u64>,
+) -> Result<(), String> {
+    let table = model_param_table(model_id).ok_or_else(|| "invalid model id".to_owned())?;
+    match value {
+        Some(value) => {
+            let value = i64::try_from(value).map_err(|error| error.to_string())?;
+            set_table_field(&table, param.key(), value).map_err(|error| error.to_string())
+        }
+        None => remove_table_key(&table, param.key()).map_err(|error| error.to_string()),
+    }
+}
+
+/// Read a per-model override for display. Read-only; `None` when the file,
+/// table, or key is absent or the value is the wrong type.
+pub(crate) fn read_model_param_f64(model_id: &str, param: ModelParam) -> Option<f64> {
+    let path = xai_grok_tools::util::grok_home::grok_home().join("config.toml");
+    let raw = std::fs::read_to_string(path).ok()?;
+    let value: toml::Value = toml::from_str(&raw).ok()?;
+    let table = value.get("model")?.get(model_id)?;
+    table.get(param.key())?.as_float()
+}
+
+/// Integer variant of [`read_model_param_f64`].
+pub(crate) fn read_model_param_u64(model_id: &str, param: ModelParam) -> Option<u64> {
+    let path = xai_grok_tools::util::grok_home::grok_home().join("config.toml");
+    let raw = std::fs::read_to_string(path).ok()?;
+    let value: toml::Value = toml::from_str(&raw).ok()?;
+    let table = value.get("model")?.get(model_id)?;
+    table.get(param.key())?.as_integer().and_then(|v| u64::try_from(v).ok())
+}
+
 pub(crate) fn chatgpt_auto_compact_threshold_in_range(percent: u8) -> bool {
     (CHATGPT_AUTO_COMPACT_THRESHOLD_MIN..=CHATGPT_AUTO_COMPACT_THRESHOLD_MAX).contains(&percent)
 }

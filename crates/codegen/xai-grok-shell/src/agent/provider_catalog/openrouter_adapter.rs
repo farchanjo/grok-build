@@ -269,11 +269,13 @@ pub async fn fetch_openrouter_bounded_list_body(
 /// Live fetch for one OpenRouter account with provider-specific pagination.
 ///
 /// When `zdr` is `Some(true)`, this instance fetches `GET /models?zdr=true`
-/// (that instance only) and stamps `supports_zdr` on every retained row.
-/// When `zdr` is false/unset the full list is fetched. In both cases a
-/// best-effort `GET /endpoints/zdr` hop tags (or optionally intersects)
-/// ZDR-capable slugs. Failure of the optional endpoints hop never fails
-/// the models catalog.
+/// (that instance only) and retains only rows with a confirmed
+/// `GET /endpoints/zdr` endpoint. When `zdr` is false/unset the full list is
+/// fetched and confirmed members are tagged `supports_zdr = Some(true)`;
+/// unconfirmed rows stay untagged. `GET /endpoints/zdr` membership is the
+/// only stamping source for both paths: a failed or empty hop yields an
+/// empty catalog for a ZDR instance instead of fabricated stamps, because
+/// unconfirmed rows 404 at call time under the instance's ZDR data policy.
 pub async fn fetch_openrouter_catalog(
     models_url: &str,
     bearer_token: &str,
@@ -341,10 +343,12 @@ fn project_page(
         .iter()
         .filter_map(|row| {
             let upstream = row.id.trim();
-            if zdr_filtered && !zdr_slugs.is_empty() && !zdr_slugs.contains(upstream) {
-                // Optional intersection with GET /endpoints/zdr when both
-                // lists are available. An empty/failed endpoints hop keeps
-                // the ?zdr=true models list intact.
+            if zdr_filtered && !zdr_slugs.contains(upstream) {
+                // ZDR instances offer only models with a confirmed
+                // GET /endpoints/zdr endpoint. A failed or empty hop yields an
+                // empty catalog for that instance instead of fabricated stamps
+                // (unconfirmed rows 404 at call time under the instance's ZDR
+                // data policy).
                 return None;
             }
             let (efforts, default_effort, supports_reasoning) = effort_metadata(row);
@@ -365,9 +369,10 @@ fn project_page(
                 .as_ref()
                 .and_then(|l| positive_token_count(l.completion_tokens.as_ref()));
             let ceiling = conservative_openrouter_max_output_ceiling(top_max, per_request_max);
-            let supports_zdr = if zdr_filtered {
-                Some(true)
-            } else if zdr_slugs.contains(upstream) {
+            // Confirmed GET /endpoints/zdr membership is the only stamping
+            // source. The ?zdr=true models list alone is not proof: models it
+            // lists can still 404 under an instance's ZDR data policy.
+            let supports_zdr = if zdr_slugs.contains(upstream) {
                 Some(true)
             } else {
                 None

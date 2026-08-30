@@ -948,11 +948,13 @@ impl AgentView {
                                     return InputOutcome::Action(Action::FetchSessionList);
                                 }
 
-                                let is_picker =
-                                    matches!(trimmed.as_str(), "model" | "m" | "theme" | "t");
-                                if is_picker
-                                    && let Some(command) =
-                                        self.prompt.slash_controller.registry().get(&trimmed)
+                                // Any command that offers argument suggestions
+                                // (e.g. /model, /theme, /tersify, /effort)
+                                // opens the arg picker instead of dispatching
+                                // the bare command, which would only print a
+                                // usage line and leave the level/value fixed.
+                                if let Some(command) =
+                                    self.prompt.slash_controller.registry().get(&trimmed)
                                 {
                                     let ctx =
                                         self.prompt.slash_controller.app_ctx(&self.session.models);
@@ -3125,6 +3127,7 @@ mod command_palette_vim_input_tests {
             "unfocused command palette should show the `/ to search` placeholder, got {unfocused_text:?}",
         );
     }
+
 }
 
 #[cfg(test)]

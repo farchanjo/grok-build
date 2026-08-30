@@ -997,6 +997,23 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
                 prev_model_id: None,
             }]
         }
+        Action::SaveModelParam {
+            model_id,
+            param,
+            value,
+        } => {
+            // Config-level override: persists even without a live session.
+            let agent_id = match app.active_view {
+                ActiveView::Agent(id) => id,
+                _ => return vec![],
+            };
+            vec![Effect::SaveModelParam {
+                agent_id,
+                model_id,
+                param,
+                value,
+            }]
+        }
         Action::AnnouncementsHide => {
             let shown_key = crate::views::announcements::first_session_announcement(
                 &app.active_announcements,

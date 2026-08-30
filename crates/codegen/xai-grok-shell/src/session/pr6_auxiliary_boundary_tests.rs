@@ -226,8 +226,9 @@ fn compaction_prep_client_carries_exact_route_and_operation() {
 }
 
 /// Compaction inherits the request max from configuration, exactly like the
-/// main turn: catalog ceiling first, then the OpenRouter API default. Nothing
-/// on the compaction path invents or strips a request budget.
+/// main turn: the 16384 OpenRouter API default, never the raw catalog
+/// ceiling. The ceiling stays a separate clamp; nothing on the compaction
+/// path invents or strips a request budget.
 #[test]
 fn compaction_route_inherits_resolved_request_max_tokens() {
     use crate::agent::model_providers::OPENROUTER_DEFAULT_MAX_COMPLETION_TOKENS;
@@ -265,7 +266,9 @@ fn compaction_route_inherits_resolved_request_max_tokens() {
         resolved.inference
     };
 
-    // A catalog ceiling fills the request budget, and survives sanitization.
+    // A catalog ceiling stays a separate clamp: the request budget keeps the
+    // 16384 API default so a 131072-wide model never reserves its whole
+    // context for output.
     let dir = tempdir().unwrap();
     register_provider(
         dir.path(),
@@ -277,18 +280,19 @@ fn compaction_route_inherits_resolved_request_max_tokens() {
     let with_ceiling = resolve_max(Some(131_072), dir.path());
     assert_eq!(
         with_ceiling.max_completion_tokens,
-        Some(131_072),
-        "compaction must inherit the catalog ceiling, not drop it"
+        Some(OPENROUTER_DEFAULT_MAX_COMPLETION_TOKENS),
+        "compaction must inherit the API default, not the raw ceiling"
     );
     assert_eq!(with_ceiling.max_output_ceiling, Some(131_072));
 
-    // No ceiling anywhere: the shared OpenRouter API default applies.
+    // No ceiling anywhere: the same shared OpenRouter API default applies.
     let without_ceiling = resolve_max(None, dir.path());
     assert_eq!(
         without_ceiling.max_completion_tokens,
         Some(OPENROUTER_DEFAULT_MAX_COMPLETION_TOKENS),
         "compaction must fall back to the same API default as the main turn"
     );
+    assert_eq!(without_ceiling.max_output_ceiling, None);
 }
 
 /// Production seam: web-search resolve binds exact-route attribution (not sibling).

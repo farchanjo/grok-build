@@ -1814,7 +1814,8 @@ pub struct Config {
     pub path_not_found_hints: bool,
     /// Whether to fetch managed MCP configs from the managed connectors service at startup.
     /// Resolved by [`crate::config::ManagedMcpsConfig::resolve`]: env var >
-    /// config.toml > remote settings > default (off in headless, on in interactive).
+    /// config.toml > remote settings > default (disabled; opt in via env,
+    /// config.toml, or remote settings).
     #[serde(skip)]
     pub managed_mcps_enabled: bool,
     #[serde(skip)]
@@ -6156,12 +6157,13 @@ fn build_inference_config_for_model(
     model_name: String,
 ) -> InferenceConfig {
     let info = model.info();
-    let max_completion_tokens = info.max_completion_tokens.or_else(|| {
-        model
-            .model_provider
-            .as_ref()
-            .and_then(|provider| provider.request_max_completion_tokens(info.max_output_ceiling))
-    });
+    // Request budget: user/model override first, then the provider-level
+    // value (explicit TOML or the 16384 OpenRouter API default). The catalog
+    // capability ceiling never becomes the budget — it lives separately on
+    // `max_output_ceiling` and the sampler only clamps against it.
+    let max_completion_tokens = info
+        .max_completion_tokens
+        .or_else(|| model.model_provider.as_ref().and_then(|p| p.request_max_completion_tokens()));
     let max_output_ceiling = info.max_output_ceiling;
     let temperature = info.temperature;
     let top_p = info.top_p;
@@ -13747,7 +13749,11 @@ hooks = true
         });
         assert!(cfg.subagents_enabled);
         assert!(!cfg.respect_gitignore);
-        assert!(cfg.managed_mcps_enabled);
+        assert!(
+            !cfg.managed_mcps_enabled,
+            "managed MCP connectors default to disabled; opt in via \
+             GROK_MANAGED_MCPS_ENABLED, [managed_mcps] enabled, or remote settings"
+        );
         assert!(!cfg.managed_mcp_gateway_tools_enabled);
         assert_eq!(
             cfg.web_search_model,
@@ -13793,6 +13799,7 @@ hooks = true
         clear_managed_mcp_env_vars();
         let raw = empty_config();
         let remote = crate::util::config::RemoteSettings {
+            managed_mcps_enabled: Some(true),
             managed_mcp_gateway_tools_enabled: Some(true),
             ..Default::default()
         };
@@ -13811,6 +13818,7 @@ hooks = true
             laziness_debug_log: None,
             storage_mode: None,
         });
+        assert!(cfg.managed_mcps_enabled);
         assert!(cfg.managed_mcp_gateway_tools_enabled);
     }
     #[test]

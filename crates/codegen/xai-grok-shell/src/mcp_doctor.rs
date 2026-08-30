@@ -271,6 +271,19 @@ fn managed_found(
 
 /// Discover managed `grok_com_*` servers if the user has xAI auth on disk.
 async fn try_discover_managed_servers() -> (ConfigSourceStatus, Vec<DiscoveredServer>) {
+    // Honor the managed-MCP kill switch: when the feature is disabled (env or
+    // config.toml — remote settings are not visible in the doctor path), the
+    // doctor neither fetches nor lists grok.com connectors.
+    let managed_enabled = crate::config::ManagedMcpsConfig::resolve(
+        &crate::config::load_effective_config()
+            .unwrap_or_else(|_| toml::Value::Table(toml::map::Map::new())),
+        None,
+        false,
+    )
+    .enabled;
+    if !managed_enabled {
+        return managed_skipped("managed MCP connectors disabled");
+    }
     let grok_home = xai_grok_tools::util::grok_home::grok_home();
     let grok_com_config = GrokComConfig::default();
     let auth_manager = Arc::new(crate::auth::AuthManager::new(&grok_home, grok_com_config));

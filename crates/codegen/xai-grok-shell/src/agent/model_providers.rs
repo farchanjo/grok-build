@@ -346,15 +346,21 @@ impl ModelProviderConfig {
 impl ResolvedModelProvider {
     /// Request budget when the model row has no `max_completion_tokens`.
     ///
-    /// Order: explicit provider TOML > OpenRouter catalog ceiling >
+    /// Order: explicit provider TOML >
     /// [`OPENROUTER_DEFAULT_MAX_COMPLETION_TOKENS`] (16384) for
     /// `kind = "openrouter"`. Other kinds stay unset unless the provider set
-    /// an explicit positive value. The catalog ceiling is a capability cap
-    /// and a fill-in; it is never stored on `ModelInfo.max_completion_tokens`.
-    pub fn request_max_completion_tokens(&self, catalog_ceiling: Option<u32>) -> Option<u32> {
+    /// an explicit positive value.
+    ///
+    /// The OpenRouter catalog ceiling (`top_provider.max_completion_tokens`)
+    /// is a capability cap stored on `ModelInfo.max_output_ceiling` and is
+    /// deliberately **not** consulted here: copying it onto
+    /// `InferenceConfig.max_completion_tokens` (e.g. 131072 on a
+    /// 131072-wide model) makes every non-empty prompt fail context
+    /// validation. The sampler clamps whatever budget this returns to that
+    /// ceiling when both are present.
+    pub fn request_max_completion_tokens(&self) -> Option<u32> {
         self.max_completion_tokens
             .filter(|&n| n > 0)
-            .or_else(|| catalog_ceiling.filter(|&n| n > 0))
             .or_else(|| {
                 (self.kind == ModelProviderKind::OpenRouter)
                     .then_some(OPENROUTER_DEFAULT_MAX_COMPLETION_TOKENS)
@@ -2074,7 +2080,8 @@ mod tests {
     }
 
     #[test]
-    fn openrouter_uses_catalog_ceiling_when_provider_max_is_unset() {
+    fn openrouter_ceiling_never_becomes_the_request_max() {
+        use super::OPENROUTER_DEFAULT_MAX_COMPLETION_TOKENS;
         let raw_config: toml::Value = toml::from_str(
             r#"
             [model_providers.zdr]
@@ -2103,8 +2110,14 @@ mod tests {
         );
         assert_eq!(
             sampling.max_completion_tokens,
+            Some(OPENROUTER_DEFAULT_MAX_COMPLETION_TOKENS),
+            "the catalog ceiling must never be copied onto the request budget; \
+             the 16384 API default is sent and the sampler clamps it to the ceiling"
+        );
+        assert_eq!(
+            sampling.max_output_ceiling,
             Some(131_072),
-            "catalog ceiling must become the request max when nothing is set"
+            "the capability ceiling stays a separate clamp"
         );
     }
 

@@ -1258,14 +1258,18 @@ fn with_managed_mcp_env<T>(
 }
 #[test]
 #[serial_test::serial]
-fn managed_mcps_interactive_default_enabled() {
+fn managed_mcps_interactive_default_disabled() {
     with_managed_mcp_env(
         None,
         None,
         || {
             let empty = toml::Value::Table(toml::map::Map::new());
             let cfg = ManagedMcpsConfig::resolve(&empty, None, false);
-            assert!(cfg.enabled);
+            assert!(
+                !cfg.enabled,
+                "managed MCP connectors default to disabled; opt in via \
+                 GROK_MANAGED_MCPS_ENABLED, [managed_mcps] enabled, or remote settings"
+            );
         },
     );
 }
@@ -1328,10 +1332,12 @@ fn managed_mcp_gateway_tools_remote_enabled() {
         || {
             let empty = toml::Value::Table(toml::map::Map::new());
             let remote = crate::util::config::RemoteSettings {
+                managed_mcps_enabled: Some(true),
                 managed_mcp_gateway_tools_enabled: Some(true),
                 ..Default::default()
             };
             let cfg = ManagedMcpsConfig::resolve(&empty, Some(&remote), false);
+            assert!(cfg.enabled);
             assert!(cfg.gateway_tools_enabled);
         },
     );
@@ -1362,10 +1368,12 @@ fn managed_mcp_gateway_tools_env_on_overrides_remote_off() {
         || {
             let empty = toml::Value::Table(toml::map::Map::new());
             let remote = crate::util::config::RemoteSettings {
+                managed_mcps_enabled: Some(true),
                 managed_mcp_gateway_tools_enabled: Some(false),
                 ..Default::default()
             };
             let cfg = ManagedMcpsConfig::resolve(&empty, Some(&remote), false);
+            assert!(cfg.enabled);
             assert!(cfg.gateway_tools_enabled);
         },
     );

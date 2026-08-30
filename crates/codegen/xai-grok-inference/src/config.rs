@@ -305,10 +305,10 @@ pub struct InferenceConfig {
     pub max_completion_tokens: Option<u32>,
     /// Capability ceiling for output tokens (OpenRouter `top_provider.max_completion_tokens`).
     /// Distinct from [`Self::max_completion_tokens`]: the latter is the request
-    /// budget (user/model override, or the OpenRouter provider default of 8192).
-    /// When a request max is set, the sampler clamps it to this ceiling. The
-    /// ceiling is never used as a request default and is never copied onto
-    /// `ModelInfo.max_completion_tokens`.
+    /// budget (user/model override, or the OpenRouter provider default of
+    /// 16384). When a request max is set, the sampler clamps it to this
+    /// ceiling. The ceiling is never used as a request default and is never
+    /// copied onto `ModelInfo.max_completion_tokens`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_output_ceiling: Option<u32>,
     pub temperature: Option<f32>,

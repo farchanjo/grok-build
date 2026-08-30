@@ -39,7 +39,7 @@ use super::session::load::{
     handle_session_loaded, handle_session_restore_failed, handle_session_restored,
     handle_session_search_debounce_expired, remove_session_from_pickers,
 };
-use super::settings::ui::apply_setting_rollback;
+use super::settings::ui::{apply_setting_rollback, refresh_open_settings_modals};
 use super::status::{
     commit_session_usage_block, handle_coding_data_sharing_failed,
     handle_coding_data_sharing_updated, handle_context_info_complete, scrub_error_for_toast,
@@ -1424,6 +1424,12 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
         }
         TaskResult::SettingPersisted { key, value } => {
             tracing::trace!(target: "settings", ?key, ?value, "setting persisted");
+            // Disk-backed rows (e.g. [hints] tersify_level / tersify_scope)
+            // snapshot from disk when the modal refreshes, and the setter's
+            // refresh runs before the async write lands. Without this
+            // post-write refresh the modal row keeps showing the pre-change
+            // value ("fica fixo") until the modal is closed and reopened.
+            refresh_open_settings_modals(app);
             vec![]
         }
         TaskResult::SettingPersistFailed {
@@ -1445,6 +1451,41 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             );
             let scrubbed = scrub_error_for_toast(&error);
             app.show_toast(&format!("\u{2717} Could not save {key}: {scrubbed}"));
+            vec![]
+        }
+        TaskResult::ModelParamSaved {
+            agent_id,
+            model_id,
+            param,
+            value,
+            result,
+        } => {
+            let key = param.key();
+            if let Err(error) = result {
+                if let Some(agent) = app.agents.get_mut(&agent_id) {
+                    let message = format!("Failed to save {key} override: {error}");
+                    agent.scrollback.push_block(RenderBlock::system(&message));
+                    agent.show_toast(&message);
+                }
+                return vec![];
+            }
+            let shown = match (param, value) {
+                (crate::config_toml_edit::ModelParam::Temperature, Some(v)) => {
+                    format!("temperature = {v}")
+                }
+                (crate::config_toml_edit::ModelParam::TopP, Some(v)) => format!("top_p = {v}"),
+                (crate::config_toml_edit::ModelParam::MaxCompletionTokens, Some(v)) => {
+                    format!("max_completion_tokens = {v}")
+                }
+                (_, None) => format!("{key} override cleared"),
+            };
+            if let Some(agent) = app.agents.get_mut(&agent_id) {
+                agent.scrollback.push_block(RenderBlock::system(&format!(
+                    "Model override saved: {model_id} {shown}. config.toml hot-reload \
+                     applies it to subsequent turns."
+                )));
+                agent.show_toast(&format!("Override saved: {shown}"));
+            }
             vec![]
         }
         TaskResult::ChatgptContextWindowSaved {

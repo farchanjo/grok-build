@@ -629,4 +629,72 @@ mod tests {
         assert!(err.contains("never borrowing application key"), "{err}");
         let _ = std::fs::remove_dir_all(home);
     }
+
+    #[test]
+    #[serial_test::serial]
+    fn extra_openrouter_instance_credentials_read_own_scope_only() {
+        use crate::auth::OPENROUTER_API_KEY_SCOPE;
+        use crate::provider_registry::secrets::{
+            application_key_scope, clear_provider_secret, extra_openrouter_application_key_scope,
+            store_provider_secret,
+        };
+
+        let home = tempfile::tempdir().unwrap();
+        let mut providers = IndexMap::new();
+        providers.insert(
+            "openrouter-work".to_owned(),
+            ModelProviderConfig {
+                kind: ModelProviderKind::OpenRouter,
+                base_url: Some("https://openrouter.ai/api/v1".into()),
+                enabled: true,
+                ..ModelProviderConfig::default()
+            },
+        );
+        let svc = ProviderService::from_model_providers(&providers).unwrap();
+        let op = find_cli_operation("openrouter", "getModels").unwrap();
+        let work = crate::provider_registry::ProviderId::new("openrouter-work").unwrap();
+
+        store_provider_secret(
+            home.path(),
+            &extra_openrouter_application_key_scope(&work),
+            "work-key",
+        )
+        .unwrap();
+        // Decoys the extra instance must never borrow.
+        store_provider_secret(
+            home.path(),
+            &application_key_scope(&work),
+            "openai-compatible-decoy",
+        )
+        .unwrap();
+        store_provider_secret(home.path(), OPENROUTER_API_KEY_SCOPE, "builtin-decoy").unwrap();
+        unsafe {
+            std::env::set_var("OPENROUTER_API_KEY", "env-builtin-decoy");
+        }
+
+        let inst = resolve_selected_instance(&svc, "openrouter-work", op).unwrap();
+        assert_eq!(inst.kind, ProviderKind::OpenRouter);
+        let (app, admin) = resolve_instance_credentials(&inst, op, home.path()).unwrap();
+        assert_eq!(
+            app.as_deref(),
+            Some("work-key"),
+            "extra OpenRouter must read openrouter::<id>::api_key only"
+        );
+        assert!(admin.is_none(), "application op must not resolve admin token");
+
+        // Clearing the Work key must fail closed: no built-in scope, env var,
+        // or openai_compatible sibling fallback for a typed application op.
+        clear_provider_secret(home.path(), &extra_openrouter_application_key_scope(&work))
+            .unwrap();
+        let (app, admin) = resolve_instance_credentials(&inst, op, home.path()).unwrap();
+        assert!(
+            app.is_none(),
+            "missing extra OpenRouter key must fail closed (no builtin/env sibling borrow)"
+        );
+        assert!(admin.is_none());
+
+        unsafe {
+            std::env::remove_var("OPENROUTER_API_KEY");
+        }
+    }
 }

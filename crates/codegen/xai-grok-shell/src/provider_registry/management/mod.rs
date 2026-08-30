@@ -1606,10 +1606,29 @@ impl ProviderManagementService {
             .live_incarnation_str(id)
             .and_then(|raw| super::instance::ProviderIncarnation::new(raw).ok())
             .or_else(|| stable_builtin_incarnation(id));
-        let Some(incarnation) = incarnation else {
-            let mut snap = self.catalog_status(id);
-            snap.error = Some(format!("missing lifecycle incarnation for `{id}`"));
-            return snap;
+        let incarnation = match incarnation {
+            Some(inc) => inc,
+            None => {
+                // Config-declared instance (e.g. a hand-written
+                // `[model_providers.<id>]` account) on its first catalog
+                // refresh: lazily mint its lifecycle incarnation. The refresh
+                // command is explicit user intent for a provider that is
+                // present in the effective config; tombstoned ids keep
+                // failing closed through `mint_or_restore`.
+                match crate::provider_registry::lifecycle_state::with_lifecycle_state_mut(
+                    &self.home,
+                    |state| state.ensure_live(&pid).map(|inc| (inc, true)),
+                ) {
+                    Ok(inc) => inc,
+                    Err(e) => {
+                        let mut snap = self.catalog_status(id);
+                        snap.error = Some(format!(
+                            "missing lifecycle incarnation for `{id}`: {e}"
+                        ));
+                        return snap;
+                    }
+                }
+            }
         };
         let binding = super::ProviderCacheStore::load_state(&self.home, &pid)
             .ok()
@@ -2826,6 +2845,8 @@ mod tests {
 
     #[test]
     fn extra_openrouter_keys_use_instance_scope_not_openai_compatible() {
+
+
         let dir = TempDir::new().unwrap();
         let s = svc(&dir);
         let add_home = s.add(ProviderAddRequest {
@@ -2906,6 +2927,101 @@ mod tests {
         assert!(auth.contains("openrouter::openrouter-home::api_key"));
         assert!(!auth.contains("openai_compatible::openrouter-work::api_key"));
         assert!(!auth.contains("\"openrouter::api_key\""));
+    }
+
+    #[tokio::test]
+    async fn refresh_catalog_lazily_mints_incarnation_for_config_declared_instance() {
+        let dir = TempDir::new().unwrap();
+        let s = svc(&dir);
+        // Hand-written config.toml instance (never `provider add`-ed): no
+        // lifecycle row exists yet. `refresh-models <id>` is explicit user
+        // intent, so the refresh lazily mints the incarnation instead of
+        // failing closed with "missing lifecycle incarnation".
+        std::fs::write(
+            dir.path().join("config.toml"),
+            r#"
+[model_providers.openrouter-late]
+kind = "openrouter"
+enabled = true
+base_url = "http://127.0.0.1:1/v1"
+catalog_enabled = true
+"#,
+        )
+        .unwrap();
+        let pid = ProviderId::new("openrouter-late").unwrap();
+        store_provider_secret(
+            dir.path(),
+            &application_key_scope_for_kind(&pid, crate::provider_registry::ProviderKind::OpenRouter),
+            "late-key",
+        )
+        .unwrap();
+
+        let snap = s.refresh_catalog("openrouter-late").await;
+        assert!(
+            !snap
+                .error
+                .as_deref()
+                .unwrap_or("")
+                .contains("missing lifecycle incarnation"),
+            "lazy mint must supply the incarnation: {:?}",
+            snap.error
+        );
+
+        // The minted incarnation is durable: a second refresh resolves it
+        // from lifecycle state (no second mint).
+        let state =
+            crate::provider_registry::lifecycle_state::load_lifecycle_state(dir.path()).unwrap();
+        assert!(
+            state.incarnation_for("openrouter-late").is_some(),
+            "refresh must record the config-declared instance in lifecycle state"
+        );
+    }
+
+    #[tokio::test]
+    async fn extra_openrouter_refresh_catalog_fails_closed_without_instance_key() {
+        let dir = TempDir::new().unwrap();
+        let s = svc(&dir);
+        let add = s.add(ProviderAddRequest {
+            id: "openrouter-work".into(),
+            kind: "openrouter".into(),
+            base_url: "https://openrouter.ai/api/v1".into(),
+            display_name: Some("Work".into()),
+            admin_base_url: None,
+            enabled: true,
+            expected_generation: s.current_generation(),
+        });
+        assert!(add.ok, "{:?}", add.error);
+
+        // Built-in OpenRouter key exists, but the extra instance must read
+        // only `openrouter::openrouter-work::api_key` and fail closed.
+        store_provider_secret(
+            dir.path(),
+            crate::auth::OPENROUTER_API_KEY_SCOPE,
+            "builtin-decoy",
+        )
+        .unwrap();
+        let snap = s.refresh_catalog("openrouter-work").await;
+        assert!(
+            snap.error
+                .as_deref()
+                .is_some_and(|e| e.contains("no application credential for `openrouter-work`")),
+            "missing instance key must fail closed instead of borrowing built-in: {:?}",
+            snap.error
+        );
+
+        // An openai_compatible-scope decoy must not satisfy the instance.
+        let pid = ProviderId::new("openrouter-work").unwrap();
+        store_provider_secret(dir.path(), &application_key_scope(&pid), "decoy").unwrap();
+        let snap = s.refresh_catalog("openrouter-work").await;
+        assert!(
+            snap.error
+                .as_deref()
+                .is_some_and(|e| e.contains("no application credential for `openrouter-work`")),
+            "openai_compatible sibling scope must not satisfy the instance: {:?}",
+            snap.error
+        );
+        // The live network fetch (exact instance key present) is intentionally
+        // not exercised here: no real OpenRouter hop belongs in unit tests.
     }
 
     #[test]

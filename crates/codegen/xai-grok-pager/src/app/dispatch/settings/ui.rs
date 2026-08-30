@@ -1382,6 +1382,17 @@ fn merge_compaction_and_media_snapshot(
     snap.media_video_model = media_fields.media_video_model;
     snap.media_file_model = media_fields.media_file_model;
     snap.media_status = media_fields.media_status;
+    // Disk-backed `[hints]` rows, read through the shell resolver the same
+    // way `build_pager_snapshot` does. Both snapshot consumers — the modal
+    // open path and `refresh_open_settings_modals` — tail into this helper,
+    // so without these fields the Tersify scope/level (and repetition guard)
+    // rows render enum defaults and appear stuck ("fica fixo") no matter
+    // what was committed to config.toml.
+    let tersify = xai_grok_shell::util::config::TersifyConfig::load();
+    snap.tersify_scope = tersify.scope.as_config_str().to_string();
+    snap.tersify_level = tersify.level.as_config_str().to_string();
+    snap.repetition_guard_enabled =
+        xai_grok_shell::util::config::repetition_guard_enabled_from_disk();
     snap
 }
 

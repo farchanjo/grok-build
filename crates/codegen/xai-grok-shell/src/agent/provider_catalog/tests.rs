@@ -1203,6 +1203,88 @@ async fn zdr_true_fetches_models_zdr_query_for_that_instance_only() {
 }
 
 #[tokio::test]
+async fn zdr_instance_drops_models_without_confirmed_zdr_endpoint() {
+    // The ?zdr=true models list alone is not proof of a ZDR endpoint:
+    // `acme/unconfirmed` is listed but absent from /endpoints/zdr, and must
+    // not be offered (it 404s under the instance's ZDR data policy).
+    let (zdr_base, zdr_rec, zdr_h) = spawn_scripted_server(vec![
+        hop(
+            "zdr=true",
+            200,
+            r#"{"data":[{"id":"acme/zdr"},{"id":"acme/unconfirmed"}]}"#,
+        ),
+        hop(
+            "/endpoints/zdr",
+            200,
+            r#"{"data":[{"model_id":"acme/zdr"}]}"#,
+        ),
+    ]);
+    let result = fetch_openrouter_catalog(
+        &format!("{zdr_base}/models"),
+        "token-zdr",
+        &identity(
+            "openrouter_work",
+            ProviderKind::OpenRouter,
+            &zdr_base,
+            7,
+            false,
+        ),
+        &IndexMap::new(),
+        Some(true),
+        CatalogFetchBounds::default(),
+        1,
+        1,
+        &CancellationToken::new(),
+    )
+    .await
+    .unwrap();
+    zdr_h.join().unwrap();
+    let _ = zdr_rec;
+    assert_eq!(result.models.len(), 1);
+    assert_eq!(result.models[0].upstream_model_id, "acme/zdr");
+    assert_eq!(result.models[0].capabilities.supports_zdr, Some(true));
+}
+
+#[tokio::test]
+async fn zdr_instance_with_failed_endpoint_hop_yields_empty_catalog() {
+    // A failed (non-200) /endpoints/zdr hop must not fabricate stamps: the
+    // ZDR instance's catalog is empty until the hop succeeds.
+    let (zdr_base, zdr_rec, zdr_h) = spawn_scripted_server(vec![
+        hop(
+            "zdr=true",
+            200,
+            r#"{"data":[{"id":"acme/zdr"}]}"#,
+        ),
+        hop("/endpoints/zdr", 500, r#"{"error":"boom"}"#),
+    ]);
+    let result = fetch_openrouter_catalog(
+        &format!("{zdr_base}/models"),
+        "token-zdr",
+        &identity(
+            "openrouter_work",
+            ProviderKind::OpenRouter,
+            &zdr_base,
+            8,
+            false,
+        ),
+        &IndexMap::new(),
+        Some(true),
+        CatalogFetchBounds::default(),
+        1,
+        1,
+        &CancellationToken::new(),
+    )
+    .await
+    .unwrap();
+    zdr_h.join().unwrap();
+    let _ = zdr_rec;
+    assert!(
+        result.models.is_empty(),
+        "unconfirmed rows must not be offered on a ZDR instance"
+    );
+}
+
+#[tokio::test]
 async fn extra_openrouter_account_uses_native_adapter_and_skips_singleton_cache() {
     let home = tempfile::tempdir().unwrap();
     let publisher = Arc::new(CatalogPublisher::new());
