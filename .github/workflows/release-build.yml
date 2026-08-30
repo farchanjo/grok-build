@@ -1,0 +1,76 @@
+# Manual release build for the fcustom distribution targets.
+#
+# Trigger with:
+#   gh workflow run release-build.yml --ref fcustom
+#
+# Produces two release-dist binaries (see `[profile.release-dist]` in the
+# root Cargo.toml):
+#   - aarch64-apple-darwin (macOS arm64, unsigned)
+#   - x86_64-unknown-linux-gnu (Linux glibc, like the /opt/grok-custom deploy)
+#
+# `protoc` resolution is handled by `xai-proto-build` (see
+# `crates/build/xai-proto-build/src/find_protoc.rs`): GitHub-hosted runners
+# ship both DotSlash (for `bin/protoc`) and a system `protoc` on PATH.
+
+name: Release build
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build ${{ matrix.target }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-15
+            target: aarch64-apple-darwin
+          - os: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+    runs-on: ${{ matrix.os }}
+    env:
+      # .cargo/config.toml sets sccache as the rustc wrapper; GitHub runners
+      # are ephemeral, so a wrapper without a persistent cache only adds
+      # overhead. Empty string disables it for this run.
+      CARGO_BUILD_RUSTC_WRAPPER: ""
+      CARGO_INCREMENTAL: "0"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install pinned toolchain (rust-toolchain.toml)
+        uses: dtolnay/rust-toolchain@master
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Install Linux linker dependencies
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y lld
+
+      - name: Build release-dist
+        run: cargo build -p xai-grok-pager-bin --profile release-dist --locked
+
+      - name: Stage artifact
+        shell: bash
+        run: |
+          mkdir -p dist
+          cp "target/release-dist/xai-grok-pager" "dist/grok-${{ matrix.target }}"
+          if command -v sha256sum >/dev/null 2>&1; then
+            (cd dist && sha256sum "grok-${{ matrix.target }}" > "grok-${{ matrix.target }}.sha256")
+          else
+            (cd dist && shasum -a 256 "grok-${{ matrix.target }}" > "grok-${{ matrix.target }}.sha256")
+          fi
+          ls -la dist/
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: grok-${{ matrix.target }}
+          path: dist/*
+          if-no-files-found: error
+          compression-level: 0
