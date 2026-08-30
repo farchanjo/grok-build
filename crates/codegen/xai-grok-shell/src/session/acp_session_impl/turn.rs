@@ -809,6 +809,25 @@ impl SessionActor {
             .await
             .unwrap_or_default()
     }
+    /// Trusted containment roots for the prime skill-body load: the session
+    /// cwd, the git root when present, and the Grok home. The home is included
+    /// so bundled and user-scope native skills — which always live under
+    /// `$GROK_HOME`, never under the workspace — stay primable.
+    /// `validated_roots` still drops any root that is not an ancestor of an
+    /// eligible skill from the authoritative snapshot, so an unrelated root
+    /// (or an unrelated home) authorizes nothing.
+    fn prime_trusted_roots(
+        cwd: &std::path::Path,
+        git_root: Option<&std::path::Path>,
+        grok_home: &std::path::Path,
+    ) -> Vec<std::path::PathBuf> {
+        let mut roots = vec![cwd.to_path_buf()];
+        if let Some(root) = git_root {
+            roots.push(root.to_path_buf());
+        }
+        roots.push(grok_home.to_path_buf());
+        roots
+    }
     /// PR19: run PR18 skill prime for an explicit real [`PromptOrigin::User`]
     /// turn on a native backend, at execution time (after all slash/media
     /// normalization is complete), returning a hidden `ConversationItem` to
@@ -901,12 +920,17 @@ impl SessionActor {
             };
 
             // Workspace + trusted containment roots (canonicalized upstream).
-            let mut trusted_roots: Vec<std::path::PathBuf> = vec![cwd.clone()];
-            if let xai_grok_workspace::session::git::GitDiscoveryResult::Found(root) =
-                xai_grok_workspace::session::git::discover_git_root(&cwd)
-            {
-                trusted_roots.push(root);
-            }
+            // The Grok home is included so bundled and user-scope native
+            // skills — which always live under `$GROK_HOME`, never under the
+            // workspace — stay primable. `validated_roots` still drops any
+            // root that is not an ancestor of an eligible skill from the
+            // authoritative snapshot, so an unrelated home adds nothing.
+            let git_root = match xai_grok_workspace::session::git::discover_git_root(&cwd) {
+                xai_grok_workspace::session::git::GitDiscoveryResult::Found(root) => Some(root),
+                _ => None,
+            };
+            let mut trusted_roots =
+                Self::prime_trusted_roots(&cwd, git_root.as_deref(), &grok_home);
 
             let semantic_profile = skills_cfg.retrieval_profile.clone();
             let explicit_skill = self.active_skill.lock().clone();
@@ -4166,5 +4190,28 @@ mod structured_output_validation_tests {
         assert_eq!(decode_language_envelope_text(raw).as_deref(), Some("oi"));
         assert!(!is_language_envelope_json("plain text"));
         assert!(decode_language_envelope_text("plain text").is_none());
+    }
+
+    #[test]
+    fn prime_trusted_roots_include_workspace_git_root_and_home() {
+        let cwd = std::path::Path::new("/repo/pkg");
+        let git_root = std::path::Path::new("/repo");
+        let home = std::path::Path::new("/home/dev/.grokdev");
+        assert_eq!(
+            super::SessionActor::prime_trusted_roots(cwd, Some(git_root), home),
+            vec![
+                std::path::PathBuf::from("/repo/pkg"),
+                std::path::PathBuf::from("/repo"),
+                std::path::PathBuf::from("/home/dev/.grokdev"),
+            ]
+        );
+        // No git root (outside a repo): cwd + home only.
+        assert_eq!(
+            super::SessionActor::prime_trusted_roots(cwd, None, home),
+            vec![
+                std::path::PathBuf::from("/repo/pkg"),
+                std::path::PathBuf::from("/home/dev/.grokdev"),
+            ]
+        );
     }
 }
