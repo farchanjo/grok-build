@@ -478,16 +478,19 @@ impl PrimeIndexHandle {
         }
 
         let collection = frozen.collection();
-        let generation = self.generation_atom(collection).load(Ordering::Relaxed);
         let idx = self.open()?;
         let state = idx
             .collection_state(collection)
             .map_err(|_| PrimeIndexError::Unavailable)?;
         drop(idx);
-
-        if state.inventory_generation != generation {
-            return Err(PrimeIndexError::StaleGeneration);
-        }
+        // Trust the persisted sqlite generation as the starting truth: another
+        // process (shared index file) may have advanced it via a fill while
+        // this process's in-memory atom still holds the pre-fill value. The
+        // per-batch stale guards below protect against concurrent fills from
+        // THIS point on.
+        let generation = state.inventory_generation;
+        self.generation_atom(collection)
+            .store(generation, Ordering::Relaxed);
 
         let compatible = !force_rebuild
             && state.fingerprint_hash == frozen.fingerprint_hash()
@@ -1813,7 +1816,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn stale_generation_refuses_backfill_write() {
+    async fn stale_in_memory_generation_resyncs_from_sqlite_backfill() {
         let tmp = tempfile::tempdir().unwrap();
         let home = tmp.path().join("home");
         let cwd = tmp.path().join("ws");
@@ -1845,20 +1848,32 @@ mod tests {
             skill("b", "skills/b/SKILL.md"),
         ]);
         handle.sync_skills(2, &later).unwrap();
+        // Simulate a multi-process desync: this process's in-memory atom was
+        // loaded before another process's fill advanced the persisted sqlite
+        // generation. The run must re-sync from the persisted truth (the
+        // sqlite holds the current inventory [a, b] its generation refers to)
+        // and proceed, instead of refusing forever.
         handle.inventory_generation.store(1, Ordering::Relaxed);
         let embedder = Arc::new(MockEmbeddingProvider { dimensions: 4 });
-        let err = handle
+        let written = handle
             .backfill(
                 embedder,
                 handle.freeze_pin().unwrap(),
                 CancellationToken::new(),
             )
             .await
-            .err();
+            .expect("backfill must re-sync from the persisted sqlite generation");
+        let state = handle
+            .collection_snapshot(CollectionKind::Skills)
+            .expect("snapshot")
+            .0;
         assert_eq!(
-            err,
-            Some(PrimeIndexError::StaleGeneration),
-            "stale generation must not install mixed inventory vectors: {err:?}"
+            state.inventory_generation, 2,
+            "the fill atom must follow the persisted sqlite generation"
+        );
+        assert!(
+            state.vec_count >= 1,
+            "the stale-atom backfill must produce vectors (restage or missing-fill)"
         );
         uninstall_prime_index(&home, &cwd);
     }
@@ -1999,7 +2014,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn captured_generation_zero_refuses_write_after_inventory_sync() {
+    async fn zero_in_memory_generation_resyncs_from_sqlite_backfill() {
         let tmp = tempfile::tempdir().unwrap();
         let home = tmp.path().join("home");
         let cwd = tmp.path().join("ws");
@@ -2026,20 +2041,30 @@ mod tests {
             .unwrap();
         let items = skills_to_index_items(&[skill("a", "skills/a/SKILL.md")]);
         handle.sync_skills(1, &items).unwrap();
+        // Simulate a desynced in-memory atom (another process's fill advanced
+        // the persisted sqlite generation). The run re-syncs from the
+        // persisted truth and proceeds.
         handle.inventory_generation.store(0, Ordering::Relaxed);
         let embedder = Arc::new(MockEmbeddingProvider { dimensions: 4 });
-        let err = handle
+        handle
             .backfill(
                 embedder,
                 handle.freeze_pin().unwrap(),
                 CancellationToken::new(),
             )
             .await
-            .err();
+            .expect("backfill must re-sync from the persisted sqlite generation");
+        let state = handle
+            .collection_snapshot(CollectionKind::Skills)
+            .expect("snapshot")
+            .0;
         assert_eq!(
-            err,
-            Some(PrimeIndexError::StaleGeneration),
-            "captured generation 0 must not write after a live inventory sync: {err:?}"
+            state.inventory_generation, 1,
+            "the fill atom must follow the persisted sqlite generation"
+        );
+        assert!(
+            state.vec_count >= 1,
+            "the desynced-atom backfill must produce vectors"
         );
         uninstall_prime_index(&home, &cwd);
     }
