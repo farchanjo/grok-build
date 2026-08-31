@@ -30,7 +30,7 @@ if [[ ! -x "${GROK_BINARY}" ]]; then
     exit 1
 fi
 
-export GROK_HOME="${HOME}/.grok-prod"
+export GROK_HOME="${HOME}/.grok"
 export GROK_LEADER_SOCKET="${GROK_HOME}/leader.sock"
 
 # Enable the explicitly feature-compiled experimental Claude Agent CLI runtime.
