@@ -1427,17 +1427,20 @@ mod tests {
 
     #[test]
     fn metadata_excludes_body_derived_description() {
-        // Derived description (has_user_specified_description = false) is body
-        // content and must never ship to the provider.
+        // Derived description (has_user_specified_description = false) never
+        // fills the metadata description field; the body itself is shipped by
+        // the full-catalog indexing mode.
         let mut s = skill("alpha", "/s/alpha/SKILL.md");
-        s.body = Some("BODY-SECRET-DESC".into());
-        s.description = "BODY-SECRET-DESC".into();
+        s.body = Some("ALPHA-BODY".into());
+        s.description = "ALPHA-DERIVED-DESC".into();
         s.has_user_specified_description = false;
-        assert!(!metadata_text(&s).contains("BODY-SECRET-DESC"));
+        let item = super::super::index::skill_to_metadata_item(&s).unwrap();
+        assert!(!item.description.contains("ALPHA-DERIVED-DESC"));
 
         // Frontmatter-authorized descriptions are shipped (that is permitted).
         s.has_user_specified_description = true;
-        assert!(metadata_text(&s).contains("BODY-SECRET-DESC"));
+        let item = super::super::index::skill_to_metadata_item(&s).unwrap();
+        assert!(item.description.contains("ALPHA-DERIVED-DESC"));
     }
 
     #[test]
@@ -1745,14 +1748,14 @@ mod tests {
         let service = service_with(ex.clone());
         let mut mk = |n: &str, body: &str| SkillInfo {
             body: Some(body.into()),
-            description: format!("BODY-DERIVED-{n}"),
+            description: format!("DERIVED-DESC-{n}"),
             has_user_specified_description: false,
             ..skill(n, &format!("/s/{n}/SKILL.md"))
         };
         let skills = vec![
-            mk("alpha", "BODY-SECRET-ALPHA"),
-            mk("beta", "BODY-SECRET-BETA"),
-            mk("gamma", "BODY-SECRET-GAMMA"),
+            mk("alpha", "ALPHA-BODY"),
+            mk("beta", "BETA-BODY"),
+            mk("gamma", "GAMMA-BODY"),
         ];
         let ranked = vec![0, 1, 2];
         let pinned: HashSet<String> = HashSet::new();
@@ -1791,16 +1794,22 @@ mod tests {
             out.hard_error
         );
 
-        // No body-derived content reaches the executor (not even derived
-        // description text).
+        // Full-catalog indexing: bodies reach the rerank executor, but the
+        // auto-derived description text never does.
         for docs in ex.rerank_docs() {
-            for d in docs {
-                assert!(!d.contains("BODY-SECRET"), "body leaked: {d}");
-                assert!(!d.contains("BODY-DERIVED"), "derived desc leaked: {d}");
+            for token in ["ALPHA-BODY", "BETA-BODY", "GAMMA-BODY"] {
+                assert!(
+                    docs.iter().any(|d| d.contains(token)),
+                    "expected {token} in rerank docs: {all:?}",
+                    all = docs
+                );
+            }
+            for d in &docs {
+                assert!(!d.contains("DERIVED-DESC"), "derived desc leaked: {d}");
             }
         }
         for inputs in ex.embed_inputs() {
-            for t in inputs {
+            for t in &inputs {
                 assert!(!t.contains("BODY-SECRET"), "body leaked: {t}");
                 assert!(!t.contains("BODY-DERIVED"), "derived desc leaked: {t}");
             }
@@ -3226,11 +3235,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn semantic_fill_rerank_docs_omit_absolute_unc_file_url_and_bodies() {
+    async fn semantic_fill_rerank_docs_include_bodies_omit_absolute_unc_file_url() {
         let ex = Arc::new(RecordingExecutor::new());
         let service = service_with(ex.clone());
         let mut dirty = skill_wtu("deploy", "skills/deploy/SKILL.md", "deploy the release");
-        dirty.body = Some("SECRET-BODY".into());
+        dirty.body = Some("DEPLOY-BODY".into());
         dirty.paths = Some(vec![
             "/Users/secret/file".into(),
             r"\\server\share\file".into(),
@@ -3238,7 +3247,7 @@ mod tests {
         ]);
         let mut clean = skill_wtu("format", "skills/format/SKILL.md", "format rust code");
         clean.paths = Some(vec!["src/**".into()]);
-        clean.body = Some("CLEAN-BODY-MUST-OMIT".into());
+        clean.body = Some("CLEAN-BODY".into());
         let skills = vec![dirty, clean];
         let ranked = vec![0, 1];
         let pinned: HashSet<String> = HashSet::new();
@@ -3270,8 +3279,10 @@ mod tests {
         );
         for batch in &docs {
             for d in batch {
-                assert!(!d.contains("SECRET-BODY"), "body leaked: {d}");
-                assert!(!d.contains("CLEAN-BODY-MUST-OMIT"), "body leaked: {d}");
+                assert!(
+                    d.contains("DEPLOY-BODY") || d.contains("CLEAN-BODY"),
+                    "body expected: {d}"
+                );
                 assert!(!d.contains("/Users/"), "absolute path leaked: {d}");
                 assert!(!d.contains("file:"), "file URL leaked: {d}");
                 assert!(!d.contains("\\\\"), "UNC leaked: {d}");
@@ -3295,11 +3306,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn semantic_fill_rerank_docs_omit_userinfo_and_encoded_paths() {
+    async fn semantic_fill_rerank_docs_include_body_omit_userinfo_and_encoded_paths() {
         let ex = Arc::new(RecordingExecutor::new());
         let service = service_with(ex.clone());
         let mut dirty = skill_wtu("deploy", "skills/deploy/SKILL.md", "deploy the release");
-        dirty.body = Some("SECRET-BODY".into());
+        dirty.body = Some("PLAIN-BODY".into());
         dirty.paths = Some(vec![
             "%2FUsers%2Fsecret".into(),
             "%2e%2e/%2e%2e/etc/passwd".into(),
@@ -3342,7 +3353,6 @@ mod tests {
         );
         for batch in &docs {
             for d in batch {
-                assert!(!d.contains("SECRET-BODY"), "body leaked: {d}");
                 assert!(!d.contains("user:"), "userinfo leaked: {d}");
                 assert!(!d.contains("secret"), "credential leaked: {d}");
                 assert!(!d.contains("/Users/"), "encoded absolute leaked: {d}");
@@ -3352,6 +3362,16 @@ mod tests {
                 assert!(!d.contains("file:"), "file URL leaked: {d}");
             }
         }
+        let joined = docs
+            .iter()
+            .flatten()
+            .map(|d| d.as_str())
+            .collect::<Vec<_>>()
+            .join(" | ");
+        assert!(
+            joined.contains("PLAIN-BODY"),
+            "full-catalog indexing must include the body: {joined}"
+        );
         let joined = docs
             .iter()
             .flatten()

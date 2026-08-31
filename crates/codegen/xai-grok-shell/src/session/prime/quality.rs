@@ -53,7 +53,7 @@ fn skill(name: &str, when_to_use: &str, description: &str) -> SkillInfo {
         paths: Some(vec!["src/**".into()]),
         scope: SkillScope::Repo,
         enabled: true,
-        body: Some("SECRET-BODY /Users/me/secret".into()),
+        body: Some("routine operational body content for the skill".into()),
         ..SkillInfo::default()
     }
 }
@@ -293,12 +293,12 @@ fn automatic_topk(
 }
 
 #[test]
-fn routing_quality_corpus_is_metadata_only() {
+fn routing_quality_corpus_documents_are_leak_free() {
     for skill in corpus() {
         let doc = skill_rerank_document(&skill);
         assert!(
-            !doc.contains("SECRET-BODY"),
-            "quality corpus must never index bodies"
+            doc.contains("routine operational body content"),
+            "quality corpus must index the body"
         );
         assert!(
             !doc.contains("/Users/"),

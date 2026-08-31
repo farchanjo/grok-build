@@ -855,24 +855,37 @@ fn cap_chars(s: &str, max: usize) -> String {
     s.chars().take(max).collect()
 }
 
-/// Metadata text persisted and (when needed) transmitted. Bodies never appear.
+/// Cap for the skill body included in index/rerank documents. Large enough to
+/// cover typical skill bodies while keeping embedding inputs bounded.
+const SKILL_BODY_INDEX_CAP_CHARS: usize = 8_000;
+
+/// Index/rerank document text: privacy-accepted metadata plus the skill body.
 ///
-/// Built from the same privacy-accepted [`MetadataItem`] used for persist and
-/// rerank, so absolute / UNC / `file:` URL `grok.paths` tokens cannot ship.
+/// The metadata portion keeps the [`xai_grok_memory::reject_persisted_paths`]
+/// contract (absolute / UNC / `file:` URL tokens and credentials never ship).
+/// The body is appended per the full-catalog indexing mode: retrieval returns
+/// skill names, and selected bodies are still loaded from disk at render time.
 pub fn skill_index_text(skill: &SkillInfo) -> String {
     skill_rerank_document(skill)
 }
 
-/// Remote rerank document built only from a privacy-accepted metadata item.
-///
-/// Uses the same [`xai_grok_memory::reject_persisted_paths`] contract as
-/// persistence: absolute / UNC / `file:` URL / encoded-traversal / credential
-/// / body / arbitrary metadata never leave. Relative `src/**` and accepted
-/// bounded triggers remain. Returns empty when the skill cannot be accepted.
+/// Remote rerank document: metadata plus the skill body so the semantic and
+/// rerank stages judge the full authored content. The body is capped;
+/// retrieval still returns only skill names.
 pub fn skill_rerank_document(skill: &SkillInfo) -> String {
-    skill_to_metadata_item(skill)
-        .map(|item| item.fts_text())
-        .unwrap_or_default()
+    let Some(item) = skill_to_metadata_item(skill) else {
+        return String::new();
+    };
+    let body = skill.body.as_deref().map(str::trim).unwrap_or_default();
+    if body.is_empty() {
+        item.fts_text()
+    } else {
+        format!(
+            "{}\n\n{}",
+            item.fts_text(),
+            cap_chars(body, SKILL_BODY_INDEX_CAP_CHARS)
+        )
+    }
 }
 
 fn skill_extra_json(skill: &SkillInfo) -> String {
@@ -1370,17 +1383,22 @@ mod tests {
     }
 
     #[test]
-    fn skill_index_text_omits_body_and_derived_description() {
+    fn skill_index_text_includes_body_but_not_derived_description() {
         let mut s = skill("deploy", "skills/deploy/SKILL.md");
         s.body = Some("SECRET-BODY".into());
         let text = skill_index_text(&s);
-        assert!(!text.contains("SECRET-BODY"));
+        assert!(
+            text.contains("SECRET-BODY"),
+            "full-catalog indexing must include the skill body: {text}"
+        );
         assert!(text.contains("deploy"));
         s.has_user_specified_description = false;
         s.description = "BODY-DERIVED".into();
         let text = skill_index_text(&s);
-        assert!(!text.contains("BODY-DERIVED"));
-        assert!(!text.contains("SECRET-BODY"));
+        assert!(
+            !text.contains("BODY-DERIVED"),
+            "auto-derived description must not be indexed: {text}"
+        );
     }
 
     #[test]
@@ -2043,7 +2061,7 @@ mod tests {
     }
 
     #[test]
-    fn skill_rerank_document_omits_absolute_unc_file_url_and_body() {
+    fn skill_rerank_document_includes_body_and_omits_absolute_unc_file_url() {
         let mut s = skill("deploy", "skills/deploy/SKILL.md");
         s.body = Some("SECRET-BODY".into());
         s.when_to_use = Some("see /Users/secret/file".into());
@@ -2054,7 +2072,10 @@ mod tests {
             "src/**".into(),
         ]);
         let doc = skill_rerank_document(&s);
-        assert!(!doc.contains("SECRET-BODY"), "body leaked: {doc}");
+        assert!(
+            doc.contains("SECRET-BODY"),
+            "full-catalog indexing must include the body: {doc}"
+        );
         assert!(!doc.contains("/Users/"), "absolute path leaked: {doc}");
         assert!(!doc.contains("file:"), "file URL leaked: {doc}");
         assert!(!doc.contains("\\\\"), "UNC leaked: {doc}");
