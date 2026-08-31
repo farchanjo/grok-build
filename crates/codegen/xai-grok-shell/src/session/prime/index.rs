@@ -876,16 +876,57 @@ pub fn skill_rerank_document(skill: &SkillInfo) -> String {
     let Some(item) = skill_to_metadata_item(skill) else {
         return String::new();
     };
-    let body = skill.body.as_deref().map(str::trim).unwrap_or_default();
+    let body = skill_body_for_index(skill);
     if body.is_empty() {
         item.fts_text()
     } else {
         format!(
             "{}\n\n{}",
             item.fts_text(),
-            cap_chars(body, SKILL_BODY_INDEX_CAP_CHARS)
+            cap_chars(&body, SKILL_BODY_INDEX_CAP_CHARS)
         )
     }
+}
+
+/// Skill body for index/rerank documents. Uses the in-memory body when the
+/// discovery layer populated it; otherwise reads the `SKILL.md` from
+/// `skill.path` (frontmatter stripped). Disk reads are cached by absolute
+/// path and invalidated on mtime change, so repeated per-turn ranking calls
+/// do not re-read the catalog.
+fn skill_body_for_index(skill: &SkillInfo) -> String {
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+    static CACHE: OnceLock<Mutex<HashMap<String, (Option<std::time::SystemTime>, String)>>> =
+        OnceLock::new();
+    if let Some(body) = skill.body.as_deref() {
+        return body.trim().to_owned();
+    }
+    let path = skill.path.as_str();
+    if path.is_empty() {
+        return String::new();
+    }
+    let mtime = std::fs::metadata(path).ok().and_then(|m| m.modified().ok());
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    let Ok(mut guard) = cache.lock() else {
+        return String::new();
+    };
+    if let Some((cached_mtime, body)) = guard.get(path) {
+        if *cached_mtime == mtime {
+            return body.clone();
+        }
+    }
+    // Strip the YAML frontmatter so index documents carry instructions only.
+    let raw = std::fs::read_to_string(path).unwrap_or_default();
+    let body = match raw.strip_prefix("---\n") {
+        Some(rest) => match rest.find("\n---") {
+            Some(idx) => rest[idx + 4..].trim_start().to_owned(),
+            None => raw,
+        },
+        None => raw,
+    };
+    let body = cap_chars(body.trim(), SKILL_BODY_INDEX_CAP_CHARS);
+    guard.insert(path.to_owned(), (mtime, body.clone()));
+    body
 }
 
 fn skill_extra_json(skill: &SkillInfo) -> String {
