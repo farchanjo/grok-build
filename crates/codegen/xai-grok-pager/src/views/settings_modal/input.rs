@@ -3,6 +3,8 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEventKind};
 use ratatui::layout::Rect;
 
+use crate::input::line_editor::LineEditor;
+
 use super::render::int_step_sizes;
 use super::state::{
     RowEntry, SettingsKeyOutcome, SettingsModalState, SettingsMode, SettingsModeKind,
@@ -11,9 +13,7 @@ use super::state::{
 };
 use crate::app::actions::Action;
 use crate::input::line_editor::LineEditOutcome;
-use crate::settings::{
-    SettingKey, SettingKind, SettingValue, StringValidator, dynamic_enum_choices,
-};
+use crate::settings::{SettingKey, SettingKind, SettingValue, StringValidator};
 
 // ---------------------------------------------------------------------------
 // Key handling
@@ -98,7 +98,87 @@ fn handle_picking_enum(state: &mut SettingsModalState, key: &KeyEvent) -> Settin
         _ => unreachable!("picker handler requires PickingEnum state"),
     };
 
+    // ── Search field active: printable keys feed the filter; arrows
+    // move through the filtered list; Enter commits; Esc leaves search.
+    if state.enum_picker_filter_active {
+        return match key.code {
+            KeyCode::Esc => {
+                state.enum_picker_filter_active = false;
+                state.enum_picker_filter = LineEditor::default();
+                // Clamp the focus into the now-unfiltered list.
+                let len = picker_choices_len(state, setting_key);
+                let clamped = choices_idx.min(len.saturating_sub(1));
+                if clamped != choices_idx {
+                    state.transition_to_picking_enum(
+                        setting_key,
+                        clamped,
+                        original_value,
+                        supports_preview,
+                    );
+                }
+                state.enum_picker_filter_active = false;
+                SettingsKeyOutcome::Changed
+            }
+            KeyCode::Enter => commit_picker_choice(state, setting_key, choices_idx),
+            // While search is focused, EVERY printable character feeds the
+            // filter (a 'k' in "grok-4.5" must not jump the cursor);
+            // navigation is by arrow keys only until Esc leaves search.
+            KeyCode::Down => {
+                let len = picker_choices_len(state, setting_key);
+                if choices_idx + 1 >= len {
+                    return SettingsKeyOutcome::Unchanged;
+                }
+                set_picker_idx(
+                    state,
+                    setting_key,
+                    choices_idx + 1,
+                    original_value,
+                    supports_preview,
+                )
+            }
+            KeyCode::Up => {
+                if choices_idx == 0 {
+                    return SettingsKeyOutcome::Unchanged;
+                }
+                set_picker_idx(
+                    state,
+                    setting_key,
+                    choices_idx - 1,
+                    original_value,
+                    supports_preview,
+                )
+            }
+            KeyCode::Left | KeyCode::Right | KeyCode::Home | KeyCode::End => {
+                let _ = state.enum_picker_filter.handle_key(key);
+                SettingsKeyOutcome::Changed
+            }
+            _ => {
+                let before = state.enum_picker_filter.text().to_owned();
+                let _ = state.enum_picker_filter.handle_key(key);
+                if state.enum_picker_filter.text() != before {
+                    // Filter text changed: refocus on the first match.
+                    state.transition_to_picking_enum(
+                        setting_key,
+                        0,
+                        original_value,
+                        supports_preview,
+                    );
+                    state.enum_picker_filter_active = true;
+                    return SettingsKeyOutcome::Changed;
+                }
+                SettingsKeyOutcome::Unchanged
+            }
+        };
+    }
+
     match key.code {
+        KeyCode::Char('/') if key.modifiers.is_empty() => {
+            // Open the picker's inline search field (same convention as
+            // the Browse-level `/ to search`).
+            state.enum_picker_filter = LineEditor::default();
+            state.enum_picker_filter_active = true;
+            SettingsKeyOutcome::Changed
+        }
         KeyCode::Down | KeyCode::Char('j') => {
             let len = picker_choices_len(state, setting_key);
             if choices_idx + 1 >= len {
@@ -124,49 +204,7 @@ fn handle_picking_enum(state: &mut SettingsModalState, key: &KeyEvent) -> Settin
                 supports_preview,
             )
         }
-        KeyCode::Enter => {
-            // Commit: dispatch the typed COMMIT Action for the
-            // currently-focused choice. This is the single place
-            // per picker open → close cycle that fires
-            // `Effect::PersistSetting`, eliminating the per-keystroke
-            // disk write race. The most recent PREVIEW Action (from Up/Down) has
-            // already mutated the live visual; the commit's
-            // `set_X_inner` is idempotent on that.
-            //
-            // For
-            // `SettingKind::DynamicEnum` settings (e.g.
-            // `default_model`, `fork_secondary_model`), the picker
-            // commits through `action_for_string` rather than
-            // `action_for_enum_commit` — the canonical is a runtime
-            // string sourced from the model catalog, which
-            // `action_for_string` already knows how to resolve via
-            // `snapshot.resolve_model_name` AND treats the empty
-            // canonical as a `Clear*` sentinel.
-            let kind_is_dynamic = matches!(
-                state.registry.find(setting_key).map(|m| &m.kind),
-                Some(SettingKind::DynamicEnum { .. })
-            );
-            state.transition_to_browse();
-            if kind_is_dynamic {
-                let Some(canonical) = picker_choice_at_owned(state, setting_key, choices_idx)
-                else {
-                    return SettingsKeyOutcome::Changed;
-                };
-                if let Some(action) =
-                    action_for_string(setting_key, canonical, &state.pager_snapshot)
-                {
-                    return SettingsKeyOutcome::Action(action);
-                }
-                return SettingsKeyOutcome::Changed;
-            }
-            let Some(current_canonical) = picker_choice_at(state, setting_key, choices_idx) else {
-                return SettingsKeyOutcome::Changed;
-            };
-            if let Some(action) = action_for_enum_commit(setting_key, current_canonical) {
-                return SettingsKeyOutcome::Action(action);
-            }
-            SettingsKeyOutcome::Changed
-        }
+        KeyCode::Enter => commit_picker_choice(state, setting_key, choices_idx),
         KeyCode::Esc => {
             // Revert preview and return to Browse. Non-preview Enums
             // skip the revert (no live visual was applied).
@@ -195,6 +233,59 @@ fn handle_picking_enum(state: &mut SettingsModalState, key: &KeyEvent) -> Settin
         }
         _ => SettingsKeyOutcome::Unchanged,
     }
+}
+
+/// Commit the currently-focused picker choice. This is the single place
+/// per picker open → close cycle that fires `Effect::PersistSetting`,
+/// eliminating the per-keystroke disk write race. The most recent PREVIEW
+/// action (from Up/Down) has already mutated the live visual; the commit's
+/// `set_X_inner` is idempotent on that.
+///
+/// For `SettingKind::DynamicEnum` settings (e.g. `default_model`,
+/// `fork_secondary_model`), the picker commits through `action_for_string`
+/// rather than `action_for_enum_commit` — the canonical is a runtime string
+/// sourced from the model catalog, which `action_for_string` already knows
+/// how to resolve via `snapshot.resolve_model_name` AND treats the empty
+/// canonical as a `Clear*` sentinel.
+fn commit_picker_choice(
+    state: &mut SettingsModalState,
+    setting_key: SettingKey,
+    choices_idx: usize,
+) -> SettingsKeyOutcome {
+    let kind_is_dynamic = matches!(
+        state.registry.find(setting_key).map(|m| &m.kind),
+        Some(SettingKind::DynamicEnum { .. })
+    );
+    // Resolve the canonical BEFORE `transition_to_browse` — the browse
+    // transition clears the picker filter, and `choices_idx` addresses the
+    // FILTERED index space only while that filter lives.
+    let resolved_dynamic = if kind_is_dynamic {
+        picker_choice_at_owned(state, setting_key, choices_idx)
+    } else {
+        None
+    };
+    let resolved_static = if kind_is_dynamic {
+        None
+    } else {
+        picker_choice_at(state, setting_key, choices_idx)
+    };
+    state.transition_to_browse();
+    if kind_is_dynamic {
+        let Some(canonical) = resolved_dynamic else {
+            return SettingsKeyOutcome::Changed;
+        };
+        if let Some(action) = action_for_string(setting_key, canonical, &state.pager_snapshot) {
+            return SettingsKeyOutcome::Action(action);
+        }
+        return SettingsKeyOutcome::Changed;
+    }
+    let Some(current_canonical) = resolved_static else {
+        return SettingsKeyOutcome::Changed;
+    };
+    if let Some(action) = action_for_enum_commit(setting_key, current_canonical) {
+        return SettingsKeyOutcome::Action(action);
+    }
+    SettingsKeyOutcome::Changed
 }
 
 /// Group sub-sheet key routing. Up/Down moves between the child toggles;
@@ -504,19 +595,7 @@ fn update_int_buffer(state: &mut SettingsModalState, new_buffer: String) {
 /// `SettingKind::Enum` (static catalog) and `SettingKind::DynamicEnum`
 /// (catalog built from the snapshot at picker-open time).
 pub(super) fn picker_choices_len(state: &SettingsModalState, key: SettingKey) -> usize {
-    state
-        .registry
-        .find(key)
-        .and_then(|m| match &m.kind {
-            SettingKind::Enum { choices, .. } => {
-                Some(effective_enum_choices(key, choices, &state.pager_snapshot).len())
-            }
-            SettingKind::DynamicEnum { source, .. } => {
-                Some(dynamic_enum_choices(*source, &state.pager_snapshot).len())
-            }
-            _ => None,
-        })
-        .unwrap_or(0)
+    state.filtered_picker_indices(key).len()
 }
 
 /// Canonical value at index `idx` in the picker's choices, or `None`
@@ -531,12 +610,15 @@ pub(super) fn picker_choice_at(
     key: SettingKey,
     idx: usize,
 ) -> Option<&'static str> {
+    // `idx` addresses the filtered choice list; map it to the real index
+    // before resolving the canonical value.
+    let real_idx = state.filtered_picker_indices(key).get(idx).copied()?;
     let meta = state.registry.find(key)?;
     let SettingKind::Enum { choices, .. } = &meta.kind else {
         return None;
     };
     effective_enum_choices(key, choices, &state.pager_snapshot)
-        .get(idx)
+        .get(real_idx)
         .map(|c| c.canonical)
 }
 
@@ -556,19 +638,11 @@ fn picker_choice_at_owned(
     key: SettingKey,
     idx: usize,
 ) -> Option<String> {
-    let meta = state.registry.find(key)?;
-    match &meta.kind {
-        SettingKind::Enum { choices, .. } => {
-            effective_enum_choices(key, choices, &state.pager_snapshot)
-                .get(idx)
-                .map(|c| c.canonical.to_string())
-        }
-        SettingKind::DynamicEnum { source, .. } => {
-            let resolved = dynamic_enum_choices(*source, &state.pager_snapshot);
-            resolved.get(idx).map(|c| c.canonical.clone())
-        }
-        _ => None,
-    }
+    // `idx` addresses the filtered choice list; map it to the real index
+    // before resolving the canonical value.
+    let real_idx = state.filtered_picker_indices(key).get(idx).copied()?;
+    let all = state.all_picker_choices(key);
+    all.get(real_idx).map(|c| c.canonical.clone())
 }
 
 /// F2 / Ctrl+, / Cmd+, are the modal-internal close keys.
@@ -1125,6 +1199,13 @@ fn handle_picker_mouse(
     let MouseEventKind::Down(crossterm::event::MouseButton::Left) = kind else {
         return SettingsKeyOutcome::Unchanged;
     };
+    // Clicking the inline search field focuses it (does not pick a choice).
+    if state.enum_picker_filter_rect.height > 0
+        && rect_contains(state.enum_picker_filter_rect, column, row)
+    {
+        state.enum_picker_filter_active = true;
+        return SettingsKeyOutcome::Changed;
+    }
     // Snapshot the picker payload before mutating the state.
     let (setting_key, current_idx, original_value, supports_preview) = match &state.state.mode {
         SettingsMode::PickingEnum {

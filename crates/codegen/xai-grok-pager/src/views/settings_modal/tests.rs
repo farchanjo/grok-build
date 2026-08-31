@@ -4252,6 +4252,120 @@ fn picker_choice_at_returns_none_for_oob_and_missing() {
 }
 
 #[test]
+fn enum_picker_filter_narrows_choice_index_space() {
+    let mut s = picker_test_state();
+
+    // Empty filter: the filtered index space is the full list.
+    assert_eq!(picker_choices_len(&s, "test_enum"), 3);
+    assert_eq!(picker_choice_at(&s, "test_enum", 0), Some("first"));
+
+    // Substring of the canonical: only "second" matches.
+    s.enum_picker_filter.set_text("sec");
+    s.enum_picker_filter_active = true;
+    assert_eq!(picker_choices_len(&s, "test_enum"), 1);
+    assert_eq!(picker_choice_at(&s, "test_enum", 0), Some("second"));
+    assert_eq!(picker_choice_at(&s, "test_enum", 1), None);
+
+    // Substring matching every display: the full list again.
+    s.enum_picker_filter.set_text("option");
+    assert_eq!(picker_choices_len(&s, "test_enum"), 3);
+    // Index space is the filtered order: 0 still maps to "first".
+    assert_eq!(picker_choice_at(&s, "test_enum", 0), Some("first"));
+
+    // No match: empty index space.
+    s.enum_picker_filter.set_text("zzz");
+    assert_eq!(picker_choices_len(&s, "test_enum"), 0);
+    assert_eq!(picker_choice_at(&s, "test_enum", 0), None);
+}
+
+#[test]
+fn enum_picker_slash_opens_search_and_esc_leaves_it_open() {
+    let mut s = picker_test_state();
+    assert!(!s.enum_picker_filter_active);
+
+    // `/` opens the inline search field.
+    let outcome = handle_settings_key(
+        &mut s,
+        &KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE),
+    );
+    assert!(matches!(outcome, SettingsKeyOutcome::Changed));
+    assert!(s.enum_picker_filter_active);
+
+    // Typing feeds the filter and refocuses on the first match.
+    // "fir" matches only the "first" choice.
+    let outcome = handle_settings_key(
+        &mut s,
+        &KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE),
+    );
+    assert!(matches!(outcome, SettingsKeyOutcome::Changed));
+    let outcome = handle_settings_key(
+        &mut s,
+        &KeyEvent::new(KeyCode::Char('i'), KeyModifiers::NONE),
+    );
+    assert!(matches!(outcome, SettingsKeyOutcome::Changed));
+    let outcome = handle_settings_key(
+        &mut s,
+        &KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE),
+    );
+    assert!(matches!(outcome, SettingsKeyOutcome::Changed));
+    assert_eq!(s.enum_picker_filter.text(), "fir");
+    assert_eq!(picker_choices_len(&s, "test_enum"), 1);
+
+    // Down at the end of a single-item filtered list is a no-op.
+    let outcome = handle_settings_key(&mut s, &KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+    assert!(matches!(outcome, SettingsKeyOutcome::Unchanged));
+
+    // Esc leaves search active→inactive but keeps the picker open.
+    let outcome = handle_settings_key(&mut s, &KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+    assert!(matches!(outcome, SettingsKeyOutcome::Changed));
+    assert!(!s.enum_picker_filter_active);
+    assert!(matches!(s.mode(), SettingsModalMode::PickingEnum { .. }));
+
+    // Second Esc closes the picker and returns to Browse.
+    let outcome = handle_settings_key(&mut s, &KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+    assert!(matches!(outcome, SettingsKeyOutcome::Changed));
+    assert!(matches!(s.mode(), SettingsModalMode::Browse));
+}
+
+#[test]
+fn enum_picker_enter_with_active_filter_commits_filtered_choice() {
+    // Regression: `transition_to_browse` clears the picker filter, so the
+    // commit must resolve the canonical BEFORE that transition — otherwise
+    // `choices_idx` silently maps into the unfiltered list.
+    let mut s = make_state();
+
+    // Open the real "theme" picker and filter to the "Grok Day" choice.
+    s.transition_to_picking_enum("theme", 0, SettingValue::Enum("oscura-midnight"), true);
+    let _ = handle_settings_key(
+        &mut s,
+        &KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE),
+    );
+    for ch in "grokday".chars() {
+        let _ = handle_settings_key(
+            &mut s,
+            &KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE),
+        );
+    }
+    assert_eq!(picker_choices_len(&s, "theme"), 1);
+
+    // Enter commits the FILTERED choice ("grokday"), not choice 0 of the
+    // unfiltered list ("grokday"? no — unfiltered 0 is the first theme).
+    let outcome = handle_settings_key(&mut s, &KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    assert!(matches!(outcome, SettingsKeyOutcome::Action(_)));
+    assert!(matches!(s.mode(), SettingsModalMode::Browse));
+    match outcome {
+        SettingsKeyOutcome::Action(action) => {
+            let rendered = format!("{action:?}");
+            assert!(
+                rendered.contains("grokday"),
+                "commit with active filter must target the filtered choice, got {rendered}"
+            );
+        }
+        _ => unreachable!(),
+    }
+}
+
+#[test]
 fn editing_value_esc_returns_to_browse() {
     let mut s = int_stepper_fixture(120);
     let outcome = handle_settings_key(&mut s, &KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));

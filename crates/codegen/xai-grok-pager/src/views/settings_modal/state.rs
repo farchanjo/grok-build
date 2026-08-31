@@ -189,6 +189,17 @@ pub struct SettingsModalState {
     /// Click-hit rect per choice in `PickingEnum`. Each rect spans the
     /// full height of a choice (including wrapped description lines).
     pub picker_choice_rects: Vec<Rect>,
+    /// Case-insensitive substring filter for the `PickingEnum` choice
+    /// list (e.g. model catalogs with hundreds of entries). Only
+    /// meaningful while `enum_picker_filter_active`.
+    pub(super) enum_picker_filter: LineEditor,
+    /// Whether the enum picker's inline search field is focused. When
+    /// true, printable keys feed the filter; `/` opens it, Esc closes
+    /// it (keeping the picker open).
+    pub(super) enum_picker_filter_active: bool,
+    /// Hit-rect for the picker's search field row. Zero-sized when the
+    /// search row is not rendered.
+    pub enum_picker_filter_rect: Rect,
     /// Hit-rect for the breadcrumb title in sub-pane modes
     /// (`PickingEnum`/`EditingValue`). Clicking anywhere on
     /// `Settings › <label>` cancels back to Browse. `None` in
@@ -237,6 +248,9 @@ impl SettingsModalState {
             value_hit_rects: Vec::new(),
             editor_adornment_rects: (Rect::default(), Rect::default()),
             picker_choice_rects: Vec::new(),
+            enum_picker_filter: LineEditor::default(),
+            enum_picker_filter_active: false,
+            enum_picker_filter_rect: Rect::default(),
             settings_breadcrumb_rect: None,
             breadcrumb_hovered: false,
             expanded_keys: std::collections::HashSet::new(),
@@ -490,6 +504,9 @@ impl SettingsModalState {
         self.hover_row = None;
         self.settings_breadcrumb_rect = None;
         self.breadcrumb_hovered = false;
+        self.enum_picker_filter = LineEditor::default();
+        self.enum_picker_filter_active = false;
+        self.enum_picker_filter_rect = Rect::default();
     }
 
     pub fn focus_filter(&mut self) {
@@ -503,6 +520,18 @@ impl SettingsModalState {
         original_value: SettingValue,
         supports_preview: bool,
     ) {
+        // Each fresh open starts with an empty, unfocused search field.
+        // Navigation within the picker (set_picker_idx) goes through
+        // here too, so only reset when the target key actually changes.
+        let reset_filter = !matches!(
+            &self.state.mode,
+            SettingsMode::PickingEnum { key: current, .. } if *current == key
+        );
+        if reset_filter {
+            self.enum_picker_filter = LineEditor::default();
+            self.enum_picker_filter_active = false;
+            self.enum_picker_filter_rect = Rect::default();
+        }
         self.state.mode = SettingsMode::PickingEnum {
             key,
             choices_idx,
@@ -557,6 +586,52 @@ impl SettingsModalState {
     /// [`Self::try_enter_picking_enum`] for an arbitrary setting key —
     /// group sub-sheets use this to open the enum picker for an Enum child
     /// (the child is not the browse list's focused row).
+    /// Resolved choices for an Enum/DynamicEnum setting, in picker order.
+    /// Empty for non-enum keys.
+    pub(super) fn all_picker_choices(&self, key: SettingKey) -> Vec<OwnedEnumChoice> {
+        let Some((_, meta)) = self.registry.find(key).map(|meta| (key, meta)) else {
+            return Vec::new();
+        };
+        match &meta.kind {
+            SettingKind::Enum { choices, .. } => {
+                effective_enum_choices(key, choices, &self.pager_snapshot)
+                    .into_iter()
+                    .map(|c| OwnedEnumChoice {
+                        canonical: c.canonical.to_string(),
+                        display: c.display.to_string(),
+                        description: c.description.to_string(),
+                    })
+                    .collect()
+            }
+            SettingKind::DynamicEnum { source, .. } => {
+                dynamic_enum_choices(*source, &self.pager_snapshot)
+            }
+            _ => Vec::new(),
+        }
+    }
+
+    /// Indices (into [`Self::all_picker_choices`]) of the choices matching
+    /// the picker's case-insensitive substring filter. Empty filter keeps
+    /// every choice, so the filtered index space is identical to the full
+    /// list when search is unused.
+    pub(super) fn filtered_picker_indices(&self, key: SettingKey) -> Vec<usize> {
+        let all = self.all_picker_choices(key);
+        let raw = self.enum_picker_filter.text();
+        let query = raw.trim().to_ascii_lowercase();
+        if query.is_empty() {
+            return (0..all.len()).collect();
+        }
+        all.iter()
+            .enumerate()
+            .filter(|(_, c)| {
+                c.display.to_ascii_lowercase().contains(&query)
+                    || c.canonical.to_ascii_lowercase().contains(&query)
+                    || c.description.to_ascii_lowercase().contains(&query)
+            })
+            .map(|(i, _)| i)
+            .collect()
+    }
+
     pub fn try_enter_picking_enum_for_key(&mut self, key: SettingKey) -> bool {
         let (key, first_canonical, current_value, supports_preview, resolved_choices) = {
             let Some((key, meta)) = self.registry.find(key).map(|meta| (key, meta)) else {

@@ -9,12 +9,11 @@ use unicode_width::UnicodeWidthStr;
 use super::state::{
     CONTENT_MIN_WIDTH, MAX_THOUGHTS_WIDTH_WIDENED_MARGIN, MODAL_TITLE, RowEntry,
     STANDARD_MAX_WIDTH, SettingsModalState, SettingsMode, SettingsModeKind,
-    TITLE_LEADING_DECORATION_W, effective_enum_choices, group_children,
+    TITLE_LEADING_DECORATION_W, group_children,
 };
 use crate::render::line_utils::truncate_str;
 use crate::settings::{
     OwnedEnumChoice, SettingKey, SettingKind, SettingMeta, SettingValue, StringValidator,
-    dynamic_enum_choices,
 };
 use crate::theme::Theme;
 use crate::views::modal_window::{
@@ -186,6 +185,7 @@ pub fn render_settings_modal(
             state.reset_hit_rects();
             render_picking_enum(buf, inner_area, state, &theme);
             state.picker_choice_rects = take_picker_choice_rects();
+            state.enum_picker_filter_rect = take_enum_picker_filter_rect();
         }
         SettingsModeKind::PickingGroup => {
             state.reset_hit_rects();
@@ -987,35 +987,63 @@ pub(super) fn render_picking_enum(
         return;
     };
 
-    let choices: Vec<OwnedEnumChoice> = match &meta.kind {
-        SettingKind::Enum { choices, .. } => {
-            effective_enum_choices(setting_key, choices, &state.pager_snapshot)
-                .into_iter()
-                .map(|c| OwnedEnumChoice {
-                    canonical: c.canonical.to_string(),
-                    display: c.display.to_string(),
-                    description: c.description.to_string(),
-                })
-                .collect()
-        }
-        SettingKind::DynamicEnum { source, .. } => {
-            dynamic_enum_choices(*source, &state.pager_snapshot)
-        }
-        _ => return,
-    };
+    // Choices are addressed through the filtered index space so the
+    // inline search (`/`) narrows large catalogs (e.g. model pickers).
+    let all = state.all_picker_choices(setting_key);
+    let keep = state.filtered_picker_indices(setting_key);
+    let choices: Vec<OwnedEnumChoice> = keep.iter().map(|&i| all[i].clone()).collect();
 
     if area.width == 0 || area.height == 0 {
         return;
     }
 
     // Choosers need title + gap (2) before the description renders.
-    let header_rows = render_sub_pane_header(buf, area, theme, meta.label, meta.description, 2);
+    let mut header_rows = render_sub_pane_header(buf, area, theme, meta.label, meta.description, 2);
     if area.height <= header_rows {
         return;
     }
+
+    // ── Inline search field (only while active) ───────────────────
+    let mut filter_rect = Rect::default();
+    if state.enum_picker_filter_active {
+        let search_y = area.y + header_rows;
+        crate::views::picker::render_line_editor_search_bar(
+            buf,
+            area.x,
+            search_y,
+            area.width,
+            theme,
+            &state.enum_picker_filter,
+            true,
+            true,
+            Some(theme.bg_base),
+        );
+        filter_rect = Rect {
+            x: area.x,
+            y: search_y,
+            width: area.width,
+            height: 1,
+        };
+        header_rows += 1;
+    }
+    PICKER_FILTER_RECT_SCRATCH.with(|cell| {
+        *cell.borrow_mut() = filter_rect;
+    });
+
     let choices_y = area.y + header_rows;
     let max_choices_h = area.height.saturating_sub(header_rows) as usize;
     if max_choices_h == 0 {
+        return;
+    }
+
+    // ── No-match hint ─────────────────────────────────────────────
+    if choices.is_empty() {
+        PICKER_RECTS_SCRATCH.with(|cell| {
+            *cell.borrow_mut() = Vec::new();
+        });
+        let hint_style = Style::default().fg(theme.gray).bg(theme.bg_base);
+        let hint_y = choices_y.min(area.y + area.height.saturating_sub(1));
+        buf.set_string(area.x, hint_y, "no matches", hint_style);
         return;
     }
 
@@ -1261,6 +1289,9 @@ pub(super) fn render_picking_enum(
 thread_local! {
     static PICKER_RECTS_SCRATCH: std::cell::RefCell<Vec<Rect>>
         = const { std::cell::RefCell::new(Vec::new()) };
+    static PICKER_FILTER_RECT_SCRATCH: std::cell::RefCell<Rect> = std::cell::RefCell::new(
+        Rect::default(),
+    );
 }
 
 /// Read-and-clear the most recent per-choice hit-rects produced by
@@ -1269,6 +1300,14 @@ thread_local! {
 /// scratch).
 pub(super) fn take_picker_choice_rects() -> Vec<Rect> {
     PICKER_RECTS_SCRATCH.with(|cell| std::mem::take(&mut *cell.borrow_mut()))
+}
+
+/// Read-and-clear the inline search field's hit-rect produced by
+/// `render_picking_enum`. `Rect::default()` (zero-sized) when the
+/// search row is not rendered.
+pub(super) fn take_enum_picker_filter_rect() -> Rect {
+    PICKER_FILTER_RECT_SCRATCH
+        .with(|cell| std::mem::replace(&mut *cell.borrow_mut(), Rect::default()))
 }
 
 /// Render the group sub-sheet: title + description + one row per child Bool
