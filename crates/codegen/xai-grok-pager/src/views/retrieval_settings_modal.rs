@@ -1654,7 +1654,7 @@ impl RetrievalSettingsState {
             .iter()
             .enumerate()
             .map(|(i, p)| {
-                let label = format!(" {}{} ", i + 1, p.label());
+                let label = format!(" {} {} ", i + 1, p.label());
                 if *p == self.page {
                     Span::styled(
                         label,
