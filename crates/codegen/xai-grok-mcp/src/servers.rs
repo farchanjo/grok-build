@@ -18,7 +18,7 @@ use rmcp::{
     ClientHandler, ServiceExt,
     model::{
         CallToolRequestParams, ClientCapabilities, ClientInfo, Implementation,
-        PaginatedRequestParams,
+        PaginatedRequestParams, ResourceUpdatedNotificationParam, SubscribeRequestParams,
     },
     service::{
         ClientInitializeError, NotificationContext, RoleClient, RunningService, ServiceError,
@@ -2364,6 +2364,10 @@ pub enum McpClientEvent {
     ToolsChanged { server: McpServerName },
     /// Server pushed `notifications/resources/list_changed`.
     ResourcesChanged { server: McpServerName },
+    /// Server pushed `notifications/resources/updated` for a subscribed
+    /// uri. Emitted per update; the dispatcher forwards each one
+    /// individually (never coalesced) so no `uri` is lost.
+    ResourceUpdated { server: McpServerName, uri: String },
     /// Client transitioned to [`ClientState::Ready`]; dispatcher uses
     /// this to surface "ready" status without polling. Emitted from
     /// `ensure_initialized`; the dispatcher maps it to
@@ -2404,6 +2408,7 @@ pub enum McpClientEventKind {
     HandshakeFailed,
     ToolsChanged,
     ResourcesChanged,
+    ResourceUpdated,
     Ready,
     ConfigAdded,
     ConfigRemoved,
@@ -2422,6 +2427,7 @@ impl McpClientEvent {
             | Self::HandshakeFailed { server, .. }
             | Self::ToolsChanged { server }
             | Self::ResourcesChanged { server }
+            | Self::ResourceUpdated { server, .. }
             | Self::Ready { server }
             | Self::ConfigAdded { server }
             | Self::ConfigRemoved { server } => Some(server.as_str()),
@@ -3385,6 +3391,71 @@ impl McpClient {
             }
         }
         outcome
+    }
+
+    /// Subscribe to every resource the server currently lists, so
+    /// `notifications/resources/updated` pushes flow through
+    /// [`GrokClientHandler`] as [`McpClientEvent::ResourceUpdated`].
+    ///
+    /// Feature-detected: returns `Ok(0)` without any request when the
+    /// server did not advertise `resources.subscribe` at handshake time.
+    /// Per-uri failures are logged and skipped (a server that answered
+    /// `method_not_found` for `resources/subscribe` lied about its
+    /// capability or raced a downgrade) — subscribing is best-effort and
+    /// must never fail the owning handshake path.
+    ///
+    /// Returns the number of successful subscriptions.
+    pub async fn subscribe_all_resources(&self) -> Result<usize, McpError> {
+        let service = self.ensure_initialized().await?;
+        let subscribe_capable = service.peer_info().is_some_and(|info| {
+            info.capabilities
+                .resources
+                .as_ref()
+                .and_then(|r| r.subscribe)
+                == Some(true)
+        });
+        if !subscribe_capable {
+            tracing::debug!(
+                server = %self.server_name,
+                "MCP server does not advertise resources.subscribe; skipping subscribe"
+            );
+            return Ok(0);
+        }
+
+        let resources = match service.list_all_resources().await {
+            Ok(resources) => resources,
+            Err(e) => {
+                tracing::warn!(
+                    server = %self.server_name,
+                    error = %e,
+                    "list_all_resources failed; cannot subscribe to resource updates"
+                );
+                return Ok(0);
+            }
+        };
+
+        let mut subscribed = 0usize;
+        for resource in resources {
+            let uri = resource.uri.clone();
+            match service
+                .subscribe(SubscribeRequestParams::new(uri.clone()))
+                .await
+            {
+                Ok(_) => subscribed += 1,
+                Err(e) => tracing::warn!(
+                    server = %self.server_name,
+                    uri = %uri,
+                    error = %e,
+                    "resources/subscribe failed for one uri; continuing"
+                ),
+            }
+        }
+        tracing::debug!(
+            server = %self.server_name,
+            subscribed,
+            "MCP resource subscriptions established"
+        );
+        Ok(subscribed)
     }
 
     /// Run the MCP handshake (no lock held).
@@ -4432,6 +4503,17 @@ impl ClientHandler for GrokClientHandler {
     async fn on_resource_list_changed(&self, _context: NotificationContext<RoleClient>) {
         self.emit(McpClientEvent::ResourcesChanged {
             server: self.server_name.clone(),
+        });
+    }
+
+    async fn on_resource_updated(
+        &self,
+        params: ResourceUpdatedNotificationParam,
+        _context: NotificationContext<RoleClient>,
+    ) {
+        self.emit(McpClientEvent::ResourceUpdated {
+            server: self.server_name.clone(),
+            uri: params.uri,
         });
     }
 
@@ -7654,5 +7736,45 @@ mod tests {
             server: "srv".to_string(),
         };
         assert_eq!(ev.server_name(), Some("srv"));
+    }
+
+    // A `notifications/resources/updated` push arriving on the transport
+    // must be routed by rmcp's service loop into our
+    // `GrokClientHandler::on_resource_updated` override and surface as
+    // `McpClientEvent::ResourceUpdated` on the (post-handshake wired)
+    // event channel.
+    #[tokio::test]
+    async fn resource_updated_notification_reaches_event_tx() {
+        use tokio::io::AsyncWriteExt;
+
+        let (mut server_out, client_in) = tokio::io::duplex(64 * 1024);
+        let mut transport = ResilientRwTransport::new(
+            client_in,
+            tokio::io::sink(),
+            "fwbuild".to_string(),
+            xai_file_utils::events::EventWriter::noop(),
+        );
+
+        let notification =
+            r#"{"jsonrpc":"2.0","method":"notifications/resources/updated","params":{"uri":"file:///a.txt"}}"#;
+        server_out
+            .write_all(format!("{notification}\n").as_bytes())
+            .await
+            .unwrap();
+        drop(server_out);
+
+        let msg = transport.receive().await.expect("notification decoded");
+        match msg {
+            RxJsonRpcMessage::<RoleClient>::Notification(n) => {
+                assert!(
+                    matches!(
+                        n.notification,
+                        rmcp::model::ServerNotification::ResourceUpdatedNotification(_)
+                    ),
+                    "the push must decode as the resources/updated notification"
+                );
+            }
+            other => panic!("expected notification, got {other:?}"),
+        }
     }
 }

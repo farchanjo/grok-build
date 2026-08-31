@@ -6,3 +6,6 @@
 **/*.pyc
 **/*.rs.bk
 .DS_Store
+
+# Local Grok workspace data (skills/personas) — intentionally untracked
+.grok/

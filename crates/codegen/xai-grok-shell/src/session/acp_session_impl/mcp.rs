@@ -222,6 +222,15 @@ impl SessionActor {
             .get_tool_registrations(self.mcp_state.clone())
             .await
             .map_err(|e| format!("re-handshake failed: {e}"))?;
+        // Best-effort resource subscribe after the managed-client
+        // re-handshake; failure must not fail the refresh.
+        if let Err(e) = client.subscribe_all_resources().await {
+            tracing::warn!(
+                server = %server_name,
+                error = %e,
+                "resource subscribe after managed re-handshake failed"
+            );
+        }
         let mut mcp_state = self.mcp_state.lock().await;
         mcp_state.auth_required.remove(server_name);
         mcp_state.clear_init_failed(server_name);
@@ -429,6 +438,15 @@ impl SessionActor {
             .get_tool_registrations(mcp_state_arc)
             .await
             .map_err(|e| format!("Failed to get tools after auth: {}", e))?;
+        // Best-effort resource subscribe after a successful re-auth
+        // handshake; failure must not fail the auth flow.
+        if let Err(e) = client.subscribe_all_resources().await {
+            tracing::warn!(
+                server = %server_name,
+                error = %e,
+                "resource subscribe after auth_trigger failed"
+            );
+        }
         let mut mcp_state = self.mcp_state.lock().await;
         mcp_state.auth_required.remove(server_name);
         mcp_state.init_failed.remove(server_name);
@@ -1024,6 +1042,16 @@ impl SessionActor {
                 server: server.to_string(),
             });
         }
+        // Re-subscribe to resource updates on the fresh transport. Best
+        // effort: a failure here must not fail the respawn — the server is
+        // already installed and serving tools.
+        if let Err(e) = new_client.subscribe_all_resources().await {
+            tracing::warn!(
+                server = %server,
+                error = %e,
+                "resource re-subscribe after stdio respawn failed"
+            );
+        }
         let arc_client = std::sync::Arc::new(new_client);
         let _ = arc_client
             .arm_liveness_watcher(xai_grok_mcp::liveness::DEFAULT_POLL_INTERVAL)
@@ -1412,6 +1440,15 @@ impl SessionActor {
                     };
                     match registrations {
                         Ok(handles) => {
+                            // Best-effort resource subscribe after a healthy
+                            // handshake: a failure must not fail init.
+                            if let Err(e) = client.subscribe_all_resources().await {
+                                tracing::warn!(
+                                    server = %server_name,
+                                    error = %e,
+                                    "resource subscribe after MCP init failed"
+                                );
+                            }
                             Ok((server_name, handles, server_start.elapsed(), timeout_sec))
                         }
                         Err(e) => {
@@ -1740,6 +1777,14 @@ impl SessionActor {
                         continue;
                     }
                 };
+                // Best-effort resource subscribe for shared clients too.
+                if let Err(e) = client.subscribe_all_resources().await {
+                    tracing::warn!(
+                        server = %server_name,
+                        error = %e,
+                        "resource subscribe for shared MCP client failed"
+                    );
+                }
                 let mut mcp_state = mcp_state_bg.lock().await;
                 for reg in regs {
                     let qualified_name = reg.name.clone();

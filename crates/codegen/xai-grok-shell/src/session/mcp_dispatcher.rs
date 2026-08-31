@@ -42,6 +42,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use agent_client_protocol as acp;
+use xai_acp_lib::AcpAgentGatewaySender;
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex as TokioMutex;
 use tokio::sync::mpsc::UnboundedReceiver;
@@ -54,6 +55,10 @@ use crate::session::managed_mcp::MANAGED_MCP_PREFIX;
 
 /// Tumbling-window coalescing period. See module doc.
 pub const COALESCE_WINDOW: Duration = Duration::from_millis(50);
+
+/// Minimum gap between two `x.ai/mcp/resource_updated` forwards for the
+/// same `(server, uri)`. Bursty servers coalesce; distinct uris never do.
+const RESOURCE_UPDATE_MIN_GAP: Duration = Duration::from_millis(100);
 
 /// Method name for the ACP push.
 pub const SERVER_STATUS_METHOD: &str = "x.ai/mcp/server_status";
@@ -261,6 +266,10 @@ pub struct CoalescedWindow {
     /// All `TransportClosed` client identities per server seen in the
     /// window.
     pub closed: HashMap<McpServerName, HashSet<u64>>,
+    /// Every `ResourceUpdated` seen in the window, in arrival order.
+    /// Routed to a dedicated list because the `(server, kind)` buffer
+    /// would collapse distinct uris into the last one.
+    pub resource_updates: Vec<(McpServerName, String)>,
 }
 
 /// Coalesce the buffered events for one window flush.
@@ -334,6 +343,12 @@ fn insert_event(win: &mut CoalescedWindow, ev: McpClientEvent) {
                     .or_default()
                     .insert(*client_id);
             }
+            // Resource updates bypass the collapsing buffer entirely:
+            // distinct uris must each survive the window.
+            if let McpClientEvent::ResourceUpdated { server, uri } = &ev {
+                win.resource_updates.push((server.clone(), uri.clone()));
+                return;
+            }
             let kind = kind_of(&ev);
             // server_name() returns None only for ConfigDiff which
             // is handled above; the unwrap_or here exists purely
@@ -362,6 +377,7 @@ fn kind_of(ev: &McpClientEvent) -> McpClientEventKind {
         McpClientEvent::HandshakeFailed { .. } => McpClientEventKind::HandshakeFailed,
         McpClientEvent::ToolsChanged { .. } => McpClientEventKind::ToolsChanged,
         McpClientEvent::ResourcesChanged { .. } => McpClientEventKind::ResourcesChanged,
+        McpClientEvent::ResourceUpdated { .. } => McpClientEventKind::ResourceUpdated,
         McpClientEvent::Ready { .. } => McpClientEventKind::Ready,
         McpClientEvent::ConfigAdded { .. } => McpClientEventKind::ConfigAdded,
         McpClientEvent::ConfigRemoved { .. } => McpClientEventKind::ConfigRemoved,
@@ -427,6 +443,15 @@ pub fn build_payload(
             None,
         ),
         (McpClientEventKind::ResourcesChanged, _) => (
+            McpServerStatus::Ready,
+            McpServerStatusReason::ConfigChanged,
+            None,
+        ),
+        // Never reaches `build_payload` in production — `run_dispatcher`
+        // forwards `ResourceUpdated` as a dedicated `resource_updated`
+        // push before the coalesce window. The arm exists so the
+        // exhaustive match keeps compiling if routing ever changes.
+        (McpClientEventKind::ResourceUpdated, _) => (
             McpServerStatus::Ready,
             McpServerStatusReason::ConfigChanged,
             None,
@@ -689,6 +714,11 @@ pub async fn run_dispatcher(
     // gateway that is already tearing down. Tasks select on this token
     // during their backoff (see `mcp_restart::auto_restart_stdio`).
     let restart_cancel = tokio_util::sync::CancellationToken::new();
+    // Per `(server, uri)` last-forward time for `ResourceUpdated` flood
+    // control. A churning server must not spam the frontend with a push
+    // per update; at most one forward per `(server, uri)` per gap.
+    let mut last_resource_forward: HashMap<(McpServerName, String), std::time::Instant> =
+        HashMap::new();
     loop {
         let Some(mut win) = collect_window(&mut rx, COALESCE_WINDOW).await else {
             tracing::debug!(
@@ -697,6 +727,44 @@ pub async fn run_dispatcher(
             );
             break;
         };
+
+        // Forward `ResourceUpdated` events individually, BEFORE the
+        // `(server, kind)` coalescer (they never enter `buf`): distinct
+        // uris must each survive. Flood-guarded per `(server, uri)` so a
+        // churning server cannot spam the frontend (one forward per
+        // RESOURCE_UPDATE_MIN_GAP). Runs before the `buf.is_empty()`
+        // early-continue: a window holding ONLY resource updates has an
+        // empty buffer but must still forward.
+        let resource_updates = std::mem::take(&mut win.resource_updates);
+        if !resource_updates.is_empty() {
+            let now = std::time::Instant::now();
+            for (server, uri) in resource_updates {
+                let key = (server.clone(), uri.clone());
+                if let Some(last) = last_resource_forward.get(&key)
+                    && now.duration_since(*last) < RESOURCE_UPDATE_MIN_GAP
+                {
+                    tracing::debug!(
+                        session_id = %session_id,
+                        server = %server.as_str(),
+                        uri = %uri,
+                        "resource_updated forward suppressed (flood guard)"
+                    );
+                    continue;
+                }
+                last_resource_forward.insert(key, now);
+                if let Ok(params) = serde_json::value::to_raw_value(&serde_json::json!({
+                    "sessionId": session_id,
+                    "name": server.as_str(),
+                    "uri": uri,
+                })) {
+                    gateway.forward_fire_and_forget(acp::ExtNotification::new(
+                        crate::extensions::mcp::mcp_methods::RESOURCE_UPDATED,
+                        params.into(),
+                    ));
+                }
+            }
+        }
+
         if win.buf.is_empty() {
             continue;
         }
@@ -827,6 +895,8 @@ pub async fn run_dispatcher(
 mod tests {
     use super::*;
     use tokio::sync::mpsc::unbounded_channel;
+    use xai_acp_lib::AcpClientMessageGeneric;
+    use xai_acp_lib::AcpMethod;
 
     /// Contract: 100 ToolsChanged events for the same server within
     /// 10 ms coalesce into exactly one buffer entry.
@@ -1749,5 +1819,144 @@ mod tests {
             !shutdown.lock().unwrap().is_shutting_down("removed"),
             "Ready must clear shutting_down",
         );
+    }
+
+    // End-to-end: a `ResourceUpdated` event must be forwarded as a
+    // dedicated `x.ai/mcp/resource_updated` push carrying the exact
+    // `(sessionId, name, uri)` triple — and must NOT produce a
+    // `server_status` push, nor schedule a restart.
+    #[tokio::test(start_paused = true, flavor = "current_thread")]
+    async fn run_dispatcher_forwards_resource_updated_with_uri() {
+        use xai_grok_mcp::servers::McpState;
+
+        let mcp_state = Arc::new(TokioMutex::new(McpState::new(vec![])));
+        let shutdown = new_shutdown_state();
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+
+        // Capturing gateway so the test can assert on the wire pushes.
+        let (gw_tx, mut gw_rx) = tokio::sync::mpsc::unbounded_channel();
+        let gateway = xai_acp_lib::AcpAgentGatewaySender::new(gw_tx);
+
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async move {
+                let dispatcher = tokio::task::spawn_local(run_dispatcher(
+                    "sess-1".to_string(),
+                    rx,
+                    gateway,
+                    mcp_state,
+                    Arc::clone(&shutdown),
+                    None,
+                    std::path::PathBuf::from("."),
+                ));
+
+                tx.send(McpClientEvent::ResourceUpdated {
+                    server: "svr".to_string(),
+                    uri: "file:///a.txt".to_string(),
+                })
+                .unwrap();
+
+                tokio::task::yield_now().await;
+                tokio::time::advance(Duration::from_millis(60)).await;
+                for _ in 0..5 {
+                    tokio::task::yield_now().await;
+                }
+
+                let push = gw_rx
+                    .try_recv()
+                    .expect("resource_updated push must arrive");
+                assert_eq!(push.method_name(), "ext_notification");
+                match &push {
+                    AcpClientMessageGeneric::ExtNotification(ext) => {
+                        assert_eq!(ext.method.as_ref(), "x.ai/mcp/resource_updated");
+                        let body: serde_json::Value =
+                            serde_json::from_str(ext.params.get()).expect("json");
+                        assert_eq!(body["sessionId"], "sess-1");
+                        assert_eq!(body["name"], "svr");
+                        assert_eq!(body["uri"], "file:///a.txt");
+                    }
+                    other => panic!("expected ExtNotification push, got {other:?}"),
+                }
+
+                // No server_status push may accompany the update.
+                assert!(
+                    gw_rx.try_recv().is_err(),
+                    "ResourceUpdated must not produce a server_status push"
+                );
+
+                dispatcher.abort();
+            })
+            .await;
+    }
+
+    // Flood guard: two `ResourceUpdated` events for the same
+    // `(server, uri)` inside one gap forward only once; a distinct uri
+    // still forwards immediately.
+    #[tokio::test(start_paused = true, flavor = "current_thread")]
+    async fn run_dispatcher_flood_guards_same_uri_resource_updates() {
+        use xai_grok_mcp::servers::McpState;
+
+        let mcp_state = Arc::new(TokioMutex::new(McpState::new(vec![])));
+        let shutdown = new_shutdown_state();
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+
+        let (gw_tx, mut gw_rx) = tokio::sync::mpsc::unbounded_channel();
+        let gateway = xai_acp_lib::AcpAgentGatewaySender::new(gw_tx);
+
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async move {
+                let dispatcher = tokio::task::spawn_local(run_dispatcher(
+                    "sess-1".to_string(),
+                    rx,
+                    gateway,
+                    mcp_state,
+                    Arc::clone(&shutdown),
+                    None,
+                    std::path::PathBuf::from("."),
+                ));
+
+                tx.send(McpClientEvent::ResourceUpdated {
+                    server: "svr".to_string(),
+                    uri: "file:///a.txt".to_string(),
+                })
+                .unwrap();
+                // Same uri: inside the gap, must be suppressed. A
+                // different uri in the same window must NOT be.
+                tx.send(McpClientEvent::ResourceUpdated {
+                    server: "svr".to_string(),
+                    uri: "file:///b.txt".to_string(),
+                })
+                .unwrap();
+
+                tokio::task::yield_now().await;
+                tokio::time::advance(Duration::from_millis(60)).await;
+                for _ in 0..5 {
+                    tokio::task::yield_now().await;
+                }
+
+                let mut uris = Vec::new();
+                while let Some(push) = gw_rx.try_recv().ok() {
+                    assert_eq!(push.method_name(), "ext_notification");
+                    match &push {
+                        AcpClientMessageGeneric::ExtNotification(ext) => {
+                            assert_eq!(ext.method.as_ref(), "x.ai/mcp/resource_updated");
+                            let body: serde_json::Value =
+                                serde_json::from_str(ext.params.get()).expect("json");
+                            uris.push(body["uri"].as_str().expect("uri").to_string());
+                        }
+                        other => panic!("expected ExtNotification push, got {other:?}"),
+                    }
+                }
+                uris.sort();
+                assert_eq!(
+                    uris,
+                    vec!["file:///a.txt".to_string(), "file:///b.txt".to_string()],
+                    "two distinct uris in one window both forward; duplicate collapses"
+                );
+
+                dispatcher.abort();
+            })
+            .await;
     }
 }

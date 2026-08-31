@@ -47,6 +47,7 @@ pub mod mcp_methods {
     pub const SERVERS_UPDATED: &str = "x.ai/mcp/servers_updated";
     pub const TOOLS_CHANGED: &str = "x.ai/mcp/tools_changed";
     pub const INIT_PROGRESS: &str = "x.ai/mcp/init_progress";
+    pub const RESOURCE_UPDATED: &str = "x.ai/mcp/resource_updated";
 }
 use crate::agent::MvpAgent;
 use crate::session::managed_mcp::MANAGED_MCP_PREFIX;
