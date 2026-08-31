@@ -957,6 +957,12 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
                     match result {
                         Ok(_) => {
                             modal.skills_data = TabDataState::Loading;
+                            if modal.prime_index_capable {
+                                // The Prime metadata index only re-syncs on
+                                // backfill/rebuild; flag the compact footer
+                                // until the next index generation lands.
+                                modal.prime_index_stale_hint = true;
+                            }
                             if let Some(session_id) = session_id {
                                 effects.push(Effect::FetchSkillsList {
                                     agent_id,

@@ -1001,6 +1001,15 @@ impl ModalInput {
                 code: KeyCode::Enter,
                 ..
             } => {
+                // Multi-field forms: Enter advances to the next field; only
+                // the last field's Enter validates and submits. Single-field
+                // forms submit directly. This matches the type-and-Enter
+                // wizard flow of the retrieval settings editor.
+                if self.is_multi_field() && self.focused + 1 < self.fields.len() {
+                    self.error = None;
+                    self.focused += 1;
+                    return ModalInputOutcome::Changed;
+                }
                 let field_texts = self.field_texts();
                 let empty_required: Vec<&str> = self
                     .fields
@@ -2069,6 +2078,10 @@ pub struct ExtensionsModalState {
     pub skills_scroll: usize,
     /// Compact Prime index status (skills collection). Never a second dashboard.
     pub prime_index: Option<xai_grok_shell::session::prime::PrimeIndexStatus>,
+    /// Set after a new skill is published while the Prime index is capable:
+    /// the metadata index only re-syncs on backfill/rebuild, so the compact
+    /// footer flags the index as stale until the next index generation.
+    pub prime_index_stale_hint: bool,
     /// Identity to restore once after a generation refresh so selection survives.
     /// Taken on the next `/skills` paint and cleared on user navigation.
     pub skills_anchor_identity: Option<SkillIdentity>,
@@ -2165,6 +2178,7 @@ impl ExtensionsModalState {
             skills_selected: 0,
             skills_scroll: 0,
             prime_index: None,
+            prime_index_stale_hint: false,
             skills_anchor_identity: None,
             prime_index_capable: false,
             workflows_data: TabDataState::Loading,
@@ -2346,6 +2360,11 @@ impl ExtensionsModalState {
             if update.generation_is_stale_vs(status.generation) {
                 return;
             }
+            if update.generation != status.generation {
+                // The index re-published a new generation (e.g. a backfill or
+                // rebuild finished), so the stale hint no longer applies.
+                self.prime_index_stale_hint = false;
+            }
             status.generation = update.generation;
             if !update.fingerprint_short.is_empty() {
                 status.fingerprint_short = update.fingerprint_short.clone();
@@ -2396,15 +2415,26 @@ impl ExtensionsModalState {
     pub fn prime_index_footer_line(&self, narrow: bool) -> Option<String> {
         let status = self.prime_index.as_ref()?;
         let skills = &status.skills;
+        // While the stale hint is up, the readiness slot itself carries the
+        // flag so the compact line still fits the fixed header width cap.
+        let readiness = if self.prime_index_stale_hint {
+            if narrow {
+                "stale".to_owned()
+            } else {
+                "stale (backfill to re-index)".to_owned()
+            }
+        } else {
+            skills.readiness.clone()
+        };
         let mut line = if narrow {
             format!(
                 "idx {}/{} {}",
-                skills.vector_count, skills.item_count, skills.readiness
+                skills.vector_count, skills.item_count, readiness
             )
         } else {
             format!(
                 "index {}/{} {} · gen {}",
-                skills.vector_count, skills.item_count, skills.readiness, skills.generation
+                skills.vector_count, skills.item_count, readiness, skills.generation
             )
         };
         if let Some(job) = &status.job
@@ -3852,7 +3882,11 @@ pub fn render_extensions_modal(
         // handles. Tab is either path completion (single-field) or
         // field navigation (multi-field).
         shortcuts.push(Shortcut {
-            label: "Enter submit",
+            label: if input.is_multi_field() {
+                "Enter next/submit"
+            } else {
+                "Enter submit"
+            },
             clickable: false,
             id: 0,
         });
@@ -4609,12 +4643,22 @@ fn render_input_form(buf: &mut Buffer, area: Rect, input: &ModalInput, theme: &T
                 cell.set_style(Style::default().fg(theme.bg_base).bg(theme.text_primary));
             }
         } else {
-            let viewport = field.viewport(max_text_w);
-            let visible = &field.text()[viewport.visible_byte_range];
-            buf.set_string(text_x, content_y, visible, text_style);
+            // Focused fields follow the cursor; unfocused fields show the
+            // text from the start so the beginning never scrolls out of
+            // view while the user is filling other rows.
+            let (visible, cursor_display_column): (String, Option<usize>) = if is_focused {
+                let viewport = field.viewport(max_text_w);
+                (
+                    field.text()[viewport.visible_byte_range].to_owned(),
+                    Some(viewport.cursor_display_column),
+                )
+            } else {
+                (take_by_width(field.text(), max_text_w), None)
+            };
+            buf.set_string(text_x, content_y, &visible, text_style);
 
-            if is_focused {
-                let cx = text_x + viewport.cursor_display_column as u16;
+            if let Some(cursor_col) = cursor_display_column {
+                let cx = text_x + cursor_col as u16;
                 if cx < inner.x + inner.width
                     && let Some(cell) = buf.cell_mut((cx, content_y))
                 {
@@ -5868,7 +5912,7 @@ mod tests {
         let text = buffer_text(&buf);
         assert!(text.contains("Name"), "{text}");
         assert!(text.contains("Description"), "{text}");
-        assert!(text.contains("Enter submit"), "{text}");
+        assert!(text.contains("Enter next/submit"), "{text}");
         assert!(text.contains("Esc cancel"), "{text}");
         assert!(
             !text.contains("n new"),
@@ -6045,6 +6089,102 @@ mod tests {
         );
         assert!(!footer.contains("/Users/"), "{footer}");
         assert!(!footer.contains("http"), "{footer}");
+    }
+
+    fn prime_index_status_fixture(
+        generation: u64,
+        item_count: u64,
+    ) -> xai_grok_shell::session::prime::PrimeIndexStatus {
+        xai_grok_shell::session::prime::PrimeIndexStatus {
+            api_version: 1,
+            generation,
+            fingerprint_short: "fp000000".into(),
+            skills: xai_grok_shell::session::prime::PrimeIndexCollectionStatus {
+                collection: "skills".into(),
+                generation,
+                fingerprint_short: "fp000000".into(),
+                item_count,
+                vector_count: 0,
+                missing_vectors: item_count,
+                readiness: "pending".into(),
+                route_id: None,
+                dimensions: None,
+            },
+            agents: xai_grok_shell::session::prime::PrimeIndexCollectionStatus {
+                collection: "agents".into(),
+                generation: 0,
+                fingerprint_short: String::new(),
+                item_count: 0,
+                vector_count: 0,
+                missing_vectors: 0,
+                readiness: "ready".into(),
+                route_id: None,
+                dimensions: None,
+            },
+            job: None,
+            configured_route: None,
+            capabilities: xai_grok_shell::session::prime::PrimeIndexCapabilities::SUPPORTED,
+            unchanged: false,
+        }
+    }
+
+    #[test]
+    fn prime_index_footer_line_flags_stale_after_publish() {
+        let mut state = ExtensionsModalState::new(ExtensionsTab::Skills);
+        state.prime_index = Some(prime_index_status_fixture(2, 11));
+        assert!(
+            !state
+                .prime_index_footer_line(false)
+                .unwrap()
+                .contains("stale"),
+            "footer must not flag stale before a publish"
+        );
+
+        state.prime_index_stale_hint = true;
+        let wide = state.prime_index_footer_line(false).unwrap();
+        assert!(
+            wide.contains("stale (backfill to re-index)"),
+            "wide footer must explain the stale flag\n{wide}"
+        );
+        let compact = state.prime_index_footer_line(true).unwrap();
+        assert!(
+            compact.ends_with("stale"),
+            "compact footer must flag stale without overflow\n{compact}"
+        );
+    }
+
+    #[test]
+    fn apply_prime_index_update_clears_stale_hint_on_new_generation() {
+        let mut state = ExtensionsModalState::new(ExtensionsTab::Skills);
+        state.prime_index = Some(prime_index_status_fixture(2, 11));
+        state.prime_index_stale_hint = true;
+
+        // Same generation: the hint stays (nothing re-synced yet).
+        state.apply_prime_index_update(&xai_grok_shell::session::prime::PrimeIndexUpdate {
+            schema_version: 1,
+            api_version: Some(1),
+            generation: 2,
+            notify_seq: 1,
+            fingerprint_short: "fp000000".into(),
+            job: None,
+            changed_fields: vec![],
+        });
+        assert!(state.prime_index_stale_hint);
+
+        // New generation: a backfill/rebuild re-published the index.
+        state.apply_prime_index_update(&xai_grok_shell::session::prime::PrimeIndexUpdate {
+            schema_version: 1,
+            api_version: Some(1),
+            generation: 3,
+            notify_seq: 2,
+            fingerprint_short: "fp111111".into(),
+            job: None,
+            changed_fields: vec![],
+        });
+        assert!(
+            !state.prime_index_stale_hint,
+            "stale hint must clear once the index re-publishes"
+        );
     }
 
     #[test]
@@ -6862,8 +7002,19 @@ mod tests {
     }
 
     #[test]
-    fn handle_key_submit_validates_required() {
+    fn handle_key_enter_advances_to_next_field() {
         let mut input = mcp_add_input();
+        let result = input.handle_key(&key_event(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(matches!(result, ModalInputOutcome::Changed));
+        assert_eq!(input.focused_index(), 1);
+    }
+
+    #[test]
+    fn handle_key_submit_validates_required_on_last_field() {
+        let mut input = mcp_add_input();
+        // Multi-field: Enter on the first field advances, so move to the
+        // last field before submitting.
+        let _ = input.handle_key(&key_event(KeyCode::Tab, KeyModifiers::NONE));
         let result = input.handle_key(&key_event(KeyCode::Enter, KeyModifiers::NONE));
         assert!(matches!(result, ModalInputOutcome::Changed));
         assert!(input.error.is_some());
@@ -6874,6 +7025,9 @@ mod tests {
     fn handle_key_submit_succeeds() {
         let mut input = mcp_add_input();
         input.field_mut(0).unwrap().set_text("https://example.com");
+        // Advance to the last field; only its Enter submits.
+        let _ = input.handle_key(&key_event(KeyCode::Tab, KeyModifiers::NONE));
+        input.field_mut(1).unwrap().set_text("example");
         let result = input.handle_key(&key_event(KeyCode::Enter, KeyModifiers::NONE));
         assert!(matches!(result, ModalInputOutcome::Submit { .. }));
     }
