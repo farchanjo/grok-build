@@ -44,6 +44,67 @@ pub fn normalize_empty_arguments(arguments: &str) -> &str {
     }
 }
 
+/// Attempt to repair a truncated tool-arguments JSON string by closing
+/// unterminated strings and bracket nesting.
+///
+/// Some providers truncate `function.arguments` when a model emits multiple
+/// parallel tool calls with identical structure (observed as exactly the
+/// trailing `}`/`}}` delimiters missing). Returns `None` when the text already
+/// parses as valid JSON, does not open a JSON container, or still fails to
+/// parse after repair.
+pub fn try_repair_truncated_json(arguments: &str) -> Option<serde_json::Value> {
+    let trimmed = arguments.trim();
+    if trimmed.is_empty() || !(trimmed.starts_with('{') || trimmed.starts_with('[')) {
+        return None;
+    }
+    // Already valid — nothing to repair.
+    if serde_json::from_str::<serde_json::Value>(trimmed).is_ok() {
+        return None;
+    }
+
+    let mut in_string = false;
+    let mut escaped = false;
+    let mut stack: Vec<char> = Vec::new();
+    for ch in trimmed.chars() {
+        if in_string {
+            match ch {
+                '\\' => escaped = !escaped,
+                '"' if !escaped => in_string = false,
+                _ => escaped = false,
+            }
+            continue;
+        }
+        match ch {
+            '"' => in_string = true,
+            '{' => stack.push('}'),
+            '[' => stack.push(']'),
+            '}' | ']' => {
+                stack.pop();
+            }
+            _ => {}
+        }
+    }
+
+    let mut repaired = trimmed.to_string();
+    if in_string {
+        // Truncated inside a string literal — close the quote. A dangling
+        // escape backslash is rare; serde will reject it and we return None.
+        repaired.push('"');
+    }
+    let end = repaired.trim_end();
+    if end.ends_with(':') {
+        repaired.push_str(" null");
+    } else if end.ends_with(',') {
+        while repaired.ends_with(',') || repaired.ends_with(' ') {
+            repaired.pop();
+        }
+    }
+    for closer in stack.iter().rev() {
+        repaired.push(*closer);
+    }
+    serde_json::from_str::<serde_json::Value>(&repaired).ok()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -170,5 +231,51 @@ mod tests {
     fn normalize_non_empty_passthrough() {
         assert_eq!(normalize_empty_arguments(r#"{"a":1}"#), r#"{"a":1}"#);
         assert_eq!(normalize_empty_arguments("not json"), "not json");
+    }
+
+    /// The exact production truncation: parallel `use_tool` calls whose
+    /// trailing `}}` delimiters were cut by the provider.
+    #[test]
+    fn test_repair_missing_closing_braces() {
+        let args = r#"{"tool_name": "ssh__ssh_run", "tool_input": {"address": "213.155.16.34:22", "username": "root", "command": "hostname && uptime", "timeout_secs": 30}"#;
+        let repaired = try_repair_truncated_json(args).unwrap();
+        assert_eq!(repaired["tool_name"], "ssh__ssh_run");
+        assert_eq!(repaired["tool_input"]["address"], "213.155.16.34:22");
+        assert_eq!(repaired["tool_input"]["timeout_secs"], 30);
+    }
+
+    #[test]
+    fn test_repair_truncated_string_value() {
+        let repaired = try_repair_truncated_json(r#"{"cmd": "echo hi"#).unwrap();
+        assert_eq!(repaired["cmd"], "echo hi");
+    }
+
+    #[test]
+    fn test_repair_trailing_comma() {
+        let repaired = try_repair_truncated_json(r#"{"a": 1,"#).unwrap();
+        assert_eq!(repaired["a"], 1);
+    }
+
+    #[test]
+    fn test_repair_trailing_colon() {
+        let repaired = try_repair_truncated_json(r#"{"a":"#).unwrap();
+        assert!(repaired["a"].is_null());
+    }
+
+    #[test]
+    fn test_repair_truncated_array() {
+        let repaired = try_repair_truncated_json(r#"{"items": [1, 2"#).unwrap();
+        assert_eq!(repaired["items"], serde_json::json!([1, 2]));
+    }
+
+    #[test]
+    fn test_no_repair_for_valid_json() {
+        assert!(try_repair_truncated_json(r#"{"a": 1}"#).is_none());
+    }
+
+    #[test]
+    fn test_no_repair_for_garbage() {
+        assert!(try_repair_truncated_json("not json").is_none());
+        assert!(try_repair_truncated_json("").is_none());
     }
 }

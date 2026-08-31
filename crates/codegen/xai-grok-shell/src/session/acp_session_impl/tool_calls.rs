@@ -871,7 +871,22 @@ impl SessionActor {
         let mut raw_input = match &parse_result {
             Ok(value) => value.clone(),
             Err(e) => {
-                if let Some(objects) = crate::session::helpers::tool_input_parsing::try_extract_concatenated_json_objects(
+                // Provider-side truncation of parallel tool calls can cut the
+                // trailing delimiters; try closing unterminated strings and
+                // brackets before falling back to the concatenated-JSON path.
+                if let Some(repaired) =
+                    crate::session::helpers::tool_input_parsing::try_repair_truncated_json(
+                        &call.function.arguments,
+                    )
+                {
+                    tracing::warn!(
+                        tool_name = %call.function.name,
+                        call_id = %call.id,
+                        "Repaired truncated tool-call arguments JSON \
+                         (missing closing delimiters)"
+                    );
+                    repaired
+                } else if let Some(objects) = crate::session::helpers::tool_input_parsing::try_extract_concatenated_json_objects(
                     &call.function.arguments,
                 ) {
                     let total_count = objects.len();
