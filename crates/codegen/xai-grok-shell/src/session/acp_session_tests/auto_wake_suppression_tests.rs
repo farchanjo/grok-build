@@ -1737,3 +1737,136 @@ async fn state_is_busy_reflects_queued_inputs() {
         })
         .await;
 }
+
+/// A user prompt preempting a queued task-completed wake must not lose the
+/// completion: the wake fallback is parked as a pending notification (drained
+/// at idle / next user turn), the swept prompt replies RemovedFromQueue, and
+/// the reminder-suppression reservation is released.
+#[tokio::test(flavor = "current_thread")]
+async fn user_prompt_preemption_parks_queued_wake_fallback_as_pending_notification() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (gateway_tx, _) =
+                tokio::sync::mpsc::unbounded_channel::<xai_acp_lib::AcpClientMessage>();
+            let (persistence_tx, _) = tokio::sync::mpsc::unbounded_channel::<PersistenceMsg>();
+            let actor = create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await;
+            let reservations = actor
+                .tool_context
+                .task_completion_reservations
+                .clone()
+                .expect("test actor wires task completion reservations");
+            let task_id = "bg-sweep";
+            reservations.reserve(task_id.to_string());
+
+            // A queued task-completed wake carrying its drain fallback.
+            let (mut wake_item, mut wake_rx) = input_with_origin_rx(
+                &format!("task-completed-{task_id}"),
+                crate::session::PromptOrigin::TaskCompleted {
+                    task_id: task_id.to_string(),
+                },
+            );
+            wake_item.task_wake_fallback = Some(crate::session::commands::TaskWakeFallback {
+                prompt_id: format!("bash-completed-{task_id}"),
+                prompt_blocks: vec![acp::ContentBlock::Text(acp::TextContent::new(format!(
+                    "Background task \"{task_id}\" completed (exit code: 0)."
+                )))],
+                source: NotificationSource::BashTaskCompleted {
+                    task_id: task_id.to_string(),
+                },
+            });
+            {
+                let mut state = actor.state.lock().await;
+                state.pending_inputs.push_back(wake_item);
+            }
+
+            // A user prompt arrives and preempts the queued synthetic.
+            let mut state = actor.state.lock().await;
+            actor
+                .sweep_pending_synthetic_prompts_for_user_prompt(&mut state)
+                .await;
+            assert!(
+                state
+                    .pending_inputs
+                    .iter()
+                    .all(|i| i.prompt_id != format!("task-completed-{task_id}")),
+                "the swept wake prompt must leave the queue"
+            );
+            assert!(
+                state.pending_notifications.iter().any(|n| {
+                    n.prompt_id == format!("bash-completed-{task_id}")
+                        && matches!(n.source, NotificationSource::BashTaskCompleted { .. })
+                }),
+                "the wake fallback must be parked as a pending notification"
+            );
+            drop(state);
+            assert!(
+                !reservations.contains(task_id),
+                "the sweep must release the reminder-suppression reservation"
+            );
+            assert!(
+                wake_rx.try_recv().is_ok(),
+                "the swept prompt must answer its reply channel"
+            );
+        })
+        .await;
+}
+
+/// When the bridge times out on admission (250ms budget) and the actor later
+/// processes the queued wake command, the dead admission reply must park the
+/// fallback as a pending notification and release the reservation — the
+/// completion still reaches the model through the drain.
+#[tokio::test(flavor = "current_thread")]
+async fn task_wake_admission_dead_reply_parks_fallback_and_releases_reservation() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (gateway_tx, _) =
+                tokio::sync::mpsc::unbounded_channel::<xai_acp_lib::AcpClientMessage>();
+            let (persistence_tx, _) = tokio::sync::mpsc::unbounded_channel::<PersistenceMsg>();
+            let actor = create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await;
+            let reservations = actor
+                .tool_context
+                .task_completion_reservations
+                .clone()
+                .expect("test actor wires task completion reservations");
+            let task_id = "bg-dead-reply";
+            reservations.reserve(task_id.to_string());
+
+            // The bridge-side admission receiver is already gone.
+            let (respond_to, admission_rx) = oneshot::channel::<bool>();
+            drop(admission_rx);
+            let admission = crate::session::commands::TaskWakeAdmission {
+                respond_to,
+                fallback: crate::session::commands::TaskWakeFallback {
+                    prompt_id: format!("bash-completed-{task_id}"),
+                    prompt_blocks: vec![acp::ContentBlock::Text(acp::TextContent::new(format!(
+                        "Background task \"{task_id}\" completed (exit code: 0)."
+                    )))],
+                    source: NotificationSource::BashTaskCompleted {
+                        task_id: task_id.to_string(),
+                    },
+                },
+            };
+            let origin = crate::session::PromptOrigin::TaskCompleted {
+                task_id: task_id.to_string(),
+            };
+            let promoted = actor.admit_task_completion_wake(&origin, admission).await;
+            assert!(promoted.is_none(), "a dead reply must not promote the wake");
+
+            let state = actor.state.lock().await;
+            assert!(
+                state
+                    .pending_notifications
+                    .iter()
+                    .any(|n| { n.prompt_id == format!("bash-completed-{task_id}") }),
+                "the fallback must be parked as a pending notification"
+            );
+            drop(state);
+            assert!(
+                !reservations.contains(task_id),
+                "the parked fallback must release the reservation"
+            );
+        })
+        .await;
+}

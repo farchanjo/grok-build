@@ -14,6 +14,41 @@ use xai_grok_tools::types::output::{BashOutput, ToolOutput};
 use xai_grok_workspace::session::file_state::FileStateTracker;
 use xai_hunk_tracker::HunkTrackerHandle;
 const TASK_WAKE_ADMISSION_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(250);
+
+/// Outcome of the actor-side admission handshake for a synthetic
+/// task-completion wake. Drives the fail-safe so a wake that never becomes a
+/// turn still reaches the model through the pending-notification drain.
+enum WakeAdmissionOutcome {
+    /// Actor accepted; the queued prompt will run (or its dead-reply path will
+    /// park the fallback as a pending notification).
+    Accepted,
+    /// Actor explicitly refused (gate/suppressed); it already parked the wake
+    /// fallback as a pending notification.
+    Refused,
+    /// Actor never answered within the admission budget. The queued command
+    /// may still be processed later — the actor parks the fallback when it
+    /// finds the admission reply already gone — so the bridge must not
+    /// double-inject.
+    NoResponse,
+    /// The wake prompt never reached the session actor channel. The bridge
+    /// injects the completion itself as a pending notification.
+    SendFailed,
+}
+
+impl WakeAdmissionOutcome {
+    fn as_str(&self) -> &'static str {
+        match self {
+            Self::Accepted => "accepted",
+            Self::Refused => "refused",
+            Self::NoResponse => "no_response",
+            Self::SendFailed => "send_failed",
+        }
+    }
+
+    fn will_wake(&self) -> bool {
+        matches!(self, Self::Accepted)
+    }
+}
 /// Configuration for the notification bridge.
 pub struct NotificationBridgeConfig {
     /// ACP gateway for sending streaming updates to TUI
@@ -467,19 +502,46 @@ async fn handle_notification(
                         parsed_prompt_tx: None,
                     })
                     .is_ok();
-                if !enqueued {
-                    config.task_completion_reservations.release(&task_id);
-                }
-                let admitted = if enqueued {
-                    tokio::time::timeout(TASK_WAKE_ADMISSION_TIMEOUT, admission_rx)
-                        .await
-                        .ok()
-                        .and_then(Result::ok)
-                        .unwrap_or(false)
+                let outcome = if !enqueued {
+                    WakeAdmissionOutcome::SendFailed
                 } else {
-                    false
+                    match tokio::time::timeout(TASK_WAKE_ADMISSION_TIMEOUT, admission_rx).await {
+                        Ok(Ok(true)) => WakeAdmissionOutcome::Accepted,
+                        Ok(Ok(false)) => WakeAdmissionOutcome::Refused,
+                        Ok(Err(_)) | Err(_) => WakeAdmissionOutcome::NoResponse,
+                    }
                 };
-                will_wake = admitted;
+                will_wake = outcome.will_wake();
+                if matches!(outcome, WakeAdmissionOutcome::SendFailed) {
+                    // The wake prompt never reached the session actor. Park the
+                    // completion as a pending notification (same shape as the
+                    // auto-wake-disabled branch) so the idle / next-turn drain
+                    // still surfaces it instead of losing it silently.
+                    config.task_completion_reservations.release(&task_id);
+                    let source = if is_monitor {
+                        NotificationSource::MonitorCompleted {
+                            task_id: task_id.clone(),
+                        }
+                    } else {
+                        NotificationSource::BashTaskCompleted {
+                            task_id: task_id.clone(),
+                        }
+                    };
+                    let _ = config
+                        .session_cmd_tx
+                        .send(SessionCommand::InjectNotification {
+                            prompt_id: if is_monitor {
+                                format!("monitor-completed-{task_id}")
+                            } else {
+                                format!("bash-completed-{task_id}")
+                            },
+                            prompt_blocks: vec![acp::ContentBlock::Text(acp::TextContent::new(
+                                body.clone(),
+                            ))],
+                            priority: NotificationPriority::Later,
+                            source,
+                        });
+                }
                 xai_grok_telemetry::unified_log::info(
                     "shell.task_wake.bridge_admission",
                     Some(config.session_id.0.as_ref()),
@@ -487,7 +549,8 @@ async fn handle_notification(
                         "task_id": &task_id,
                         "monitor": is_monitor,
                         "enqueued": enqueued,
-                        "admitted": admitted,
+                        "admitted": will_wake,
+                        "admission_outcome": outcome.as_str(),
                         "gate": config.task_wake_suppressed.get(),
                     })),
                 );
@@ -2323,6 +2386,39 @@ mod tests {
         assert!(
             prompt.contains("bg-disk-2"),
             "auto-wake-disabled: prompt must reference task id"
+        );
+    }
+
+    /// When the wake prompt cannot reach the session actor (channel closed),
+    /// the bridge must release the reminder-suppression reservation so the
+    /// per-tool-call completion reminder can still surface the completion,
+    /// and must attempt the pending-notification fallback injection.
+    #[tokio::test]
+    async fn send_failed_wake_releases_reservation() {
+        let (config, _gateway_rx, _persistence_rx, cmd_rx) = make_test_config_full();
+        config
+            .task_output_tool_name
+            .set(Some("get_command_or_subagent_output".to_string()))
+            .expect("slot is fresh in this test fixture");
+        // Close the session command channel: the wake prompt cannot reach the
+        // session actor at all. The bridge reserves the completion itself; a
+        // SendFailed outcome must release that reservation.
+        drop(cmd_rx);
+
+        let snapshot = make_task_snapshot("bg-send-failed", TaskKind::Bash);
+        let mut offsets = HashMap::new();
+        handle_notification(
+            &config,
+            ToolNotification::TaskCompleted(snapshot),
+            &mut offsets,
+        )
+        .await;
+
+        assert!(
+            !config
+                .task_completion_reservations
+                .contains("bg-send-failed"),
+            "a send-failed wake must release its reminder-suppression reservation"
         );
     }
 }

@@ -80,6 +80,11 @@ impl SessionActor {
         let admitted = !gate_suppressed && !state_suppressed;
         if !admitted {
             Self::push_task_wake_fallback(&mut state, fallback);
+            // NOTE: the reminder-suppression reservation is deliberately kept
+            // here. A refused wake (e.g. post-Ctrl+C cancel barrier) parks the
+            // fallback for the next-user-turn drain, which releases it; the
+            // reservation keeps the per-tool-call reminder from resurfacing the
+            // completion before genuine user re-engagement.
             drop(state);
             xai_grok_telemetry::unified_log::info(
                 "shell.task_wake.actor_admission",
@@ -95,7 +100,20 @@ impl SessionActor {
             return None;
         }
         if respond_to.send(true).is_err() {
+            // The bridge already gave up on admission (250ms budget). Park the
+            // fallback so the completion still reaches the model through the
+            // pending-notification drain, and release the reminder-suppression
+            // reservation for the same reason.
             Self::push_task_wake_fallback(&mut state, fallback);
+            if let Some(reservations) = &self.tool_context.task_completion_reservations {
+                reservations.release(&task_id);
+            }
+            drop(state);
+            xai_grok_telemetry::unified_log::info(
+                "shell.task_wake.actor_wake_fallback_parked",
+                Some(self.session_info.id.0.as_ref()),
+                Some(serde_json::json!({ "task_id": task_id })),
+            );
             return None;
         }
         drop(state);

@@ -138,25 +138,8 @@ impl SessionActor {
         // completion-id-bearing synthetics only (pre-existing shape): a queue
         // holding only drain/goal-summary synthetics is never preempted.
         if origin.is_client_user_prompt() {
-            let preempt_armed = state.pending_inputs.iter().any(|i| {
-                i.origin.completion_id().is_some()
-                    && state.running_prompt_id() != Some(i.prompt_id.as_str())
-            });
-            if preempt_armed {
-                let dropped = state.sweep_pending_inputs(|i| i.origin.is_synthetic());
-                if let Some(reservations) = &self.tool_context.task_completion_reservations {
-                    for task_id in dropped
-                        .iter()
-                        .filter_map(|item| item.origin.completion_id())
-                    {
-                        reservations.release(task_id);
-                    }
-                }
-                tracing::info!(
-                    dropped_count = dropped.len(),
-                    "auto-wake: dropping pending synthetic prompts (user prompt has priority)"
-                );
-            }
+            self.sweep_pending_synthetic_prompts_for_user_prompt(&mut state)
+                .await;
         }
 
         // Build the shared-queue metadata for user-originated prompts only.
@@ -283,9 +266,58 @@ impl SessionActor {
         cancel_running_turn
     }
 
+    /// User prompts preempt queued synthetic auto-wake prompts. Swept wakes
+    /// must not lose their completion: each `task_wake_fallback` is parked as
+    /// a pending notification so the idle / next-turn drain still surfaces it,
+    /// and the matching completion reservation is released so the per-tool-call
+    /// reminder can re-surface if the drain misses it. The running turn's own
+    /// slot is exempt (`State::sweep_pending_inputs`).
+    pub(super) async fn sweep_pending_synthetic_prompts_for_user_prompt(&self, state: &mut State) {
+        let preempt_armed = state.pending_inputs.iter().any(|i| {
+            i.origin.completion_id().is_some()
+                && state.running_prompt_id() != Some(i.prompt_id.as_str())
+        });
+        if !preempt_armed {
+            return;
+        }
+        let dropped = state.sweep_pending_inputs(|i| i.origin.is_synthetic());
+        let dropped_count = dropped.len();
+        let mut parked_fallbacks = 0usize;
+        let mut swept_task_ids: Vec<String> = Vec::new();
+        for item in dropped {
+            if let Some(fallback) = item.task_wake_fallback {
+                Self::push_task_wake_fallback(state, fallback);
+                parked_fallbacks += 1;
+            }
+            if let Some(task_id) = item.origin.completion_id() {
+                swept_task_ids.push(task_id.to_string());
+            }
+            Self::respond_removed_prompt(item.respond_to);
+        }
+        if let Some(reservations) = &self.tool_context.task_completion_reservations {
+            for task_id in &swept_task_ids {
+                reservations.release(task_id);
+            }
+        }
+        if parked_fallbacks > 0 {
+            xai_grok_telemetry::unified_log::info(
+                "shell.task_wake.wake_swept_to_pending",
+                Some(self.session_info.id.0.as_ref()),
+                Some(serde_json::json!({
+                    "dropped_count": dropped_count,
+                    "parked_fallbacks": parked_fallbacks,
+                    "task_ids": swept_task_ids,
+                })),
+            );
+        }
+        tracing::info!(
+            dropped_count,
+            "auto-wake: dropping pending synthetic prompts (user prompt has priority)"
+        );
+    }
+
     /// Extract a plain-text summary of a prompt's content blocks for the
     /// shared queue display.
-    ///
     /// Prefers a block's `displayText` meta (the compact user-facing form, e.g.
     /// `/loop 5s echo "x"`) over the raw wire text. A client that expands a
     /// slash skill locally sends the full expanded instruction as the wire text
