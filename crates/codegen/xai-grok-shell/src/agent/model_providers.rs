@@ -359,12 +359,10 @@ impl ResolvedModelProvider {
     /// validation. The sampler clamps whatever budget this returns to that
     /// ceiling when both are present.
     pub fn request_max_completion_tokens(&self) -> Option<u32> {
-        self.max_completion_tokens
-            .filter(|&n| n > 0)
-            .or_else(|| {
-                (self.kind == ModelProviderKind::OpenRouter)
-                    .then_some(OPENROUTER_DEFAULT_MAX_COMPLETION_TOKENS)
-            })
+        self.max_completion_tokens.filter(|&n| n > 0).or_else(|| {
+            (self.kind == ModelProviderKind::OpenRouter)
+                .then_some(OPENROUTER_DEFAULT_MAX_COMPLETION_TOKENS)
+        })
     }
 }
 

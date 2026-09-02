@@ -559,6 +559,37 @@ impl SessionHandle {
         }
         rx.await.unwrap_or_default()
     }
+    /// Active MCP resource subscriptions with pump stats (TUI "Subscribed
+    /// Tools" sheet). Empty when the session is closed.
+    pub async fn mcp_subscriptions(&self) -> Vec<crate::extensions::mcp::McpSubscriptionEntry> {
+        let (tx, rx) = oneshot::channel();
+        if self
+            .cmd_tx
+            .send(SessionCommand::ListMcpSubscriptions { respond_to: tx })
+            .is_err()
+        {
+            return vec![];
+        }
+        rx.await.unwrap_or_default()
+    }
+    /// Drop one MCP resource subscription (TUI-driven unsubscribe). The uri
+    /// is tombstoned so subscription refreshes do not re-subscribe it.
+    pub async fn mcp_unsubscribe(&self, server_name: String, uri: String) -> Result<bool, String> {
+        let (tx, rx) = oneshot::channel();
+        if self
+            .cmd_tx
+            .send(SessionCommand::UnsubscribeMcpResource {
+                server_name,
+                uri,
+                respond_to: tx,
+            })
+            .is_err()
+        {
+            return Err("session closed".to_string());
+        }
+        rx.await
+            .unwrap_or_else(|_| Err("session closed".to_string()))
+    }
     pub async fn mcp_auth_trigger(&self, server_name: String) -> Result<(), String> {
         let (tx, rx) = oneshot::channel();
         if self

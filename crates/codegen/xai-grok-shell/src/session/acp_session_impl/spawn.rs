@@ -1202,6 +1202,19 @@ pub(crate) async fn spawn_session_actor(
         tracing::warn!(error = %e, "failed to bind local session toolset");
     }
     let system_prompt = agent.system_prompt().to_string();
+    // Stamp the user's pinned tools (Settings → Tools) into the fresh system
+    // prompt. Subagents and inherited-prefix sessions skip the stamp — the
+    // pins are a main-session UX concept.
+    let system_prompt = if startup_hints.is_subagent {
+        system_prompt
+    } else {
+        let definitions = agent.tool_bridge().tool_definitions().await;
+        crate::session::pinned_tools::refresh_pinned_tools_block(
+            &system_prompt,
+            &definitions,
+            &crate::session::pinned_tools::pinned_tools_from_disk(),
+        )
+    };
     let mut prompt_context = agent.prompt_context().clone();
     prompt_context.normalize_for_persistence();
     save_prompt_context(&session_info, &prompt_context);
@@ -1697,6 +1710,8 @@ pub(crate) async fn spawn_session_actor(
         tool_context,
         deny_read_globs,
         mcp_state: mcp_state.clone(),
+        mcp_push_stats: Default::default(),
+        session_cmd_tx: cmd_tx.clone(),
         mcp_strategy,
         initial_client_mcp_servers: initial_client_mcp_servers.clone(),
         chat_state_handle,

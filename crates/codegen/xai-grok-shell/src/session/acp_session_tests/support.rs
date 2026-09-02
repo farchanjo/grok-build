@@ -265,6 +265,8 @@ pub(crate) async fn create_test_actor_ex(
         tool_context,
         deny_read_globs: Vec::new(),
         mcp_state: Arc::new(TokioMutex::new(McpState::new(vec![]))),
+        mcp_push_stats: Default::default(),
+        session_cmd_tx: dummy_session_cmd_tx(),
         mcp_strategy: McpInitStrategy::Blocking,
         chat_state_handle,
         unattributed_background_usage: std::sync::atomic::AtomicBool::new(false),
@@ -466,6 +468,11 @@ pub(crate) async fn create_test_actor_ex(
             .await;
     }
     (actor, event_rx)
+}
+#[cfg(test)]
+pub(crate) fn dummy_session_cmd_tx() -> tokio::sync::mpsc::UnboundedSender<SessionCommand> {
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    tx
 }
 #[cfg(test)]
 pub(crate) async fn create_test_actor(

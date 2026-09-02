@@ -1959,6 +1959,31 @@ fn pager_registry_default_matches_agent_view_new_initializer() {
                     "default media status must match the status built from the runtime defaults",
                 );
             }
+            // Action deep-link into the tools sheet; no runtime scalar.
+            ("open_retrieval_settings", SettingKind::Status) => {}
+            ("open_tools", SettingKind::Status) => {}
+            // Hint mirrors resolved from disk config, not AgentView state.
+            ("repetition_guard", SettingKind::Bool { default }) => {
+                assert_eq!(
+                    *default,
+                    crate::settings::PagerLocalSnapshot::default().repetition_guard_enabled,
+                    "repetition_guard default must match the snapshot default (disk-resolved)",
+                );
+            }
+            ("tersify_scope", SettingKind::Enum { default, .. }) => {
+                assert_eq!(
+                    *default,
+                    crate::settings::PagerLocalSnapshot::default().tersify_scope,
+                    "tersify_scope default must match the snapshot default (disk-resolved)",
+                );
+            }
+            ("tersify_level", SettingKind::Enum { default, .. }) => {
+                assert_eq!(
+                    *default,
+                    crate::settings::PagerLocalSnapshot::default().tersify_level,
+                    "tersify_level default must match the snapshot default (disk-resolved)",
+                );
+            }
             _ => {
                 panic!(
                     "PAGER setting `{}` has no arm in \

@@ -7,8 +7,8 @@
 
 use crate::app::actions::Action;
 use crate::config_toml_edit::{self, ModelParam};
-use agent_client_protocol as acp;
 use crate::slash::command::{CommandExecCtx, CommandResult, SlashCommand};
+use agent_client_protocol as acp;
 
 /// Shared behavior of the three request-param commands.
 trait ParamCommand {
@@ -89,8 +89,9 @@ fn current_override(model_id: &str, param: ModelParam) -> Option<f64> {
         ModelParam::Temperature | ModelParam::TopP => {
             config_toml_edit::read_model_param_f64(model_id, param)
         }
-        ModelParam::MaxCompletionTokens => config_toml_edit::read_model_param_u64(model_id, param)
-            .map(|value| value as f64),
+        ModelParam::MaxCompletionTokens => {
+            config_toml_edit::read_model_param_u64(model_id, param).map(|value| value as f64)
+        }
     }
 }
 
@@ -359,7 +360,9 @@ mod tests {
     #[test]
     fn max_tokens_default_hint_reports_capability_ceiling() {
         let mut info = acp::ModelInfo::new("zdr:z-ai/glm-5.3-flash", "Z.ai: GLM 5.3 Flash");
-        info.meta = serde_json::json!({ "maxOutputTokens": 64000.0 }).as_object().cloned();
+        info.meta = serde_json::json!({ "maxOutputTokens": 64000.0 })
+            .as_object()
+            .cloned();
         assert_eq!(
             MaxTokensCommand.default_hint(Some(&info)),
             ", capability ceiling 64000"

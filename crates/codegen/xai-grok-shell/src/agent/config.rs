@@ -6161,9 +6161,12 @@ fn build_inference_config_for_model(
     // value (explicit TOML or the 16384 OpenRouter API default). The catalog
     // capability ceiling never becomes the budget — it lives separately on
     // `max_output_ceiling` and the sampler only clamps against it.
-    let max_completion_tokens = info
-        .max_completion_tokens
-        .or_else(|| model.model_provider.as_ref().and_then(|p| p.request_max_completion_tokens()));
+    let max_completion_tokens = info.max_completion_tokens.or_else(|| {
+        model
+            .model_provider
+            .as_ref()
+            .and_then(|p| p.request_max_completion_tokens())
+    });
     let max_output_ceiling = info.max_output_ceiling;
     let temperature = info.temperature;
     let top_p = info.top_p;

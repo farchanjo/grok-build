@@ -1622,9 +1622,7 @@ impl ProviderManagementService {
                     Ok(inc) => inc,
                     Err(e) => {
                         let mut snap = self.catalog_status(id);
-                        snap.error = Some(format!(
-                            "missing lifecycle incarnation for `{id}`: {e}"
-                        ));
+                        snap.error = Some(format!("missing lifecycle incarnation for `{id}`: {e}"));
                         return snap;
                     }
                 }
@@ -2845,8 +2843,6 @@ mod tests {
 
     #[test]
     fn extra_openrouter_keys_use_instance_scope_not_openai_compatible() {
-
-
         let dir = TempDir::new().unwrap();
         let s = svc(&dir);
         let add_home = s.add(ProviderAddRequest {
@@ -2951,7 +2947,10 @@ catalog_enabled = true
         let pid = ProviderId::new("openrouter-late").unwrap();
         store_provider_secret(
             dir.path(),
-            &application_key_scope_for_kind(&pid, crate::provider_registry::ProviderKind::OpenRouter),
+            &application_key_scope_for_kind(
+                &pid,
+                crate::provider_registry::ProviderKind::OpenRouter,
+            ),
             "late-key",
         )
         .unwrap();

@@ -500,4 +500,30 @@ impl SessionActor {
         out.push_str(prompt[end..].trim_start());
         out.trim_end().to_string()
     }
+
+    /// Mid-session pinned-tools update (`x.ai/pinned_tools_changed`).
+    ///
+    /// Resolves the pinned names against the live toolset catalog and
+    /// re-stamps the `<pinned_tools>` block in the system head. No-op when
+    /// the rebuilt head matches the live one (idempotent duplicate
+    /// notifications).
+    pub(super) async fn handle_set_pinned_tools(&self, tool_names: &[String]) {
+        let Some(current) = crate::session::acp_session::load_system_prompt(&self.session_info)
+        else {
+            return;
+        };
+        let definitions = self.agent.borrow().tool_bridge().tool_definitions().await;
+        let rebuilt = crate::session::pinned_tools::refresh_pinned_tools_block(
+            &current,
+            &definitions,
+            tool_names,
+        );
+        if rebuilt != current {
+            tracing::info!(
+                pinned_count = tool_names.len(),
+                "Re-stamping <pinned_tools> system block"
+            );
+            self.handle_replace_system_prompt(rebuilt).await;
+        }
+    }
 }

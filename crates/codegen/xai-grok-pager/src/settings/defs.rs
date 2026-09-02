@@ -1564,6 +1564,56 @@ pub fn default_settings() -> Vec<SettingMeta> {
             restart_required: true,
             hidden_in_minimal: false,
         },
+        // Deep-link action row: opens the Tools sub-sheet (search + pin over
+        // the built-in + MCP tool catalog). Status kind keeps it
+        // non-editable; Enter is special-cased in the settings modal to
+        // transition to `PickingTools`.
+        SettingMeta {
+            key: "open_tools",
+            category: SettingCategory::Advanced,
+            owner: SettingOwner::Pager,
+            label: "Tools",
+            description: "Browse every registered tool (built-in and MCP) with name and description; pin the ones the model should always hear about.",
+            keywords: &[
+                "tools",
+                "tool",
+                "mcp",
+                "pin",
+                "pinned",
+                "favorite",
+                "bookmark",
+                "catalog",
+                "server",
+                "description",
+            ],
+            kind: SettingKind::Status,
+            restart_required: false,
+            hidden_in_minimal: false,
+        },
+        // Deep-link row: Enter transitions the modal to `PickingSubscriptions`.
+        SettingMeta {
+            key: "open_subscriptions",
+            category: SettingCategory::Advanced,
+            owner: SettingOwner::Pager,
+            label: "Subscribed Tools",
+            description: "Live MCP resource subscriptions (server pushes the model receives in async mode). Shows status per subscription; unsubscribe a lost or chatty stream.",
+            keywords: &[
+                "subscribed",
+                "subscribe",
+                "subscription",
+                "subscriptions",
+                "unsubscribe",
+                "mcp",
+                "resources",
+                "push",
+                "async",
+                "stream",
+                "lost",
+            ],
+            kind: SettingKind::Status,
+            restart_required: false,
+            hidden_in_minimal: false,
+        },
         // Contextual hints: one Advanced row that opens a sub-sheet of per-tip
         // toggles. Applies live (restart_required: false); the group carries no
         // value and its children are hidden from the top-level list.

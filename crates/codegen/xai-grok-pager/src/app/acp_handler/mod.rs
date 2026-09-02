@@ -473,6 +473,10 @@ pub(crate) fn handle(msg: AcpClientMessage, app: &mut AppView) -> bool {
                         if let Some(tools) = agent.session.tracker.take_pending_acp_tools() {
                             agent.session.available_tools = Some(tools.into_iter().collect());
                         }
+                        if let Some(catalog) = agent.session.tracker.take_pending_acp_tool_catalog()
+                        {
+                            agent.session.tool_catalog = Some(catalog);
+                        }
                         for entry_id in agent.session.tracker.take_pending_edit_hl() {
                             agent.submit_edit_highlight(entry_id);
                         }

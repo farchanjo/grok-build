@@ -61,6 +61,60 @@ pub(crate) fn set_hint(key: &str, value: impl Into<toml_edit::Value>) -> std::io
     set_table_field("hints", key, value)
 }
 
+/// Replace `[hints].pinned_tools` with `tools`, creating the array only when
+/// non-empty (an empty pin list removes the key to keep `config.toml` tidy).
+pub(crate) fn set_pinned_tools(tools: &[String]) -> std::io::Result<()> {
+    let path = xai_grok_tools::util::grok_home::grok_home().join("config.toml");
+    set_pinned_tools_at(&path, tools)
+}
+
+/// Like [`set_pinned_tools`] but targeting an explicit `config.toml` path
+/// (test seam).
+fn set_pinned_tools_at(path: &Path, tools: &[String]) -> std::io::Result<()> {
+    if tools.is_empty() {
+        return remove_table_key_at(path, "hints", "pinned_tools");
+    }
+    let array = toml_edit::Array::from_iter(tools.iter().map(String::as_str));
+    set_table_field_at(path, "hints", "pinned_tools", array)
+}
+
+/// Read `[hints].pinned_tools` from the on-disk `config.toml`. Deduplicated
+/// (first-seen order), blank entries dropped. Missing key/file → empty;
+/// malformed shapes degrade to empty (fail-open display only).
+pub(crate) fn read_pinned_tools() -> Vec<String> {
+    let path = xai_grok_tools::util::grok_home::grok_home().join("config.toml");
+    read_pinned_tools_at(&path)
+}
+
+/// Like [`read_pinned_tools`] but reading an explicit path (test seam).
+fn read_pinned_tools_at(path: &Path) -> Vec<String> {
+    let Ok(content) = std::fs::read_to_string(&path) else {
+        return Vec::new();
+    };
+    let Ok(doc) = content.parse::<toml_edit::DocumentMut>() else {
+        return Vec::new();
+    };
+    let Some(items) = doc
+        .get("hints")
+        .and_then(|h| h.get("pinned_tools"))
+        .and_then(|p| p.as_array())
+    else {
+        return Vec::new();
+    };
+    let mut seen = std::collections::HashSet::new();
+    let mut out = Vec::new();
+    for item in items.iter() {
+        let Some(name) = item.as_str() else {
+            continue;
+        };
+        if name.is_empty() || !seen.insert(name.to_owned()) {
+            continue;
+        }
+        out.push(name.to_owned());
+    }
+    out
+}
+
 /// Inclusive minimum ChatGPT subscription `context_window` override.
 pub(crate) const CHATGPT_CONTEXT_WINDOW_MIN: u64 = 8_000;
 /// Inclusive maximum ChatGPT subscription `context_window` override.
@@ -103,9 +157,9 @@ pub(crate) fn chatgpt_context_window_in_range(tokens: u64) -> bool {
 fn is_overridable_model_id(model_id: &str) -> bool {
     !model_id.is_empty()
         && model_id.len() <= 160
-        && model_id
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b':' | b'/'))
+        && model_id.bytes().all(|byte| {
+            byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b':' | b'/')
+        })
 }
 
 /// TOML table path for a per-model override, such as `model."dr:z-ai/glm-5.3-flash"`.
@@ -186,7 +240,10 @@ pub(crate) fn read_model_param_u64(model_id: &str, param: ModelParam) -> Option<
     let raw = std::fs::read_to_string(path).ok()?;
     let value: toml::Value = toml::from_str(&raw).ok()?;
     let table = value.get("model")?.get(model_id)?;
-    table.get(param.key())?.as_integer().and_then(|v| u64::try_from(v).ok())
+    table
+        .get(param.key())?
+        .as_integer()
+        .and_then(|v| u64::try_from(v).ok())
 }
 
 pub(crate) fn chatgpt_auto_compact_threshold_in_range(percent: u8) -> bool {
@@ -510,6 +567,39 @@ mod tests {
         assert!(
             path.exists(),
             "missing file and parent dir should be created"
+        );
+    }
+
+    #[test]
+    fn set_pinned_tools_round_trips_and_preserves_siblings() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        fs::write(&path, "[ui]\ncompact_mode = false\n").unwrap();
+
+        set_pinned_tools_at(&path, &["server__search".to_string(), "grep".to_string()]).unwrap();
+
+        assert_eq!(
+            read_pinned_tools_at(&path),
+            vec!["server__search".to_string(), "grep".to_string()]
+        );
+        assert!(
+            fs::read_to_string(&path).unwrap().contains("compact_mode"),
+            "sibling [ui] should be preserved"
+        );
+
+        // Replacing the list overwrites in place.
+        set_pinned_tools_at(&path, &["grep".to_string()]).unwrap();
+        assert_eq!(read_pinned_tools_at(&path), vec!["grep".to_string()]);
+
+        // Empty list removes the key entirely.
+        set_pinned_tools_at(&path, &[]).unwrap();
+        assert!(read_pinned_tools_at(&path).is_empty());
+        let doc = read_config_document_for_edit(&path).expect("reparse");
+        assert!(
+            doc.get("hints")
+                .and_then(|h| h.get("pinned_tools"))
+                .is_none(),
+            "empty pin list must remove the key"
         );
     }
 

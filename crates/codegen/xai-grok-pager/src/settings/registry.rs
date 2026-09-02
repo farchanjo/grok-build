@@ -547,6 +547,43 @@ pub enum SettingValue {
 /// Snapshot of pager-local state captured when the modal opens.
 /// Used by `current_value_for` to render against LIVE state rather
 /// than the on-disk `UiConfig`. Refreshed by
+/// One row of the settings "Subscribed Tools" sheet: an active MCP resource
+/// subscription (server, uri) with push stats from the shell's pump.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct McpSubscriptionRow {
+    pub server: String,
+    pub uri: String,
+    pub pushes_seen: Option<u64>,
+    /// Milliseconds since the last accepted push (`None` = never pushed).
+    pub last_push_ms_ago: Option<u64>,
+    pub unsubscribed: bool,
+}
+
+/// Wire shape of the shell's `x.ai/mcp/subscriptions` response (camelCase).
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct McpSubscriptionsResponseWire {
+    pub subscriptions: Vec<McpSubscriptionEntryWire>,
+}
+
+/// Wire shape of one subscription entry.
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct McpSubscriptionEntryWire {
+    pub server: String,
+    pub uri: String,
+    pub pushes_seen: Option<u64>,
+    pub last_push_ms_ago: Option<u64>,
+    pub unsubscribed: Option<bool>,
+}
+
+/// Wire shape of the shell's `x.ai/mcp/unsubscribe` response.
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct McpUnsubscribeResponseWire {
+    pub ok: bool,
+}
+
 /// `refresh_open_settings_modals` after every mutation.
 #[derive(Debug, Clone)]
 pub struct PagerLocalSnapshot {
@@ -637,6 +674,13 @@ pub struct PagerLocalSnapshot {
     pub media_file_model: String,
     /// Read-only effective media summary, including external-provider disclosure.
     pub media_status: String,
+    /// Detailed tool catalog (built-ins + MCP) for the Tools section.
+    pub tool_catalog: Vec<crate::acp::tracker::ToolCatalogEntry>,
+    /// Fully-qualified pinned tool names, disk order (`[hints] pinned_tools`).
+    pub pinned_tools: Vec<String>,
+    /// Active MCP resource subscriptions (server, uri, push stats), fetched
+    /// on demand for the "Subscribed Tools" sheet.
+    pub mcp_subscriptions: Vec<McpSubscriptionRow>,
 }
 
 impl Default for PagerLocalSnapshot {
@@ -675,6 +719,9 @@ impl Default for PagerLocalSnapshot {
             compaction_fallback_model: String::new(),
             compaction_in_progress: false,
             media_routing: "auto".to_string(),
+            tool_catalog: Vec::new(),
+            pinned_tools: Vec::new(),
+            mcp_subscriptions: Vec::new(),
             media_image_model: "@session".to_string(),
             media_audio_model: String::new(),
             media_video_model: String::new(),
@@ -1184,6 +1231,18 @@ pub fn current_value_for(
         "open_retrieval_settings" => {
             Some(SettingValue::String("Open /retrieval-settings".to_string()))
         }
+        // Action deep-link row (Status kind); Enter opens the tools sheet.
+        // Value mirrors the live pin count so the row reads like a summary.
+        "open_tools" => Some(SettingValue::String(format!(
+            "{} pinned",
+            pager.pinned_tools.len()
+        ))),
+        // Action deep-link row (Status kind); Enter opens the subscriptions
+        // sheet. Value mirrors the live subscription count.
+        "open_subscriptions" => Some(SettingValue::String(format!(
+            "{} subscribed",
+            pager.mcp_subscriptions.len()
+        ))),
 
         _ => None,
     }
@@ -1734,6 +1793,7 @@ mod tests {
                 }
                 ("media_status", SettingKind::Status) => {}
                 ("open_retrieval_settings", SettingKind::Status) => {}
+                ("open_subscriptions", SettingKind::Status) => {}
                 ("language.conversation", SettingKind::Enum { default, .. }) => {
                     assert_eq!(
                         *default, "off",
@@ -1807,6 +1867,9 @@ mod tests {
                 }
                 // Action deep-link; no pager scalar to align.
                 ("open_retrieval_settings", SettingKind::Status) => {}
+                // Action deep-link into the tools sheet; the row's displayed
+                // value is derived (`N pinned`), not a snapshot field.
+                ("open_tools", SettingKind::Status) => {}
                 // Tersify defaults mirror the shell resolver's fail-closed
                 // defaults, which is also what PagerLocalSnapshot::default()
                 // carries (both read through TersifyConfig semantics).

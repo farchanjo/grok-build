@@ -3127,7 +3127,6 @@ mod command_palette_vim_input_tests {
             "unfocused command palette should show the `/ to search` placeholder, got {unfocused_text:?}",
         );
     }
-
 }
 
 #[cfg(test)]

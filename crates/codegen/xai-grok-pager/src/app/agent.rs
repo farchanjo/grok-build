@@ -685,6 +685,10 @@ pub struct AgentSession {
     /// `Some(_)` enables tool-gating in the slash registry; `None` keeps
     /// every command visible (avoids bootstrap flicker).
     pub available_tools: Option<HashSet<String>>,
+    /// Detailed tool catalog (name + description) for the Settings → Tools
+    /// section. `None` until the shell advertises `meta.tool_catalog`
+    /// (older shells keep the section empty with a hint instead).
+    pub tool_catalog: Option<Vec<crate::acp::tracker::ToolCatalogEntry>>,
     /// Whether a `/model` switch is in flight. Dims the status-bar model name
     /// and holds the queue drain (`maybe_drain_queue`) so a queued prompt isn't
     /// sent on the old harness mid-switch. Cleared on
@@ -1515,6 +1519,7 @@ mod tests {
             available_commands: Vec::new(),
             available_commands_generation: 0,
             available_tools: None,
+            tool_catalog: None,
             model_switch_pending: false,
             user_model_preference: None,
             deferred_model_switch: None,

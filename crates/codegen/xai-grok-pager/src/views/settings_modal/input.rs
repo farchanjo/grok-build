@@ -46,6 +46,8 @@ pub fn handle_settings_key(state: &mut SettingsModalState, key: &KeyEvent) -> Se
         SettingsModeKind::FilterFocused => handle_filter_focused(state, key),
         SettingsModeKind::PickingEnum => handle_picking_enum(state, key),
         SettingsModeKind::PickingGroup => handle_picking_group(state, key),
+        SettingsModeKind::PickingTools => handle_picking_tools(state, key),
+        SettingsModeKind::PickingSubscriptions => handle_picking_subscriptions(state, key),
         SettingsModeKind::EditingString | SettingsModeKind::EditingInt => {
             handle_editing_value(state, key)
         }
@@ -76,6 +78,8 @@ pub fn handle_settings_paste(state: &mut SettingsModalState, text: &str) -> Sett
         SettingsModeKind::Browse
         | SettingsModeKind::PickingEnum
         | SettingsModeKind::PickingGroup
+        | SettingsModeKind::PickingTools
+        | SettingsModeKind::PickingSubscriptions
         | SettingsModeKind::EditingInt => SettingsKeyOutcome::Unchanged,
     }
 }
@@ -340,6 +344,186 @@ fn handle_picking_group(state: &mut SettingsModalState, key: &KeyEvent) -> Setti
             };
             match action_for_bool(child_key, !cur) {
                 Some(action) => SettingsKeyOutcome::Action(action),
+                None => SettingsKeyOutcome::Unchanged,
+            }
+        }
+        KeyCode::Esc => {
+            state.transition_to_browse();
+            SettingsKeyOutcome::Changed
+        }
+        _ => SettingsKeyOutcome::Unchanged,
+    }
+}
+
+/// Tools sub-sheet key routing: search-filter, pin toggle, Esc back.
+/// Space/Enter toggles the focused tool's pin in place (the sheet stays
+/// open) so the user can pin several tools in a row; printable keys feed
+/// the search filter (Backspace erases); Esc closes the sheet.
+fn handle_picking_tools(state: &mut SettingsModalState, key: &KeyEvent) -> SettingsKeyOutcome {
+    let tool_idx = match &state.state.mode {
+        SettingsMode::PickingTools { tool_idx } => *tool_idx,
+        _ => unreachable!("tools handler requires PickingTools state"),
+    };
+    match key.code {
+        KeyCode::Backspace => {
+            if state.enum_picker_filter.text().is_empty() {
+                return SettingsKeyOutcome::Unchanged;
+            }
+            let _ = state.enum_picker_filter.delete_last_grapheme();
+            state.enum_picker_filter_active = true;
+            state.state.mode = SettingsMode::PickingTools { tool_idx: 0 };
+            SettingsKeyOutcome::Changed
+        }
+        KeyCode::Char(c) if key.modifiers.is_empty() => {
+            let _ = state
+                .enum_picker_filter
+                .insert_paste(c.to_string().as_str());
+            state.enum_picker_filter_active = true;
+            state.state.mode = SettingsMode::PickingTools { tool_idx: 0 };
+            SettingsKeyOutcome::Changed
+        }
+        _ => handle_picking_tools_nav(state, key, tool_idx),
+    }
+}
+
+/// Navigation/commit keys for the tools sheet (filter-mutating keys are
+/// handled by [`handle_picking_tools`]).
+fn handle_picking_tools_nav(
+    state: &mut SettingsModalState,
+    key: &KeyEvent,
+    tool_idx: usize,
+) -> SettingsKeyOutcome {
+    let filtered_len = state.filtered_tool_catalog().len();
+    if filtered_len == 0 {
+        // Only Esc is meaningful on an empty list; any other key stays a
+        // no-op so focus can't escape the sheet.
+        return if matches!(key.code, KeyCode::Esc) {
+            state.transition_to_browse();
+            SettingsKeyOutcome::Changed
+        } else {
+            SettingsKeyOutcome::Unchanged
+        };
+    }
+    match key.code {
+        KeyCode::Down | KeyCode::Char('j') => {
+            let next = (tool_idx + 1).min(filtered_len - 1);
+            if next == tool_idx {
+                SettingsKeyOutcome::Unchanged
+            } else {
+                state.state.mode = SettingsMode::PickingTools { tool_idx: next };
+                SettingsKeyOutcome::Changed
+            }
+        }
+        KeyCode::Up | KeyCode::Char('k') => {
+            let prev = tool_idx.saturating_sub(1);
+            if prev == tool_idx {
+                SettingsKeyOutcome::Unchanged
+            } else {
+                state.state.mode = SettingsMode::PickingTools { tool_idx: prev };
+                SettingsKeyOutcome::Changed
+            }
+        }
+        KeyCode::Char(' ') | KeyCode::Enter => {
+            let name = state
+                .filtered_tool_catalog()
+                .get(tool_idx)
+                .map(|entry| entry.name.clone());
+            match name {
+                Some(name) => match state.toggle_tool_pin(&name) {
+                    Some(action) => SettingsKeyOutcome::Action(action),
+                    None => SettingsKeyOutcome::Unchanged,
+                },
+                None => SettingsKeyOutcome::Unchanged,
+            }
+        }
+        KeyCode::Esc => {
+            state.transition_to_browse();
+            SettingsKeyOutcome::Changed
+        }
+        _ => SettingsKeyOutcome::Unchanged,
+    }
+}
+
+/// Subscriptions sub-sheet ("Subscribed Tools") key routing: same filter
+/// model as the tools sheet. Enter/x unsubscribes the focused stream
+/// (fire-and-forget with a toast on completion); Esc returns to Browse.
+fn handle_picking_subscriptions(
+    state: &mut SettingsModalState,
+    key: &KeyEvent,
+) -> SettingsKeyOutcome {
+    let sub_idx = match &state.state.mode {
+        SettingsMode::PickingSubscriptions { sub_idx } => *sub_idx,
+        _ => unreachable!("subscriptions handler requires PickingSubscriptions state"),
+    };
+    match key.code {
+        KeyCode::Backspace => {
+            if state.enum_picker_filter.text().is_empty() {
+                return SettingsKeyOutcome::Unchanged;
+            }
+            let _ = state.enum_picker_filter.delete_last_grapheme();
+            state.enum_picker_filter_active = true;
+            state.state.mode = SettingsMode::PickingSubscriptions { sub_idx: 0 };
+            SettingsKeyOutcome::Changed
+        }
+        KeyCode::Char(c) if key.modifiers.is_empty() => {
+            let _ = state
+                .enum_picker_filter
+                .insert_paste(c.to_string().as_str());
+            state.enum_picker_filter_active = true;
+            state.state.mode = SettingsMode::PickingSubscriptions { sub_idx: 0 };
+            SettingsKeyOutcome::Changed
+        }
+        _ => handle_picking_subscriptions_nav(state, key, sub_idx),
+    }
+}
+
+/// Navigation/commit keys for the subscriptions sheet.
+fn handle_picking_subscriptions_nav(
+    state: &mut SettingsModalState,
+    key: &KeyEvent,
+    sub_idx: usize,
+) -> SettingsKeyOutcome {
+    let filtered_len = state.filtered_subscriptions().len();
+    if filtered_len == 0 {
+        // Only Esc is meaningful on an empty list; any other key stays a
+        // no-op so focus can't escape the sheet.
+        return if matches!(key.code, KeyCode::Esc) {
+            state.transition_to_browse();
+            SettingsKeyOutcome::Changed
+        } else {
+            SettingsKeyOutcome::Unchanged
+        };
+    }
+    match key.code {
+        KeyCode::Down | KeyCode::Char('j') => {
+            let next = (sub_idx + 1).min(filtered_len - 1);
+            if next == sub_idx {
+                SettingsKeyOutcome::Unchanged
+            } else {
+                state.state.mode = SettingsMode::PickingSubscriptions { sub_idx: next };
+                SettingsKeyOutcome::Changed
+            }
+        }
+        KeyCode::Up | KeyCode::Char('k') => {
+            let prev = sub_idx.saturating_sub(1);
+            if prev == sub_idx {
+                SettingsKeyOutcome::Unchanged
+            } else {
+                state.state.mode = SettingsMode::PickingSubscriptions { sub_idx: prev };
+                SettingsKeyOutcome::Changed
+            }
+        }
+        KeyCode::Char('x') | KeyCode::Enter => {
+            let focused = state
+                .filtered_subscriptions()
+                .get(sub_idx)
+                .cloned()
+                .map(|row| (row.server.clone(), row.uri.clone()));
+            match focused {
+                Some((server, uri)) => {
+                    state.remove_subscription_row(&server, &uri);
+                    SettingsKeyOutcome::Action(Action::UnsubscribeMcpResource { server, uri })
+                }
                 None => SettingsKeyOutcome::Unchanged,
             }
         }
@@ -769,6 +953,10 @@ fn handle_browse(state: &mut SettingsModalState, key: &KeyEvent) -> SettingsKeyO
             }
         }
         KeyCode::Enter => {
+            // Tools deep-link row → open the tools sub-sheet.
+            if state.try_enter_picking_tools() {
+                return SettingsKeyOutcome::Changed;
+            }
             // Group row → open its sub-sheet of child toggles.
             if state.try_enter_picking_group() {
                 return SettingsKeyOutcome::Changed;
@@ -793,6 +981,20 @@ fn handle_browse(state: &mut SettingsModalState, key: &KeyEvent) -> SettingsKeyO
                 && key == "open_retrieval_settings"
             {
                 return SettingsKeyOutcome::Action(Action::OpenRetrievalSettings);
+            }
+            if let Some((key, _)) = state.focused_setting()
+                && key == "open_tools"
+                && state.try_enter_picking_tools()
+            {
+                return SettingsKeyOutcome::Changed;
+            }
+            if let Some((key, _)) = state.focused_setting()
+                && key == "open_subscriptions"
+                && state.try_enter_picking_subscriptions()
+            {
+                // Kick a fresh subscriptions fetch so the sheet opens with
+                // live data (the effect fires after the mode transition).
+                return SettingsKeyOutcome::Action(Action::FetchMcpSubscriptions);
             }
             SettingsKeyOutcome::Unchanged
         }
@@ -970,6 +1172,9 @@ pub fn handle_settings_mouse(
             SettingsModeKind::PickingGroup => {
                 return handle_picking_group(state, &synthetic);
             }
+            SettingsModeKind::PickingTools => {
+                return handle_picking_tools(state, &synthetic);
+            }
             SettingsModeKind::EditingString | SettingsModeKind::EditingInt => {
                 return handle_editing_value(state, &synthetic);
             }
@@ -1026,6 +1231,12 @@ pub fn handle_settings_mouse(
     // child in place (same bounded-viewport, scroll-is-a-no-op contract).
     if state.state.mode_kind() == SettingsModeKind::PickingGroup {
         let outcome = handle_group_mouse(state, kind, column, row);
+        return upgrade_if_breadcrumb_flipped(outcome, breadcrumb_hover_flipped);
+    }
+
+    // PickingTools: click toggles the clicked tool's pin in place.
+    if state.state.mode_kind() == SettingsModeKind::PickingTools {
+        let outcome = handle_tools_mouse(state, kind, column, row);
         return upgrade_if_breadcrumb_flipped(outcome, breadcrumb_hover_flipped);
     }
 
@@ -1134,6 +1345,13 @@ pub fn handle_settings_mouse(
                     && key == "open_retrieval_settings"
                 {
                     return SettingsKeyOutcome::Action(Action::OpenRetrievalSettings);
+                }
+                if let Some((key, _)) = state.focused_setting()
+                    && key == "open_subscriptions"
+                {
+                    if state.try_enter_picking_subscriptions() {
+                        return SettingsKeyOutcome::Action(Action::FetchMcpSubscriptions);
+                    }
                 }
             }
             // Selection moved (or was already on this row); the
@@ -1298,6 +1516,50 @@ fn handle_group_mouse(
     }
     let cur = matches!(state.value_for(child_key), Some(SettingValue::Bool(true)));
     match action_for_bool(child_key, !cur) {
+        Some(action) => SettingsKeyOutcome::Action(action),
+        None => SettingsKeyOutcome::Changed,
+    }
+}
+
+/// Handle a mouse event while in `PickingTools` mode. Hover tracks the tool
+/// row under the cursor; a left-click focuses the clicked row AND toggles
+/// its pin in one click. Scroll wheel is a no-op (the sub-sheet is bounded).
+fn handle_tools_mouse(
+    state: &mut SettingsModalState,
+    kind: MouseEventKind,
+    column: u16,
+    row: u16,
+) -> SettingsKeyOutcome {
+    if matches!(kind, MouseEventKind::Moved) {
+        let new_hover = state
+            .picker_choice_rects
+            .iter()
+            .position(|r| r.height > 0 && rect_contains(*r, column, row));
+        if new_hover != state.hover_row {
+            state.hover_row = new_hover;
+            return SettingsKeyOutcome::Changed;
+        }
+        return SettingsKeyOutcome::Unchanged;
+    }
+    let MouseEventKind::Down(crossterm::event::MouseButton::Left) = kind else {
+        return SettingsKeyOutcome::Unchanged;
+    };
+    let clicked_idx = state
+        .picker_choice_rects
+        .iter()
+        .position(|r| r.height > 0 && rect_contains(*r, column, row));
+    let Some(idx) = clicked_idx else {
+        return SettingsKeyOutcome::Unchanged;
+    };
+    state.state.mode = SettingsMode::PickingTools { tool_idx: idx };
+    let Some(name) = state
+        .filtered_tool_catalog()
+        .get(idx)
+        .map(|entry| entry.name.clone())
+    else {
+        return SettingsKeyOutcome::Changed;
+    };
+    match state.toggle_tool_pin(&name) {
         Some(action) => SettingsKeyOutcome::Action(action),
         None => SettingsKeyOutcome::Changed,
     }

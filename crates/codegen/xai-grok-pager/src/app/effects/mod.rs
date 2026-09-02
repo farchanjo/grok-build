@@ -2143,6 +2143,10 @@ pub(crate) fn execute(
                     }
                 });
         }
+        Effect::PersistPinnedTools { tools } => {
+            let tx = acp_tx.clone();
+            tasks.spawn(persist_pinned_tools_and_notify(tools, tx));
+        }
         Effect::Authenticate {
             request_seq,
             method_id,
@@ -2287,6 +2291,87 @@ pub(crate) fn execute(
                         result,
                     }
                 });
+        }
+        Effect::FetchMcpSubscriptions { agent_id, session_id } => {
+            let tx = acp_tx.clone();
+            tasks.spawn(async move {
+                let params = serde_json::json!({
+                    "sessionId": session_id.0.to_string(),
+                });
+                let req = acp::ExtRequest::new(
+                    "x.ai/mcp/subscriptions",
+                    serde_json::value::to_raw_value(&params)
+                        .expect("serialize mcp/subscriptions params")
+                        .into(),
+                );
+                let result = match acp_send(req, &tx).await {
+                    Ok(resp) => {
+                        let wrapper: serde_json::Value =
+                            serde_json::from_str(resp.0.get()).unwrap_or_default();
+                        let inner = wrapper.get("result").unwrap_or(&wrapper);
+                        serde_json::from_value::<
+                            crate::settings::registry::McpSubscriptionsResponseWire,
+                        >(inner.clone())
+                        .map(|response| response.subscriptions)
+                        .map(|entries| {
+                            entries
+                                .into_iter()
+                                .map(|entry| {
+                                    crate::settings::registry::McpSubscriptionRow {
+                                        server: entry.server,
+                                        uri: entry.uri,
+                                        pushes_seen: entry.pushes_seen,
+                                        last_push_ms_ago: entry.last_push_ms_ago,
+                                        unsubscribed: entry.unsubscribed.unwrap_or(false),
+                                    }
+                                })
+                                .collect::<Vec<_>>()
+                        })
+                        .map_err(|_| "couldn't load subscriptions".to_string())
+                    }
+                    Err(e) => Err(sanitize_user_error(&format!(
+                        "couldn't load subscriptions: {e}"
+                    ))),
+                };
+                TaskResult::McpSubscriptionsLoaded { agent_id, result }
+            });
+        }
+        Effect::UnsubscribeMcpResource { agent_id, session_id, server, uri } => {
+            let tx = acp_tx.clone();
+            tasks.spawn(async move {
+                let params = serde_json::json!({
+                    "sessionId": session_id.0.to_string(),
+                    "server": server,
+                    "uri": uri,
+                });
+                let req = acp::ExtRequest::new(
+                    "x.ai/mcp/unsubscribe",
+                    serde_json::value::to_raw_value(&params)
+                        .expect("serialize mcp/unsubscribe params")
+                        .into(),
+                );
+                let result = match acp_send(req, &tx).await {
+                    Ok(resp) => {
+                        let wrapper: serde_json::Value =
+                            serde_json::from_str(resp.0.get()).unwrap_or_default();
+                        let inner = wrapper.get("result").unwrap_or(&wrapper);
+                        serde_json::from_value::<
+                            crate::settings::registry::McpUnsubscribeResponseWire,
+                        >(inner.clone())
+                        .map(|response| response.ok)
+                        .map_err(|_| "unsubscribe failed".to_string())
+                    }
+                    Err(e) => Err(sanitize_user_error(&format!(
+                        "unsubscribe failed: {e}"
+                    ))),
+                };
+                TaskResult::McpUnsubscribeDone {
+                    agent_id,
+                    server,
+                    uri,
+                    result,
+                }
+            });
         }
         Effect::McpAuthTrigger { agent_id, session_id, server_name } => {
             let tx = acp_tx.clone();

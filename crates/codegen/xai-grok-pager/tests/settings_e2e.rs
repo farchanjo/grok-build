@@ -99,6 +99,18 @@ const ALL_SETTINGS_EXERCISED: &[&str] = &[
     // Deep-link action row (Status kind): Enter dispatches the retrieval
     // settings deep-link.
     "open_retrieval_settings",
+    // Deep-link action row (Status kind): Enter opens the tools browser
+    // sub-sheet.
+    "open_tools",
+    // Deep-link action row (Status kind): Enter opens the "Subscribed
+    // Tools" subscriptions sub-sheet (fetch + unsubscribe).
+    "open_subscriptions",
+    // Shell-owned hints settings (persisted under `[hints]`): toggled via
+    // the typed repetition-guard setter; tersify scope/level via enum
+    // pickers.
+    "repetition_guard",
+    "tersify_level",
+    "tersify_scope",
 ];
 
 #[test]
@@ -761,6 +773,57 @@ fn mouse_click_on_retrieval_settings_row_dispatches_deep_link() {
             SettingsKeyOutcome::Action(Action::OpenRetrievalSettings)
         ),
         "click must dispatch the retrieval deep-link, got {outcome:?}",
+    );
+}
+
+/// Enter on the `open_subscriptions` ("Subscribed Tools") Status row
+/// transitions to the subscriptions sub-sheet AND dispatches the fetch
+/// action that populates it with live data.
+#[test]
+fn enter_on_subscriptions_row_dispatches_fetch_and_opens_sheet() {
+    let mut s = make_state();
+    navigate_to(&mut s, "open_subscriptions");
+    let outcome = handle_settings_key(&mut s, &press(KeyCode::Enter));
+    assert!(
+        matches!(
+            outcome,
+            SettingsKeyOutcome::Action(Action::FetchMcpSubscriptions)
+        ),
+        "Enter must dispatch the subscriptions fetch, got {outcome:?}",
+    );
+}
+
+/// Mouse parity: two-stage click on the "Subscribed Tools" row dispatches
+/// the same fetch action.
+#[test]
+fn mouse_click_on_subscriptions_row_dispatches_fetch() {
+    let mut s = make_state();
+    synth_rects(&mut s);
+    let row = row_idx_for(&s, "open_subscriptions") as u16;
+    // First click: selection only.
+    let outcome = handle_settings_mouse(
+        &mut s,
+        MouseEventKind::Down(crossterm::event::MouseButton::Left),
+        40,
+        row,
+    );
+    assert!(
+        matches!(outcome, SettingsKeyOutcome::Changed),
+        "first click must select the row, got {outcome:?}",
+    );
+    // Second click on the now-selected row dispatches the fetch.
+    let outcome = handle_settings_mouse(
+        &mut s,
+        MouseEventKind::Down(crossterm::event::MouseButton::Left),
+        40,
+        row,
+    );
+    assert!(
+        matches!(
+            outcome,
+            SettingsKeyOutcome::Action(Action::FetchMcpSubscriptions)
+        ),
+        "click must dispatch the subscriptions fetch, got {outcome:?}",
     );
 }
 
@@ -2010,6 +2073,7 @@ fn registry_kind_membership_through_pr_14() {
             "display_refresh_auto_cadence",
             "multiline_mode",
             "prompt_suggestions",
+            "repetition_guard",
             "respect_manual_folds",
             "show_thinking_blocks",
             "show_timeline",
@@ -2059,6 +2123,8 @@ fn registry_kind_membership_through_pr_14() {
             "render_mermaid",
             "screen_mode",
             "scroll_mode",
+            "tersify_level",
+            "tersify_scope",
             "theme",
             "voice_capture_mode",
             "voice_stt_language",
@@ -2116,7 +2182,9 @@ fn registry_kind_membership_through_pr_14() {
         vec![
             "compaction_status",
             "media_status",
-            "open_retrieval_settings"
+            "open_retrieval_settings",
+            "open_subscriptions",
+            "open_tools",
         ],
         "Status kind membership drift",
     );
@@ -2158,6 +2226,8 @@ fn enum_settings_membership_through_pr_14() {
             "render_mermaid",
             "screen_mode",
             "scroll_mode",
+            "tersify_level",
+            "tersify_scope",
             "theme",
             "voice_capture_mode",
             "voice_stt_language",
@@ -2265,6 +2335,14 @@ fn defaults_round_trip_through_registry() {
             "open_retrieval_settings" => {
                 SettingValue::String("Open /retrieval-settings".to_string())
             }
+            // Deep-link Status rows with live-count summaries (empty
+            // snapshot defaults to zero).
+            "open_tools" => SettingValue::String("0 pinned".to_string()),
+            "open_subscriptions" => SettingValue::String("0 subscribed".to_string()),
+            // Shell-owned hints settings (snapshot defaults).
+            "repetition_guard" => SettingValue::Bool(true),
+            "tersify_scope" => SettingValue::Enum("main_only"),
+            "tersify_level" => SettingValue::Enum("full"),
             other => panic!("test must list expected default for `{other}`"),
         }
     };
@@ -2344,7 +2422,8 @@ fn settings_value_payload_matches_kind() {
             | SettingsKeyOutcome::Action(Action::SetGroupToolVerbs(_))
             | SettingsKeyOutcome::Action(Action::SetCollapsedEditBlocks(_))
             | SettingsKeyOutcome::Action(Action::SetInvertScroll(_))
-            | SettingsKeyOutcome::Action(Action::SetDisplayRefreshAutoCadence(_)) => {}
+            | SettingsKeyOutcome::Action(Action::SetDisplayRefreshAutoCadence(_))
+            | SettingsKeyOutcome::Action(Action::SetRepetitionGuard(_)) => {}
             other => panic!(
                 "expected a typed bool setter for `{}`, got {:?}",
                 meta.key, other

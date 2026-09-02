@@ -1365,6 +1365,52 @@ pub(super) fn should_send_yolo_acp_notification(
         (Err(_), PermissionModePersist::WithRollback(_)) => false,
     }
 }
+
+/// Persist the pinned-tools list to `[hints] pinned_tools` and notify the
+/// live agent session so the `<pinned_tools>` system block is re-stamped
+/// without waiting for the next session spawn. Fire-and-forget on the ACP
+/// side: a disconnected agent logs a warning and the disk state still wins.
+pub(crate) async fn persist_pinned_tools_and_notify(
+    tools: Vec<String>,
+    tx: AcpAgentTx,
+) -> TaskResult {
+    let disk_tools = tools.clone();
+    let disk_result = tokio::task::spawn_blocking(move || {
+        crate::config_toml_edit::set_pinned_tools(&disk_tools)
+    })
+    .await
+    .map_err(|e| e.to_string())
+    .and_then(|r| r.map_err(|e| e.to_string()));
+    match disk_result {
+        Ok(()) => {
+            let params = serde_json::json!({ "pinned_tools": tools });
+            let notification = acp::ExtNotification::new(
+                "x.ai/pinned_tools_changed",
+                serde_json::value::to_raw_value(&params)
+                    .expect("serialize pinned_tools_changed params")
+                    .into(),
+            );
+            if let Err(e) = acp_send(notification, &tx).await {
+                tracing::warn!("Failed to send pinned_tools_changed notification: {e}");
+            }
+            TaskResult::SettingPersisted {
+                key: "pinned_tools",
+                value: crate::settings::SettingValue::String(String::new()),
+            }
+        }
+        Err(error) => {
+            ulog::error(
+                "pinned tools save failed",
+                None,
+                Some(serde_json::json!({ "error": &error })),
+            );
+            TaskResult::SettingPersistFailedBestEffort {
+                key: "pinned_tools",
+                error,
+            }
+        }
+    }
+}
 pub(super) fn marketplace_outcome_succeeded(
     outcome: &xai_hooks_plugins_types::ActionOutcome,
 ) -> bool {

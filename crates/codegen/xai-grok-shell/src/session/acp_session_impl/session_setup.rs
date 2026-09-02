@@ -211,11 +211,10 @@ impl SessionActor {
     pub(super) async fn send_available_commands_update(&self) {
         let bridge = self.agent.borrow().tool_bridge().clone();
         let skills = bridge.slash_skills().await;
-        let tool_names: Vec<String> = bridge
-            .tool_definitions()
-            .await
-            .into_iter()
-            .map(|td| td.function.name)
+        let definitions = bridge.tool_definitions().await;
+        let tool_names: Vec<String> = definitions
+            .iter()
+            .map(|td| td.function.name.clone())
             .collect();
         let has_workflow_runs = !self.workflow_tracker().await.lock().list().is_empty();
         let availability = self.build_command_availability(&tool_names, has_workflow_runs);
@@ -225,7 +224,11 @@ impl SessionActor {
         if commands.is_empty() {
             return;
         }
-        let meta = Some(slash_commands::build_tools_meta(&tool_names));
+        let mut meta = slash_commands::build_tools_meta(&tool_names);
+        if let Some((key, value)) = slash_commands::build_tool_catalog_meta_opt(&definitions) {
+            meta.insert(key, value);
+        }
+        let meta = Some(meta);
         tracing::info!(
             session_id = %self.session_info.id.0,
             command_count = commands.len(),

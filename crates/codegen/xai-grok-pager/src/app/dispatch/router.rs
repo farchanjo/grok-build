@@ -767,6 +767,38 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
                 cache: false,
             }]
         }
+        Action::FetchMcpSubscriptions => {
+            let ActiveView::Agent(id) = app.active_view else {
+                return vec![];
+            };
+            let Some(agent) = app.agents.get(&id) else {
+                return vec![];
+            };
+            let Some(session_id) = agent.session.session_id.clone() else {
+                return vec![];
+            };
+            vec![Effect::FetchMcpSubscriptions {
+                agent_id: id,
+                session_id,
+            }]
+        }
+        Action::UnsubscribeMcpResource { server, uri } => {
+            let ActiveView::Agent(id) = app.active_view else {
+                return vec![];
+            };
+            let Some(agent) = app.agents.get(&id) else {
+                return vec![];
+            };
+            let Some(session_id) = agent.session.session_id.clone() else {
+                return vec![];
+            };
+            vec![Effect::UnsubscribeMcpResource {
+                agent_id: id,
+                session_id,
+                server,
+                uri,
+            }]
+        }
         Action::ExecuteHooksAction(action) => {
             let ActiveView::Agent(id) = app.active_view else {
                 return vec![];
@@ -1180,6 +1212,7 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
         Action::OpenRetrievalSettings => {
             crate::app::dispatch::settings::ui::dispatch_open_retrieval_settings(app)
         }
+        Action::PersistPinnedTools { tools } => vec![Effect::PersistPinnedTools { tools }],
         Action::RetrievalCommand(cmd) => {
             crate::app::dispatch::settings::ui::dispatch_retrieval_command(app, cmd)
         }

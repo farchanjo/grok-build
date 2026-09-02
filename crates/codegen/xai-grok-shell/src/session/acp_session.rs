@@ -233,6 +233,9 @@ pub(crate) use laziness_classifier::*;
 #[path = "acp_session_impl/notification_drain.rs"]
 mod notification_drain;
 use notification_drain::*;
+#[path = "acp_session_impl/mcp_push.rs"]
+mod mcp_push;
+pub(crate) use mcp_push::{McpPushStats, spawn_mcp_resource_pump};
 #[path = "acp_session_impl/extensions.rs"]
 mod extensions;
 use extensions::*;
@@ -831,6 +834,16 @@ pub(crate) struct SessionActor {
     /// Consolidated MCP state (configs, clients, init status) protected by a single lock.
     /// This ensures atomicity when updating configs or checking initialization status.
     pub(crate) mcp_state: Arc<TokioMutex<McpState>>,
+    /// Self-command sender for host-side synthetic injections (MCP resource
+    /// pushes, task wakes). The actor sends `SessionCommand`s to itself so
+    /// buffering/drain semantics stay in exactly one place: the run loop.
+    pub(crate) session_cmd_tx: tokio::sync::mpsc::UnboundedSender<SessionCommand>,
+    /// Per-`(server, uri)` MCP push stats, updated by the resource pump and
+    /// surfaced through `ListMcpSubscriptions` (the TUI "Subscribed Tools"
+    /// sheet's status column).
+    pub(crate) mcp_push_stats: parking_lot::Mutex<
+        std::collections::HashMap<(String, String), crate::session::acp_session::McpPushStats>,
+    >,
     /// MCP initialization strategy
     pub(crate) mcp_strategy: McpInitStrategy,
     /// Actor-based chat state handle — manages conversation, tokens, timing, and persistence.

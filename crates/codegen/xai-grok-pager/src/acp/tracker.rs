@@ -307,6 +307,10 @@ pub struct AcpUpdateTracker {
     /// `handle_update`) so a partial replay can't silently regress the
     /// registry to the unknown-toolset state.
     pending_acp_tools: Option<Vec<String>>,
+    /// Detailed tool catalog (name + description) awaiting drain, from the
+    /// same `AvailableCommandsUpdate.meta`. Consumed by the caller via
+    /// `take_pending_acp_tool_catalog()`.
+    pending_acp_tool_catalog: Option<Vec<ToolCatalogEntry>>,
     /// Live Edit completions awaiting full-file HL (drained via [`Self::take_pending_edit_hl`]).
     pending_edit_hl: Vec<EntryId>,
 }
@@ -568,6 +572,10 @@ impl AcpUpdateTracker {
     pub fn take_pending_acp_tools(&mut self) -> Option<Vec<String>> {
         self.pending_acp_tools.take()
     }
+    /// Drain the pending tool catalog (name + description entries).
+    pub fn take_pending_acp_tool_catalog(&mut self) -> Option<Vec<ToolCatalogEntry>> {
+        self.pending_acp_tool_catalog.take()
+    }
     /// Drain Edit entry ids that need a background full-file HL job.
     pub fn take_pending_edit_hl(&mut self) -> Vec<EntryId> {
         std::mem::take(&mut self.pending_edit_hl)
@@ -821,6 +829,9 @@ impl AcpUpdateTracker {
             acp::SessionUpdate::AvailableCommandsUpdate(update) => {
                 if let Some(t) = parse_tools_meta(update.meta.as_ref()) {
                     self.pending_acp_tools = Some(t);
+                }
+                if let Some(catalog) = parse_tool_catalog_meta(update.meta.as_ref()) {
+                    self.pending_acp_tool_catalog = Some(catalog);
                 }
                 self.pending_acp_commands = Some(update.available_commands);
                 true
@@ -2472,6 +2483,37 @@ fn parse_tools_meta(meta: Option<&acp::Meta>) -> Option<Vec<String>> {
             .filter_map(|v| v.as_str().map(String::from))
             .collect(),
     )
+}
+/// One entry of the Settings → Tools catalog advertised by the shell:
+/// client-facing name plus optional description.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ToolCatalogEntry {
+    pub name: String,
+    pub description: Option<String>,
+}
+/// Extract the agent's advertised tool *catalog* from
+/// `AvailableCommandsUpdate.meta`.
+///
+/// Wire format set by the shell: `{"tool_catalog": [{"name": ..., "description":
+/// ...}, ...]}`. Returns `None` when `meta` is absent or the key is absent
+/// (older shells); an unparseable array degrades to `None` too, so a partial
+/// catalog never wipes the previous one.
+fn parse_tool_catalog_meta(meta: Option<&acp::Meta>) -> Option<Vec<ToolCatalogEntry>> {
+    let arr = meta?.get("tool_catalog")?.as_array()?;
+    let mut out = Vec::with_capacity(arr.len());
+    for item in arr {
+        let Some(name) = item.get("name").and_then(|v| v.as_str()) else {
+            continue;
+        };
+        out.push(ToolCatalogEntry {
+            name: name.to_owned(),
+            description: item
+                .get("description")
+                .and_then(|v| v.as_str())
+                .map(String::from),
+        });
+    }
+    Some(out)
 }
 /// Compact one-line description of a `SessionUpdate` for the always-on
 /// `acp_update` log target.

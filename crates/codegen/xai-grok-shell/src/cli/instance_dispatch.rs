@@ -680,12 +680,14 @@ mod tests {
             Some("work-key"),
             "extra OpenRouter must read openrouter::<id>::api_key only"
         );
-        assert!(admin.is_none(), "application op must not resolve admin token");
+        assert!(
+            admin.is_none(),
+            "application op must not resolve admin token"
+        );
 
         // Clearing the Work key must fail closed: no built-in scope, env var,
         // or openai_compatible sibling fallback for a typed application op.
-        clear_provider_secret(home.path(), &extra_openrouter_application_key_scope(&work))
-            .unwrap();
+        clear_provider_secret(home.path(), &extra_openrouter_application_key_scope(&work)).unwrap();
         let (app, admin) = resolve_instance_credentials(&inst, op, home.path()).unwrap();
         assert!(
             app.is_none(),

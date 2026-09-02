@@ -56,7 +56,8 @@ impl SessionActor {
             .filter_map(|notification| match &notification.source {
                 NotificationSource::BashTaskCompleted { task_id }
                 | NotificationSource::MonitorCompleted { task_id } => Some(task_id.clone()),
-                NotificationSource::MonitorEvent { .. } => None,
+                NotificationSource::MonitorEvent { .. }
+                | NotificationSource::McpResourceUpdated { .. } => None,
             })
             .collect();
         completion_ids.sort();
@@ -71,9 +72,13 @@ impl SessionActor {
             let consume = match &notification.source {
                 NotificationSource::BashTaskCompleted { .. }
                 | NotificationSource::MonitorCompleted { .. } => true,
+                // MCP resource updates are NOT consumed at user-turn start:
+                // they stay parked so the idle / end-of-turn drain delivers
+                // them as their own (batched) turn.
                 NotificationSource::MonitorEvent { task_id } => {
                     deferred_ids.contains(task_id.as_str())
                 }
+                NotificationSource::McpResourceUpdated { .. } => false,
             };
             if consume {
                 deferred.push(notification);
@@ -545,7 +550,8 @@ impl SessionActor {
             .filter_map(|notification| match &notification.source {
                 NotificationSource::MonitorCompleted { task_id } => Some(task_id.as_str()),
                 NotificationSource::MonitorEvent { .. }
-                | NotificationSource::BashTaskCompleted { .. } => None,
+                | NotificationSource::BashTaskCompleted { .. }
+                | NotificationSource::McpResourceUpdated { .. } => None,
             })
             .collect();
         let mut monitor_events: Vec<MonitorEventNotification> = Vec::new();
@@ -577,7 +583,8 @@ impl SessionActor {
                     }
                 }
                 NotificationSource::MonitorCompleted { .. }
-                | NotificationSource::BashTaskCompleted { .. } => {
+                | NotificationSource::BashTaskCompleted { .. }
+                | NotificationSource::McpResourceUpdated { .. } => {
                     sections.push(notification.prompt_blocks.clone());
                 }
             }
@@ -645,6 +652,9 @@ impl SessionActor {
                 NotificationSource::MonitorEvent { task_id } => format!("monitor:{task_id}"),
                 NotificationSource::MonitorCompleted { task_id } => format!("monitor-completed:{task_id}"),
                 NotificationSource::BashTaskCompleted { task_id } => format!("bash:{task_id}"),
+                NotificationSource::McpResourceUpdated { server, uri } => {
+                    format!("mcp:{server}:{uri}")
+                }
             }).collect::<Vec<_>>().join(","),
             "Drained pending notifications into single batched turn"
         );

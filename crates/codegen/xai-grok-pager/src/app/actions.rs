@@ -703,6 +703,13 @@ pub enum Action {
     OpenProviders,
     /// Open the retrieval graph settings (`/retrieval-settings`).
     OpenRetrievalSettings,
+    /// Settings → Tools pin toggle: persist the pin list to disk
+    /// (`[hints] pinned_tools`) and notify the agent so the system block
+    /// re-stamps mid-session.
+    PersistPinnedTools {
+        /// Fully-qualified tool names in pin order.
+        tools: Vec<String>,
+    },
     /// Command from the retrieval settings modal.
     RetrievalCommand(crate::views::retrieval_settings_modal::RetrievalCommand),
     /// Credential-free request emitted by the provider modal. The provider
@@ -1111,6 +1118,17 @@ pub enum Action {
     JumpPickerSelect(EntryId),
     /// Close the picker and restore the stashed viewport.
     JumpDismiss,
+    /// Open the settings "Subscribed Tools" sheet: fetch the session's
+    /// active MCP resource subscriptions via `x.ai/mcp/subscriptions`,
+    /// reported back via `TaskResult::McpSubscriptionsLoaded`.
+    FetchMcpSubscriptions,
+    /// Unsubscribe one MCP resource subscription from the sheet via
+    /// `x.ai/mcp/unsubscribe`, reported back via
+    /// `TaskResult::McpUnsubscribeDone`.
+    UnsubscribeMcpResource {
+        server: String,
+        uri: String,
+    },
 }
 /// Persist-and-notify semantics for [`Effect::PersistPermissionMode`].
 ///
@@ -1903,6 +1921,13 @@ pub enum Effect {
         value: crate::settings::SettingValue,
         rollback_value: crate::settings::SettingValue,
     },
+    /// Persist the Settings → Tools pin list to `[hints] pinned_tools` and
+    /// notify the live agent so the `<pinned_tools>` system block re-stamps.
+    PersistPinnedTools {
+        /// Fully-qualified tool names (`server__tool` for MCP, bare client
+        /// name for built-ins), order preserved.
+        tools: Vec<String>,
+    },
     /// Send structured prompt blocks to the agent.
     /// Used for skill injection where the prompt consists of
     /// multiple content blocks (metadata + skill body).
@@ -2032,6 +2057,18 @@ pub enum Effect {
         agent_id: AgentId,
         session_id: acp::SessionId,
         cache: bool,
+    },
+    /// Fetch active MCP resource subscriptions (x.ai/mcp/subscriptions).
+    FetchMcpSubscriptions {
+        agent_id: AgentId,
+        session_id: acp::SessionId,
+    },
+    /// Unsubscribe one MCP resource subscription (x.ai/mcp/unsubscribe).
+    UnsubscribeMcpResource {
+        agent_id: AgentId,
+        session_id: acp::SessionId,
+        server: String,
+        uri: String,
     },
     /// Trigger MCP OAuth for a server (x.ai/mcp/auth_trigger).
     McpAuthTrigger {
@@ -2837,6 +2874,19 @@ pub enum TaskResult {
     McpsListLoaded {
         agent_id: AgentId,
         result: Result<Vec<crate::views::mcps_modal::McpServerInfo>, String>,
+    },
+    /// MCP resource subscriptions fetched from shell ("Subscribed Tools").
+    McpSubscriptionsLoaded {
+        agent_id: AgentId,
+        result: Result<Vec<crate::settings::registry::McpSubscriptionRow>, String>,
+    },
+    /// MCP unsubscribe completed from the sheet. `server`/`uri` echo the
+    /// request so the optimistic row removal can be reconciled on failure.
+    McpUnsubscribeDone {
+        agent_id: AgentId,
+        server: String,
+        uri: String,
+        result: Result<bool, String>,
     },
     /// MCP auth trigger completed.
     McpAuthTriggerDone {

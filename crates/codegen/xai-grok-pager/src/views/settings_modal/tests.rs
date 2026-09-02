@@ -924,6 +924,9 @@ fn rows_contain_categories_and_settings_through_pr_14() {
             // not exposed in the modal.
             // Advanced category.
             "show_tips",
+            // Deep-link into the Tools sub-sheet (search + pin over the
+            // built-in + MCP tool catalog).
+            "open_tools",
             // Per-tip contextual-hints GROUP row, repositioned right after
             // `show_tips`. Its 3 child toggles
             // (`contextual_hints.{undo,plan_mode,image_input}`) are hidden
@@ -7831,4 +7834,121 @@ fn preview_remains_clamped_when_pending_exceeds_widened_width() {
         find_text_row(&buf, area, "note: clamped").is_some(),
         "clamped note must render when pending > interior, even after widening",
     );
+}
+
+// ── Tools sub-sheet (Settings → Tools: search + pin) ──────────────────
+
+use crate::acp::tracker::ToolCatalogEntry;
+
+/// State with a small catalog: one built-in, one MCP tool.
+fn tools_state() -> SettingsModalState {
+    let mut s = make_state();
+    s.pager_snapshot.tool_catalog = vec![
+        ToolCatalogEntry {
+            name: "read_file".to_owned(),
+            description: Some("Reads a file from disk.".to_owned()),
+        },
+        ToolCatalogEntry {
+            name: "arithma__divide".to_owned(),
+            description: Some("High-precision division.".to_owned()),
+        },
+    ];
+    s
+}
+
+fn open_tools_row(s: &mut SettingsModalState) {
+    let row_idx = s
+        .rows
+        .iter()
+        .position(|r| {
+            matches!(
+                r,
+                RowEntry::Setting {
+                    key: "open_tools",
+                    ..
+                }
+            )
+        })
+        .expect("open_tools row present in advanced section");
+    s.selected = row_idx;
+}
+
+#[test]
+fn open_tools_row_status_kind_and_enter_opens_sheet() {
+    let mut s = make_state();
+    let reg = SettingsRegistry::defaults();
+    let meta = reg.find("open_tools").expect("open_tools registered");
+    assert!(
+        matches!(meta.kind, SettingKind::Status),
+        "deep-link row must be non-editable Status kind"
+    );
+    open_tools_row(&mut s);
+    let out = handle_settings_key(&mut s, &KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    assert!(matches!(out, SettingsKeyOutcome::Changed));
+    assert!(matches!(s.state.mode, SettingsMode::PickingTools { .. }));
+}
+
+#[test]
+fn tools_sheet_pin_toggles_and_dispatches_persist() {
+    let mut s = tools_state();
+    open_tools_row(&mut s);
+    let _ = handle_settings_key(&mut s, &KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+    // Enter on the first row pins `read_file`.
+    let out = handle_settings_key(&mut s, &KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    match out {
+        SettingsKeyOutcome::Action(Action::PersistPinnedTools { tools }) => {
+            assert_eq!(tools, vec!["read_file".to_owned()]);
+        }
+        other => panic!("expected PersistPinnedTools action, got {other:?}"),
+    }
+    assert_eq!(s.pager_snapshot.pinned_tools, vec!["read_file".to_owned()]);
+
+    // Second Enter unpins (toggle).
+    let out = handle_settings_key(&mut s, &KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    match out {
+        SettingsKeyOutcome::Action(Action::PersistPinnedTools { tools }) => {
+            assert!(tools.is_empty(), "unpin must clear the list");
+        }
+        other => panic!("expected PersistPinnedTools action, got {other:?}"),
+    }
+    assert!(s.pager_snapshot.pinned_tools.is_empty());
+}
+
+#[test]
+fn tools_sheet_search_filters_and_toggles_target_tool() {
+    let mut s = tools_state();
+    open_tools_row(&mut s);
+    let _ = handle_settings_key(&mut s, &KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+    // Type "div" → narrows to `arithma__divide`.
+    for ch in "div".chars() {
+        let _ = handle_settings_key(
+            &mut s,
+            &KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE),
+        );
+    }
+    let filtered = s.filtered_tool_catalog();
+    assert_eq!(filtered.len(), 1, "query 'div' must narrow to one tool");
+    assert_eq!(filtered[0].name, "arithma__divide");
+
+    // Enter pins the filtered tool.
+    let out = handle_settings_key(&mut s, &KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    match out {
+        SettingsKeyOutcome::Action(Action::PersistPinnedTools { tools }) => {
+            assert_eq!(tools, vec!["arithma__divide".to_owned()]);
+        }
+        other => panic!("expected PersistPinnedTools action, got {other:?}"),
+    }
+}
+
+#[test]
+fn tools_sheet_esc_returns_to_browse() {
+    let mut s = tools_state();
+    open_tools_row(&mut s);
+    let _ = handle_settings_key(&mut s, &KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    assert!(matches!(s.state.mode, SettingsMode::PickingTools { .. }));
+    let out = handle_settings_key(&mut s, &KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+    assert!(matches!(out, SettingsKeyOutcome::Changed));
+    assert!(matches!(s.state.mode, SettingsMode::Browse));
 }

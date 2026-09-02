@@ -4307,6 +4307,44 @@ impl acp::Agent for MvpAgent {
                 );
             }
         }
+        if args.method.as_ref() == "x.ai/pinned_tools_changed"
+            && let Ok(params) = serde_json::from_str::<
+                serde_json::Value,
+            >(args.params.get())
+        {
+            // Empty list is meaningful: clears the block. Deduping preserves
+            // first-seen order; unknown names are skipped at block-build time.
+            let mut seen = std::collections::HashSet::new();
+            let tool_names: Vec<String> = params
+                .get("pinned_tools")
+                .and_then(|v| v.as_array())
+                .map(|items| {
+                    items
+                        .iter()
+                        .filter_map(|item| item.as_str())
+                        .filter(|s| !s.is_empty() && seen.insert(s.to_string()))
+                        .map(str::to_owned)
+                        .collect()
+                })
+                .unwrap_or_default();
+            let mut updated = 0;
+            for handle in self.sessions.borrow().values() {
+                if handle
+                    .cmd_tx
+                    .send(SessionCommand::SetPinnedTools {
+                        tool_names: tool_names.clone(),
+                    })
+                    .is_ok()
+                {
+                    updated += 1;
+                }
+            }
+            tracing::info!(
+                target_sessions = updated,
+                pinned_count = tool_names.len(),
+                "pinned_tools_changed applied"
+            );
+        }
         if args.method.as_ref() == "x.ai/terminal/pty/input"
             && let Ok(params) = serde_json::from_str::<
                 serde_json::Value,

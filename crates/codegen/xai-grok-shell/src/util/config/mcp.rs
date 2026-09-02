@@ -1252,6 +1252,80 @@ fn load_claude_json_mcp_servers_from(
     servers
 }
 
+/// Resolve one MCP server's definition directly from the imported editor
+/// sources (`~/.claude.json`, `~/.cursor/mcp.json`, `.mcp.json`), ignoring the
+/// compat discovery gates and the phase-2 import marker.
+///
+/// Used by the explicit enable path (`x.ai/mcp/toggle` with `enabled: true`):
+/// the extensions modal can surface servers that the gated catalog merge
+/// excludes — a session restored from saved state, or a disabled-name
+/// placeholder whose definition only exists in a gated source. Re-enabling
+/// such a server must still find its definition. This is not discovery (the
+/// compat gates decide which servers are *surfaced*); the user explicitly
+/// named the server, so the sources are read unfiltered here. Source priority
+/// mirrors the gated loaders: claude.json (project scope, then user level),
+/// cursor (project, then global), `.mcp.json` (nearest to `cwd` wins).
+pub fn load_imported_mcp_server_ungated(
+    cwd: &std::path::Path,
+    server_name: &str,
+) -> Option<acp::McpServer> {
+    let home = dirs::home_dir()?;
+    load_imported_mcp_server_ungated_from(
+        &home.join(".claude.json"),
+        &home.join(".cursor").join("mcp.json"),
+        cwd,
+        server_name,
+    )
+}
+
+/// [`load_imported_mcp_server_ungated`] with explicit source paths (testable).
+pub fn load_imported_mcp_server_ungated_from(
+    claude_json_path: &std::path::Path,
+    cursor_global_path: &std::path::Path,
+    cwd: &std::path::Path,
+    server_name: &str,
+) -> Option<acp::McpServer> {
+    let matches_name = |server: &acp::McpServer| {
+        crate::session::managed_mcp::mcp_server_name(server) == server_name
+    };
+
+    if let Some(server) = load_claude_json_mcp_servers_from(claude_json_path, cwd)
+        .into_iter()
+        .find(|server| matches_name(server))
+    {
+        return Some(server);
+    }
+
+    // Project-scoped cursor config first (higher priority), then global —
+    // matching the ordering of the gated `load_cursor_mcp_servers`.
+    let cursor_project_path = cwd.join(".cursor").join("mcp.json");
+    if let Some(server) = load_mcp_json_file(&cursor_project_path)
+        .into_iter()
+        .find(|server| matches_name(server))
+    {
+        return Some(server);
+    }
+
+    if let Some(server) = load_mcp_json_file(cursor_global_path)
+        .into_iter()
+        .find(|server| matches_name(server))
+    {
+        return Some(server);
+    }
+
+    // Nearest-to-cwd `.mcp.json` wins on name conflicts.
+    for mcp_path in find_mcp_json_files(cwd).iter().rev() {
+        if let Some(server) = load_mcp_json_file(mcp_path)
+            .into_iter()
+            .find(|server| matches_name(server))
+        {
+            return Some(server);
+        }
+    }
+
+    None
+}
+
 /// Read and parse a JSON file. Returns `None` on I/O or parse errors (logged).
 pub(crate) fn read_mcp_json(path: &std::path::Path) -> Option<McpConfig> {
     let content = std::fs::read_to_string(path)
@@ -2054,4 +2128,110 @@ enabled = false
     }
 
     // === merge_section tests ===
+
+    /// The explicit enable path must resolve a server definition from the
+    /// imported editor sources even when the compat gates exclude them from
+    /// the discovery catalog. Regression: a claude.json-imported server that
+    /// was disabled could never be re-enabled from the MCP modal — Space sent
+    /// `x.ai/mcp/toggle { enabled: true }` and the shell replied
+    /// "server 'X' not found in config" because the gated catalog merge no
+    /// longer contained the definition.
+    #[test]
+    fn load_imported_mcp_server_ungated_resolves_across_sources() {
+        let dir = tempfile::tempdir().unwrap();
+        let cwd = dir.path().join("work");
+        std::fs::create_dir_all(&cwd).unwrap();
+
+        let claude_json_path = dir.path().join("claude.json");
+        std::fs::write(
+            &claude_json_path,
+            r#"{
+                "mcpServers": {
+                    "merkle": { "command": "/usr/local/bin/merkle-mcp" }
+                }
+            }"#,
+        )
+        .unwrap();
+
+        let cursor_global_path = dir.path().join("cursor").join("mcp.json");
+        std::fs::create_dir_all(cursor_global_path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &cursor_global_path,
+            r#"{
+                "mcpServers": {
+                    "cursor_global_srv": { "url": "https://global.example/mcp" }
+                }
+            }"#,
+        )
+        .unwrap();
+
+        // Project-scoped cursor config overrides the global one by name.
+        let cursor_project_dir = cwd.join(".cursor");
+        std::fs::create_dir_all(&cursor_project_dir).unwrap();
+        std::fs::write(
+            cursor_project_dir.join("mcp.json"),
+            r#"{
+                "mcpServers": {
+                    "cursor_dup": { "url": "https://project.example/mcp" }
+                }
+            }"#,
+        )
+        .unwrap();
+        let cursor_global_with_dup = dir.path().join("cursor-dup").join("mcp.json");
+        std::fs::create_dir_all(cursor_global_with_dup.parent().unwrap()).unwrap();
+        std::fs::write(
+            &cursor_global_with_dup,
+            r#"{
+                "mcpServers": {
+                    "cursor_dup": { "url": "https://global-dup.example/mcp" }
+                }
+            }"#,
+        )
+        .unwrap();
+
+        let resolve = |name: &str| {
+            load_imported_mcp_server_ungated_from(
+                &claude_json_path,
+                &cursor_global_path,
+                &cwd,
+                name,
+            )
+        };
+
+        // claude.json import (the exact merkle-style failure).
+        match resolve("merkle") {
+            Some(acp::McpServer::Stdio(acp::McpServerStdio { command, .. })) => {
+                assert_eq!(
+                    command,
+                    std::path::PathBuf::from("/usr/local/bin/merkle-mcp")
+                );
+            }
+            other => panic!("expected Stdio merkle server, got {other:?}"),
+        }
+
+        // Cursor global fallback when claude.json lacks the name.
+        match resolve("cursor_global_srv") {
+            Some(acp::McpServer::Http(acp::McpServerHttp { url, .. })) => {
+                assert_eq!(url, "https://global.example/mcp");
+            }
+            other => panic!("expected Http cursor server, got {other:?}"),
+        }
+
+        // Project-scoped cursor entry wins over the global one.
+        let project_wins = load_imported_mcp_server_ungated_from(
+            &claude_json_path,
+            &cursor_global_with_dup,
+            &cwd,
+            "cursor_dup",
+        );
+        match project_wins {
+            Some(acp::McpServer::Http(acp::McpServerHttp { url, .. })) => {
+                assert_eq!(url, "https://project.example/mcp");
+            }
+            other => panic!("expected project-scoped cursor server, got {other:?}"),
+        }
+
+        // Unknown names still resolve to None (the "not found" error path).
+        assert!(resolve("not-configured").is_none());
+    }
 }

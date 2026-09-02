@@ -89,6 +89,17 @@ pub fn render_settings_modal(
                     MODAL_TITLE
                 }
             }
+            SettingsMode::PickingTools { .. } => {
+                breadcrumb_owned = format!("{MODAL_TITLE} {} Tools", crate::glyphs::chevron());
+                &breadcrumb_owned
+            }
+            SettingsMode::PickingSubscriptions { .. } => {
+                breadcrumb_owned = format!(
+                    "{MODAL_TITLE} {} Subscribed Tools",
+                    crate::glyphs::chevron()
+                );
+                &breadcrumb_owned
+            }
             _ => MODAL_TITLE,
         }
     };
@@ -177,6 +188,8 @@ pub fn render_settings_modal(
         state.state.mode_kind(),
         SettingsModeKind::PickingEnum
             | SettingsModeKind::PickingGroup
+            | SettingsModeKind::PickingTools
+            | SettingsModeKind::PickingSubscriptions
             | SettingsModeKind::EditingString
             | SettingsModeKind::EditingInt
     );
@@ -190,6 +203,16 @@ pub fn render_settings_modal(
         SettingsModeKind::PickingGroup => {
             state.reset_hit_rects();
             let rects = render_picking_group(buf, inner_area, state, &theme);
+            state.picker_choice_rects = rects;
+        }
+        SettingsModeKind::PickingTools => {
+            state.reset_hit_rects();
+            let rects = render_picking_tools(buf, inner_area, state, &theme);
+            state.picker_choice_rects = rects;
+        }
+        SettingsModeKind::PickingSubscriptions => {
+            state.reset_hit_rects();
+            let rects = render_picking_subscriptions(buf, inner_area, state, &theme);
             state.picker_choice_rects = rects;
         }
         SettingsModeKind::EditingString | SettingsModeKind::EditingInt => {
@@ -1306,8 +1329,7 @@ pub(super) fn take_picker_choice_rects() -> Vec<Rect> {
 /// `render_picking_enum`. `Rect::default()` (zero-sized) when the
 /// search row is not rendered.
 pub(super) fn take_enum_picker_filter_rect() -> Rect {
-    PICKER_FILTER_RECT_SCRATCH
-        .with(|cell| std::mem::replace(&mut *cell.borrow_mut(), Rect::default()))
+    PICKER_FILTER_RECT_SCRATCH.with(|cell| std::mem::take(&mut *cell.borrow_mut()))
 }
 
 /// Render the group sub-sheet: title + description + one row per child Bool
@@ -1467,6 +1489,318 @@ fn render_picking_group(
             buf.set_span(value_x, y, &Span::styled(value_text, value_style), value_w);
         }
         y = y.saturating_add(1);
+    }
+    rects
+}
+
+/// Render the tools sub-sheet: search hint + one row per catalog tool
+/// (`<marker> <name> … <pinned/on|off>` with the description wrapped on the
+/// line below). Returns per-tool hit-rects for mouse routing. Each tool row
+/// is 2 lines tall (name line + description line) so name + description are
+/// ALWAYS both visible — the user never expands anything to read what a
+/// tool does.
+fn render_picking_tools(
+    buf: &mut Buffer,
+    area: Rect,
+    state: &SettingsModalState,
+    theme: &Theme,
+) -> Vec<Rect> {
+    let tool_idx = match &state.state.mode {
+        SettingsMode::PickingTools { tool_idx } => *tool_idx,
+        _ => unreachable!("tools renderer requires PickingTools state"),
+    };
+    if area.width == 0 || area.height == 0 {
+        return Vec::new();
+    }
+    // Header: title + description + gap rows, then the live search line.
+    let header_rows = render_sub_pane_header(
+        buf,
+        area,
+        theme,
+        "Tools",
+        "Every registered tool (built-in and MCP). Pin the ones the model should always hear about; pinned name + description go into the system prompt once, not per turn.",
+        2,
+    );
+    let mut y = area.y + header_rows;
+    let area_end = area.y + area.height;
+
+    // Live search line, mirroring the enum picker's filter row.
+    let query = state.enum_picker_filter.text();
+    let search_label = if query.is_empty() {
+        "Search: (type to filter)".to_string()
+    } else {
+        format!("Search: {query}")
+    };
+    if y >= area_end {
+        return Vec::new();
+    }
+    buf.set_span(
+        area.x,
+        y,
+        &Span::styled(
+            truncate_str(&search_label, area.width as usize),
+            Style::default().fg(theme.gray),
+        ),
+        area.width,
+    );
+    y = y.saturating_add(1);
+
+    let filtered = state.filtered_tool_catalog();
+    let pins: std::collections::HashSet<&str> =
+        state.pinned_tools().iter().map(String::as_str).collect();
+
+    let desc_x = area.x.saturating_add(PICKER_PREFIX_W);
+    let desc_room = (area.width as usize).saturating_sub(PICKER_PREFIX_W as usize);
+    let mut rects: Vec<Rect> = Vec::with_capacity(filtered.len());
+    for (i, entry) in filtered.iter().enumerate() {
+        if y >= area_end {
+            break;
+        }
+        let is_focused = i == tool_idx;
+        let is_pinned = pins.contains(entry.name.as_str());
+        let is_hovered = !is_focused && state.hover_row == Some(i);
+        let bg = settings_list_row_bg(theme, is_focused, is_hovered);
+
+        let row_height = 2.min(area_end.saturating_sub(y) as usize) as u16;
+        let row_rect = Rect {
+            x: area.x,
+            y,
+            width: area.width,
+            height: row_height,
+        };
+        if row_height == 0 {
+            break;
+        }
+        buf.set_style(row_rect, Style::default().bg(bg));
+        rects.push(row_rect);
+
+        let marker = if is_pinned {
+            crate::glyphs::filled_dot()
+        } else {
+            "\u{25CB}"
+        };
+        let marker_style = if is_pinned {
+            Style::default().fg(theme.accent_user).bg(bg)
+        } else {
+            Style::default().fg(theme.gray).bg(bg)
+        };
+        let name_style = if is_focused {
+            Style::default()
+                .fg(theme.text_primary)
+                .bg(bg)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(theme.text_primary).bg(bg)
+        };
+
+        // " <marker>  <name>  <PINNED> " — the pin badge doubles as the
+        // value column; right-aligned like the group sheet's on/off.
+        buf.set_span(area.x, y, &Span::styled(" ", name_style), 1.min(area.width));
+        if area.width > 1 {
+            buf.set_span(
+                area.x + 1,
+                y,
+                &Span::styled(marker, marker_style),
+                PICKER_MARKER_W.min(area.width - 1),
+            );
+        }
+        let badge = if is_pinned { "pinned" } else { "" };
+        let name_x = area.x.saturating_add(PICKER_PREFIX_W);
+        let badge_w = if badge.is_empty() {
+            0
+        } else {
+            badge.width() as u16 + 1
+        };
+        let badge_x = (area.x + area.width)
+            .saturating_sub(badge_w + 1)
+            .max(name_x);
+        let name_room = if badge_w > 0 {
+            (badge_x - name_x).saturating_sub(1) as usize
+        } else {
+            (area.x + area.width).saturating_sub(name_x) as usize
+        };
+        if name_room > 0 {
+            let name_text = truncate_str(&entry.name, name_room);
+            buf.set_span(
+                name_x,
+                y,
+                &Span::styled(name_text, name_style),
+                name_room as u16,
+            );
+        }
+        if badge_w > 0 && badge_x + badge_w <= area.x + area.width {
+            buf.set_span(
+                badge_x,
+                y,
+                &Span::styled(badge, Style::default().fg(theme.accent_user).bg(bg)),
+                badge_w,
+            );
+        }
+
+        // Description line (indented under the name), truncated to fit.
+        let desc_line = y + 1;
+        if desc_line < area_end {
+            let desc = entry
+                .description
+                .as_deref()
+                .unwrap_or("(no description available)")
+                .replace('\n', " ");
+            let desc_text = truncate_str(desc.trim(), desc_room);
+            buf.set_span(
+                desc_x,
+                desc_line,
+                &Span::styled(desc_text, Style::default().fg(theme.gray).bg(bg)),
+                desc_room as u16,
+            );
+        }
+        y = y.saturating_add(row_height);
+    }
+    rects
+}
+
+/// "Subscribed Tools" sub-sheet: every live MCP resource subscription with
+/// its push status. Enter/x unsubscribes the focused stream.
+fn render_picking_subscriptions(
+    buf: &mut Buffer,
+    area: Rect,
+    state: &SettingsModalState,
+    theme: &Theme,
+) -> Vec<Rect> {
+    let sub_idx = match &state.state.mode {
+        SettingsMode::PickingSubscriptions { sub_idx } => *sub_idx,
+        _ => unreachable!("subscriptions renderer requires PickingSubscriptions state"),
+    };
+    if area.width == 0 || area.height == 0 {
+        return Vec::new();
+    }
+    // Header: title + description + gap rows, then the live search line.
+    let header_rows = render_sub_pane_header(
+        buf,
+        area,
+        theme,
+        "Subscribed Tools",
+        "Live MCP resource subscriptions — streams the model receives in async mode. \
+         If one looks lost (no pushes for a long time) or too chatty, unsubscribe it here.",
+        2,
+    );
+    let mut y = area.y + header_rows;
+    let area_end = area.y + area.height;
+
+    // Live search line, mirroring the tools sheet's filter row.
+    let query = state.enum_picker_filter.text();
+    let search_label = if query.is_empty() {
+        "Search: (type to filter)".to_string()
+    } else {
+        format!("Search: {query}")
+    };
+    if y >= area_end {
+        return Vec::new();
+    }
+    buf.set_span(
+        area.x,
+        y,
+        &Span::styled(
+            truncate_str(&search_label, area.width as usize),
+            Style::default().fg(theme.gray),
+        ),
+        area.width,
+    );
+    y = y.saturating_add(1);
+
+    let filtered = state.filtered_subscriptions();
+    let mut rects: Vec<Rect> = Vec::with_capacity(filtered.len());
+    for (i, row) in filtered.iter().enumerate() {
+        if y >= area_end {
+            break;
+        }
+        let is_focused = i == sub_idx;
+        let is_hovered = !is_focused && state.hover_row == Some(i);
+        let bg = settings_list_row_bg(theme, is_focused, is_hovered);
+
+        let row_height = 2.min(area_end.saturating_sub(y) as usize) as u16;
+        let row_rect = Rect {
+            x: area.x,
+            y,
+            width: area.width,
+            height: row_height,
+        };
+        if row_height == 0 {
+            break;
+        }
+        buf.set_style(row_rect, Style::default().bg(bg));
+        rects.push(row_rect);
+
+        let name_style = if is_focused {
+            Style::default()
+                .fg(theme.text_primary)
+                .bg(bg)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(theme.text_primary).bg(bg)
+        };
+        let status_style = Style::default().fg(theme.gray).bg(bg);
+
+        // Line 1: " <server>  <uri>"
+        buf.set_span(area.x, y, &Span::styled(" ", name_style), 1.min(area.width));
+        let prefix_w = PICKER_PREFIX_W.min(area.width.saturating_sub(1));
+        let server_label = format!("{}  ", row.server);
+        if area.width > 1 {
+            buf.set_span(
+                area.x + 1,
+                y,
+                &Span::styled(truncate_str(&server_label, prefix_w as usize), name_style),
+                prefix_w,
+            );
+        }
+        let name_x = area.x.saturating_add(PICKER_PREFIX_W);
+        let uri_room = (area.width as usize).saturating_sub(PICKER_PREFIX_W as usize);
+        if area.width > PICKER_PREFIX_W {
+            buf.set_span(
+                name_x,
+                y,
+                &Span::styled(truncate_str(&row.uri, uri_room), name_style),
+                area.width.saturating_sub(PICKER_PREFIX_W),
+            );
+        }
+
+        // Line 2: status — push count + age, or the unsubscribed tombstone.
+        if row_height < 2 || y + 1 >= area_end {
+            y = y.saturating_add(row_height);
+            continue;
+        }
+        let status = if row.unsubscribed {
+            "unsubscribed (tombstoned; refreshes will not re-subscribe)".to_string()
+        } else {
+            match (row.pushes_seen, row.last_push_ms_ago) {
+                (Some(pushes), Some(ms)) => {
+                    format!("active · {pushes} pushes · last {}s ago", ms / 1000)
+                }
+                (Some(pushes), None) => format!("active · {pushes} pushes · no pushes yet"),
+                _ => "subscribed (no pushes seen yet)".to_string(),
+            }
+        };
+        buf.set_span(
+            name_x,
+            y + 1,
+            &Span::styled(truncate_str(&status, uri_room.max(1)), status_style),
+            area.width.saturating_sub(PICKER_PREFIX_W),
+        );
+        y = y.saturating_add(row_height);
+    }
+    if filtered.is_empty() {
+        let empty = "No active MCP subscriptions. Streams appear here after a tool opens \
+                     one (e.g. ssh sub_open) and the server pushes updates.";
+        if y < area_end {
+            buf.set_span(
+                area.x,
+                y,
+                &Span::styled(
+                    truncate_str(empty, area.width as usize),
+                    Style::default().fg(theme.gray),
+                ),
+                area.width,
+            );
+        }
     }
     rects
 }
@@ -2831,6 +3165,8 @@ pub(super) fn build_shortcuts(state: &SettingsModalState) -> Vec<Shortcut<'stati
             let enter_label = match state.focused_setting() {
                 Some((_, meta)) if matches!(meta.kind, SettingKind::Bool { .. }) => "Enter toggle",
                 Some((key, _)) if key == "open_retrieval_settings" => "Enter open",
+                Some((key, _)) if key == "open_tools" => "Enter open",
+                Some((key, _)) if key == "open_subscriptions" => "Enter open",
                 Some((_, meta)) if matches!(meta.kind, SettingKind::Status) => "Enter",
                 _ => "Enter edit",
             };
@@ -3004,6 +3340,50 @@ pub(super) fn build_shortcuts(state: &SettingsModalState) -> Vec<Shortcut<'stati
             // Bool children toggle in place; Enum children open their picker.
             Shortcut {
                 label: "Space/Enter select",
+                clickable: false,
+                id: 0,
+            },
+            Shortcut {
+                label: "Esc back",
+                clickable: false,
+                id: 0,
+            },
+        ],
+        SettingsMode::PickingTools { .. } => vec![
+            Shortcut {
+                label: "\u{2191}/\u{2193}/j/k nav",
+                clickable: false,
+                id: 0,
+            },
+            Shortcut {
+                label: "Space/Enter pin",
+                clickable: false,
+                id: 0,
+            },
+            Shortcut {
+                label: "type to search",
+                clickable: false,
+                id: 0,
+            },
+            Shortcut {
+                label: "Esc back",
+                clickable: false,
+                id: 0,
+            },
+        ],
+        SettingsMode::PickingSubscriptions { .. } => vec![
+            Shortcut {
+                label: "\u{2191}/\u{2193}/j/k nav",
+                clickable: false,
+                id: 0,
+            },
+            Shortcut {
+                label: "Enter/x unsubscribe",
+                clickable: false,
+                id: 0,
+            },
+            Shortcut {
+                label: "type to search",
                 clickable: false,
                 id: 0,
             },

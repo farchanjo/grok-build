@@ -112,9 +112,25 @@ pub enum NotificationPriority {
 }
 #[derive(Debug, Clone)]
 pub enum NotificationSource {
-    MonitorEvent { task_id: String },
-    MonitorCompleted { task_id: String },
-    BashTaskCompleted { task_id: String },
+    MonitorEvent {
+        task_id: String,
+    },
+    MonitorCompleted {
+        task_id: String,
+    },
+    BashTaskCompleted {
+        task_id: String,
+    },
+    /// An MCP server pushed `notifications/resources/updated` for a
+    /// subscribed resource (e.g. the ssh server's live `command://…/output`
+    /// stream after `sub_open`). The session's resource pump reads the
+    /// fresh content host-side and parks it here so the idle / end-of-turn
+    /// drain delivers it to the model as a synthetic turn — the "async
+    /// result" of the subscription. The drain key is the `uri`.
+    McpResourceUpdated {
+        server: String,
+        uri: String,
+    },
 }
 impl NotificationSource {
     pub fn task_id(&self) -> &str {
@@ -122,6 +138,7 @@ impl NotificationSource {
             Self::MonitorEvent { task_id }
             | Self::MonitorCompleted { task_id }
             | Self::BashTaskCompleted { task_id } => task_id,
+            Self::McpResourceUpdated { uri, .. } => uri,
         }
     }
 }
@@ -146,6 +163,12 @@ pub enum SessionCommand {
     /// serialization guarantees); no-op when the live head already matches.
     ReplaceSystemPrompt {
         system_prompt: String,
+    },
+    /// Mid-session pinned-tools change: re-stamp the `<pinned_tools>` block
+    /// in the system head from the given fully-qualified tool names. No-op
+    /// when the resolved block matches the live head (dedup guard).
+    SetPinnedTools {
+        tool_names: Vec<String>,
     },
     /// Resume hook: after a session is restored with
     /// `awaiting_plan_approval == true`, re-issue the `exit_plan_mode`
@@ -592,6 +615,21 @@ pub enum SessionCommand {
     /// when a final verification round has already flipped the goal to Blocked.
     RecordGoalTurnTaskIds {
         task_ids: Vec<String>,
+    },
+    /// List this session's active MCP resource subscriptions (server, uri,
+    /// push stats) for the pager's "Subscribed Tools" sheet. Stats come from
+    /// the session's resource pump; `None` stats mean the agent-level
+    /// (non-session) path answered.
+    ListMcpSubscriptions {
+        respond_to: oneshot::Sender<Vec<crate::extensions::mcp::McpSubscriptionEntry>>,
+    },
+    /// User-driven unsubscribe from the TUI: sends MCP
+    /// `resources/unsubscribe`, drops the tracked subscription, and
+    /// tombstones the uri so refreshes do not re-subscribe it.
+    UnsubscribeMcpResource {
+        server_name: String,
+        uri: String,
+        respond_to: oneshot::Sender<Result<bool, String>>,
     },
     /// Remove a queued (not-yet-running) prompt from the authoritative prompt
     /// queue. Versioned + idempotent: a stale `expected_version`

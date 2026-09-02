@@ -430,6 +430,30 @@ pub(crate) fn build_tools_meta(tool_names: &[String]) -> acp::Meta {
     meta
 }
 
+/// Build the `AvailableCommandsUpdate.meta` `tool_catalog` payload consumed
+/// by the pager's Settings → Tools section: client-facing name plus
+/// description for every registered tool (built-ins and MCP alike).
+///
+/// Returns the insertable `("tool_catalog", value)` pair, or `None` when the
+/// catalog would be empty (older pager builds simply ignore the key).
+pub(crate) fn build_tool_catalog_meta_opt(
+    definitions: &[xai_grok_tools::types::definition::ToolDefinition],
+) -> Option<(String, serde_json::Value)> {
+    if definitions.is_empty() {
+        return None;
+    }
+    let catalog: Vec<serde_json::Value> = definitions
+        .iter()
+        .map(|d| {
+            serde_json::json!({
+                "name": d.function.name,
+                "description": d.function.description,
+            })
+        })
+        .collect();
+    Some(("tool_catalog".to_owned(), serde_json::Value::Array(catalog)))
+}
+
 struct EffectiveCommandCatalog<'a> {
     builtins: Vec<&'a BuiltinCommand>,
     skills: Vec<SkillCommand<'a>>,
@@ -2234,6 +2258,39 @@ mod tests {
             serde_json::Value::Object(v),
             serde_json::json!({"tools": ["scheduler_create", "image_gen"]})
         );
+    }
+
+    #[test]
+    fn tool_catalog_meta_carries_name_and_description() {
+        let definitions = vec![
+            xai_grok_tools::types::definition::ToolDefinition::function(
+                "read_file",
+                Some("Reads a file."),
+                serde_json::json!({}),
+            ),
+            xai_grok_tools::types::definition::ToolDefinition {
+                kind: xai_grok_tools::types::definition::ToolType::Function,
+                function: xai_grok_tools::types::definition::FunctionTool {
+                    name: "server__search".to_owned(),
+                    description: None,
+                    parameters: serde_json::json!({}),
+                },
+            },
+        ];
+        let (key, value) =
+            build_tool_catalog_meta_opt(&definitions).expect("catalog for non-empty list");
+        assert_eq!(key, "tool_catalog");
+        let entries = value.as_array().expect("array payload");
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0]["name"], "read_file");
+        assert_eq!(entries[0]["description"], "Reads a file.");
+        assert_eq!(entries[1]["name"], "server__search");
+        assert!(entries[1]["description"].is_null());
+    }
+
+    #[test]
+    fn tool_catalog_meta_absent_for_empty_catalog() {
+        assert!(build_tool_catalog_meta_opt(&[]).is_none());
     }
 
     #[test]

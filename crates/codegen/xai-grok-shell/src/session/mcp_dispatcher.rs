@@ -42,10 +42,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use agent_client_protocol as acp;
-use xai_acp_lib::AcpAgentGatewaySender;
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex as TokioMutex;
 use tokio::sync::mpsc::UnboundedReceiver;
+use xai_acp_lib::AcpAgentGatewaySender;
 use xai_grok_mcp::servers::{
     McpClientEvent, McpClientEventKind, McpServerName, McpState, mcp_server_name, mcp_transport_str,
 };
@@ -1862,9 +1862,7 @@ mod tests {
                     tokio::task::yield_now().await;
                 }
 
-                let push = gw_rx
-                    .try_recv()
-                    .expect("resource_updated push must arrive");
+                let push = gw_rx.try_recv().expect("resource_updated push must arrive");
                 assert_eq!(push.method_name(), "ext_notification");
                 match &push {
                     AcpClientMessageGeneric::ExtNotification(ext) => {

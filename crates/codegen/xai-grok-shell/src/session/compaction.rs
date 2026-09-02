@@ -2688,6 +2688,11 @@ mod inline_auto_compact_flow_tests {
         SessionActor {
             tersify_transform: None,
             tersify_level_meta: std::sync::Mutex::new(None),
+            session_cmd_tx: {
+                let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+                tx
+            },
+            mcp_push_stats: Default::default(),
             repetition_guard: std::cell::RefCell::new(Some(
                 crate::session::repetition_guard::RepetitionGuard::default(),
             )),

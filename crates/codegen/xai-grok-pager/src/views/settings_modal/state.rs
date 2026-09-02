@@ -113,6 +113,8 @@ pub(super) enum SettingsModeKind {
     FilterFocused,
     PickingEnum,
     PickingGroup,
+    PickingTools,
+    PickingSubscriptions,
     EditingString,
     EditingInt,
 }
@@ -124,6 +126,8 @@ impl SettingsState {
             SettingsMode::FilterFocused => SettingsModeKind::FilterFocused,
             SettingsMode::PickingEnum { .. } => SettingsModeKind::PickingEnum,
             SettingsMode::PickingGroup { .. } => SettingsModeKind::PickingGroup,
+            SettingsMode::PickingTools { .. } => SettingsModeKind::PickingTools,
+            SettingsMode::PickingSubscriptions { .. } => SettingsModeKind::PickingSubscriptions,
             SettingsMode::EditingString { .. } => SettingsModeKind::EditingString,
             SettingsMode::EditingInt { .. } => SettingsModeKind::EditingInt,
         }
@@ -143,6 +147,19 @@ pub(super) enum SettingsMode {
     PickingGroup {
         key: SettingKey,
         child_idx: usize,
+    },
+    /// Tools sub-sheet: search + pin/unpin over the live tool catalog.
+    /// `tool_idx` indexes the filtered list. Space/Enter toggles the pin
+    /// in place (the sheet stays open); Esc returns to Browse.
+    PickingTools {
+        tool_idx: usize,
+    },
+    /// Subscriptions sub-sheet ("Subscribed Tools"): search over the live
+    /// MCP resource subscriptions. `sub_idx` indexes the filtered list.
+    /// Enter/x unsubscribes the focused stream (after confirm); Esc returns
+    /// to Browse.
+    PickingSubscriptions {
+        sub_idx: usize,
     },
     EditingString {
         key: SettingKey,
@@ -298,7 +315,10 @@ impl SettingsModalState {
             | SettingsMode::PickingGroup { key, .. }
             | SettingsMode::EditingString { key, .. }
             | SettingsMode::EditingInt { key, .. } => Some(*key),
-            SettingsMode::Browse | SettingsMode::FilterFocused => None,
+            SettingsMode::PickingTools { .. }
+            | SettingsMode::PickingSubscriptions { .. }
+            | SettingsMode::Browse
+            | SettingsMode::FilterFocused => None,
         };
 
         self.rows = build_rows(&self.registry);
@@ -352,6 +372,12 @@ impl SettingsModalState {
                 key,
                 child_idx: *child_idx,
             },
+            SettingsMode::PickingTools { .. } => {
+                // Not part of the public projection yet; Browse is the
+                // closest read-only approximation for external consumers.
+                SettingsModalMode::Browse
+            }
+            SettingsMode::PickingSubscriptions { .. } => SettingsModalMode::Browse,
             SettingsMode::EditingString { key, .. } | SettingsMode::EditingInt { key, .. } => {
                 SettingsModalMode::EditingValue { key }
             }
@@ -542,6 +568,30 @@ impl SettingsModalState {
 
     pub(super) fn transition_to_picking_group(&mut self, key: SettingKey, child_idx: usize) {
         self.state.mode = SettingsMode::PickingGroup { key, child_idx };
+    }
+
+    pub(super) fn transition_to_picking_tools(&mut self) {
+        self.state.mode = SettingsMode::PickingTools { tool_idx: 0 };
+        self.hover_row = None;
+    }
+
+    pub(super) fn transition_to_picking_subscriptions(&mut self) {
+        self.state.mode = SettingsMode::PickingSubscriptions { sub_idx: 0 };
+        self.hover_row = None;
+    }
+
+    /// Transition to `PickingSubscriptions` if the focused row is the
+    /// subscriptions deep-link (`open_subscriptions`). Returns whether the
+    /// transition happened.
+    pub fn try_enter_picking_subscriptions(&mut self) -> bool {
+        let Some((key, _meta)) = self.focused_setting() else {
+            return false;
+        };
+        if key != "open_subscriptions" {
+            return false;
+        }
+        self.transition_to_picking_subscriptions();
+        true
     }
 
     pub(super) fn transition_to_editing_string(
@@ -756,6 +806,93 @@ impl SettingsModalState {
         self.transition_to_picking_group(key, 0);
         self.hover_row = None;
         true
+    }
+
+    /// Transition to `PickingTools` if the focused row is the tools
+    /// deep-link (`open_tools`). Returns whether the transition happened.
+    pub fn try_enter_picking_tools(&mut self) -> bool {
+        let Some((key, _meta)) = self.focused_setting() else {
+            return false;
+        };
+        if key != "open_tools" {
+            return false;
+        }
+        self.transition_to_picking_tools();
+        true
+    }
+
+    /// Case-insensitive substring match over the tools sub-sheet filter,
+    /// covering name and description (searching both is the point of the
+    /// sheet: "which tool did that?").
+    fn tool_matches_query(&self, name: &str, description: Option<&str>) -> bool {
+        let query = self.enum_picker_filter.text().to_ascii_lowercase();
+        if query.is_empty() {
+            return true;
+        }
+        name.to_ascii_lowercase().contains(&query)
+            || description
+                .unwrap_or_default()
+                .to_ascii_lowercase()
+                .contains(&query)
+    }
+
+    /// Filtered tool-catalog entries for the `PickingTools` sub-sheet.
+    pub fn filtered_tool_catalog(&self) -> Vec<&crate::acp::tracker::ToolCatalogEntry> {
+        self.pager_snapshot
+            .tool_catalog
+            .iter()
+            .filter(|entry| self.tool_matches_query(&entry.name, entry.description.as_deref()))
+            .collect()
+    }
+
+    /// Case-insensitive substring match over the subscriptions sub-sheet
+    /// filter, covering server and uri.
+    fn subscription_matches_query(&self, server: &str, uri: &str) -> bool {
+        let query = self.enum_picker_filter.text().to_ascii_lowercase();
+        if query.is_empty() {
+            return true;
+        }
+        server.to_ascii_lowercase().contains(&query) || uri.to_ascii_lowercase().contains(&query)
+    }
+
+    /// Filtered subscription rows for the `PickingSubscriptions` sub-sheet.
+    pub fn filtered_subscriptions(&self) -> Vec<&crate::settings::registry::McpSubscriptionRow> {
+        self.pager_snapshot
+            .mcp_subscriptions
+            .iter()
+            .filter(|row| self.subscription_matches_query(&row.server, &row.uri))
+            .collect()
+    }
+
+    pub fn pinned_tools(&self) -> &[String] {
+        &self.pager_snapshot.pinned_tools
+    }
+
+    /// Toggle the pin state of `tool_name`: optimistic in-snapshot update
+    /// (kept across the sheet's lifetime) plus the `Effect::PersistPinnedTools`
+    /// action that writes disk and notifies the agent.
+    pub fn toggle_tool_pin(&mut self, tool_name: &str) -> Option<Action> {
+        let pins = &mut self.pager_snapshot.pinned_tools;
+        if let Some(existing) = pins.iter().position(|p| p == tool_name) {
+            pins.remove(existing);
+        } else {
+            pins.push(tool_name.to_owned());
+        }
+        Some(Action::PersistPinnedTools {
+            tools: pins.clone(),
+        })
+    }
+
+    /// Optimistically drop a subscription row from the snapshot after the
+    /// user triggers unsubscribe (the sheet stays open; the shell effect
+    /// confirms server-side and a later fetch reconciles).
+    pub fn remove_subscription_row(&mut self, server: &str, uri: &str) {
+        self.pager_snapshot
+            .mcp_subscriptions
+            .retain(|row| !(row.server == server && row.uri == uri));
+        if let SettingsMode::PickingSubscriptions { sub_idx } = &mut self.state.mode {
+            *sub_idx = sub_idx.saturating_sub(1);
+        }
     }
 
     /// Transition to `EditingValue` if the focused row is String or Int.

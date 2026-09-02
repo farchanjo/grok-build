@@ -48,6 +48,8 @@ pub mod mcp_methods {
     pub const TOOLS_CHANGED: &str = "x.ai/mcp/tools_changed";
     pub const INIT_PROGRESS: &str = "x.ai/mcp/init_progress";
     pub const RESOURCE_UPDATED: &str = "x.ai/mcp/resource_updated";
+    pub const SUBSCRIPTIONS: &str = "x.ai/mcp/subscriptions";
+    pub const UNSUBSCRIBE: &str = "x.ai/mcp/unsubscribe";
 }
 use crate::agent::MvpAgent;
 use crate::session::managed_mcp::MANAGED_MCP_PREFIX;
@@ -300,6 +302,53 @@ pub struct McpReadResourceResponse {
     pub contents: Vec<McpReadResourceContent>,
 }
 
+/// Request for `x.ai/mcp/subscriptions`: the session's active resource
+/// subscriptions (TUI "Subscribed Tools" sheet).
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct McpSubscriptionsRequest {
+    #[serde(default)]
+    pub session_id: Option<String>,
+}
+
+/// One active subscription row. `pushes_seen` / `last_push_ms_ago` come from
+/// the session's resource pump (`None` on the agent-level path, which has no
+/// pump stats); `unsubscribed` marks a user-tombstoned stream.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct McpSubscriptionEntry {
+    pub server: String,
+    pub uri: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pushes_seen: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_push_ms_ago: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub unsubscribed: Option<bool>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct McpSubscriptionsResponse {
+    pub subscriptions: Vec<McpSubscriptionEntry>,
+}
+
+/// Request for `x.ai/mcp/unsubscribe`: drop one subscription from the TUI.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct McpUnsubscribeRequest {
+    #[serde(default)]
+    pub session_id: Option<String>,
+    pub server: String,
+    pub uri: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct McpUnsubscribeResponse {
+    pub ok: bool,
+}
+
 /// A single resource content block from `resources/read`.
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -353,6 +402,8 @@ enum McpRoute {
     ToggleTool,
     Upsert,
     Delete,
+    Subscriptions,
+    Unsubscribe,
 }
 
 fn route_mcp_method(method: &str) -> Option<McpRoute> {
@@ -367,6 +418,8 @@ fn route_mcp_method(method: &str) -> Option<McpRoute> {
         mcp_methods::TOGGLE_TOOL => McpRoute::ToggleTool,
         mcp_methods::UPSERT => McpRoute::Upsert,
         mcp_methods::DELETE => McpRoute::Delete,
+        mcp_methods::SUBSCRIPTIONS => McpRoute::Subscriptions,
+        mcp_methods::UNSUBSCRIBE => McpRoute::Unsubscribe,
         _ => return None,
     })
 }
@@ -384,6 +437,8 @@ pub async fn handle(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
         Some(McpRoute::ToggleTool) => handle_toggle_tool(agent, args).await,
         Some(McpRoute::Upsert) => handle_upsert(agent, args).await,
         Some(McpRoute::Delete) => handle_delete(agent, args).await,
+        Some(McpRoute::Subscriptions) => handle_subscriptions(agent, args).await,
+        Some(McpRoute::Unsubscribe) => handle_unsubscribe(agent, args).await,
         None => Err(acp::Error::method_not_found()),
     }
 }
@@ -1195,6 +1250,75 @@ async fn handle_call(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
     to_ext_response(Ok(result))
 }
 
+/// List the session's active MCP resource subscriptions (TUI "Subscribed
+/// Tools" sheet). Session-scoped when `sessionId` is present (includes pump
+/// push stats); agent-level otherwise (no stats).
+async fn handle_subscriptions(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
+    let req = parse_params::<McpSubscriptionsRequest>(args)?;
+    let subscriptions = if let Some(ref sid) = req.session_id {
+        let acp_id = acp::SessionId::new(sid.clone());
+        let handle = agent
+            .session_handle_waiting_for_load(&acp_id)
+            .await
+            .ok_or_else(|| acp::Error::invalid_params().data("session not found"))?;
+        handle.mcp_subscriptions().await
+    } else {
+        let mcp_state = agent.agent_mcp_state();
+        let state = mcp_state.lock().await;
+        state
+            .configs
+            .iter()
+            .filter_map(|config| {
+                let name = xai_grok_mcp::servers::mcp_server_name(config).to_string();
+                state.get_client(&name).map(|client| (name, client))
+            })
+            .flat_map(|(server, client)| {
+                client
+                    .subscribed_uris()
+                    .into_iter()
+                    .map(move |uri| McpSubscriptionEntry {
+                        server: server.clone(),
+                        uri,
+                        pushes_seen: None,
+                        last_push_ms_ago: None,
+                        unsubscribed: None,
+                    })
+            })
+            .collect()
+    };
+    to_ext_response(Ok(McpSubscriptionsResponse { subscriptions }))
+}
+
+/// User-driven unsubscribe from the TUI sheet.
+async fn handle_unsubscribe(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
+    let req = parse_params::<McpUnsubscribeRequest>(args)?;
+    let ok = if let Some(ref sid) = req.session_id {
+        let acp_id = acp::SessionId::new(sid.clone());
+        let handle = agent
+            .session_handle_waiting_for_load(&acp_id)
+            .await
+            .ok_or_else(|| acp::Error::invalid_params().data("session not found"))?;
+        handle
+            .mcp_unsubscribe(req.server.clone(), req.uri.clone())
+            .await
+            .map_err(|e| acp::Error::internal_error().data(e))?
+    } else {
+        let mcp_state = agent.agent_mcp_state();
+        let client = {
+            let state = mcp_state.lock().await;
+            state
+                .get_client(&req.server)
+                .cloned()
+                .ok_or_else(|| acp::Error::invalid_params().data("server not found"))?
+        };
+        client
+            .unsubscribe_resource(&req.uri)
+            .await
+            .map_err(|e| acp::Error::internal_error().data(e.to_string()))?
+    };
+    to_ext_response(Ok(McpUnsubscribeResponse { ok }))
+}
+
 async fn handle_read_resource(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
     let req = parse_params::<McpReadResourceRequest>(args)?;
 
@@ -1743,36 +1867,81 @@ async fn handle_toggle(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
         let found = all_servers_with_policy
             .into_iter()
             .find(|s| crate::session::mcp_servers::mcp_server_name(&s.server) == req.server_name);
-        match found {
-            Some(s) if s.disabled_reason.is_some() => {
-                let display = req
-                    .server_name
-                    .strip_prefix(crate::session::managed_mcp::MANAGED_MCP_PREFIX)
-                    .unwrap_or(&req.server_name);
-                // Capitalize first letter for display.
-                let mut chars = display.chars();
-                let capitalized: String = match chars.next() {
-                    Some(c) => c.to_uppercase().chain(chars).collect(),
-                    None => display.to_string(),
-                };
-                let path = match &s.disabled_reason {
-                    Some(
-                        crate::session::managed_mcp::McpDisabledReason::Allowlist { source }
-                        | crate::session::managed_mcp::McpDisabledReason::Denylist { source },
-                    ) => source.display().to_string(),
-                    None => String::new(),
-                };
-                return Err(acp::Error::invalid_params().data(format!(
-                    "The server {capitalized} can't be enabled due to an organization policy ({path}).",
-                )));
-            }
-            None => {
-                return Err(acp::Error::invalid_params()
-                    .data(format!("server '{}' not found in config", req.server_name)));
-            }
-            _ => {}
+        if let Some(s) = found.as_ref()
+            && s.disabled_reason.is_some()
+        {
+            let display = req
+                .server_name
+                .strip_prefix(crate::session::managed_mcp::MANAGED_MCP_PREFIX)
+                .unwrap_or(&req.server_name);
+            // Capitalize first letter for display.
+            let mut chars = display.chars();
+            let capitalized: String = match chars.next() {
+                Some(c) => c.to_uppercase().chain(chars).collect(),
+                None => display.to_string(),
+            };
+            let path = match &s.disabled_reason {
+                Some(
+                    crate::session::managed_mcp::McpDisabledReason::Allowlist { source }
+                    | crate::session::managed_mcp::McpDisabledReason::Denylist { source },
+                ) => source.display().to_string(),
+                None => String::new(),
+            };
+            return Err(acp::Error::invalid_params().data(format!(
+                "The server {capitalized} can't be enabled due to an organization policy ({path}).",
+            )));
         }
-        found.map(|s| s.server)
+        let server_config_resolved = match found {
+            Some(s) => Some(s.server),
+            None => {
+                // The gated catalog merge can legitimately miss a server the
+                // modal showed: a session restored from saved state, or a
+                // disabled-name placeholder whose definition lives only in a
+                // compat-gated source (`~/.claude.json`, `~/.cursor/mcp.json`,
+                // `.mcp.json`). The user is explicitly enabling a named
+                // server, so resolve its definition from the imported sources
+                // without the discovery gates before giving up. The
+                // managed-settings policy still applies to the fallback.
+                let fallback =
+                    crate::util::config::load_imported_mcp_server_ungated(&cwd, &req.server_name);
+                match fallback {
+                    Some(server) => {
+                        let allowlist =
+                            &xai_grok_workspace::permission::resolution::managed_settings()
+                                .mcp_allowlist;
+                        if !allowlist.is_server_allowed(&server) {
+                            let reason =
+                                crate::session::managed_mcp::McpDisabledReason::for_blocked_server(
+                                    allowlist, &server,
+                                );
+                            let display = req.server_name.clone();
+                            let mut chars = display.chars();
+                            let capitalized: String = match chars.next() {
+                                Some(c) => c.to_uppercase().chain(chars).collect(),
+                                None => display,
+                            };
+                            let path = match &reason {
+                                crate::session::managed_mcp::McpDisabledReason::Allowlist {
+                                    source,
+                                }
+                                | crate::session::managed_mcp::McpDisabledReason::Denylist {
+                                    source,
+                                } => source.display().to_string(),
+                            };
+                            return Err(acp::Error::invalid_params().data(format!(
+                                "The server {capitalized} can't be enabled due to an organization policy ({path}).",
+                            )));
+                        }
+                        Some(server)
+                    }
+                    None => {
+                        return Err(acp::Error::invalid_params()
+                            .data(format!("server '{}' not found in config", req.server_name)));
+                    }
+                }
+            }
+        };
+        server_config_resolved
     } else if let Some(connector_id) = gateway_connector_id {
         handle
             .toggle_managed_gateway_tool(connector_id.to_string(), String::new(), false)

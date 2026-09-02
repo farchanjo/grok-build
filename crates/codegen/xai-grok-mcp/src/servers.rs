@@ -1006,6 +1006,10 @@ const STDIO_SHUTDOWN_GRACE: std::time::Duration = std::time::Duration::from_secs
 /// Bounds transport setup for servers without OAuth support.
 const OAUTH_DISCOVERY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
+/// Minimum gap between two `subscribe_new_resources` refreshes per client, so
+/// a chatty tool cannot trigger a `resources/list` per call.
+const SUBSCRIBE_REFRESH_MIN_GAP: std::time::Duration = std::time::Duration::from_millis(500);
+
 /// Per-MCP-server config overrides from `_meta.mcpConfig` in session/new or session/load.
 #[derive(Debug, Clone, Default, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -1432,6 +1436,18 @@ impl xai_tool_runtime::Tool for McpErasedTool {
                 return Err(e);
             }
         };
+
+        // A successful tool call may have created dynamic resources (e.g. the
+        // ssh server's `command://<id>/output` stream after `sub_open`).
+        // Fire-and-forget refresh so any new URIs get `resources/subscribe`d
+        // and their `resources/updated` pushes can reach the session's
+        // resource pump. Rate-limited per client; failures logged inside.
+        if !is_timeout {
+            let client_for_sub = Arc::clone(&client);
+            tokio::spawn(async move {
+                client_for_sub.subscribe_new_resources().await;
+            });
+        }
 
         let is_error = call_result.is_error.unwrap_or(false);
         let mut output = if is_error {
@@ -2598,6 +2614,21 @@ pub struct McpClient {
     /// `.await`, and the handler's `emit` path is short and
     /// allocation-free.
     notify_tx: SharedEventTx,
+    /// URIs successfully subscribed via `resources/subscribe`, tracked so the
+    /// post-tool-call refresh only subscribes NEW URIs (a `tools/*` call may
+    /// have created dynamic resources — e.g. the ssh server's
+    /// `command://<id>/output` after `sub_open` — that were absent from the
+    /// handshake-time `resources/list`). `parking_lot::Mutex` is fine: never
+    /// held across an `.await`.
+    subscribed_uris: parking_lot::Mutex<std::collections::HashSet<String>>,
+    /// Tombstones: URIs the user explicitly unsubscribed via the TUI. Both
+    /// subscribe paths skip them so a post-tool-call refresh (or re-handshake
+    /// subscribe) does not silently re-subscribe an intentionally-dropped
+    /// stream. Cleared with the client instance when the connection restarts.
+    unsubscribed_uris: parking_lot::Mutex<std::collections::HashSet<String>>,
+    /// Millis-since-epoch of the last `subscribe_new_resources` refresh, for
+    /// the min-gap guard so chatty tools do not trigger a list per call.
+    last_subscription_refresh_ms: std::sync::atomic::AtomicU64,
     /// RAII handle for the per-client transport-liveness poller.
     ///
     /// `Some` after [`Self::arm_liveness_watcher`] succeeds; `None`
@@ -2733,6 +2764,9 @@ impl McpClient {
             warn_budget: crate::mcp_http_client::WarnBudget::default(),
             reconnect,
             notify_tx: Arc::new(parking_lot::Mutex::new(None)),
+            subscribed_uris: parking_lot::Mutex::new(std::collections::HashSet::new()),
+            unsubscribed_uris: parking_lot::Mutex::new(std::collections::HashSet::new()),
+            last_subscription_refresh_ms: std::sync::atomic::AtomicU64::new(0),
             liveness_handle: Arc::new(parking_lot::Mutex::new(None)),
         }
     }
@@ -3406,6 +3440,44 @@ impl McpClient {
     ///
     /// Returns the number of successful subscriptions.
     pub async fn subscribe_all_resources(&self) -> Result<usize, McpError> {
+        self.subscribe_resources_filtered(false).await
+    }
+
+    /// Best-effort post-tool-call refresh: subscribe to any listed resource
+    /// URI not already subscribed. A `tools/*` call can create dynamic
+    /// resources (e.g. the ssh server's `command://<id>/output` stream after
+    /// `sub_open`) that were absent from the handshake-time `resources/list`;
+    /// without this refresh their `resources/updated` pushes would never be
+    /// requested. Rate-limited per client (see [`SUBSCRIBE_REFRESH_MIN_GAP`]);
+    /// returns the number of NEW subscriptions (0 when rate-limited or when
+    /// nothing is new).
+    pub async fn subscribe_new_resources(&self) -> usize {
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+        let last = self
+            .last_subscription_refresh_ms
+            .load(std::sync::atomic::Ordering::Relaxed);
+        if now_ms.saturating_sub(last) < SUBSCRIBE_REFRESH_MIN_GAP.as_millis() as u64 {
+            return 0;
+        }
+        self.last_subscription_refresh_ms
+            .store(now_ms, std::sync::atomic::Ordering::Relaxed);
+        match self.subscribe_resources_filtered(true).await {
+            Ok(count) => count,
+            Err(e) => {
+                tracing::debug!(
+                    server = %self.server_name,
+                    error = %e,
+                    "subscribe_new_resources refresh failed"
+                );
+                0
+            }
+        }
+    }
+
+    async fn subscribe_resources_filtered(&self, only_new: bool) -> Result<usize, McpError> {
         let service = self.ensure_initialized().await?;
         let subscribe_capable = service.peer_info().is_some_and(|info| {
             info.capabilities
@@ -3437,11 +3509,25 @@ impl McpClient {
         let mut subscribed = 0usize;
         for resource in resources {
             let uri = resource.uri.clone();
+            if only_new && self.subscribed_uris.lock().contains(&uri) {
+                continue;
+            }
+            if self.unsubscribed_uris.lock().contains(&uri) {
+                tracing::debug!(
+                    server = %self.server_name,
+                    uri = %uri,
+                    "skipping user-unsubscribed uri"
+                );
+                continue;
+            }
             match service
                 .subscribe(SubscribeRequestParams::new(uri.clone()))
                 .await
             {
-                Ok(_) => subscribed += 1,
+                Ok(_) => {
+                    self.subscribed_uris.lock().insert(uri);
+                    subscribed += 1;
+                }
                 Err(e) => tracing::warn!(
                     server = %self.server_name,
                     uri = %uri,
@@ -3456,6 +3542,46 @@ impl McpClient {
             "MCP resource subscriptions established"
         );
         Ok(subscribed)
+    }
+
+    /// Snapshot of currently-tracked subscription URIs (for the TUI
+    /// "Subscribed Tools" sheet). Order is the insertion order of the
+    /// underlying set — best-effort, not a contract.
+    pub fn subscribed_uris(&self) -> Vec<String> {
+        self.subscribed_uris.lock().iter().cloned().collect()
+    }
+
+    /// Unsubscribe from one resource URI: sends `resources/unsubscribe`,
+    /// drops the tracked subscription, and tombstones the URI so neither
+    /// subscribe path re-subscribes it. Returns `true` when the server
+    /// acknowledged the unsubscribe (a tombstone is recorded either way, so
+    /// an already-gone resource cannot come back via refresh).
+    pub async fn unsubscribe_resource(&self, uri: &str) -> Result<bool, McpError> {
+        let service = self.ensure_initialized().await?;
+        let result = service
+            .unsubscribe(rmcp::model::UnsubscribeRequestParams::new(uri.to_string()))
+            .await;
+        self.subscribed_uris.lock().remove(uri);
+        self.unsubscribed_uris.lock().insert(uri.to_string());
+        match result {
+            Ok(_) => {
+                tracing::info!(
+                    server = %self.server_name,
+                    uri = %uri,
+                    "unsubscribed from MCP resource"
+                );
+                Ok(true)
+            }
+            Err(e) => {
+                tracing::warn!(
+                    server = %self.server_name,
+                    uri = %uri,
+                    error = %e,
+                    "resources/unsubscribe failed; tombstoned anyway"
+                );
+                Ok(false)
+            }
+        }
     }
 
     /// Run the MCP handshake (no lock held).
@@ -7755,8 +7881,7 @@ mod tests {
             xai_file_utils::events::EventWriter::noop(),
         );
 
-        let notification =
-            r#"{"jsonrpc":"2.0","method":"notifications/resources/updated","params":{"uri":"file:///a.txt"}}"#;
+        let notification = r#"{"jsonrpc":"2.0","method":"notifications/resources/updated","params":{"uri":"file:///a.txt"}}"#;
         server_out
             .write_all(format!("{notification}\n").as_bytes())
             .await
@@ -7777,4 +7902,143 @@ mod tests {
             other => panic!("expected notification, got {other:?}"),
         }
     }
+}
+
+/// End-to-end `subscribe_all_resources` proof against a real stdio MCP
+/// server process: spawn the fixture (advertises `resources.subscribe`),
+/// handshake, subscribe, and assert every resource URI was acknowledged.
+/// Uses a tempdir-backed script path so the test is hermetic.
+#[tokio::test]
+async fn subscribe_all_resources_subscribes_every_listed_uri() {
+    // Write the fixture server script to a temp dir.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let script = dir.path().join("fixture.py");
+    std::fs::write(
+        &script,
+        r#"
+import json, sys
+PROTOCOL = "2025-06-18"
+RESOURCES = [{"uri": "res://demo/1", "name": "demo", "mimeType": "text/plain"}]
+def reply(id_, result):
+    print(json.dumps({"jsonrpc": "2.0", "id": id_, "result": result}), flush=True)
+for line in sys.stdin:
+    line = line.strip()
+    if not line:
+        continue
+    req = json.loads(line)
+    method = req.get("method", "")
+    id_ = req.get("id")
+    if method == "initialize":
+        reply(id_, {
+            "protocolVersion": PROTOCOL,
+            "capabilities": {"resources": {"subscribe": True, "listChanged": True}},
+            "serverInfo": {"name": "subscribe-fixture", "version": "0.1.0"},
+        })
+    elif id_ is not None:
+        if method == "resources/list":
+            reply(id_, {"resources": RESOURCES})
+        elif method == "resources/subscribe":
+            reply(id_, {})
+        else:
+            reply(id_, {})
+"#,
+    )
+    .expect("write fixture");
+
+    let mut cmd = Command::new("python3");
+    cmd.arg(&script).kill_on_drop(true);
+    xai_grok_tools::util::detach_command(&mut cmd);
+    let (transport, _stderr) = SafeTokioChildProcess::spawn(
+        cmd,
+        "subscribe-fixture".to_string(),
+        xai_file_utils::events::EventWriter::noop(),
+    )
+    .expect("spawn fixture server");
+
+    let client = McpClient::new_stdio("subscribe-fixture".to_string(), transport, None, None);
+
+    let subscribed = client
+        .subscribe_all_resources()
+        .await
+        .expect("subscribe must succeed against a subscribe-capable server");
+    assert_eq!(subscribed, 1, "exactly one resource uri subscribed");
+}
+
+/// `subscribe_new_resources` must subscribe ONLY URIs that appeared after the
+/// handshake-time `resources/list` (dynamic resources created by tool calls,
+/// e.g. ssh `command://<id>/output` after `sub_open`) and never re-subscribe
+/// tracked URIs.
+#[tokio::test]
+async fn subscribe_new_resources_subscribes_only_new_uris() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let script = dir.path().join("fixture.py");
+    std::fs::write(
+        &script,
+        r#"
+import json, sys
+PROTOCOL = "2025-06-18"
+BASE = [{"uri": "res://demo/1", "name": "demo", "mimeType": "text/plain"}]
+EXTRA = [{"uri": "res://demo/2", "name": "demo-2", "mimeType": "text/plain"}]
+STATE = {"subs": 0, "subscribe_calls": 0}
+def reply(id_, result):
+    print(json.dumps({"jsonrpc": "2.0", "id": id_, "result": result}), flush=True)
+for line in sys.stdin:
+    line = line.strip()
+    if not line:
+        continue
+    req = json.loads(line)
+    method = req.get("method", "")
+    id_ = req.get("id")
+    if method == "initialize":
+        reply(id_, {
+            "protocolVersion": PROTOCOL,
+            "capabilities": {"resources": {"subscribe": True, "listChanged": True}},
+            "serverInfo": {"name": "subscribe-fixture", "version": "0.1.0"},
+        })
+    elif id_ is not None:
+        if method == "resources/list":
+            # After the first subscribe, the server "created" a new resource.
+            resources = BASE + EXTRA if STATE["subs"] > 0 else BASE
+            reply(id_, {"resources": resources})
+        elif method == "resources/subscribe":
+            STATE["subs"] += 1
+            STATE["subscribe_calls"] += 1
+            reply(id_, {})
+        else:
+            reply(id_, {})
+"#,
+    )
+    .expect("write fixture");
+
+    let mut cmd = Command::new("python3");
+    cmd.arg(&script).kill_on_drop(true);
+    xai_grok_tools::util::detach_command(&mut cmd);
+    let (transport, _stderr) = SafeTokioChildProcess::spawn(
+        cmd,
+        "subscribe-fixture".to_string(),
+        xai_file_utils::events::EventWriter::noop(),
+    )
+    .expect("spawn fixture server");
+
+    let client = McpClient::new_stdio("subscribe-fixture".to_string(), transport, None, None);
+
+    // Handshake-path subscribe: only the base resource exists.
+    let first = client
+        .subscribe_all_resources()
+        .await
+        .expect("subscribe_all_resources must succeed");
+    assert_eq!(first, 1, "handshake subscribe covers the base uri only");
+
+    // Post-tool-call refresh: the list now grows by one NEW uri; only that
+    // one may be subscribed.
+    let second = client.subscribe_new_resources().await;
+    assert_eq!(second, 1, "refresh subscribes exactly the new uri");
+
+    // A further refresh (rate-limit guard reset for the assertion) must be a
+    // no-op: every listed uri is already tracked.
+    client
+        .last_subscription_refresh_ms
+        .store(0, std::sync::atomic::Ordering::Relaxed);
+    let third = client.subscribe_new_resources().await;
+    assert_eq!(third, 0, "tracked uris must never be re-subscribed");
 }

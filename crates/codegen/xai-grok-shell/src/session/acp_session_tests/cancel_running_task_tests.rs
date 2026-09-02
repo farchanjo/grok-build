@@ -127,6 +127,8 @@ async fn persist_ack_waits_for_disk_flush_before_success() {
                 tokio_util::sync::CancellationToken::new(),
             );
             let actor = Arc::new(SessionActor {
+                mcp_push_stats: Default::default(),
+                session_cmd_tx: dummy_session_cmd_tx(),
                 repetition_guard: std::cell::RefCell::new(Some(
                     crate::session::repetition_guard::RepetitionGuard::default(),
                 )),
@@ -667,6 +669,8 @@ async fn first_turn_memory_injection_disabled_does_not_persist_to_chat_history()
             };
             let (event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel::<SessionEvent>();
             let actor = Arc::new(SessionActor {
+                mcp_push_stats: Default::default(),
+                session_cmd_tx: dummy_session_cmd_tx(),
                 repetition_guard: std::cell::RefCell::new(Some(
                     crate::session::repetition_guard::RepetitionGuard::default(),
                 )),
@@ -988,6 +992,8 @@ async fn cancel_running_task_teardown_clears_running_and_pending_work() {
             let actor = SessionActor {
                 tersify_transform: None,
                 tersify_level_meta: std::sync::Mutex::new(None),
+                mcp_push_stats: Default::default(),
+                session_cmd_tx: dummy_session_cmd_tx(),
                 repetition_guard: std::cell::RefCell::new(Some(
                     crate::session::repetition_guard::RepetitionGuard::default(),
                 )),
@@ -2331,6 +2337,8 @@ async fn cancel_propagates_to_sampler_handle_so_no_further_emission() {
             let actor = SessionActor {
                 tersify_transform: None,
                 tersify_level_meta: std::sync::Mutex::new(None),
+                mcp_push_stats: Default::default(),
+                session_cmd_tx: dummy_session_cmd_tx(),
                 repetition_guard: std::cell::RefCell::new(Some(
                     crate::session::repetition_guard::RepetitionGuard::default(),
                 )),

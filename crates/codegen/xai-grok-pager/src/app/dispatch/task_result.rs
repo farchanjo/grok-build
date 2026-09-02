@@ -794,6 +794,50 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             }
             vec![]
         }
+        TaskResult::McpSubscriptionsLoaded { agent_id, result } => {
+            if let Some(agent) = app.agents.get_mut(&agent_id)
+                && let Some(crate::views::modal::ActiveModal::Settings { state }) =
+                    &mut agent.active_modal
+            {
+                match result {
+                    Ok(rows) => {
+                        state.pager_snapshot.mcp_subscriptions = rows;
+                    }
+                    Err(e) => {
+                        // Keep stale rows; surface the failure as a toast.
+                        app.show_toast(&e);
+                    }
+                }
+            }
+            vec![]
+        }
+        TaskResult::McpUnsubscribeDone {
+            agent_id,
+            server,
+            uri,
+            result,
+        } => {
+            let session_id = app
+                .agents
+                .get(&agent_id)
+                .and_then(|agent| agent.session.session_id.clone());
+            match result {
+                Ok(_acknowledged) => {
+                    app.show_toast(&format!("\u{2713} Unsubscribed: {server} \u{b7} {uri}"));
+                }
+                Err(e) => {
+                    app.show_toast(&e);
+                }
+            }
+            // Refresh the sheet so the rows reflect server truth.
+            match session_id {
+                Some(session_id) => vec![Effect::FetchMcpSubscriptions {
+                    agent_id,
+                    session_id,
+                }],
+                None => vec![],
+            }
+        }
         TaskResult::McpAuthTriggerDone {
             agent_id,
             server_name,

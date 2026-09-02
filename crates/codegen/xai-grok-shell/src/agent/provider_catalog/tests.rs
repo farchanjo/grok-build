@@ -1250,11 +1250,7 @@ async fn zdr_instance_with_failed_endpoint_hop_yields_empty_catalog() {
     // A failed (non-200) /endpoints/zdr hop must not fabricate stamps: the
     // ZDR instance's catalog is empty until the hop succeeds.
     let (zdr_base, zdr_rec, zdr_h) = spawn_scripted_server(vec![
-        hop(
-            "zdr=true",
-            200,
-            r#"{"data":[{"id":"acme/zdr"}]}"#,
-        ),
+        hop("zdr=true", 200, r#"{"data":[{"id":"acme/zdr"}]}"#),
         hop("/endpoints/zdr", 500, r#"{"error":"boom"}"#),
     ]);
     let result = fetch_openrouter_catalog(

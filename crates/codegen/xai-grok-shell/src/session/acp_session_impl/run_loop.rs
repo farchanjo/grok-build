@@ -607,9 +607,26 @@ pub(super) async fn run_session(
     if !session.startup_hints.is_subagent && liveness_watchers_enabled {
         let (event_tx, event_rx) =
             tokio::sync::mpsc::unbounded_channel::<xai_grok_mcp::servers::McpClientEvent>();
+        // Tee: clients emit into one channel; every event fans out to the
+        // status dispatcher AND the session's MCP resource pump (async
+        // subscription delivery to the model).
+        let (tee_tx, mut tee_rx) =
+            tokio::sync::mpsc::unbounded_channel::<xai_grok_mcp::servers::McpClientEvent>();
+        let (actor_event_tx, actor_event_rx) =
+            tokio::sync::mpsc::unbounded_channel::<xai_grok_mcp::servers::McpClientEvent>();
+        {
+            let dispatcher_tx = event_tx.clone();
+            let pump_tx = actor_event_tx.clone();
+            tokio::task::spawn_local(async move {
+                while let Some(event) = tee_rx.recv().await {
+                    let _ = dispatcher_tx.send(event.clone());
+                    let _ = pump_tx.send(event);
+                }
+            });
+        }
         {
             let mut mcp_state = session.mcp_state.lock().await;
-            mcp_state.set_client_event_tx(Some(event_tx));
+            mcp_state.set_client_event_tx(Some(tee_tx));
         }
         let dispatcher_session_id = session.session_info.id.0.to_string();
         let dispatcher_cwd = std::path::PathBuf::from(session.session_info.cwd.as_str());
@@ -646,6 +663,7 @@ pub(super) async fn run_session(
             )
             .await;
         });
+        crate::session::acp_session::spawn_mcp_resource_pump(session.clone(), actor_event_rx);
     }
     let session_for_mcp = session.clone();
     let completion_tx_for_mcp = completion_tx.clone();
@@ -1028,6 +1046,9 @@ pub(super) async fn run_session(
                         }
                         SessionCommand::ReplaceSystemPrompt { system_prompt } => {
                             session.handle_replace_system_prompt(system_prompt).await;
+                        }
+                        SessionCommand::SetPinnedTools { tool_names } => {
+                            session.handle_set_pinned_tools(&tool_names).await;
                         }
                         SessionCommand::RestorePlanApproval => {
                             // Resume re-park: spawn the approval
@@ -1416,6 +1437,13 @@ pub(super) async fn run_session(
                         }
                         SessionCommand::RecordGoalTurnTaskIds { task_ids } => {
                             session.record_reparented_goal_turn_task_ids(task_ids);
+                        }
+                        SessionCommand::ListMcpSubscriptions { respond_to } => {
+                            let _ = respond_to.send(session.list_mcp_subscriptions().await);
+                        }
+                        SessionCommand::UnsubscribeMcpResource { server_name, uri, respond_to } => {
+                            let _ = respond_to
+                                .send(session.unsubscribe_mcp_resource(&server_name, &uri).await);
                         }
                         SessionCommand::RemoveQueuedPrompt { id, expected_version, owner } => {
                             session.handle_remove_queued_prompt(&id, expected_version, owner.as_deref()).await;

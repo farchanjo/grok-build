@@ -70,6 +70,8 @@ async fn create_test_actor(
     );
     chat_state_handle.record_token_usage(total_tokens);
     SessionActor {
+        mcp_push_stats: Default::default(),
+        session_cmd_tx: dummy_session_cmd_tx(),
         repetition_guard: std::cell::RefCell::new(Some(
             crate::session::repetition_guard::RepetitionGuard::default(),
         )),
@@ -631,6 +633,8 @@ async fn create_test_actor_with_memory(
         .as_ref()
         .map_or_else(Default::default, |mc| mc.initial_injection.clone());
     SessionActor {
+        mcp_push_stats: Default::default(),
+        session_cmd_tx: dummy_session_cmd_tx(),
         repetition_guard: std::cell::RefCell::new(Some(
             crate::session::repetition_guard::RepetitionGuard::default(),
         )),
@@ -1444,6 +1448,8 @@ async fn test_e2e_idle_resume_refreshes_model_metadata() {
             });
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
             let actor = SessionActor {
+                mcp_push_stats: Default::default(),
+                session_cmd_tx: dummy_session_cmd_tx(),
                 repetition_guard: std::cell::RefCell::new(Some(
                     crate::session::repetition_guard::RepetitionGuard::default(),
                 )),

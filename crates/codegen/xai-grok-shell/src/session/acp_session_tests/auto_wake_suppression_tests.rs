@@ -139,6 +139,62 @@ fn pending_notification_cap_keeps_newest_entries() {
     );
 }
 #[tokio::test(flavor = "current_thread")]
+async fn drain_delivers_mcp_resource_update_with_intact_text() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (gateway_tx, _) =
+                tokio::sync::mpsc::unbounded_channel::<xai_acp_lib::AcpClientMessage>();
+            let (persistence_tx, _) = tokio::sync::mpsc::unbounded_channel::<PersistenceMsg>();
+            let actor = create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await;
+            let uri = "command://exec-7/output";
+            let update = PendingNotification {
+                prompt_id: "mcp-resource-test".to_string(),
+                prompt_blocks: vec![agent_client_protocol::ContentBlock::Text(
+                    agent_client_protocol::TextContent::new(
+                        "<system-reminder>MCP push from server `ssh` (subscribed resource \
+                         `command://exec-7/output`)</system-reminder>",
+                    ),
+                )],
+                priority: NotificationPriority::Later,
+                source: NotificationSource::McpResourceUpdated {
+                    server: "ssh".to_string(),
+                    uri: uri.to_string(),
+                },
+            };
+            assert_eq!(update.source.task_id(), uri, "drain key must be the uri");
+
+            let mut state = actor.state.lock().await;
+            let drained = SessionActor::drain_notifications_into_turn(
+                &mut state,
+                vec![update],
+                "get_task_output",
+            );
+            assert!(drained, "MCP resource update must surface a drain turn");
+            let item = state.pending_inputs.back().expect("drained turn queued");
+            assert_eq!(
+                item.origin,
+                crate::session::PromptOrigin::NotificationDrain,
+                "MCP updates ride the synthetic NotificationDrain origin"
+            );
+            let text = item
+                .prompt_blocks
+                .iter()
+                .filter_map(|b| match b {
+                    agent_client_protocol::ContentBlock::Text(t) => Some(t.text.as_str()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            assert!(
+                text.contains("MCP push from server `ssh`"),
+                "injected MCP text must survive the drain verbatim: {text}"
+            );
+        })
+        .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn drain_batches_monitor_notifications_into_formatted_block() {
     let local = tokio::task::LocalSet::new();
     local
