@@ -166,7 +166,11 @@ verify:
 			fi; \
 		done; \
 	done; \
-	/usr/bin/grep -Fqx 'export GROK_HOME="$${HOME}/.grok-prod"' "$(DEPLOY_WRAPPER)"; \
+	grok_home_pin="$$(/usr/bin/sed -n 's|^export GROK_HOME="$${HOME}/\(.*\)"|\1|p' "$(DEPLOY_WRAPPER)")"; \
+	if [ "$$(/usr/bin/grep -Fc 'export GROK_HOME=' "$(DEPLOY_WRAPPER)")" -ne 1 ] || [ -z "$$grok_home_pin" ]; then \
+	echo "error: wrapper must pin GROK_HOME exactly once to a HOME-relative path" >&2; \
+	exit 1; \
+	fi; \
 	/usr/bin/grep -Fqx 'export GROK_LEADER_SOCKET="$${GROK_HOME}/leader.sock"' "$(DEPLOY_WRAPPER)"; \
 	/usr/bin/grep -Fqx 'export GROK_CLAUDE_CLI_RUNTIME=1' "$(DEPLOY_WRAPPER)"; \
 	/usr/bin/grep -Fqx 'export GROK_EXTERNAL_OTEL=1' "$(DEPLOY_WRAPPER)"; \
@@ -192,7 +196,7 @@ verify:
 		echo "wrapper: $$wrapper_version" >&2; \
 		exit 1; \
 	fi; \
-	expected_home="$${HOME}/.grok-prod"; \
+	expected_home="$${HOME}/$$grok_home_pin"; \
 	test -d "$$expected_home"; \
 	home_meta="$$("/usr/bin/stat" -f '%Lp' "$$expected_home")"; \
 	if [ "$$home_meta" != "700" ]; then \
