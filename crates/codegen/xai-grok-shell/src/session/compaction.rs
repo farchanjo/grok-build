@@ -681,6 +681,56 @@ impl SessionActor {
             span.record("detail", tracing::field::display(detail));
         }
     }
+
+    /// Emit a `shell.compaction.prep_stage` timing event for the compaction
+    /// preparation pipeline. `stage_mark` is the previous stage boundary and
+    /// is advanced to now; `prep_started` anchors the cumulative elapsed time.
+    /// The last event visible in the unified log names the stage that hung.
+    fn emit_compaction_prep_stage(
+        &self,
+        stage: &str,
+        stage_mark: &mut std::time::Instant,
+        prep_started: std::time::Instant,
+    ) {
+        let now = std::time::Instant::now();
+        crate::session::compaction_config::emit_compaction_event(
+            xai_grok_telemetry::unified_log::LogLevel::Info,
+            "shell.compaction.prep_stage",
+            Some(self.session_info.id.0.as_ref()),
+            Some(serde_json::json!({
+                "stage": stage,
+                "stage_elapsed_ms": now.duration_since(*stage_mark).as_millis() as u64,
+                "prep_elapsed_ms": now.duration_since(prep_started).as_millis() as u64,
+            })),
+        );
+        *stage_mark = now;
+    }
+
+    /// Emit the terminal `shell.compaction.done` / `shell.compaction.failed`
+    /// unified-log event for a compaction run.
+    fn emit_compaction_finished(&self, trigger: &str, elapsed_ms: u64, error: Option<&acp::Error>) {
+        match error {
+            None => crate::session::compaction_config::emit_compaction_event(
+                xai_grok_telemetry::unified_log::LogLevel::Info,
+                "shell.compaction.done",
+                Some(self.session_info.id.0.as_ref()),
+                Some(serde_json::json!({
+                    "trigger": trigger,
+                    "elapsed_ms": elapsed_ms,
+                })),
+            ),
+            Some(err) => crate::session::compaction_config::emit_compaction_event(
+                xai_grok_telemetry::unified_log::LogLevel::Warn,
+                "shell.compaction.failed",
+                Some(self.session_info.id.0.as_ref()),
+                Some(serde_json::json!({
+                    "trigger": trigger,
+                    "elapsed_ms": elapsed_ms,
+                    "error": err.to_string(),
+                })),
+            ),
+        }
+    }
     /// Runs the compact operation over here which compresses the current conversation
     /// and helps with saving the context for the model
     #[tracing::instrument(
@@ -716,14 +766,20 @@ impl SessionActor {
             .unwrap_or(DEFAULT_CONTEXT_WINDOW);
         self.maybe_pre_compaction_flush(total_tokens, context_window, "pre_compaction")
             .await;
-        if let Err(e) = self
+        let compact_start = std::time::Instant::now();
+        let compact_result = self
             .run_compact_inner(
                 user_context,
                 None,
                 xai_grok_telemetry::events::CompactionTrigger::Manual,
             )
-            .await
-        {
+            .await;
+        self.emit_compaction_finished(
+            "manual",
+            compact_start.elapsed().as_millis() as u64,
+            compact_result.as_ref().err(),
+        );
+        if let Err(e) = compact_result {
             let span = tracing::Span::current();
             span.record("success", false);
             span.record("error", e.to_string().as_str());
@@ -1158,10 +1214,13 @@ impl SessionActor {
         auto_continue: Option<crate::extensions::notification::AutoContinueInfo>,
         trigger: xai_grok_telemetry::events::CompactionTrigger,
     ) -> Result<(), acp::Error> {
+        let prep_started = std::time::Instant::now();
+        let mut stage_mark = prep_started;
         let (cancel_sequence, cancel, _cancel_scope) = self.compaction.cancel.enter_with_sequence();
         let tokens_before = self.chat_state_handle.get_total_tokens().await;
         tracing::Span::current().record("compaction_tokens_before", tokens_before as i64);
         self.signals_handle().record_compaction(tokens_before);
+        self.emit_compaction_prep_stage("session_state", &mut stage_mark, prep_started);
         let trigger_str = match trigger {
             xai_grok_telemetry::events::CompactionTrigger::Manual => "manual",
             xai_grok_telemetry::events::CompactionTrigger::Auto => "auto",
@@ -1185,6 +1244,7 @@ impl SessionActor {
             );
             span.record("compaction_trigger", trigger_str);
         }
+        self.emit_compaction_prep_stage("inference_settings", &mut stage_mark, prep_started);
         // Reasoning payloads are provider-specific replay artifacts. They are
         // unnecessary for summarization and can be rejected after a model or
         // provider switch, so compaction always sends portable text/tool history.
@@ -1207,6 +1267,7 @@ impl SessionActor {
             None,
         )
         .await;
+        self.emit_compaction_prep_stage("pre_compact_hook", &mut stage_mark, prep_started);
         let max_retries = 3u32;
         let retry_delay_secs = 3u64;
         let source_snapshot = self
@@ -1233,6 +1294,7 @@ impl SessionActor {
         })?;
         let source_had_images =
             xai_chat_state::compaction_utils::conversation_contains_images(&full_conversation);
+        self.emit_compaction_prep_stage("snapshot_and_identity", &mut stage_mark, prep_started);
         // One immutable descriptor map for this compact attempt. Route
         // fallback, ImageSanitization recovery, and input-ladder step-down all
         // reuse it — never re-invoke media understanding mid-compact.
@@ -1247,6 +1309,7 @@ impl SessionActor {
         } else {
             Vec::new()
         };
+        self.emit_compaction_prep_stage("media_descriptors", &mut stage_mark, prep_started);
         const SUMMARY_BUDGET_RESERVE_TOKENS: u64 = 32_768;
         let verbatim_input_enabled = self.compaction.verbatim_input;
         let simplified_messages = if verbatim_input_enabled {
@@ -1304,11 +1367,13 @@ impl SessionActor {
             return Err(acp::Error::internal_error()
                 .data("Compaction failed: no system message in simplified conversation"));
         }
+        self.emit_compaction_prep_stage("conversation_prep", &mut stage_mark, prep_started);
         let compaction_routes = self.prepare_compaction_routes().await?;
         let inference_config = compaction_routes
             .first()
             .map(|route| route.inference_config.clone())
             .ok_or_else(|| acp::Error::invalid_params().data("no compaction route configured"))?;
+        self.emit_compaction_prep_stage("compaction_routes", &mut stage_mark, prep_started);
         let backend_search_active = self.backend_search_active();
         let effective_tool_defs: Vec<xai_grok_inference_types::ToolDefinition> = self
             .prepare_tool_definitions()
@@ -1348,6 +1413,7 @@ impl SessionActor {
             } else {
                 Vec::new()
             };
+        self.emit_compaction_prep_stage("tool_definitions", &mut stage_mark, prep_started);
         tracing::info!(
             num_tools = compaction_tools.len(),
             tool_tokens = compaction_tool_tokens,
@@ -1428,6 +1494,7 @@ impl SessionActor {
             retry_delay_secs,
             sampling_timeout_secs: 0,
         };
+        self.emit_compaction_prep_stage("sampler_init", &mut stage_mark, prep_started);
         let mut request_turns = simplified_messages.clone();
         let mut input_overflow_rejections: u32 = 0;
         let two_pass_output = self
@@ -1435,6 +1502,7 @@ impl SessionActor {
             .await;
         let mut compact_summary: Option<String> =
             two_pass_output.as_ref().map(|o| o.content.clone());
+        self.emit_compaction_prep_stage("two_pass_pass2", &mut stage_mark, prep_started);
         while compact_summary.is_none() {
             match xai_grok_compaction::sample_full_replace_summary(
                 &sampler,
@@ -2476,6 +2544,7 @@ impl SessionActor {
             )
             .await;
         let elapsed_ms = compact_start.elapsed().as_millis() as i64;
+        self.emit_compaction_finished("auto", elapsed_ms as u64, result.as_ref().err());
         match result {
             Ok(()) => {
                 let tokens_after = self.chat_state_handle.get_total_tokens().await;

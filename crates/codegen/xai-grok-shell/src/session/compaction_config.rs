@@ -4,10 +4,87 @@ use std::cell::Cell;
 use std::cell::RefCell;
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::sync::OnceLock;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::AtomicU8;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
+
+/// One queued compaction log entry flowing through the async event channel.
+#[derive(Debug)]
+pub(crate) struct CompactionLogEntry {
+    pub(crate) lvl: xai_grok_telemetry::unified_log::LogLevel,
+    pub(crate) msg: String,
+    pub(crate) sid: Option<String>,
+    pub(crate) ctx: Option<serde_json::Value>,
+}
+
+/// Process-wide sender for compaction unified-log events.
+///
+/// Compaction emits progress events (prep stages, generation start/end,
+/// completion) from the session actor thread. Writing them synchronously would
+/// put file I/O on that thread and inside the compact critical path; instead
+/// the sender pushes entries onto a tokio mpsc channel (lock-free send) and a
+/// dedicated drain task owns the disk write. Before the worker is installed
+/// (unit tests, early startup) events fall back to a direct synchronous write,
+/// preserving the pre-channel behavior.
+static COMPACTION_EVENT_SINK: OnceLock<tokio::sync::mpsc::UnboundedSender<CompactionLogEntry>> =
+    OnceLock::new();
+
+/// Spawn the drain task and install the process-wide compaction event channel.
+///
+/// Idempotent: only the first install wins; later sessions keep using the
+/// original worker. Requires an active tokio runtime (session spawn context).
+pub(crate) fn install_compaction_event_worker() {
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<CompactionLogEntry>();
+    if COMPACTION_EVENT_SINK.set(tx).is_err() {
+        return;
+    }
+    tokio::spawn(async move {
+        while let Some(entry) = rx.recv().await {
+            xai_grok_telemetry::unified_log::emit(
+                entry.lvl,
+                &entry.msg,
+                entry.sid.as_deref(),
+                entry.ctx,
+            );
+        }
+    });
+}
+
+/// Queue one compaction log entry through the async event channel.
+///
+/// Falls back to a direct synchronous write when the worker is not installed
+/// or the channel is closed during teardown, so events are never silently
+/// dropped in either direction.
+pub(crate) fn emit_compaction_event(
+    lvl: xai_grok_telemetry::unified_log::LogLevel,
+    msg: &str,
+    sid: Option<&str>,
+    ctx: Option<serde_json::Value>,
+) {
+    let Some(tx) = COMPACTION_EVENT_SINK.get() else {
+        xai_grok_telemetry::unified_log::emit(lvl, msg, sid, ctx);
+        return;
+    };
+    let entry = CompactionLogEntry {
+        lvl,
+        msg: msg.to_owned(),
+        sid: sid.map(str::to_owned),
+        ctx,
+    };
+    if let Err(send_error) = tx.send(entry) {
+        // Worker gone (teardown) — recover the entry and write synchronously
+        // so the event still lands.
+        let entry = send_error.0;
+        xai_grok_telemetry::unified_log::emit(
+            entry.lvl,
+            &entry.msg,
+            entry.sid.as_deref(),
+            entry.ctx,
+        );
+    }
+}
 
 /// True only for trigger-bearing interactive cancels that are allowed to stop
 /// compaction. Send-now, legacy/teardown `None`, and the internal persistence

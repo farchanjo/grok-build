@@ -1740,20 +1740,26 @@ pub(crate) async fn spawn_session_actor(
         rewind_pending_prompt: std::sync::Mutex::new(None),
         startup_hints,
         forked_tool_override,
-        compaction: super::compaction_config::CompactionConfig {
-            threshold_percent: std::cell::Cell::new(auto_compact_threshold_percent),
-            force_compact: force_compact.clone(),
-            context_window_override,
-            count: std::sync::atomic::AtomicU64::new(0),
-            auto_compact_suppressed: std::sync::atomic::AtomicU8::new(0),
-            previous_model: std::cell::Cell::new(None),
-            compaction_mode,
-            verbatim_input: compaction_verbatim_input,
-            tool_choice: compaction_tool_choice,
-            prefire: crate::session::compaction_config::PrefireState::default(),
-            prefix_released: std::sync::atomic::AtomicBool::new(false),
-            cancel: compaction_cancel.clone(),
-            rolling_in_flight: std::sync::atomic::AtomicBool::new(false),
+        // Compaction progress events flow through a tokio mpsc channel to a
+        // dedicated drain task (lock-free send on the actor thread); install
+        // the process-wide worker here where a tokio runtime is guaranteed.
+        compaction: {
+            crate::session::compaction_config::install_compaction_event_worker();
+            super::compaction_config::CompactionConfig {
+                threshold_percent: std::cell::Cell::new(auto_compact_threshold_percent),
+                force_compact: force_compact.clone(),
+                context_window_override,
+                count: std::sync::atomic::AtomicU64::new(0),
+                auto_compact_suppressed: std::sync::atomic::AtomicU8::new(0),
+                previous_model: std::cell::Cell::new(None),
+                compaction_mode,
+                verbatim_input: compaction_verbatim_input,
+                tool_choice: compaction_tool_choice,
+                prefire: crate::session::compaction_config::PrefireState::default(),
+                prefix_released: std::sync::atomic::AtomicBool::new(false),
+                cancel: compaction_cancel.clone(),
+                rolling_in_flight: std::sync::atomic::AtomicBool::new(false),
+            }
         },
         memory: super::memory_state::SessionMemory {
             flush_config: memory_config.as_ref().map_or_else(

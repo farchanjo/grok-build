@@ -491,6 +491,68 @@ pub(crate) async fn generate_session_compact(
     .await
 }
 
+/// Classify a [`CompactFailure`] into a short unified-log outcome tag.
+pub(crate) fn compact_failure_outcome(failure: &CompactFailure) -> &'static str {
+    match failure {
+        CompactFailure::ImageSanitization(_) => "image_sanitization",
+        CompactFailure::Deterministic(_) => "deterministic",
+        CompactFailure::Transient(_) => "transient",
+        CompactFailure::Cancelled => "cancelled",
+    }
+}
+
+/// Human-readable message for a [`CompactFailure`] in unified-log events.
+pub(crate) fn compact_failure_message(failure: &CompactFailure) -> String {
+    match failure {
+        CompactFailure::ImageSanitization(error)
+        | CompactFailure::Deterministic(error)
+        | CompactFailure::Transient(error) => error.to_string(),
+        CompactFailure::Cancelled => "cancelled".to_string(),
+    }
+}
+
+/// Emit the `shell.compaction.generate_start`/`generate_end` unified-log pair
+/// for one compaction model generation. Success logs at info with stream
+/// metrics; failures log at warn with the outcome tag so an idle-timeout or
+/// wall-budget cut is visible in production logs.
+pub(crate) fn emit_compaction_generate_outcome(
+    session_id: &acp::SessionId,
+    inference_config: &InferenceConfig,
+    elapsed: std::time::Duration,
+    outcome: &Result<CompactOutput, CompactFailure>,
+) {
+    let elapsed_ms = elapsed.as_millis() as u64;
+    match outcome {
+        Ok(output) => crate::session::compaction_config::emit_compaction_event(
+            xai_grok_telemetry::unified_log::LogLevel::Info,
+            "shell.compaction.generate_end",
+            Some(session_id.0.as_ref()),
+            Some(serde_json::json!({
+                "model": inference_config.model.as_str(),
+                "outcome": "success",
+                "elapsed_ms": elapsed_ms,
+                "ttft_ms": output.ttft_ms,
+                "stream_ms": output.stream_ms,
+                "delta_count": output.delta_count,
+                "summary_chars": output.content.chars().count(),
+                "stop_reason": output.stop_reason,
+                "truncated": output.truncated,
+            })),
+        ),
+        Err(failure) => crate::session::compaction_config::emit_compaction_event(
+            xai_grok_telemetry::unified_log::LogLevel::Warn,
+            "shell.compaction.generate_end",
+            Some(session_id.0.as_ref()),
+            Some(serde_json::json!({
+                "model": inference_config.model.as_str(),
+                "outcome": compact_failure_outcome(failure),
+                "elapsed_ms": elapsed_ms,
+                "error": compact_failure_message(failure),
+            })),
+        ),
+    }
+}
+
 /// Cancellation-aware compaction generator used by session-owned compaction
 /// paths. The wrapper above preserves the existing test/helper API.
 pub(crate) async fn generate_session_compact_cancellable(

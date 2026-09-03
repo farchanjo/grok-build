@@ -1129,7 +1129,16 @@ impl SessionActor {
         &self,
     ) -> Result<Vec<crate::session::helpers::full_replace_compaction::CompactionRoute>, acp::Error>
     {
+        let routes_prep_started = std::time::Instant::now();
         self.refresh_token_if_expired().await;
+        xai_grok_telemetry::unified_log::info(
+            "shell.compaction.prep_stage",
+            Some(self.session_info.id.0.as_ref()),
+            Some(serde_json::json!({
+                "stage": "routes.refresh_token",
+                "stage_elapsed_ms": routes_prep_started.elapsed().as_millis() as u64,
+            })),
+        );
         let configured = self
             .agent
             .borrow()
@@ -1139,6 +1148,7 @@ impl SessionActor {
         let mut routes = Vec::with_capacity(configured.len());
 
         for model_ref in configured {
+            let resolve_started = std::time::Instant::now();
             let resolved = self
                 .resolve_aux_route(
                     crate::session::auxiliary_route::AuxiliaryPurpose::Compaction,
@@ -1162,6 +1172,15 @@ impl SessionActor {
                     "configured compaction model '{model_ref}' could not be initialized: {error}"
                 ))
             })?;
+            xai_grok_telemetry::unified_log::info(
+                "shell.compaction.route_resolved",
+                Some(self.session_info.id.0.as_ref()),
+                Some(serde_json::json!({
+                    "selection_id": model_ref.as_str(),
+                    "model": config.model.as_str(),
+                    "resolve_init_ms": resolve_started.elapsed().as_millis() as u64,
+                })),
+            );
             routes.push(
                 crate::session::helpers::full_replace_compaction::CompactionRoute {
                     client,

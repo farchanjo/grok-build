@@ -107,7 +107,11 @@ pub type MediaDescriptorMap = HashMap<MediaDescriptorKey, MediaDescriptor>;
 #[derive(Debug)]
 pub struct MediaDescriptorStore {
     path: PathBuf,
-    entries: parking_lot::RwLock<MediaDescriptorMap>,
+    /// Lock-free shared map. Readers (`get`, `snapshot`) load without blocking
+    /// and `snapshot` is O(1) (an `Arc` clone of the current generation).
+    /// Writers clone-on-write and publish through `rcu`, whose compare-and-
+    /// swap retry keeps racing inserts from dropping each other's entries.
+    entries: arc_swap::ArcSwap<MediaDescriptorMap>,
 }
 
 impl MediaDescriptorStore {
@@ -116,35 +120,40 @@ impl MediaDescriptorStore {
         let entries = load_descriptor_map(&path)?;
         Ok(Self {
             path,
-            entries: parking_lot::RwLock::new(entries),
+            entries: arc_swap::ArcSwap::from_pointee(entries),
         })
     }
 
     pub fn empty(session_dir: &Path) -> Self {
         Self {
             path: session_dir.join(MEDIA_DESCRIPTORS_FILE),
-            entries: parking_lot::RwLock::new(HashMap::new()),
+            entries: arc_swap::ArcSwap::from_pointee(HashMap::new()),
         }
     }
 
     pub fn get(&self, key: &MediaDescriptorKey) -> Option<MediaDescriptor> {
-        self.entries.read().get(key).cloned()
+        self.entries.load().get(key).cloned()
     }
 
     pub fn snapshot(&self) -> Arc<MediaDescriptorMap> {
-        Arc::new(self.entries.read().clone())
+        self.entries.load_full()
     }
 
     pub fn insert(&self, descriptor: MediaDescriptor) -> io::Result<()> {
         descriptor.validate()?;
-        let mut entries = self.entries.write();
-        if !entries.contains_key(&descriptor.key) && entries.len() >= MAX_MEDIA_DESCRIPTOR_ENTRIES {
+        // Limit pre-check against the lock-free snapshot (matching the
+        // serialized original: replacing an existing key is always allowed).
+        // A same-instant race of distinct keys can overshoot the limit by one;
+        // the file-size cap below still bounds the on-disk footprint.
+        let snapshot = self.entries.load();
+        let replacing = snapshot.contains_key(&descriptor.key);
+        if !replacing && snapshot.len() >= MAX_MEDIA_DESCRIPTOR_ENTRIES {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 "media descriptor store reached its entry limit",
             ));
         }
-        let replacing = entries.contains_key(&descriptor.key);
+        drop(snapshot);
         let record_len = descriptor_record(&descriptor)?.len() as u64;
         let needs_compaction = replacing
             || std::fs::metadata(&self.path)
@@ -153,22 +162,45 @@ impl MediaDescriptorStore {
                 })
                 .unwrap_or(false);
         if needs_compaction {
-            let descriptor_key = descriptor.key.clone();
-            let previous = entries.insert(descriptor_key.clone(), descriptor);
-            if let Err(error) = rewrite_descriptors(&self.path, &entries) {
-                if let Some(previous) = previous {
-                    entries.insert(descriptor_key, previous);
-                } else {
-                    entries.remove(&descriptor_key);
+            // Rewrite path: clone-on-write from the lock-free snapshot,
+            // atomically replace the file with the full map (tempfile +
+            // rename), then publish the same map. The rewrite runs inside the
+            // rcu closure so every published generation is fully persisted;
+            // a racing insert triggers a retry that re-persists the merged
+            // generation. On rewrite failure the previous generation is
+            // published unchanged and the error is surfaced.
+            let rewrite_error = std::cell::Cell::new(None);
+            self.entries.rcu(|current| {
+                // `current` is `&Arc<MediaDescriptorMap>`: clone the inner map,
+                // not the Arc, so the published generation is a new owned map.
+                let mut next = MediaDescriptorMap::clone(current);
+                next.insert(descriptor.key.clone(), descriptor.clone());
+                match rewrite_descriptors(&self.path, &next) {
+                    Ok(()) => {
+                        rewrite_error.set(None);
+                        next
+                    }
+                    Err(error) => {
+                        rewrite_error.set(Some(error));
+                        MediaDescriptorMap::clone(current)
+                    }
                 }
+            });
+            if let Some(error) = rewrite_error.into_inner() {
                 return Err(error);
             }
-            Ok(())
-        } else {
-            append_descriptor(&self.path, &descriptor)?;
-            entries.insert(descriptor.key.clone(), descriptor);
-            Ok(())
+            return Ok(());
         }
+        // Append path: a single append write is line-atomic across concurrent
+        // writers, and the rcu publish retries from the winner generation so
+        // concurrent inserts never lose each other's in-memory entries.
+        append_descriptor(&self.path, &descriptor)?;
+        self.entries.rcu(|current| {
+            let mut next = MediaDescriptorMap::clone(current);
+            next.insert(descriptor.key.clone(), descriptor.clone());
+            next
+        });
+        Ok(())
     }
 }
 

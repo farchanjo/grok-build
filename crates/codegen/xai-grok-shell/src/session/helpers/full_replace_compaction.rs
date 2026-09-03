@@ -20,8 +20,9 @@
 //! `context_overflow` / `deterministic` flags on
 //! [`FullReplaceError`](xai_grok_compaction::FullReplaceError).
 
-use std::sync::Mutex;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use arc_swap::ArcSwapOption;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 use std::time::Duration;
 
 use agent_client_protocol as acp;
@@ -159,17 +160,18 @@ pub(crate) struct ShellCompactionSampler {
     cancel: tokio_util::sync::CancellationToken,
     cancelled: std::sync::atomic::AtomicBool,
     /// Full output of the most recent successful sample (for L5 telemetry).
-    last_success: Mutex<Option<CompactOutput>>,
+    last_success: ArcSwapOption<CompactOutput>,
     /// Route of the most recent failed attempt, for failure attribution.
-    last_failed: Mutex<Option<FailedCompactionRoute>>,
+    last_failed: ArcSwapOption<FailedCompactionRoute>,
     /// Read-only tool resolver that lets the summarizer open artifacts
     /// referenced in history. `None` keeps the pure single-call path.
     resolver: Option<std::sync::Arc<dyn CompactionToolResolver>>,
     /// `(rounds, calls)` spent by the resolver on this sampler's lifetime.
-    resolver_stats: Mutex<(u32, u32)>,
+    resolver_rounds: AtomicU32,
+    resolver_calls: AtomicU32,
     /// Resolved lookup turns, cached so the engine's retry ladder does not
     /// re-pay the resolution rounds. `None` means "not attempted yet".
-    resolved_lookups: Mutex<Option<Vec<ConversationItem>>>,
+    resolved_lookups: ArcSwapOption<Vec<ConversationItem>>,
 }
 
 impl ShellCompactionSampler {
@@ -201,11 +203,12 @@ impl ShellCompactionSampler {
             tool_choice,
             cancel: tokio_util::sync::CancellationToken::new(),
             cancelled: std::sync::atomic::AtomicBool::new(false),
-            last_success: Mutex::new(None),
-            last_failed: Mutex::new(None),
+            last_success: ArcSwapOption::empty(),
+            last_failed: ArcSwapOption::empty(),
             resolver: None,
-            resolver_stats: Mutex::new((0, 0)),
-            resolved_lookups: Mutex::new(None),
+            resolver_rounds: AtomicU32::new(0),
+            resolver_calls: AtomicU32::new(0),
+            resolved_lookups: ArcSwapOption::empty(),
         }
     }
 
@@ -226,7 +229,10 @@ impl ShellCompactionSampler {
 
     /// `(rounds, calls)` the resolver spent before the summary was produced.
     pub(crate) fn resolver_stats(&self) -> (u32, u32) {
-        *self.resolver_stats.lock().unwrap()
+        (
+            self.resolver_rounds.load(Ordering::Acquire),
+            self.resolver_calls.load(Ordering::Acquire),
+        )
     }
 
     /// Pre-seed the resolved lookup context so every later sample call reuses
@@ -234,7 +240,7 @@ impl ShellCompactionSampler {
     /// compaction resolves the whole cold source once, then feeds the folded
     /// context to every chunk and merge round.
     pub(crate) fn with_resolved_lookups(mut self, items: Vec<ConversationItem>) -> Self {
-        *self.resolved_lookups.lock().unwrap() = Some(items);
+        self.resolved_lookups.store(Some(Arc::new(items)));
         self
     }
 
@@ -249,18 +255,33 @@ impl ShellCompactionSampler {
 
     /// Take the [`CompactOutput`] of the most recent successful sample, if any.
     pub(crate) fn take_last_success(&self) -> Option<CompactOutput> {
-        self.last_success.lock().unwrap().take()
+        self.last_success
+            .swap(None)
+            .map(|arc| match Arc::try_unwrap(arc) {
+                Ok(output) => output,
+                // Shared with a concurrent reader; reconstruct without Clone.
+                Err(arc) => CompactOutput {
+                    content: arc.content.clone(),
+                    stop_reason: arc.stop_reason.clone(),
+                    truncated: arc.truncated,
+                    ttft_ms: arc.ttft_ms,
+                    stream_ms: arc.stream_ms,
+                    delta_count: arc.delta_count,
+                    itl_max_ms: arc.itl_max_ms,
+                },
+            })
     }
 
     /// Route of the most recent failed attempt, for failure attribution.
     pub(crate) fn last_failed_route(&self) -> Option<FailedCompactionRoute> {
-        self.last_failed.lock().unwrap().clone()
+        self.last_failed.load_full().map(Arc::unwrap_or_clone)
     }
 
     /// Remember which route just failed. The last failure wins: it is the one
     /// whose credential the provider surface should offer to repair.
     fn record_failed_route(&self, route: &CompactionRoute) {
-        *self.last_failed.lock().unwrap() = Some(FailedCompactionRoute::from_route(route));
+        self.last_failed
+            .store(Some(Arc::new(FailedCompactionRoute::from_route(route))));
     }
 
     pub(crate) fn selected_model(&self) -> Option<&str> {
@@ -288,7 +309,7 @@ impl CompactionSampler for ShellCompactionSampler {
         // explicitly forbids tool calls, so it must not be in front of the model
         // while it decides what to look up.
         let mut resolved_turns = turns.to_vec();
-        let cached_lookups = self.resolved_lookups.lock().unwrap().clone();
+        let cached_lookups = self.resolved_lookups.load_full().map(Arc::unwrap_or_clone);
         if let Some(items) = cached_lookups {
             resolved_turns.extend(items);
         } else if let Some(resolver) = self.resolver.as_deref() {
@@ -303,14 +324,16 @@ impl CompactionSampler for ShellCompactionSampler {
                     &self.cancel,
                 )
                 .await;
-                *self.resolver_stats.lock().unwrap() = (outcome.rounds, outcome.calls);
+                self.resolver_rounds
+                    .store(outcome.rounds, Ordering::Release);
+                self.resolver_calls.store(outcome.calls, Ordering::Release);
                 if let Some(summary) = outcome.early_summary {
                     // The summarizer answered instead of asking for context.
                     // Stash the output like the streaming path below, otherwise
                     // the caller finds `last_success` empty and panics.
-                    *self.resolved_lookups.lock().unwrap() = Some(Vec::new());
+                    self.resolved_lookups.store(Some(Arc::new(Vec::new())));
                     let response = summary.clone();
-                    *self.last_success.lock().unwrap() = Some(CompactOutput {
+                    self.last_success.store(Some(Arc::new(CompactOutput {
                         content: summary,
                         stop_reason: None,
                         truncated: false,
@@ -318,7 +341,7 @@ impl CompactionSampler for ShellCompactionSampler {
                         stream_ms: None,
                         delta_count: 0,
                         itl_max_ms: None,
-                    });
+                    })));
                     return Ok(LlmCompactionOutput {
                         response,
                         thinking: String::new(),
@@ -329,7 +352,7 @@ impl CompactionSampler for ShellCompactionSampler {
                     .map(ConversationItem::user)
                     .into_iter()
                     .collect();
-                *self.resolved_lookups.lock().unwrap() = Some(items.clone());
+                self.resolved_lookups.store(Some(Arc::new(items.clone())));
                 resolved_turns.extend(items);
             }
         }
@@ -366,6 +389,22 @@ impl CompactionSampler for ShellCompactionSampler {
             let route = self.routes.get(route_index).ok_or_else(|| {
                 CompactionSampleError::Build("no usable compaction route configured".to_owned())
             })?;
+            let generate_started = std::time::Instant::now();
+            crate::session::compaction_config::emit_compaction_event(
+                xai_grok_telemetry::unified_log::LogLevel::Info,
+                "shell.compaction.generate_start",
+                Some(self.session_id.0.as_ref()),
+                Some(serde_json::json!({
+                    "model": route.inference_config.model.as_str(),
+                    "route": route.selection_id.as_str(),
+                    "num_messages": recovery_history
+                        .as_ref()
+                        .unwrap_or(&text_only_history)
+                        .len(),
+                    "idle_timeout_secs": self.idle_timeout.as_secs(),
+                    "wall_clock_budget_secs": self.wall_clock_budget_secs,
+                })),
+            );
             let attempt = generate_session_compact_cancellable(
                 recovery_history
                     .as_ref()
@@ -390,6 +429,12 @@ impl CompactionSampler for ShellCompactionSampler {
                 &self.cancel,
             )
             .await;
+            crate::session::helpers::session_compact::emit_compaction_generate_outcome(
+                &self.session_id,
+                &route.inference_config,
+                generate_started.elapsed(),
+                &attempt,
+            );
             // Record before classification: a fallback or a terminal failure both
             // need the route whose credential actually failed.
             if attempt.is_err() {
@@ -412,7 +457,7 @@ impl CompactionSampler for ShellCompactionSampler {
                 }
                 Ok(output) => {
                     let response = output.content.clone();
-                    *self.last_success.lock().unwrap() = Some(output);
+                    self.last_success.store(Some(Arc::new(output)));
                     self.route_index.store(route_index, Ordering::Release);
                     return Ok(LlmCompactionOutput {
                         response,
@@ -522,7 +567,7 @@ pub(crate) struct FullReplaceTelemetry {
     pub last_rejected_summary: Option<String>,
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 struct ObserverState {
     attempts: u32,
     attempt_details: Vec<CompactionAttempt>,
@@ -544,7 +589,9 @@ pub(crate) struct ShellFullReplaceObserver {
     session_id: String,
     estimated_input_tokens: u64,
     retry_delay_secs: u64,
-    state: Mutex<ObserverState>,
+    /// Lock-free telemetry accumulator: readers load without blocking and the
+    /// per-attempt update publishes a clone-on-write generation via `rcu`.
+    state: arc_swap::ArcSwap<ObserverState>,
 }
 
 impl ShellFullReplaceObserver {
@@ -563,32 +610,32 @@ impl ShellFullReplaceObserver {
             session_id,
             estimated_input_tokens,
             retry_delay_secs,
-            state: Mutex::new(ObserverState::default()),
+            state: arc_swap::ArcSwap::from_pointee(ObserverState::default()),
         }
     }
 
     /// Cumulative number of attempts so far (across all input-ladder stages).
     /// Read mid-loop to label the `input_overflow` retry event.
     pub(crate) fn attempt_count(&self) -> u32 {
-        self.state.lock().unwrap().attempts
+        self.state.load().attempts
     }
 
     /// Whether any attempt so far produced a degenerate summary — lets the L5
     /// loop distinguish degenerate-exhausted from empty-exhausted.
     pub(crate) fn degenerate_seen(&self) -> bool {
-        self.state.lock().unwrap().degenerate_rejections > 0
+        self.state.load().degenerate_rejections > 0
     }
 
     /// The most recent rendered error/diagnostic detail, for `last_error`.
     pub(crate) fn last_error_message(&self) -> Option<String> {
-        self.state.lock().unwrap().last_error_msg.clone()
+        self.state.load().last_error_msg.clone()
     }
 
     /// Drain the collected telemetry. The cumulative attempt count spans all
     /// input-ladder stages because the same observer instance is shared across
     /// every per-stage call.
     pub(crate) fn into_telemetry(self) -> FullReplaceTelemetry {
-        let s = self.state.into_inner().unwrap();
+        let s = Arc::unwrap_or_clone(self.state.load_full());
         FullReplaceTelemetry {
             attempts: s.attempts,
             attempt_details: s.attempt_details,
@@ -602,144 +649,150 @@ impl ShellFullReplaceObserver {
 
 impl FullReplaceObserver for ShellFullReplaceObserver {
     fn on_attempt(&self, _attempt: u32, outcome: &FullReplaceAttemptOutcome<'_>) {
-        let mut s = self.state.lock().unwrap();
-        // The shared `attempt` resets per ladder stage; keep a cumulative count
-        // so artifact rows match the pre-migration numbering.
-        s.attempts += 1;
-        let attempt = s.attempts;
+        // Lock-free clone-on-write publish: racing updates retry from the
+        // winner generation, so no attempt row or rejection counter is lost.
+        self.state.rcu(|state| {
+            let mut s = ObserverState::clone(state);
+            // The shared `attempt` resets per ladder stage; keep a cumulative
+            // count so artifact rows match the pre-migration numbering.
+            s.attempts += 1;
+            let attempt = s.attempts;
 
-        match outcome {
-            FullReplaceAttemptOutcome::Success { summary } => {
-                s.attempt_details.push(CompactionAttempt {
-                    attempt,
-                    outcome: "success".to_string(),
-                    summary_chars: summary.chars().count() as u64,
-                    summary: None,
-                    error: None,
-                });
-            }
-            FullReplaceAttemptOutcome::Degenerate {
-                summary,
-                will_retry,
-            } => {
-                s.degenerate_rejections += 1;
-                let summary_chars = summary.chars().count();
-                s.attempt_details.push(CompactionAttempt {
-                    attempt,
-                    outcome: "degenerate".to_string(),
-                    summary_chars: summary_chars as u64,
-                    summary: Some(bound_captured_output(summary, MAX_CAPTURED_SUMMARY_CHARS)),
-                    error: None,
-                });
-                s.last_rejected_summary = Some((*summary).to_string());
-                s.last_error_msg = Some(format!(
-                    "compact failed: degenerate summary \
-                     ({summary_chars} chars for ~{} input tokens)",
-                    self.estimated_input_tokens
-                ));
-                if *will_retry {
-                    xai_grok_telemetry::session_ctx::log_event(CompactionRetryDegraded {
-                        trigger: self.trigger,
-                        reason: "degenerate_summary",
-                        from_stage: None,
-                        to_stage: None,
-                        summary_chars: Some(summary_chars as u64),
+            match outcome {
+                FullReplaceAttemptOutcome::Success { summary } => {
+                    s.attempt_details.push(CompactionAttempt {
                         attempt,
-                        context_window: self.context_window,
-                        compaction_id: self.compaction_id.clone(),
+                        outcome: "success".to_string(),
+                        summary_chars: summary.chars().count() as u64,
+                        summary: None,
+                        error: None,
                     });
-                    tracing::warn!(
-                        session_id = %self.session_id,
-                        attempt,
-                        summary_chars,
-                        estimated_input_tokens = self.estimated_input_tokens,
-                        retry_delay_secs = self.retry_delay_secs,
-                        "Compaction produced a degenerate summary, retrying in {} seconds...",
-                        self.retry_delay_secs
-                    );
-                } else {
-                    tracing::error!(
-                        session_id = %self.session_id,
-                        attempt,
-                        summary_chars,
-                        estimated_input_tokens = self.estimated_input_tokens,
-                        "Compaction produced only degenerate summaries after max retries"
-                    );
                 }
-            }
-            FullReplaceAttemptOutcome::EmptyResponse { .. } => {
-                // The shell surfaces an empty response as a transient error
-                // (`generate_session_compact` returns `Transient`), so it never
-                // reaches the shared `Ok("")` branch; handle defensively.
-                s.transient_rejections += 1;
-                let msg = "compact failed: model returned empty response".to_string();
-                s.attempt_details.push(CompactionAttempt {
-                    attempt,
-                    outcome: "transient".to_string(),
-                    summary_chars: 0,
-                    summary: None,
-                    error: Some(msg.clone()),
-                });
-                s.last_error_msg = Some(msg);
-            }
-            FullReplaceAttemptOutcome::Failure {
-                message,
-                deterministic,
-                context_overflow,
-                will_retry,
-            } => {
-                // A context overflow is recorded as a `deterministic` attempt
-                // (matching the pre-migration row) but does NOT count toward
-                // `deterministic_rejections` — the L5 ladder steps down on it
-                // and tracks its own `input_overflow_rejections`.
-                if *deterministic {
-                    if !*context_overflow {
-                        s.deterministic_rejections += 1;
-                        tracing::error!(
-                            session_id = %self.session_id,
-                            attempt,
-                            error = %message,
-                            "Compaction failed (deterministic error class, no further retries)"
-                        );
-                    }
+                FullReplaceAttemptOutcome::Degenerate {
+                    summary,
+                    will_retry,
+                } => {
+                    s.degenerate_rejections += 1;
+                    let summary_chars = summary.chars().count();
                     s.attempt_details.push(CompactionAttempt {
                         attempt,
-                        outcome: "deterministic".to_string(),
-                        summary_chars: 0,
-                        summary: None,
-                        error: Some((*message).to_string()),
+                        outcome: "degenerate".to_string(),
+                        summary_chars: summary_chars as u64,
+                        summary: Some(bound_captured_output(summary, MAX_CAPTURED_SUMMARY_CHARS)),
+                        error: None,
                     });
-                } else {
-                    s.transient_rejections += 1;
-                    s.attempt_details.push(CompactionAttempt {
-                        attempt,
-                        outcome: "transient".to_string(),
-                        summary_chars: 0,
-                        summary: None,
-                        error: Some((*message).to_string()),
-                    });
+                    s.last_rejected_summary = Some((*summary).to_string());
+                    s.last_error_msg = Some(format!(
+                        "compact failed: degenerate summary \
+                         ({summary_chars} chars for ~{} input tokens)",
+                        self.estimated_input_tokens
+                    ));
                     if *will_retry {
+                        xai_grok_telemetry::session_ctx::log_event(CompactionRetryDegraded {
+                            trigger: self.trigger,
+                            reason: "degenerate_summary",
+                            from_stage: None,
+                            to_stage: None,
+                            summary_chars: Some(summary_chars as u64),
+                            attempt,
+                            context_window: self.context_window,
+                            compaction_id: self.compaction_id.clone(),
+                        });
                         tracing::warn!(
                             session_id = %self.session_id,
                             attempt,
+                            summary_chars,
+                            estimated_input_tokens = self.estimated_input_tokens,
                             retry_delay_secs = self.retry_delay_secs,
-                            error = %message,
-                            "Compaction attempt {} failed, retrying in {} seconds...",
-                            attempt,
+                            "Compaction produced a degenerate summary, retrying in {} seconds...",
                             self.retry_delay_secs
                         );
                     } else {
                         tracing::error!(
                             session_id = %self.session_id,
                             attempt,
-                            error = %message,
-                            "Compaction failed after max retries"
+                            summary_chars,
+                            estimated_input_tokens = self.estimated_input_tokens,
+                            "Compaction produced only degenerate summaries after max retries"
                         );
                     }
                 }
-                s.last_error_msg = Some((*message).to_string());
+                FullReplaceAttemptOutcome::EmptyResponse { .. } => {
+                    // The shell surfaces an empty response as a transient error
+                    // (`generate_session_compact` returns `Transient`), so it
+                    // never reaches the shared `Ok("")` branch; defensively.
+                    s.transient_rejections += 1;
+                    let msg = "compact failed: model returned empty response".to_string();
+                    s.attempt_details.push(CompactionAttempt {
+                        attempt,
+                        outcome: "transient".to_string(),
+                        summary_chars: 0,
+                        summary: None,
+                        error: Some(msg.clone()),
+                    });
+                    s.last_error_msg = Some(msg);
+                }
+                FullReplaceAttemptOutcome::Failure {
+                    message,
+                    deterministic,
+                    context_overflow,
+                    will_retry,
+                } => {
+                    // A context overflow is recorded as a `deterministic`
+                    // attempt (matching the pre-migration row) but does NOT
+                    // count toward `deterministic_rejections` — the L5 ladder
+                    // steps down on it and tracks its own
+                    // `input_overflow_rejections`.
+                    if *deterministic {
+                        if !*context_overflow {
+                            s.deterministic_rejections += 1;
+                            tracing::error!(
+                                session_id = %self.session_id,
+                                attempt,
+                                error = %message,
+                                "Compaction failed (deterministic error class, no further retries)"
+                            );
+                        }
+                        s.attempt_details.push(CompactionAttempt {
+                            attempt,
+                            outcome: "deterministic".to_string(),
+                            summary_chars: 0,
+                            summary: None,
+                            error: Some((*message).to_string()),
+                        });
+                    } else {
+                        s.transient_rejections += 1;
+                        s.attempt_details.push(CompactionAttempt {
+                            attempt,
+                            outcome: "transient".to_string(),
+                            summary_chars: 0,
+                            summary: None,
+                            error: Some((*message).to_string()),
+                        });
+                        if *will_retry {
+                            tracing::warn!(
+                                session_id = %self.session_id,
+                                attempt,
+                                retry_delay_secs = self.retry_delay_secs,
+                                error = %message,
+                                "Compaction attempt {} failed, retrying in {} seconds...",
+                                attempt,
+                                self.retry_delay_secs
+                            );
+                        } else {
+                            tracing::error!(
+                                session_id = %self.session_id,
+                                attempt,
+                                error = %message,
+                                "Compaction failed after max retries"
+                            );
+                        }
+                    }
+                    s.last_error_msg = Some((*message).to_string());
+                }
             }
-        }
+            s
+        });
     }
 }
 
@@ -757,6 +810,7 @@ mod compaction_route_tests {
     use reqwest::StatusCode;
     use serde_json::json;
     use std::sync::Arc;
+    use std::sync::Mutex;
     use tokio::net::TcpListener;
     use tokio::sync::oneshot;
     use xai_grok_inference::config::ProviderIdentity;
