@@ -6,7 +6,7 @@
 
 use std::pin::pin;
 use std::sync::{
-    Arc, Mutex,
+    Arc,
     atomic::{AtomicBool, Ordering},
 };
 use std::time::Duration;
@@ -690,8 +690,12 @@ async fn run_one_attempt(
 }
 
 /// Captured-error cell shared between the tee adapter and the
-/// per-request task.
-type ErrorCell = Arc<Mutex<Option<InferenceError>>>;
+/// per-request task. Lock-free: first error wins via an atomic `rcu`
+/// (a racing loser keeps the stored error), and the reader takes the
+/// value with a wait-free `swap(None)` — identical one-shot semantics
+/// to the previous mutex cell. The outer `Arc` exists only because
+/// `InferenceError` is not `Clone`, so `ArcSwapOption` itself is not.
+type ErrorCell = Arc<arc_swap::ArcSwapOption<InferenceError>>;
 
 /// Wrap a raw chunk stream so its first error is captured into a
 /// shared cell. The wrapped stream still yields the original
@@ -700,18 +704,21 @@ type ErrorCell = Arc<Mutex<Option<InferenceError>>>;
 fn tee_errors<'a, T: Send + 'a>(
     raw: BoxStream<'a, InferenceResult<T>>,
 ) -> (BoxStream<'a, InferenceResult<T>>, ErrorCell) {
-    let cell: ErrorCell = Arc::new(Mutex::new(None));
+    let cell: ErrorCell = Arc::new(arc_swap::ArcSwapOption::empty());
     let cell_clone = Arc::clone(&cell);
     let teed = raw
         .map(move |item| {
-            if let Err(ref e) = item
-                && let Ok(mut guard) = cell_clone.lock()
-                && guard.is_none()
-            {
+            if let Err(ref e) = item {
                 // Capture only the first error -- subsequent errors
                 // on a torn-down stream are usually secondary effects
                 // of the same disconnect.
-                *guard = Some(clone_error(e));
+                let captured = Arc::new(clone_error(e));
+                cell_clone.rcu(move |current| {
+                    if current.is_some() {
+                        return current.clone();
+                    }
+                    Some(Arc::clone(&captured))
+                });
             }
             item
         })
@@ -794,10 +801,9 @@ async fn drive_l2(
                     return AttemptOutcome::Completed { response, metrics };
                 }
                 Some(InferenceEvent::Failed { error: info, .. }) => {
-                    let raw = captured
-                        .lock()
-                        .ok()
-                        .and_then(|mut g| g.take());
+                    let raw = captured.swap(None).map(|arc| {
+                        Arc::try_unwrap(arc).unwrap_or_else(|arc| clone_error(&arc))
+                    });
                     let error = raw.unwrap_or_else(|| synthesize_from_info(&info));
                     return AttemptOutcome::Failed { error };
                 }
@@ -1349,7 +1355,10 @@ mod tests {
         let raw = stream::iter(items).boxed();
         let (mut teed, cell) = tee_errors(raw);
         while teed.next().await.is_some() {}
-        let captured = cell.lock().unwrap().take().expect("error captured");
+        let captured = cell
+            .swap(None)
+            .map(|arc| Arc::try_unwrap(arc).unwrap_or_else(|arc| clone_error(&arc)))
+            .expect("error captured");
         match captured {
             InferenceError::EventStreamError(msg) => assert_eq!(msg, "first"),
             other => panic!("expected EventStreamError, got {other:?}"),

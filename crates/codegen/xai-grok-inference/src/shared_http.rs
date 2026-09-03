@@ -14,48 +14,83 @@
 //! environment.
 
 use arc_swap::ArcSwap;
+use arc_swap::ArcSwapOption;
 use std::collections::HashMap;
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
+use std::sync::OnceLock;
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::time::Duration;
 
-static SHARED_H2: OnceLock<reqwest::Client> = OnceLock::new();
-static SHARED_HTTP1: OnceLock<reqwest::Client> = OnceLock::new();
+/// Shared sampling clients. `ArcSwapOption` empty until first successful
+/// build; reads are wait-free, a failed build stays empty so the next call
+/// retries, and a racing loser's freshly built client is dropped.
+static SHARED_H2: ArcSwapOption<reqwest::Client> = ArcSwapOption::const_empty();
+static SHARED_HTTP1: ArcSwapOption<reqwest::Client> = ArcSwapOption::const_empty();
+
+/// Latch states for the kill switch (resolved once per process).
+const LATCH_UNRESOLVED: u8 = 0;
+const LATCH_DISABLED: u8 = 1;
+const LATCH_ENABLED: u8 = 2;
 
 /// Kill switch: `GROK_SAMPLER_SHARED_CLIENT=0` (or `false`, any case)
 /// restores the old behavior of building a fresh `reqwest::Client` per
-/// `InferenceClient`. Resolved once per process: the environment cannot
-/// change externally after spawn, and latching keeps the rollback state
-/// consistent with the read-once pool knobs.
+/// `InferenceClient`. Resolved once per process via a lock-free atomic
+/// latch: the environment cannot change externally after spawn, and
+/// latching keeps the rollback state consistent with the read-once pool
+/// knobs.
 fn sharing_disabled() -> bool {
-    static DISABLED: OnceLock<bool> = OnceLock::new();
-    *DISABLED.get_or_init(|| {
-        let disabled = match std::env::var("GROK_SAMPLER_SHARED_CLIENT") {
-            Ok(v) => v == "0" || v.eq_ignore_ascii_case("false"),
-            Err(_) => false,
-        };
-        if disabled {
-            tracing::info!("sampler HTTP client sharing disabled via GROK_SAMPLER_SHARED_CLIENT");
+    static DISABLED: AtomicU8 = AtomicU8::new(LATCH_UNRESOLVED);
+    match DISABLED.load(Ordering::Acquire) {
+        LATCH_DISABLED => true,
+        LATCH_ENABLED => false,
+        _ => {
+            let disabled = match std::env::var("GROK_SAMPLER_SHARED_CLIENT") {
+                Ok(v) => v == "0" || v.eq_ignore_ascii_case("false"),
+                Err(_) => false,
+            };
+            if disabled {
+                tracing::info!(
+                    "sampler HTTP client sharing disabled via GROK_SAMPLER_SHARED_CLIENT"
+                );
+            }
+            DISABLED.store(
+                if disabled {
+                    LATCH_DISABLED
+                } else {
+                    LATCH_ENABLED
+                },
+                Ordering::Release,
+            );
+            disabled
         }
-        disabled
-    })
+    }
 }
 
 /// Clone the shared client out of `cell`, building it on first use. Build
 /// failures are not cached: on `Err` the cell stays empty and the next call
-/// retries. A racing loser's freshly built client is simply dropped.
+/// retries. Insertion is a lock-free `rcu`: a racing loser re-reads the
+/// latest snapshot and adopts the winner's client instead of overwriting.
 fn shared(
-    cell: &OnceLock<reqwest::Client>,
+    cell: &ArcSwapOption<reqwest::Client>,
     build: fn() -> Result<reqwest::Client, reqwest::Error>,
     disabled: bool,
 ) -> Result<reqwest::Client, reqwest::Error> {
     if disabled {
         return build();
     }
-    if let Some(client) = cell.get() {
-        return Ok(client.clone());
+    if let Some(client) = cell.load().as_ref() {
+        return Ok((**client).clone());
     }
     let built = build()?;
-    Ok(cell.get_or_init(|| built).clone())
+    let mut adopted: Option<reqwest::Client> = None;
+    cell.rcu(|current| {
+        if let Some(existing) = current.as_ref() {
+            adopted = Some((**existing).clone());
+            return current.clone();
+        }
+        Some(Arc::new(built.clone()))
+    });
+    Ok(adopted.unwrap_or(built))
 }
 
 /// Shared HTTP/2 sampling client (connection pooling + h2 keepalive).
@@ -234,7 +269,8 @@ fn resolve_pool_knobs(key: &ProviderPoolKey) -> (usize, u64) {
     let max_idle = tuning
         .and_then(|t| t.clamped_max_idle())
         .or_else(|| {
-            env_knob_u64(&format!("GROK_POOL_{}_MAX_IDLE", key.env_family())).map(|v| v.min(64) as usize)
+            env_knob_u64(&format!("GROK_POOL_{}_MAX_IDLE", key.env_family()))
+                .map(|v| v.min(64) as usize)
         })
         .or_else(|| env_knob_u64("GROK_POOL_MAX_IDLE").map(|v| v.min(64) as usize))
         .unwrap_or(PROVIDER_POOL_DEFAULT_MAX_IDLE);
@@ -381,7 +417,7 @@ fn build_http_client_http1() -> Result<reqwest::Client, reqwest::Error> {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::OnceLock;
+    use arc_swap::ArcSwapOption;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
 
@@ -399,11 +435,11 @@ mod tests {
 
     #[test]
     fn shared_does_not_cache_build_failures() {
-        static CELL: OnceLock<reqwest::Client> = OnceLock::new();
+        static CELL: ArcSwapOption<reqwest::Client> = ArcSwapOption::const_empty();
         assert!(shared(&CELL, flaky_build, false).is_err());
-        assert!(CELL.get().is_none(), "failure must leave the cell empty");
+        assert!(CELL.load().is_none(), "failure must leave the cell empty");
         assert!(shared(&CELL, flaky_build, false).is_ok());
-        assert!(CELL.get().is_some(), "success must populate the cell");
+        assert!(CELL.load().is_some(), "success must populate the cell");
         assert!(shared(&CELL, flaky_build, false).is_ok());
         assert_eq!(
             BUILD_CALLS.load(Ordering::SeqCst),
@@ -414,10 +450,10 @@ mod tests {
 
     #[test]
     fn shared_disabled_bypasses_cell() {
-        static CELL: OnceLock<reqwest::Client> = OnceLock::new();
+        static CELL: ArcSwapOption<reqwest::Client> = ArcSwapOption::const_empty();
         assert!(shared(&CELL, || reqwest::Client::builder().build(), true).is_ok());
         assert!(
-            CELL.get().is_none(),
+            CELL.load().is_none(),
             "disabled mode must never touch the cell"
         );
     }
@@ -495,7 +531,10 @@ mod tests {
                 std::thread::spawn(move || super::provider_client(key, |b| b))
             })
             .collect();
-        let built: Vec<_> = handles.into_iter().map(|h| h.join().unwrap().unwrap()).collect();
+        let built: Vec<_> = handles
+            .into_iter()
+            .map(|h| h.join().unwrap().unwrap())
+            .collect();
         assert_eq!(built.len(), 8, "every racer must observe a client");
         let pool_count = super::provider_pool_names()
             .iter()

@@ -7,7 +7,8 @@
 //! transform in [`crate::stream::responses`] drains them into the final
 //! `ConversationResponse`.
 
-use std::sync::{Arc, Mutex};
+use arc_swap::ArcSwap;
+use std::sync::Arc;
 
 use xai_grok_inference_types::doom_loop::{
     DOOM_LOOP_CHECK_EVENT_TYPE, DoomLoopPeek, DoomLoopRecoveryPolicy, DoomLoopSignal,
@@ -20,12 +21,27 @@ use xai_grok_inference_types::doom_loop::{
 /// the policy so the stream transform can judge confidence for the
 /// mid-stream abort; the retry loop disarms the abort once the recovery
 /// budget is spent so the final attempt completes and can be accepted.
-#[derive(Clone, Debug, Default)]
+///
+/// Lock-free: state lives in an [`ArcSwap`] (outer `Arc` only to keep the
+/// collector cheaply cloneable independent of the state type's traits);
+/// every mutation (record, disarm, take) is an atomic read-modify-write via
+/// `rcu`, so concurrent `absorb` frames never lose signals (the closure
+/// re-runs on the fresh snapshot after a lost CAS — same isolation the
+/// mutex provided).
+#[derive(Clone, Debug)]
 pub struct DoomLoopSignalCollector {
-    inner: Arc<Mutex<CollectorState>>,
+    inner: Arc<ArcSwap<CollectorState>>,
 }
 
-#[derive(Debug, Default)]
+impl Default for DoomLoopSignalCollector {
+    fn default() -> Self {
+        Self {
+            inner: Arc::new(ArcSwap::from_pointee(CollectorState::default())),
+        }
+    }
+}
+
+#[derive(Debug, Default, Clone)]
 struct CollectorState {
     signals: Vec<DoomLoopSignal>,
     malformed_logged: bool,
@@ -37,24 +53,30 @@ struct CollectorState {
 impl DoomLoopSignalCollector {
     /// A fresh, armed collector judging confidence with `policy`.
     pub(crate) fn new(policy: DoomLoopRecoveryPolicy) -> Self {
-        let collector = Self::default();
-        if let Ok(mut state) = collector.inner.lock() {
-            state.policy = policy;
+        Self {
+            inner: Arc::new(ArcSwap::from_pointee(CollectorState {
+                policy,
+                ..CollectorState::default()
+            })),
         }
-        collector
     }
 
     /// Stop the mid-stream abort for this attempt; signals keep recording.
     pub(crate) fn disarm_abort(&self) {
-        if let Ok(mut state) = self.inner.lock() {
-            state.abort_disarmed = true;
-        }
+        self.inner.rcu(|current| {
+            if current.abort_disarmed {
+                return Arc::clone(current);
+            }
+            let mut next = (**current).clone();
+            next.abort_disarmed = true;
+            Arc::new(next)
+        });
     }
 
     /// While armed: the raw labels of the confident signals recorded so far
     /// (non-draining), or `None` when there is nothing to act on.
     pub(crate) fn abort_triggers(&self) -> Option<Vec<String>> {
-        let state = self.inner.lock().ok()?;
+        let state = self.inner.load();
         if state.abort_disarmed {
             return None;
         }
@@ -92,34 +114,43 @@ impl DoomLoopSignalCollector {
 
     /// Drain the recorded signals; empty when nothing was reported.
     pub(crate) fn take(&self) -> Vec<DoomLoopSignal> {
-        match self.inner.lock() {
-            Ok(mut state) => std::mem::take(&mut state.signals),
-            Err(_) => Vec::new(),
-        }
+        let mut drained = Vec::new();
+        self.inner.rcu(|current| {
+            if current.signals.is_empty() {
+                return Arc::clone(current);
+            }
+            let mut next = (**current).clone();
+            drained = std::mem::take(&mut next.signals);
+            Arc::new(next)
+        });
+        drained
     }
 
     fn record(&self, signals: Vec<DoomLoopSignal>) {
-        let Ok(mut state) = self.inner.lock() else {
-            return;
-        };
         // Cumulative sets are re-sent as they grow; the raw label is the
         // stable identity. Linear scan is fine for these tiny sets.
-        for signal in signals {
-            if !state.signals.iter().any(|s| s.raw == signal.raw) {
-                state.signals.push(signal);
+        self.inner.rcu(|current| {
+            let mut next = (**current).clone();
+            for signal in signals.iter() {
+                if !next.signals.iter().any(|s| s.raw == signal.raw) {
+                    next.signals.push(signal.clone());
+                }
             }
-        }
+            Arc::new(next)
+        });
     }
 
     /// Debug-log the first malformed payload per attempt (never per event).
     fn log_malformed_once(&self) {
-        let Ok(mut state) = self.inner.lock() else {
-            return;
-        };
-        if !state.malformed_logged {
-            state.malformed_logged = true;
+        self.inner.rcu(|current| {
+            if current.malformed_logged {
+                return Arc::clone(current);
+            }
+            let mut next = (**current).clone();
+            next.malformed_logged = true;
             tracing::debug!("doom-loop check payload malformed or empty; ignoring");
-        }
+            Arc::new(next)
+        });
     }
 }
 

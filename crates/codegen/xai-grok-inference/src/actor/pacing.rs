@@ -10,7 +10,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
-use tokio::sync::Mutex;
+use arc_swap::ArcSwap;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
@@ -40,7 +40,7 @@ pub(crate) enum RouteKey {
     },
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 struct RouteState {
     next_allowed: Instant,
     recovery_interval: Option<Duration>,
@@ -62,8 +62,14 @@ impl RouteState {
 }
 
 /// Process-local pacing shared by every sampler actor and subagent.
+///
+/// Lock-free: the route map lives in an [`ArcSwap`]; the slot claim and the
+/// rate-limit updates are atomic read-modify-write cycles via `rcu`, so a
+/// slot is claimed by exactly one waiter under contention (the closure
+/// re-runs on the fresh snapshot after a lost CAS, mirroring the previous
+/// mutex's critical section).
 pub(crate) struct InferencePacer {
-    routes: Mutex<HashMap<RouteKey, RouteState>>,
+    routes: ArcSwap<HashMap<RouteKey, RouteState>>,
     minimum_interval: Duration,
     recovery_requests: u32,
 }
@@ -95,7 +101,7 @@ impl InferencePacer {
 
     fn new(minimum_interval: Duration, recovery_requests: u32) -> Self {
         Self {
-            routes: Mutex::new(HashMap::new()),
+            routes: ArcSwap::from_pointee(HashMap::new()),
             minimum_interval,
             recovery_requests,
         }
@@ -117,23 +123,37 @@ impl InferencePacer {
         let minimum = minimum_interval_for(self.minimum_interval, route);
 
         loop {
-            let delay = {
-                let mut routes = self.routes.lock().await;
+            // Slot claim as an atomic read-modify-write: the `rcu` closure
+            // re-runs on the latest snapshot after a lost CAS, so exactly one
+            // racing waiter claims the slot; the others observe the updated
+            // `next_allowed` and wait. A pure-wait observation returns the
+            // current map unchanged (no write amplification).
+            enum Decision {
+                Claim,
+                Wait(Duration),
+            }
+            let mut decision = Decision::Wait(Duration::ZERO);
+            self.routes.rcu(|current| {
                 let now = Instant::now();
-                let state = routes
+                if let Some(state) = current.get(&key)
+                    && state.next_allowed > now
+                {
+                    decision = Decision::Wait(state.next_allowed.duration_since(now));
+                    return Arc::clone(current);
+                }
+                let mut next = (**current).clone();
+                let state = next
                     .entry(key.clone())
                     .or_insert_with(|| RouteState::new(now));
-                if state.next_allowed <= now {
-                    state.next_allowed = now + state.interval(minimum);
-                    None
-                } else {
-                    Some(state.next_allowed.duration_since(now))
-                }
+                state.next_allowed = now + state.interval(minimum);
+                decision = Decision::Claim;
+                Arc::new(next)
+            });
+            let delay = match decision {
+                Decision::Claim => return true,
+                Decision::Wait(delay) => delay,
             };
 
-            let Some(delay) = delay else {
-                return true;
-            };
             tokio::select! {
                 biased;
                 _ = cancel_token.cancelled() => return false,
@@ -173,16 +193,21 @@ impl InferencePacer {
         } else {
             0
         };
-        let mut routes = self.routes.lock().await;
-        let state = routes.entry(key).or_insert_with(|| RouteState::new(now));
-        state.next_allowed = state.next_allowed.max(now + cooldown);
-        state.recovery_interval = (recovery_requests > 0).then(|| {
-            state
-                .recovery_interval
-                .unwrap_or_default()
-                .max(recovery_interval)
+        self.routes.rcu(|current| {
+            let mut next = (**current).clone();
+            let state = next
+                .entry(key.clone())
+                .or_insert_with(|| RouteState::new(Instant::now()));
+            state.next_allowed = state.next_allowed.max(now + cooldown);
+            state.recovery_interval = (recovery_requests > 0).then(|| {
+                state
+                    .recovery_interval
+                    .unwrap_or_default()
+                    .max(recovery_interval)
+            });
+            state.recovery_requests_remaining = recovery_requests;
+            Arc::new(next)
         });
-        state.recovery_requests_remaining = recovery_requests;
         tracing::warn!(
             target: crate::inference_log::TARGET,
             model = %config.model,
@@ -203,24 +228,28 @@ impl InferencePacer {
         let Some(key) = route_key(config, route) else {
             return;
         };
-        let mut routes = self.routes.lock().await;
-        let Some(state) = routes.get_mut(&key) else {
-            return;
-        };
-        if state.recovery_requests_remaining == 0 {
-            return;
-        }
-        state.recovery_requests_remaining -= 1;
-        if state.recovery_requests_remaining == 0 {
-            state.recovery_interval = None;
-            let minimum = minimum_interval_for(self.minimum_interval, route);
-            state.next_allowed = state.next_allowed.min(Instant::now() + minimum);
-            tracing::info!(
-                target: crate::inference_log::TARGET,
-                model = %config.model,
-                "OpenRouter rate-limit pacing returned to normal"
-            );
-        }
+        self.routes.rcu(|current| {
+            let Some(state) = current.get(&key) else {
+                return Arc::clone(current); // nothing to count
+            };
+            if state.recovery_requests_remaining == 0 {
+                return Arc::clone(current);
+            }
+            let mut next = (**current).clone();
+            let state = next.get_mut(&key).expect("checked above");
+            state.recovery_requests_remaining -= 1;
+            if state.recovery_requests_remaining == 0 {
+                state.recovery_interval = None;
+                let minimum = minimum_interval_for(self.minimum_interval, route);
+                state.next_allowed = state.next_allowed.min(Instant::now() + minimum);
+                tracing::info!(
+                    target: crate::inference_log::TARGET,
+                    model = %config.model,
+                    "OpenRouter rate-limit pacing returned to normal"
+                );
+            }
+            Arc::new(next)
+        });
     }
 }
 
