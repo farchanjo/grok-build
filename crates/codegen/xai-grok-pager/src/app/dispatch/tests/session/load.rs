@@ -2573,3 +2573,139 @@ fn plain_picker_fetch_carries_no_query_and_bumps_seq() {
         "picker fetch must be unfiltered and supersede the search, got {effects:?}"
     );
 }
+
+/// Paint-first startup contract, app-level: the welcome picker starts in the
+/// loading state (dim "loading sessions…" hint row, selection clamped to the
+/// empty list), fills exactly once when the background session-history scan
+/// completes, and a resume on the filled list still dispatches the load for
+/// the picked row.
+#[test]
+fn welcome_picker_loading_fills_once_then_resume_resolves() {
+    use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+    let mut app = test_app();
+    assert!(matches!(app.active_view, ActiveView::Welcome));
+
+    let effects = dispatch(Action::FetchSessionList, &mut app);
+    let Effect::FetchSessionList { query: None, seq } = effects[0] else {
+        panic!("expected a plain browse fetch, got {effects:?}");
+    };
+    assert!(
+        app.session_picker_loading && app.session_picker_entries.is_none(),
+        "picker must show the loading hint until the scan completes"
+    );
+
+    // Nav while loading: Up/Down/Enter clamp to the empty list (selection
+    // stays at 0 and nothing dispatches).
+    for key in [KeyCode::Up, KeyCode::Down] {
+        app.session_picker_state.search_active = false;
+        let out = app.handle_input(&Event::Key(KeyEvent::new(key, KeyModifiers::NONE)));
+        assert_eq!(
+            app.session_picker_state.selected, 0,
+            "{key:?} must clamp while loading"
+        );
+        assert!(
+            !matches!(
+                out,
+                crate::app::app_view::InputOutcome::Action(Action::PickSession(_))
+            ),
+            "{key:?} must not pick anything while loading"
+        );
+    }
+    let out = app.handle_input(&Event::Key(KeyEvent::new(
+        KeyCode::Enter,
+        KeyModifiers::NONE,
+    )));
+    assert!(
+        !matches!(
+            out,
+            crate::app::app_view::InputOutcome::Action(Action::PickSession(_))
+                | crate::app::app_view::InputOutcome::Action(Action::LoadSession(_, _, _))
+        ),
+        "empty-list Enter must not resume anything, got {out:?}"
+    );
+
+    // The scan completes: the list fills in a single update.
+    let _ = dispatch(
+        Action::TaskComplete(TaskResult::SessionListLoaded {
+            scope: ListScope::Cwd,
+            sessions: vec![make_conversation_entry("conv-filled-1")],
+            partial: None,
+            seq,
+            query: None,
+        }),
+        &mut app,
+    );
+    assert!(
+        !app.session_picker_loading,
+        "hint row must disappear once the list arrives"
+    );
+    assert_eq!(
+        app.session_picker_entries
+            .as_ref()
+            .map(|e| e[0].id.as_str()),
+        Some("conv-filled-1"),
+        "the filled list replaces the loading hint"
+    );
+
+    // Resume on the filled list resolves the picked row.
+    app.session_picker_state.selected = 0;
+    let effects = dispatch(Action::PickSession(0), &mut app);
+    assert!(
+        matches!(
+            &effects[..],
+            [Effect::LoadSession {
+                session_id,
+                session_cwd: _,
+                chat_kind: true,
+                ..
+            }] if session_id == "conv-filled-1"
+        ),
+        "resume after fill must load the picked row, got {effects:?}"
+    );
+}
+
+/// Failure path: a current-seq scan error drops the loading hint, keeps the
+/// list empty, surfaces the error notice, and leaves the app renderable (no
+/// panic, no phantom selection).
+#[test]
+fn welcome_picker_scan_failure_clears_hint_and_keeps_list_empty() {
+    let mut app = test_app();
+    let effects = dispatch(Action::FetchSessionList, &mut app);
+    let Effect::FetchSessionList { query: None, seq } = effects[0] else {
+        panic!("expected a plain browse fetch, got {effects:?}");
+    };
+    assert!(app.session_picker_loading);
+
+    let _ = dispatch(
+        Action::TaskComplete(TaskResult::SessionListFailed {
+            error: "scan boom".into(),
+            seq,
+            query: None,
+        }),
+        &mut app,
+    );
+    assert!(
+        !app.session_picker_loading,
+        "the loading hint must disappear on failure"
+    );
+    assert!(
+        app.session_picker_entries.is_none(),
+        "the list must stay empty on failure"
+    );
+    assert_eq!(
+        app.session_picker_state.selected, 0,
+        "selection must stay clamped after a failure"
+    );
+    let toast_surfaced = app
+        .welcome_toast
+        .as_ref()
+        .is_some_and(|(msg, _)| msg.contains("Couldn't load sessions"));
+    let lane_surfaced = matches!(
+        app.session_picker_lanes.pending_notice,
+        Some(crate::views::session_picker::SessionPickerPendingNotice::Error(_))
+    );
+    assert!(
+        toast_surfaced || lane_surfaced,
+        "the failure must be surfaced to the user (welcome toast or picker lane notice)"
+    );
+}

@@ -1540,6 +1540,29 @@ pub(crate) async fn run(
     // this stays `TrustState::Done`.
     seed_trust_state(&mut app, remote_settings.as_ref());
 
+    // Paint-first resume picker: on an untouched, authenticated,
+    // access-allowed, full-screen welcome with no overriding startup intent,
+    // open the grouped session picker and start its session-history fetch
+    // (background ACP `x.ai/session/list` scan) BEFORE the initial
+    // presentation. The first paint then already shows the dim "loading
+    // sessions…" hint row while the scan runs; keyboard navigation clamps to
+    // the empty list, and the filled list arrives through the normal
+    // `SessionListLoaded` plumbing as a single flicker-free update. Startup
+    // intents that leave the welcome immediately (resume / fork / explicit
+    // id / worktree / initial prompt / dashboard) skip this and dispatch
+    // below; the late fallback further down still covers deferred gates.
+    if crate::app::session_startup::welcome_picker_can_open_before_first_paint(
+        &materialized,
+        args.worktree.is_some(),
+        args.initial_prompt().is_some(),
+        std::env::var("GROK_OPEN_DASHBOARD_AT_STARTUP").as_deref() == Ok("1"),
+    ) {
+        let effs = dispatch::maybe_open_welcome_session_picker(&mut app);
+        if process_effects(effs, &mut tasks, &mut app, &progress_tx) {
+            return Ok(make_run_result(&app));
+        }
+    }
+
     let mut presenter = Presenter::new();
     // A timed-out handoff stays queued but cannot synchronously retry until
     // this deadline fires. Feedback is one-shot per editor/pager request, even

@@ -369,6 +369,31 @@ pub enum MaterializedStartup {
         new_session_id: Option<String>,
     },
 }
+/// Whether startup lands on the untouched welcome screen and may therefore
+/// open the resume picker **before** the first paint.
+///
+/// Paint-first picker contract: when this returns true the event loop opens
+/// the grouped session picker and starts its session-history fetch (the
+/// background ACP `x.ai/session/list` scan) ahead of the initial
+/// presentation, so the first frame already shows the dim "loading
+/// sessions…" hint row and the filled list arrives later as a single
+/// flicker-free update. Any startup intent that immediately leaves the
+/// welcome view (resume / fork / explicit `--session-id` / `--worktree` /
+/// initial prompt / dashboard) keeps the early open off; those paths either
+/// switch views on their own or open the picker later through the deferred
+/// auth / trust gates.
+pub fn welcome_picker_can_open_before_first_paint(
+    materialized: &MaterializedStartup,
+    worktree: bool,
+    has_initial_prompt: bool,
+    open_dashboard_at_startup: bool,
+) -> bool {
+    matches!(materialized, MaterializedStartup::NewAuto)
+        && !worktree
+        && !has_initial_prompt
+        && !open_dashboard_at_startup
+}
+
 /// Context for [`materialize_startup`] (interactive vs headless share this).
 #[derive(Debug, Clone, Copy)]
 pub struct MaterializeCtx {
@@ -1164,5 +1189,72 @@ mod tests {
         // never a startup failure).
         let missing = resume_session_title("ffffffff-1111-2222-3333-444444444444").await;
         assert_eq!(missing, None);
+    }
+
+    // ── Paint-first resume picker policy ────────────────────────────────
+
+    /// Plain `grok` (no startup intent) opens the resume picker before the
+    /// first paint so the loading hint is visible from the very first frame.
+    #[test]
+    fn paint_first_picker_opens_for_plain_new_auto() {
+        assert!(welcome_picker_can_open_before_first_paint(
+            &MaterializedStartup::NewAuto,
+            false,
+            false,
+            false,
+        ));
+    }
+
+    /// Any startup intent that immediately leaves the welcome view (resume,
+    /// fork, explicit id) must not open the picker early — those paths
+    /// dispatch their own startup action below the paint-first slot.
+    #[test]
+    fn paint_first_picker_skips_resume_fork_and_explicit_id() {
+        for materialized in [
+            MaterializedStartup::Resume {
+                session_id: "s".into(),
+                original_cwd: None,
+                title: None,
+            },
+            MaterializedStartup::NewWithId {
+                session_id: "s".into(),
+            },
+            MaterializedStartup::Fork {
+                parent_session_id: "p".into(),
+                parent_cwd: None,
+                parent_title: None,
+                new_session_id: None,
+            },
+        ] {
+            assert!(
+                !welcome_picker_can_open_before_first_paint(&materialized, false, false, false),
+                "unexpected early picker for {materialized:?}"
+            );
+        }
+    }
+
+    /// Worktree create, an initial CLI prompt, and the dashboard subcommand
+    /// all own the first screen; none of them may race the paint-first
+    /// picker open.
+    #[test]
+    fn paint_first_picker_skips_worktree_prompt_and_dashboard() {
+        assert!(!welcome_picker_can_open_before_first_paint(
+            &MaterializedStartup::NewAuto,
+            true,
+            false,
+            false,
+        ));
+        assert!(!welcome_picker_can_open_before_first_paint(
+            &MaterializedStartup::NewAuto,
+            false,
+            true,
+            false,
+        ));
+        assert!(!welcome_picker_can_open_before_first_paint(
+            &MaterializedStartup::NewAuto,
+            false,
+            false,
+            true,
+        ));
     }
 }

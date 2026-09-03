@@ -822,6 +822,7 @@ pub(crate) fn execute(
         Effect::FetchSessionList { query, seq } => {
             let tx = acp_tx.clone();
             let cwd = cwd.to_path_buf();
+            let fetch_started = std::time::Instant::now();
             tasks
                 .spawn(async move {
                     let mut params = serde_json::json!({
@@ -840,29 +841,30 @@ pub(crate) fn execute(
                             .into(),
                     );
                     let result = acp_send(request, &tx).await;
-                    match result {
+                    let outcome = match result {
                         Ok(resp) => {
                             let wrapper: serde_json::Value = serde_json::from_str(
                                     resp.0.get(),
                                 )
                                 .unwrap_or_default();
                             if let Some(err) = wrapper.get("error") {
-                                return TaskResult::SessionListFailed {
+                                TaskResult::SessionListFailed {
                                     error: err.as_str().unwrap_or("unknown error").to_string(),
                                     seq,
                                     query,
-                                };
-                            }
-                            let payload = wrapper.get("result").unwrap_or(&wrapper);
-                            let sessions = parse_session_picker_entries(payload);
-                            let partial = parse_session_list_partial(payload);
-                            let scope = parse_session_list_scope(payload);
-                            TaskResult::SessionListLoaded {
-                                sessions,
-                                partial,
-                                scope,
-                                seq,
-                                query,
+                                }
+                            } else {
+                                let payload = wrapper.get("result").unwrap_or(&wrapper);
+                                let sessions = parse_session_picker_entries(payload);
+                                let partial = parse_session_list_partial(payload);
+                                let scope = parse_session_list_scope(payload);
+                                TaskResult::SessionListLoaded {
+                                    sessions,
+                                    partial,
+                                    scope,
+                                    seq,
+                                    query,
+                                }
                             }
                         }
                         Err(e) => {
@@ -872,7 +874,33 @@ pub(crate) fn execute(
                                 query,
                             }
                         }
-                    }
+                    };
+                    // Startup-span style observability for the session-history
+                    // scan behind the resume picker: counts only, never rows.
+                    // `elapsed_ms` shares the process-start clock used by the
+                    // other startup.* events; `duration_ms` is this fetch's
+                    // round-trip. Fires for browse and search fetches alike
+                    // (low volume: picker opens), so a slow startup scan lands
+                    // next to `startup.first_paint` in the unified log.
+                    let (ok, sessions, queried) = match &outcome {
+                        TaskResult::SessionListLoaded { sessions, query, .. } => {
+                            (true, sessions.len(), query.is_some())
+                        }
+                        TaskResult::SessionListFailed { query, .. } => (false, 0, query.is_some()),
+                        _ => (false, 0, false),
+                    };
+                    ulog::info(
+                        "startup.session_list_fetch",
+                        None,
+                        Some(serde_json::json!({
+                            "elapsed_ms": xai_grok_telemetry::startup_timing::elapsed_ms(),
+                            "duration_ms": fetch_started.elapsed().as_millis() as u64,
+                            "sessions": sessions,
+                            "queried": queried,
+                            "ok": ok,
+                        })),
+                    );
+                    outcome
                 });
         }
         Effect::DebounceSessionSearch { query, seq } => {

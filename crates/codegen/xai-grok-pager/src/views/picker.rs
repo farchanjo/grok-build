@@ -3752,6 +3752,40 @@ mod tests {
         assert_eq!(state.selected, 1);
     }
 
+    /// While the session index is still loading the picker's list is empty;
+    /// arrow navigation and Enter must clamp to that empty list instead of
+    /// moving the selection off-list or dispatching a resume.
+    #[test]
+    fn nav_clamps_to_empty_list_while_sessions_load() {
+        let down = Event::Key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        for hint in [true, false] {
+            let config = cfg(hint, false);
+            // Down with zero entries: no selection move (search-focus handoff
+            // is allowed, selection stays pinned at the clamped 0).
+            let mut state = PickerState::default();
+            let outcome = handle_picker_input(&down, &mut state, 0, &config);
+            assert!(matches!(outcome, PickerOutcome::Changed), "hint={hint}");
+            assert_eq!(state.selected, 0, "hint={hint}");
+
+            // Up with zero entries: same clamp.
+            let mut state = PickerState::default();
+            let outcome = handle_picker_input(&press_up(), &mut state, 0, &config);
+            assert!(matches!(outcome, PickerOutcome::Changed), "hint={hint}");
+            assert_eq!(state.selected, 0, "hint={hint}");
+
+            // Enter with zero entries and an empty query: no selection fires.
+            let mut state = PickerState::default();
+            let outcome = handle_picker_input(
+                &Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+                &mut state,
+                0,
+                &config,
+            );
+            assert!(matches!(outcome, PickerOutcome::Changed), "hint={hint}");
+            assert_eq!(state.selected, 0, "hint={hint}");
+        }
+    }
+
     #[test]
     fn vim_char_types_after_entering_search() {
         for hint in [true, false] {
