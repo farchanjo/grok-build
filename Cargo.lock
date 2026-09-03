@@ -13460,7 +13460,7 @@ dependencies = [
 
 [[package]]
 name = "xai-grok-pager"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "agent-client-protocol",
  "ansi-to-tui",
@@ -13550,7 +13550,7 @@ dependencies = [
 
 [[package]]
 name = "xai-grok-pager-bin"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "anyhow",
  "archanjo",
@@ -13774,7 +13774,7 @@ dependencies = [
 
 [[package]]
 name = "xai-grok-shell"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "agent-client-protocol",
  "anyhow",
@@ -14191,7 +14191,7 @@ dependencies = [
 
 [[package]]
 name = "xai-grok-version"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "semver",
 ]
