@@ -37,6 +37,27 @@ pub mod subscription;
 pub(crate) use effects::sanitize_user_error;
 mod event_loop;
 pub(crate) mod external_editor;
+
+/// Lazy-startup shell-connection state.
+///
+/// The shell connect (config → managed policy → provider catalog → bootstrap
+/// → initialize → eager auth) runs as a background task while the event loop
+/// paints. Until it lands, `ready` is false and [`process_effects`] parks
+/// every effect in `queued_effects` (strict FIFO). When the connection
+/// arrives, the loop hydrates the AppView from it, flips `ready`, and drains
+/// the queue in order — so user intent issued during the connect window (the
+/// picker's session scan, a typed prompt, a CLI resume) executes unchanged,
+/// only later. `Effect::Quit` bypasses the queue so the loop always stays
+/// responsive.
+#[derive(Default)]
+pub struct ConnectionState {
+    /// True once the background connect finished and the AppView was
+    /// hydrated from the live `AcpConnection`.
+    pub ready: bool,
+    /// Effects produced before the connection was ready, in arrival order.
+    pub queued_effects: Vec<actions::Effect>,
+}
+
 mod foreign_sessions;
 mod inline_edit;
 #[cfg(all(test, unix))]
@@ -613,7 +634,7 @@ pub async fn run(
         // paint path just to title the terminal. Best-effort — a lookup
         // failure only costs the title, never the startup.
         let t_title_lookup = std::time::Instant::now();
-        session_title = session_startup::resume_session_title(&id).await;
+        session_title = session_startup::resume_session_title(id).await;
         crate::unified_log::info(
             "startup.session_title_lookup",
             None,
@@ -684,21 +705,52 @@ pub async fn run(
         default_auto_mode: launch_auto && !launch_yolo.yolo,
         workbench_executable: args.workbench_executable.clone(),
     };
-    let connection = if use_leader {
-        let conn = crate::acp::connect_via_leader(&cancel, connect_flags, &raw_config).await?;
-        tracing::info!(
-            elapsed_ms = startup_start.elapsed().as_millis() as u64,
-            "Connected via leader"
+    // Lazy shell connect: the whole connect chain (agent config → managed
+    // policy → provider catalog refresh → bootstrap → initialize → eager
+    // auth) runs as a background task while the event loop paints. The
+    // bootstrap's dependency on the refreshed catalog keeps its original
+    // order inside the task (connect → refresh → bootstrap → initialize), it
+    // just no longer blocks the first paint. The loop consumes the result
+    // through a oneshot; a failure after paint surfaces as a welcome/agent
+    // toast and the loop stays alive.
+    let connect_started = std::time::Instant::now();
+    let connect_cancel = cancel.child_token();
+    let use_leader_for_task = use_leader;
+    let raw_config_for_task = raw_config.clone();
+    let connect_ready_rx = event_loop::spawn_connect_task(async move {
+        let result = if use_leader_for_task {
+            let conn = crate::acp::connect_via_leader(
+                &connect_cancel,
+                connect_flags,
+                &raw_config_for_task,
+            )
+            .await;
+            tracing::info!(
+                elapsed_ms = startup_start.elapsed().as_millis() as u64,
+                connected = conn.is_ok(),
+                "leader connect finished (background)"
+            );
+            conn
+        } else {
+            let conn = crate::acp::connect(&connect_cancel, connect_flags).await;
+            tracing::info!(
+                elapsed_ms = startup_start.elapsed().as_millis() as u64,
+                connected = conn.is_ok(),
+                "direct connect finished (background)"
+            );
+            conn
+        };
+        crate::unified_log::info(
+            "startup.shell_connect",
+            None,
+            Some(serde_json::json!({
+                "elapsed_ms": xai_grok_telemetry::startup_timing::elapsed_ms(),
+                "duration_ms": connect_started.elapsed().as_millis() as u64,
+                "ok": result.is_ok(),
+            })),
         );
-        conn
-    } else {
-        let conn = crate::acp::connect(&cancel, connect_flags).await?;
-        tracing::info!(
-            elapsed_ms = startup_start.elapsed().as_millis() as u64,
-            "Connected directly (non-leader)"
-        );
-        conn
-    };
+        result
+    });
     let mut config_watcher = crate::appearance::ConfigWatcher::start().await?;
     let alt_screen_config_mode = config_watcher.current().alt_screen;
     let term_ctx = crate::terminal::terminal_context();
@@ -786,7 +838,7 @@ pub async fn run(
     };
     let result = event_loop::run(
         &mut terminal,
-        connection,
+        connect_ready_rx,
         &mut config_watcher,
         &effective_args,
         session_cwd,

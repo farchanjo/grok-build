@@ -632,6 +632,11 @@ pub struct AppView {
     pub cwd_has_git_ancestor: bool,
     /// ACP channel for sending requests (shared resource, cloned into agents).
     pub acp_tx: AcpAgentTx,
+    /// Lazy-startup shell-connection state: while the background connect
+    /// runs, `ready` is false and effects park in `queued_effects` (see
+    /// [`crate::app::ConnectionState`] and the event loop's connection-ready
+    /// arm).
+    pub connection: crate::app::ConnectionState,
     /// Local cache of bundle sync/status state from the shell.
     pub(crate) bundle_state: BundleState,
     /// Reusable scratch buffer for rendering.
@@ -1393,6 +1398,7 @@ impl AppView {
                 .ok()
                 .is_some_and(|c| c.ancestors().any(|p| p.join(".git").exists())),
             acp_tx,
+            connection: crate::app::ConnectionState::default(),
             bundle_state: BundleState::default(),
             scratch: ScratchBuffer::new(),
             cursor: CursorState::new(),
@@ -5532,6 +5538,7 @@ pub(crate) mod tests {
             project_picker_disabled: false,
             cwd_has_git_ancestor: false,
             acp_tx: tx,
+            connection: crate::app::ConnectionState::default(),
             scratch: crate::scrollback::render::ScratchBuffer::new(),
             cursor: CursorState::new(),
             pending_action: None,

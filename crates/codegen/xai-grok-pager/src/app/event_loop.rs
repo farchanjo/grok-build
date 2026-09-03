@@ -718,7 +718,7 @@ fn run_pending_suspends(
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn run(
     terminal: &mut PagerTerminal,
-    connection: crate::acp::AcpConnection,
+    connect_ready: tokio::sync::oneshot::Receiver<anyhow::Result<crate::acp::AcpConnection>>,
     config_watcher: &mut ConfigWatcher,
     args: &PagerArgs,
     session_cwd: Option<std::path::PathBuf>,
@@ -740,12 +740,23 @@ pub(crate) async fn run(
     }
     let tracing_handle = crate::tracing::init_tracing();
 
-    crate::unified_log::init(connection.tx.clone());
+    // Lazy connection: the shell connect runs as a background task (`run`
+    // spawned it before the terminal came up). Build the AppView over
+    // placeholder surfaces; `hydrate_connection` swaps in the live ones when
+    // the oneshot fires. Unified-log forwarding initializes on hydration —
+    // entries logged before that buffer in memory (the on-disk unified log
+    // is a separate writer and unaffected).
+    //
+    // The placeholder agent half must stay alive until hydration: a dropped
+    // sender would close the client stream and the loop's ACP arm would read
+    // `None` and exit before the real connection ever landed.
+    let (placeholder_client, placeholder_agent) = xai_acp_lib::acp_channels();
+    let mut _placeholder_agent_keepalive = Some(placeholder_agent);
     crate::unified_log::info("pager started", None, None);
     let mut app = AppView::new(
-        connection.tx,
-        connection.models,
-        connection.available_commands,
+        placeholder_client.tx,
+        crate::acp::ModelState::default(),
+        Vec::new(),
     );
     app.tracing_rx = Some(tracing_handle.rx);
     // Startup terminal height for the auto-compact derivation; kept fresh by
@@ -754,8 +765,8 @@ pub(crate) async fn run(
     // Leader mode: a live `leader_status_rx` means the pager is connected via a
     // leader. The dashboard itself is NOT gated on this flag (it renders local
     // sessions regardless); `leader_mode` only controls whether we additionally
-    // poll the leader roster (see the roster-poll arm below).
-    app.leader_mode = connection.leader_status_rx.is_some();
+    // poll the leader roster (see the roster-poll arm below). Seeded for real
+    // on connection-ready.
     app.screen_mode = term_state.screen_mode;
     // `AppView::new` precedes the terminal's resolved screen mode. Rebuild the
     // registry at this I/O boundary; the later config-aware rebuild preserves
@@ -913,115 +924,12 @@ pub(crate) async fn run(
                 .and_then(|s| s.session_picker_grouped)
         })
         .unwrap_or(true);
-    app.cancel_rewind_enabled = connection.cancel_rewind_enabled;
-    apply_session_recap_available(&mut app, connection.session_recap_available);
-    app.prime_index = connection.prime_index;
-
-    // Preserve auth methods so logout→re-login works without restarting.
-    app.auth_methods = connection.auth_methods.clone();
-
-    // Seed auth state from ACP connection metadata.
-    // --force-login overrides: show the login screen even when credentials exist.
-    let force_login = args.force_login && !connection.auth_methods.is_empty();
-    let needs_interactive_login = connection.needs_login || force_login;
-    if needs_interactive_login {
-        app.welcome_prompt_focused = false;
-
-        if connection.needs_login {
-            // Normal path: use the metadata from startup_auth_metadata()
-            app.login_label = connection.login_label;
-            app.login_method_id = connection.login_method_id;
-            app.auth_start_mode = match connection.auth_start_mode {
-                crate::acp::AuthStartMode::Pending => super::app_view::AuthMode::Pending,
-                crate::acp::AuthStartMode::Command => super::app_view::AuthMode::Command,
-            };
-        } else {
-            // --force-login: find the grok.com method from the advertised list
-            let grok_com = connection
-                .auth_methods
-                .iter()
-                .find(|m| m.id().0.as_ref() == "grok.com");
-            if let Some(method) = grok_com {
-                app.login_label = Some(method.name().to_string());
-                app.login_method_id = Some(method.id().clone());
-                let is_provider = method
-                    .meta()
-                    .as_ref()
-                    .and_then(|v| v.get("external_provider"))
-                    .and_then(|v| v.as_bool())
-                    .unwrap_or(false);
-                app.auth_start_mode = if is_provider {
-                    super::app_view::AuthMode::Command
-                } else {
-                    super::app_view::AuthMode::Pending
-                };
-            } else {
-                // No grok.com method available, use the first method as fallback
-                let first = &connection.auth_methods[0];
-                app.login_label = Some(first.name().to_string());
-                app.login_method_id = Some(first.id().clone());
-                app.auth_start_mode = super::app_view::AuthMode::Pending;
-            }
-        }
-
-        // Skip the login splash screen — auto-trigger login immediately
-        // by reusing dispatch_login. Effects are stashed and drained after
-        // the initial render so the user sees the auth UI right away.
-        // Empty auth_methods (preferred_method pin with no credentials) is
-        // fail-closed: do not invent grok.com / auto-start OIDC.
-        tracing::info!(
-            method_id = ?app.login_method_id,
-            methods_empty = connection.auth_methods.is_empty(),
-            "auto-triggering login at startup"
-        );
-    }
-    // else: auth_state defaults to Done (already authenticated eagerly)
-    // Effects stashed until after the initial render, so the user sees the
-    // welcome/auth UI right away.
-    let mut post_render_effects = if needs_interactive_login {
-        if connection.auth_methods.is_empty() {
-            // preferred_method pin unavailable — no advertised method to start.
-            app.auth_state = super::app_view::AuthState::Pending {
-                error: Some(
-                    xai_grok_shell::agent::auth_method::PREFERRED_API_KEY_UNAVAILABLE.to_string(),
-                ),
-            };
-            vec![]
-        } else {
-            // Enterprise pin: open /providers (xAI row) — no global /login.
-            dispatch::dispatch(Action::OpenProviders, &mut app)
-        }
-    } else {
-        vec![]
-    };
-
-    if let Some(meta) = connection.auth_meta.as_ref() {
-        match serde_json::from_value::<xai_grok_shell::auth::AuthMeta>(meta.clone()) {
-            Ok(auth_meta) => app.apply_auth_meta(&auth_meta),
-            Err(e) => tracing::warn!("failed to deserialize auth_meta: {e}"),
-        }
-    } else {
-        // No cached session — check if the API key is the active credential.
-        app.is_api_key_auth = app.auth_methods.iter().any(|m| {
-            m.id().0.as_ref() == xai_grok_shell::agent::auth_method::XAI_API_KEY_METHOD_ID
-        });
-        // No AuthMeta on this path — API keys have no consumer billing surface.
-        if app.is_api_key_auth {
-            app.usage_visible = false;
-            app.sync_billing_surface_to_agents();
-        }
-    }
-
-    // After auth so API-key + managed policy resolve correctly.
-    let voice_mode_enabled = crate::app::resolve_voice_mode_live(
-        remote_settings.as_ref().and_then(|s| s.voice_mode_enabled),
-        app.is_api_key_auth,
-    );
-    if !voice_mode_enabled {
-        app.voice_reset();
-        app.voice_ui_active = false;
-    }
-    app.apply_voice_mode_enabled(voice_mode_enabled);
+    // Connection-seeded state (auth methods/verdict, models, catalog flags,
+    // voice mode) is applied by `hydrate_connection` when the background
+    // shell connect lands. Until then the AppView runs on provisional
+    // defaults: auth `Done` (the common authenticated case — session-creating
+    // startup intents dispatch as usual and their effects queue),
+    // no advertised methods, and no catalog.
 
     // Fallback: prefetch may have gate info the shell's AuthMeta missed.
     // Errs on the side of blocking if stale.
@@ -1034,6 +942,7 @@ pub(crate) async fn run(
     // Re-impose the startup gate through the chokepoint: cached auth meta
     // and the settings prefetch are both possibly stale, so a consumer
     // session's gate is deferred for live verification before first paint.
+    let mut post_render_effects = Vec::new();
     if let Some(gate) = app.gate.take() {
         post_render_effects.extend(app.impose_gate(gate));
     }
@@ -1480,9 +1389,12 @@ pub(crate) async fn run(
             }
         }
     });
-    let mut acp_rx = connection.rx;
-    let connection_cancel = connection.cancel;
-    let mut leader_status_rx = connection.leader_status_rx;
+    let mut acp_rx = placeholder_client.rx;
+    let mut connection_cancel: Option<tokio_util::sync::CancellationToken> = None;
+    let mut leader_status_rx: Option<
+        tokio::sync::watch::Receiver<crate::acp::leader_bridge::ConnectionStatus>,
+    > = None;
+    let mut connect_ready = Some(connect_ready);
     let mut tasks: JoinSet<TaskResult> = JoinSet::new();
     let (progress_tx, mut progress_rx) =
         tokio::sync::mpsc::unbounded_channel::<effects::RestoreProgressMsg>();
@@ -1492,9 +1404,11 @@ pub(crate) async fn run(
     // who never enable voice mode. `AUDIO_SUPPORTED` reflects whether mic
     // capture is compiled in: true for production CLI builds on macOS/Windows
     // (cpal) and Linux (subprocess recorder), false for Bazel builds (no
-    // capture in the test sandbox).
+    // capture in the test sandbox). The auth factory arrives with the
+    // connection; a cold start requested before that stays queued and starts
+    // at a later loop-top once hydration lands.
     let mut voice_rx = None::<tokio::sync::mpsc::Receiver<xai_grok_voice::VoiceEvent>>;
-    let voice_auth_factory = connection.auth_manager.clone();
+    let mut voice_auth_factory: Option<std::sync::Arc<xai_grok_shell::auth::AuthManager>> = None;
 
     // Animation tick: only scheduled when there are running entries.
     let mut tick_interval = tick_interval;
@@ -1867,8 +1781,11 @@ pub(crate) async fn run(
         // allow. Consume the queued cold-start, carrying its hold-ownership and
         // bound target forward into the live recording it spawns.
         if let VoiceState::ColdStart { hold, target } = app.voice_state {
-            if app.voice_cmd_tx.is_none() && app.voice_can_start_pipeline() {
-                let voice_auth = crate::voice::build_voice_auth(voice_auth_factory.clone());
+            if app.voice_cmd_tx.is_none()
+                && app.voice_can_start_pipeline()
+                && let Some(voice_factory) = voice_auth_factory.clone()
+            {
+                let voice_auth = crate::voice::build_voice_auth(voice_factory);
                 let (cmd_tx, cmd_rx) = tokio::sync::mpsc::channel(32);
                 let (event_tx, event_rx) = tokio::sync::mpsc::channel(128);
                 let voice_config = app.voice_config.clone();
@@ -1898,10 +1815,13 @@ pub(crate) async fn run(
                     app.voice_state = VoiceState::Idle;
                     app.voice_ui_active = false;
                 }
-            } else if app.voice_cmd_tx.is_none() {
+            } else if app.voice_cmd_tx.is_none() && voice_auth_factory.is_some() {
                 app.voice_state = VoiceState::Idle;
                 app.voice_ui_active = false;
                 app.show_toast("Voice could not start. Restart Grok.");
+            } else if app.voice_cmd_tx.is_none() {
+                // Still connecting (no auth factory yet): keep the cold start
+                // queued; a later loop-top retries once the connection lands.
             } else {
                 // Defensive: a queued start with the pipeline already up (which
                 // shouldn't occur) — drop it so we don't re-enter every tick.
@@ -2053,13 +1973,27 @@ pub(crate) async fn run(
             }
         };
 
+        // Agent-side cancellation, rebuilt per iteration so hydration can
+        // swap in the live token (None pends until the connection lands).
+        let connection_cancelled = {
+            let connection_cancel_for_arm = connection_cancel.clone();
+            async move {
+                match connection_cancel_for_arm {
+                    Some(token) => token.cancelled().await,
+                    None => std::future::pending().await,
+                }
+            }
+        };
+
         tokio::select! {
             biased;
 
             // Leader disconnect: the bridge fires cancel when the IPC
             // channel closes.  Without this arm the loop would hang
             // because AppView holds the client-side tx, keeping acp_rx open.
-            _ = connection_cancel.cancelled() => {
+            // Before the connection lands there is no agent token yet — the
+            // arm pends until hydration swaps it in.
+            _ = connection_cancelled => {
                 break;
             }
 
@@ -2078,6 +2012,59 @@ pub(crate) async fn run(
                 let sequence = writer_event_sequence(writer_event)
                     .context("terminal output failed")?;
                 presenter.acknowledge(sequence);
+            }
+
+            // Background shell connect finished (or its task panicked).
+            // Hydrate the AppView from the live connection, drain the effects
+            // queued while painting, and swap the loop's connection surfaces.
+            // Failure surfaces via the normal toast/lane surfaces and the
+            // loop stays alive (retry semantics unchanged: none for the
+            // initial connect; the user can quit).
+            connect_result = async {
+                match connect_ready.as_mut() {
+                    Some(rx) => rx.await,
+                    None => std::future::pending().await,
+                }
+            } => {
+                connect_ready = None;
+                let connect_error = match connect_result {
+                    Ok(Ok(connection)) => {
+                        _placeholder_agent_keepalive = None;
+                        let ready_at = std::time::Instant::now();
+                        let queued_count = app.connection.queued_effects.len();
+                        let hydrated_effects = hydrate_connection(&mut app, &connection, args.force_login);
+                        // Queued user intent first (FIFO), then the
+                        // hydration's own effects (login UI dispatch).
+                        let queued_effects =
+                            std::mem::take(&mut app.connection.queued_effects);
+                        if process_effects(queued_effects, &mut tasks, &mut app, &progress_tx) {
+                            return Ok(make_run_result(&app));
+                        }
+                        if process_effects(hydrated_effects, &mut tasks, &mut app, &progress_tx) {
+                            return Ok(make_run_result(&app));
+                        }
+                        crate::unified_log::info(
+                            "startup.connection_ready",
+                            None,
+                            Some(serde_json::json!({
+                                "elapsed_ms": xai_grok_telemetry::startup_timing::elapsed_ms(),
+                                "duration_ms": ready_at.elapsed().as_millis() as u64,
+                                "queued_effects": queued_count,
+                            })),
+                        );
+                        // Swap the loop's live connection surfaces.
+                        acp_rx = connection.rx;
+                        connection_cancel = Some(connection.cancel);
+                        leader_status_rx = connection.leader_status_rx;
+                        voice_auth_factory = Some(connection.auth_manager);
+                        presenter.request_presentation(&mut app, terminal, false);
+                        continue;
+                    }
+                    Ok(Err(error)) => Some(format!("{error:#}")),
+                    Err(_) => Some("shell connect task ended unexpectedly".to_string()),
+                };
+                handle_connect_failure(&mut app, connect_error.as_deref().unwrap_or("unknown failure"));
+                presenter.request(false);
             }
 
             // Biased order: cancellation/quit, writer acks/failures, ACP,
@@ -3858,6 +3845,176 @@ fn merge_paste_fragments(events: Vec<TimedInputEvent>) -> Vec<TimedInputEvent> {
     result
 }
 
+/// Spawn a connect-shaped future as a background task that reports its
+/// result through a oneshot. The caller never awaits it inline — the event
+/// loop starts (and paints) while the task runs, and consumes the receiver
+/// from a dedicated select arm.
+pub(crate) fn spawn_connect_task<F, T>(connect: F) -> tokio::sync::oneshot::Receiver<T>
+where
+    F: std::future::Future<Output = T> + Send + 'static,
+    T: Send + 'static,
+{
+    let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+    tokio::spawn(async move {
+        let result = connect.await;
+        let _ = ready_tx.send(result);
+    });
+    ready_rx
+}
+
+/// Hydrate the AppView from the freshly established connection and open the
+/// lazy-startup gate.
+///
+/// Applies everything the pre-paint path used to seed from the connection in
+/// one place: unified-log forwarding, the live ACP surface, model catalog,
+/// advertised commands, auth methods and the login/auth-metadata seeding,
+/// catalog capability flags, and the voice-mode resolve (which depends on
+/// API-key detection). Returns the hydration's own effects (e.g. the
+/// enterprise-pin `/providers` open) for the caller to process after the
+/// queued pre-connection effects have drained.
+///
+/// `force_login` mirrors `--force-login`: show the login flow even when the
+/// connection reports credentials.
+fn hydrate_connection(
+    app: &mut AppView,
+    connection: &crate::acp::AcpConnection,
+    force_login: bool,
+) -> Vec<Effect> {
+    // Open the gate first: queued effects processed after hydration execute
+    // for real.
+    app.connection.ready = true;
+
+    // Forward unified-log entries buffered since process start to the shell.
+    crate::unified_log::init(connection.tx.clone());
+    app.acp_tx = connection.tx.clone();
+    app.models = connection.models.clone();
+    app.bootstrap_acp_commands = connection.available_commands.clone();
+    app.leader_mode = connection.leader_status_rx.is_some();
+
+    // Preserve auth methods so logout→re-login works without restarting.
+    app.auth_methods = connection.auth_methods.clone();
+
+    // Seed auth state from ACP connection metadata.
+    // --force-login overrides: show the login screen even when credentials exist.
+    let needs_interactive_login = connection.needs_login || force_login;
+    if needs_interactive_login {
+        app.welcome_prompt_focused = false;
+
+        if connection.needs_login {
+            // Normal path: use the metadata from startup_auth_metadata()
+            app.login_label = connection.login_label.clone();
+            app.login_method_id = connection.login_method_id.clone();
+            app.auth_start_mode = match connection.auth_start_mode {
+                crate::acp::AuthStartMode::Pending => super::app_view::AuthMode::Pending,
+                crate::acp::AuthStartMode::Command => super::app_view::AuthMode::Command,
+            };
+        } else {
+            // --force-login: find the grok.com method from the advertised list
+            let grok_com = connection
+                .auth_methods
+                .iter()
+                .find(|m| m.id().0.as_ref() == "grok.com");
+            if let Some(method) = grok_com {
+                app.login_label = Some(method.name().to_string());
+                app.login_method_id = Some(method.id().clone());
+                let is_provider = method
+                    .meta()
+                    .as_ref()
+                    .and_then(|v| v.get("external_provider"))
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+                app.auth_start_mode = if is_provider {
+                    super::app_view::AuthMode::Command
+                } else {
+                    super::app_view::AuthMode::Pending
+                };
+            } else {
+                // No grok.com method available, use the first method as fallback
+                let first = &connection.auth_methods[0];
+                app.login_label = Some(first.name().to_string());
+                app.login_method_id = Some(first.id().clone());
+                app.auth_start_mode = super::app_view::AuthMode::Pending;
+            }
+        }
+
+        // Skip the login splash screen — auto-trigger login immediately
+        // by reusing dispatch_login. The returned effects run right after
+        // the pre-connection queue drains, so the user sees the auth UI as
+        // soon as the connection lands.
+        // Empty auth_methods (preferred_method pin with no credentials) is
+        // fail-closed: do not invent grok.com / auto-start OIDC.
+        tracing::info!(
+            method_id = ?app.login_method_id,
+            methods_empty = connection.auth_methods.is_empty(),
+            "auto-triggering login at startup"
+        );
+    }
+
+    let effects = if needs_interactive_login {
+        if connection.auth_methods.is_empty() {
+            // preferred_method pin unavailable — no advertised method to start.
+            app.auth_state = super::app_view::AuthState::Pending {
+                error: Some(
+                    xai_grok_shell::agent::auth_method::PREFERRED_API_KEY_UNAVAILABLE.to_string(),
+                ),
+            };
+            vec![]
+        } else {
+            // Enterprise pin: open /providers (xAI row) — no global /login.
+            dispatch::dispatch(Action::OpenProviders, app)
+        }
+    } else {
+        vec![]
+    };
+
+    if let Some(meta) = connection.auth_meta.as_ref() {
+        match serde_json::from_value::<xai_grok_shell::auth::AuthMeta>(meta.clone()) {
+            Ok(auth_meta) => app.apply_auth_meta(&auth_meta),
+            Err(e) => tracing::warn!("failed to deserialize auth_meta: {e}"),
+        }
+    } else {
+        // No cached session — check if the API key is the active credential.
+        app.is_api_key_auth = app.auth_methods.iter().any(|m| {
+            m.id().0.as_ref() == xai_grok_shell::agent::auth_method::XAI_API_KEY_METHOD_ID
+        });
+        // No AuthMeta on this path — API keys have no consumer billing surface.
+        if app.is_api_key_auth {
+            app.usage_visible = false;
+            app.sync_billing_surface_to_agents();
+        }
+    }
+
+    app.cancel_rewind_enabled = connection.cancel_rewind_enabled;
+    apply_session_recap_available(app, connection.session_recap_available);
+    app.prime_index = connection.prime_index;
+
+    effects
+}
+
+/// Surface a background connect failure after paint. The loop stays alive:
+/// the user can read the error and quit, and queued effects simply keep
+/// waiting (retry semantics are unchanged — the initial connect has none).
+/// A welcome resume picker stuck on its loading hint gets the same error
+/// lane the fetch-failure path uses, so it never spins forever.
+fn handle_connect_failure(app: &mut AppView, error: &str) {
+    tracing::error!(error = %error, "shell connect failed after first paint");
+    crate::unified_log::error(
+        "startup.shell_connect_failed",
+        None,
+        Some(serde_json::json!({
+            "elapsed_ms": xai_grok_telemetry::startup_timing::elapsed_ms(),
+            "error": error,
+        })),
+    );
+    let message = format!("Couldn't start the Grok agent: {error}");
+    if app.session_picker_loading && app.session_picker_entries.is_none() {
+        app.session_picker_loading = false;
+        app.session_picker_lanes.pending_notice =
+            Some(crate::views::session_picker::SessionPickerPendingNotice::Error(message.clone()));
+    }
+    app.show_toast(&message);
+}
+
 /// Spawn effects into the task set. Returns `true` if the app should quit.
 fn process_effects(
     effs: Vec<super::actions::Effect>,
@@ -3890,6 +4047,14 @@ fn process_effects(
         },
     };
     for eff in effs {
+        // Lazy startup: while the background shell connect is still running,
+        // park effects in arrival order and let the connection-ready arm
+        // drain them. Quit bypasses the queue so the loop always stays
+        // responsive (teardown also cancels the connect task).
+        if !app.connection.ready && !matches!(eff, Effect::Quit) {
+            app.connection.queued_effects.push(eff);
+            continue;
+        }
         let (quit, meta) = effects::execute(eff, tasks, &app.acp_tx, &app.cwd, &flags, progress_tx);
         // Install auth abort handle if the current auth state still matches.
         if let Some((seq, abort_handle)) = meta.auth_abort_handle
@@ -5381,5 +5546,289 @@ mod tests {
             app.active_view = view;
             assert!(make_run_result(&app).exit_info.is_none());
         }
+    }
+
+    // ── Lazy shell connect (background connect + effect queue) ──────────
+
+    /// A mock ACP responder for effect tests: replies to every
+    /// `x.ai/session/list` with an empty session list.
+    fn spawn_session_list_responder(
+        mut rx: tokio::sync::mpsc::UnboundedReceiver<xai_acp_lib::AcpAgentMessage>,
+    ) {
+        use xai_acp_lib::AcpAgentMessage;
+        tokio::spawn(async move {
+            while let Some(msg) = rx.recv().await {
+                let AcpAgentMessage::ExtMethod(args) = msg else {
+                    continue;
+                };
+                assert_eq!(args.request.method.as_ref(), "x.ai/session/list");
+                let body = serde_json::json!({ "result": { "sessions": [] } });
+                let raw = serde_json::value::RawValue::from_string(body.to_string())
+                    .expect("serialize mock list response");
+                let _ = args
+                    .response_tx
+                    .send(Ok(agent_client_protocol::ExtResponse::new(
+                        std::sync::Arc::from(raw),
+                    )));
+            }
+        });
+    }
+
+    /// Effects issued while the shell connect still runs park in the
+    /// connection queue (FIFO, nothing executes), then drain in order and
+    /// resolve once the gate opens. Quit is exempt: it always executes.
+    #[tokio::test]
+    async fn effects_issued_before_connection_ready_drain_in_order_after_ready() {
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        spawn_session_list_responder(rx);
+        let mut app = crate::app::app_view::tests::test_app();
+        app.acp_tx = tx;
+        app.connection.ready = false;
+
+        let mut tasks: JoinSet<TaskResult> = JoinSet::new();
+        let (progress_tx, _progress_rx) =
+            tokio::sync::mpsc::unbounded_channel::<effects::RestoreProgressMsg>();
+        let issue = |seq: u64| Effect::FetchSessionList { query: None, seq };
+
+        // Pre-connection: nothing spawns, everything queues in order.
+        assert!(!process_effects(
+            vec![issue(1), issue(2), issue(3)],
+            &mut tasks,
+            &mut app,
+            &progress_tx
+        ));
+        assert_eq!(app.connection.queued_effects.len(), 3);
+        assert_eq!(tasks.len(), 0, "no effect may execute before ready");
+
+        // Ready: the queue drains in FIFO order and every fetch resolves.
+        app.connection.ready = true;
+        let drained = std::mem::take(&mut app.connection.queued_effects);
+        assert!(!process_effects(
+            drained,
+            &mut tasks,
+            &mut app,
+            &progress_tx
+        ));
+        let mut seqs = Vec::new();
+        while let Some(joined) = tasks.join_next().await {
+            match joined.expect("task") {
+                TaskResult::SessionListLoaded { seq, .. } => seqs.push(seq),
+                other => panic!("expected SessionListLoaded, got {other:?}"),
+            }
+        }
+        assert_eq!(seqs, vec![1, 2, 3], "queued effects must drain in order");
+        assert!(app.connection.queued_effects.is_empty());
+    }
+
+    /// The picker's session fetch issued before the connection exists
+    /// resolves (no error) once the connection lands — the loading hint
+    /// covers the window, never a hard failure.
+    #[tokio::test]
+    async fn fetch_session_list_issued_pre_connection_resolves_after_ready() {
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        spawn_session_list_responder(rx);
+        let mut app = crate::app::app_view::tests::test_app();
+        app.acp_tx = tx;
+        app.connection.ready = false;
+        app.session_picker_loading = true;
+
+        let mut tasks: JoinSet<TaskResult> = JoinSet::new();
+        let (progress_tx, _progress_rx) =
+            tokio::sync::mpsc::unbounded_channel::<effects::RestoreProgressMsg>();
+        let _ = process_effects(
+            vec![Effect::FetchSessionList {
+                query: None,
+                seq: 7,
+            }],
+            &mut tasks,
+            &mut app,
+            &progress_tx,
+        );
+        assert_eq!(app.connection.queued_effects.len(), 1);
+
+        app.connection.ready = true;
+        let drained = std::mem::take(&mut app.connection.queued_effects);
+        assert!(!process_effects(
+            drained,
+            &mut tasks,
+            &mut app,
+            &progress_tx
+        ));
+        match tasks
+            .join_next()
+            .await
+            .expect("fetch task")
+            .expect("no panic")
+        {
+            TaskResult::SessionListLoaded { seq, .. } => assert_eq!(seq, 7),
+            other => panic!("expected SessionListLoaded, got {other:?}"),
+        }
+    }
+
+    /// A connect failure after paint surfaces on the active view's error
+    /// surface, drops the picker's stuck loading hint, keeps queued effects
+    /// parked (not executed against a dead connection), and leaves the loop
+    /// responsive — Quit still processes.
+    #[tokio::test]
+    async fn connect_failure_surfaces_error_and_loop_stays_alive() {
+        let mut app = crate::app::app_view::tests::test_app();
+        app.connection.ready = false;
+        app.session_picker_loading = true;
+        let mut tasks: JoinSet<TaskResult> = JoinSet::new();
+        let (progress_tx, _progress_rx) =
+            tokio::sync::mpsc::unbounded_channel::<effects::RestoreProgressMsg>();
+        let _ = process_effects(
+            vec![Effect::FetchSessionList {
+                query: None,
+                seq: 1,
+            }],
+            &mut tasks,
+            &mut app,
+            &progress_tx,
+        );
+        assert_eq!(app.connection.queued_effects.len(), 1);
+
+        handle_connect_failure(&mut app, "boom");
+        assert!(
+            app.welcome_toast
+                .as_ref()
+                .is_some_and(|(msg, _)| msg.contains("boom")),
+            "connect failure must surface a toast"
+        );
+        assert!(
+            !app.session_picker_loading,
+            "the picker's loading hint must not spin forever"
+        );
+        assert!(matches!(
+            app.session_picker_lanes.pending_notice,
+            Some(crate::views::session_picker::SessionPickerPendingNotice::Error(_))
+        ));
+        assert!(!app.connection.ready);
+        assert_eq!(
+            app.connection.queued_effects.len(),
+            1,
+            "queued effects stay parked after a failure"
+        );
+
+        // Loop-alive proxy: Quit still bypasses the queue and executes.
+        assert!(process_effects(
+            vec![Effect::Quit],
+            &mut tasks,
+            &mut app,
+            &progress_tx
+        ));
+    }
+
+    /// Hydration opens the gate, seeds the AppView from the connection
+    /// (models, commands, catalog flags, auth metadata), and produces no
+    /// effects for an authenticated connection.
+    #[tokio::test]
+    async fn connection_ready_hydration_seeds_auth_and_catalog() {
+        use crate::acp::AuthStartMode;
+        use xai_acp_lib::acp_channels;
+        let (client, _agent) = acp_channels();
+        let auth_manager = std::sync::Arc::new(xai_grok_shell::auth::AuthManager::new(
+            &xai_grok_tools::util::grok_home::grok_home(),
+            Default::default(),
+        ));
+        let connection = crate::acp::AcpConnection {
+            tx: client.tx,
+            rx: client.rx,
+            models: crate::acp::ModelState::default(),
+            is_grok_shell: true,
+            auth_methods: vec![],
+            cancel: tokio_util::sync::CancellationToken::new(),
+            available_commands: vec![],
+            needs_login: false,
+            login_label: None,
+            login_method_id: None,
+            auth_start_mode: AuthStartMode::Pending,
+            auth_meta: Some(serde_json::json!({ "team_name": "acme" })),
+            leader_status_rx: None,
+            cancel_rewind_enabled: true,
+            session_recap_available: true,
+            prime_index: Default::default(),
+            auth_manager,
+        };
+
+        let mut app = crate::app::app_view::tests::test_app();
+        app.connection.ready = false;
+        let effects = hydrate_connection(&mut app, &connection, false);
+        assert!(app.connection.ready, "hydration must open the gate");
+        assert!(matches!(app.auth_state, AuthState::Done));
+        assert!(app.cancel_rewind_enabled);
+        assert!(app.session_recap_available);
+        assert_eq!(app.team_name.as_deref(), Some("acme"));
+        assert!(
+            effects.is_empty(),
+            "an authenticated connection needs no login UI, got {effects:?}"
+        );
+    }
+
+    /// A connection that requires login keeps the session gate closed and
+    /// dispatches the providers sheet instead.
+    #[tokio::test]
+    async fn connection_needing_login_opens_providers_and_keeps_gate_closed() {
+        use crate::acp::AuthStartMode;
+        use xai_acp_lib::acp_channels;
+        let (client, _agent) = acp_channels();
+        let auth_manager = std::sync::Arc::new(xai_grok_shell::auth::AuthManager::new(
+            &xai_grok_tools::util::grok_home::grok_home(),
+            Default::default(),
+        ));
+        let method =
+            agent_client_protocol::AuthMethod::Agent(agent_client_protocol::AuthMethodAgent::new(
+                agent_client_protocol::AuthMethodId::new("grok.com"),
+                "Grok".to_string(),
+            ));
+        let connection = crate::acp::AcpConnection {
+            tx: client.tx,
+            rx: client.rx,
+            models: crate::acp::ModelState::default(),
+            is_grok_shell: true,
+            auth_methods: vec![method],
+            cancel: tokio_util::sync::CancellationToken::new(),
+            available_commands: vec![],
+            needs_login: true,
+            login_label: Some("grok.com".to_string()),
+            login_method_id: Some(agent_client_protocol::AuthMethodId::new("grok.com")),
+            auth_start_mode: AuthStartMode::Pending,
+            auth_meta: None,
+            leader_status_rx: None,
+            cancel_rewind_enabled: false,
+            session_recap_available: false,
+            prime_index: Default::default(),
+            auth_manager,
+        };
+
+        let mut app = crate::app::app_view::tests::test_app();
+        app.connection.ready = false;
+        let effects = hydrate_connection(&mut app, &connection, false);
+        assert!(
+            matches!(app.auth_state, AuthState::Done),
+            "needs-login seeding keeps today's Done state; the login UI drives the gate"
+        );
+        assert!(!app.welcome_prompt_focused);
+        assert!(
+            !effects.is_empty(),
+            "needs-login hydration must dispatch the providers sheet"
+        );
+    }
+
+    /// The background connect hands off without blocking: the receiver is
+    /// still empty immediately after the spawn returns (no await), which is
+    /// what lets the event loop start — and paint — before connect finishes.
+    #[tokio::test]
+    async fn background_connect_hands_off_without_blocking_caller() {
+        let mut ready = spawn_connect_task(async {
+            // Stand-in for the connect future: completes only after a yield.
+            tokio::task::yield_now().await;
+            42_u32
+        });
+        assert!(
+            ready.try_recv().is_err(),
+            "spawn_connect_task must return before the connect future resolves"
+        );
+        assert_eq!(ready.await.expect("connect result"), 42);
     }
 }
