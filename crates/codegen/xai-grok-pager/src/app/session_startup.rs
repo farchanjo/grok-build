@@ -406,7 +406,18 @@ pub fn effective_fork_new_cwd(process_cwd: &str, parent_cwd: Option<&Path>) -> S
 }
 /// Resolve most-recent session id for cwd, or error.
 async fn most_recent_session_id(cwd: &str) -> anyhow::Result<(String, Option<String>)> {
+    let scan_started = std::time::Instant::now();
     let summaries = xai_grok_shell::session::persistence::list_summaries(Some(cwd)).await?;
+    crate::unified_log::info(
+        "startup.session_history_scan",
+        None,
+        Some(serde_json::json!({
+            "elapsed_ms": xai_grok_telemetry::startup_timing::elapsed_ms(),
+            "duration_ms": scan_started.elapsed().as_millis() as u64,
+            "sessions": summaries.len(),
+            "cwd_scoped": true,
+        })),
+    );
     let first = summaries.first().ok_or_else(|| {
         anyhow::anyhow!(
             "No session found for current directory. \
@@ -414,6 +425,31 @@ async fn most_recent_session_id(cwd: &str) -> anyhow::Result<(String, Option<Str
         )
     })?;
     Ok((first.info.id.to_string(), first.display_title_opt()))
+}
+
+/// Best-effort display title for one persisted session id (resume startup).
+///
+/// Reads only the target session's summary through the relocation-aware dir
+/// lookup plus one contained summary read — never a full `list_summaries`
+/// history scan — so `--resume` / fork startup does not pay O(stored
+/// sessions) parse cost on the paint path just to title the terminal.
+/// `None` when the session dir is unresolvable, the summary is unreadable,
+/// or no display title exists.
+pub async fn resume_session_title(session_id: &str) -> Option<String> {
+    let session_id = session_id.to_string();
+    let dir = tokio::task::spawn_blocking(move || {
+        xai_grok_shell::session::persistence::find_session_dir_by_id(&session_id)
+    })
+    .await
+    .ok()
+    .flatten()?;
+    let summary = tokio::task::spawn_blocking(move || {
+        xai_grok_shell::session::persistence::read_summary_for_dir(&dir)
+    })
+    .await
+    .ok()?
+    .ok()?;
+    summary.display_title_opt()
 }
 /// `AuthManager` for direct grok.com calls made outside the agent (pre-ACP
 /// `--continue` conversation listing, the GCS restore effect). Wires the
@@ -1085,5 +1121,48 @@ mod tests {
             }
             other => panic!("expected Resume, got {other:?}"),
         }
+    }
+
+    /// The resume startup title lookup reads only the target session's
+    /// summary (relocation-aware dir lookup + one contained read) and prefers
+    /// the generated display title; a missing session is `None`, never an
+    /// error.
+    #[serial_test::serial(GROK_HOME)]
+    #[tokio::test]
+    async fn resume_session_title_reads_target_session_summary_only() {
+        let home = tempfile::tempdir().expect("home tempdir");
+        // SAFETY: test-only GROK_HOME; serialized behind the GROK_HOME key
+        // and isolated per nextest process.
+        unsafe { std::env::set_var("GROK_HOME", home.path()) };
+        let cwd_str = "/repo/under/test";
+        let session_id = "aaaaaaaa-1111-2222-3333-444444444444";
+        let encoded = xai_grok_shell::util::grok_home::encode_cwd_dirname(cwd_str);
+        let session_dir = xai_grok_shell::util::grok_home::grok_home()
+            .join("sessions")
+            .join(&encoded)
+            .join(session_id);
+        std::fs::create_dir_all(&session_dir).unwrap();
+        let summary = serde_json::json!({
+            "info": { "id": session_id, "cwd": cwd_str },
+            "session_summary": "raw summary text",
+            "created_at": "2026-01-01T00:00:00Z",
+            "updated_at": "2026-01-02T00:00:00Z",
+            "num_messages": 1,
+            "current_model_id": "grok-4",
+            "generated_title": "Refactor auth flow",
+        });
+        std::fs::write(
+            session_dir.join("summary.json"),
+            serde_json::to_vec(&summary).unwrap(),
+        )
+        .unwrap();
+
+        let title = resume_session_title(session_id).await;
+        assert_eq!(title.as_deref(), Some("Refactor auth flow"));
+
+        // A session with no dir on disk resolves to None (best-effort title,
+        // never a startup failure).
+        let missing = resume_session_title("ffffffff-1111-2222-3333-444444444444").await;
+        assert_eq!(missing, None);
     }
 }

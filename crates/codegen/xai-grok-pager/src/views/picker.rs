@@ -1879,6 +1879,9 @@ pub struct PickerContentHitAreas {
 ///
 /// The existing [`render_picker`] calls this internally for backwards
 /// compatibility with non-migrated callers.
+///
+/// `loading_label` replaces the generic "Loading..." placeholder while
+/// `loading` is set (e.g. the resume picker's "loading sessions…" hint row).
 #[allow(clippy::too_many_arguments)]
 pub fn render_picker_content(
     buf: &mut Buffer,
@@ -1890,6 +1893,7 @@ pub fn render_picker_content(
     non_selectable_clickable: &[bool],
     bg: Option<ratatui::style::Color>,
     loading: bool,
+    loading_label: &str,
 ) -> PickerContentHitAreas {
     render_picker_content_inner(
         buf,
@@ -1902,6 +1906,7 @@ pub fn render_picker_content(
         bg,
         loading,
         None,
+        loading_label,
     )
 }
 
@@ -1933,6 +1938,7 @@ pub fn render_picker_content_with_scrollbar_x(
         bg,
         loading,
         Some(scrollbar_x),
+        "Loading...",
     )
 }
 
@@ -2038,6 +2044,7 @@ fn render_picker_content_inner(
     bg: Option<ratatui::style::Color>,
     loading: bool,
     scrollbar_x_override: Option<u16>,
+    loading_label: &str,
 ) -> PickerContentHitAreas {
     // Cleared each paint; set below if a row underlines its last description line.
     state.link_band = None;
@@ -2053,7 +2060,11 @@ fn render_picker_content_inner(
 
     // Loading state — centered in the content area.
     if loading {
-        let msg = "Loading...";
+        let msg = if loading_label.is_empty() {
+            "Loading..."
+        } else {
+            loading_label
+        };
         let msg_style = Style::default().fg(theme.gray);
         let cx = content_area.x + content_area.width.saturating_sub(msg.len() as u16) / 2;
         let cy = content_area.y + content_area.height / 2;
@@ -2244,6 +2255,7 @@ pub fn render_picker(
     entries: &[PickerEntry<'_>],
     config: &PickerConfig<'_>,
     loading: bool,
+    loading_label: &str,
 ) -> PickerHitAreas {
     let empty_hit = PickerHitAreas {
         close_button: Rect::default(),
@@ -2476,6 +2488,7 @@ pub fn render_picker(
         config.non_selectable_clickable,
         bg,
         loading,
+        loading_label,
     );
     let item_rects = content_hit.item_rects;
     let entry_indices = content_hit.entry_indices;
@@ -3389,7 +3402,16 @@ mod tests {
             let mut state = PickerState::with_mode(PickerMode::FullScreen);
             state.search_active = search_active;
             let mut buf = Buffer::empty(area);
-            let hit = render_picker(&mut buf, area, &theme, &mut state, &[], &config, false);
+            let hit = render_picker(
+                &mut buf,
+                area,
+                &theme,
+                &mut state,
+                &[],
+                &config,
+                false,
+                "Loading...",
+            );
             let y = hit.search_bar.y;
             let mut has_cursor = false;
             let mut text = String::new();

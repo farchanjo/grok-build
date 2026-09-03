@@ -28,6 +28,7 @@ pub mod sampling_log;
 pub mod sentry;
 pub mod session_ctx;
 pub mod session_metrics;
+pub mod startup_timing;
 pub mod unified_log;
 
 pub use client::{

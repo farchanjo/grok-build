@@ -311,20 +311,40 @@ pub struct McpSubscriptionsRequest {
     pub session_id: Option<String>,
 }
 
+/// Liveness of one subscription row, computed by the session from the
+/// resource pump's stats. Serialized lowercase on the `x.ai/mcp/subscriptions`
+/// wire; `None` on the agent-level path (no session stats to classify with).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum McpSubscriptionState {
+    /// Pushes are flowing (last push within the idle window).
+    Active,
+    /// No push for over the idle window (or subscribed-but-never-pushed
+    /// past the grace window).
+    Idle,
+    /// The MCP client for the server disconnected or its config was removed.
+    Dead,
+}
+
 /// One active subscription row. `pushes_seen` / `last_push_ms_ago` come from
 /// the session's resource pump (`None` on the agent-level path, which has no
-/// pump stats); `unsubscribed` marks a user-tombstoned stream.
+/// pump stats); `unsubscribed` marks a user-tombstoned stream; `label` is the
+/// display name captured at subscribe time; `state` classifies liveness.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct McpSubscriptionEntry {
     pub server: String,
     pub uri: String,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub pushes_seen: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_push_ms_ago: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub unsubscribed: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub state: Option<McpSubscriptionState>,
 }
 
 #[derive(Debug, Serialize)]
@@ -1274,14 +1294,18 @@ async fn handle_subscriptions(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtRe
             })
             .flat_map(|(server, client)| {
                 client
-                    .subscribed_uris()
+                    .subscribed_resources()
                     .into_iter()
-                    .map(move |uri| McpSubscriptionEntry {
+                    .map(move |(uri, label)| McpSubscriptionEntry {
                         server: server.clone(),
                         uri,
+                        label,
                         pushes_seen: None,
                         last_push_ms_ago: None,
                         unsubscribed: None,
+                        // Agent-level listing has no session pump stats to
+                        // classify liveness with.
+                        state: None,
                     })
             })
             .collect()

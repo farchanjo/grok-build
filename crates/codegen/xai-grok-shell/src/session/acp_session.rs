@@ -235,7 +235,7 @@ mod notification_drain;
 use notification_drain::*;
 #[path = "acp_session_impl/mcp_push.rs"]
 mod mcp_push;
-pub(crate) use mcp_push::{McpPushStats, spawn_mcp_resource_pump};
+pub(crate) use mcp_push::{McpPushStats, McpSubscriptionRecord, spawn_mcp_resource_pump};
 #[path = "acp_session_impl/extensions.rs"]
 mod extensions;
 use extensions::*;
@@ -843,6 +843,20 @@ pub(crate) struct SessionActor {
     /// sheet's status column).
     pub(crate) mcp_push_stats: parking_lot::Mutex<
         std::collections::HashMap<(String, String), crate::session::acp_session::McpPushStats>,
+    >,
+    /// Session subscription registry, keyed `(server, uri)`. Recorded at
+    /// subscribe time (display label + first-seen) and by the resource pump's
+    /// client-event tee (dead marks on client close / config removal), so the
+    /// "Subscribed Tools" sheet can keep showing a stream after its MCP
+    /// client is gone instead of silently dropping the row. `Arc`-wrapped so
+    /// the background MCP-init task can record subscribe-time labels.
+    pub(crate) mcp_subscription_registry: std::sync::Arc<
+        parking_lot::Mutex<
+            std::collections::HashMap<
+                (String, String),
+                crate::session::acp_session::McpSubscriptionRecord,
+            >,
+        >,
     >,
     /// MCP initialization strategy
     pub(crate) mcp_strategy: McpInitStrategy,
@@ -1798,6 +1812,9 @@ mod external_runtime_preflight_tests;
 #[cfg(test)]
 #[path = "acp_session_tests/external_runtime_session_tests.rs"]
 mod external_runtime_session_tests;
+#[cfg(test)]
+#[path = "acp_session_tests/mcp_subscription_sheet_tests.rs"]
+mod mcp_subscription_sheet_tests;
 #[cfg(test)]
 #[path = "acp_session_tests/replace_system_prompt_tests.rs"]
 mod replace_system_prompt_tests;

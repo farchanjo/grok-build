@@ -646,6 +646,15 @@ pub fn find_session_dir_by_id(session_id: &str) -> Option<PathBuf> {
     find_any_session_dir_by_id_result(session_id).ok().flatten()
 }
 
+/// Read one session's summary from its session dir (contained read).
+///
+/// Public seam for targeted pager-side lookups (e.g. the resume title read)
+/// that must not pay a full `list_summaries` history scan. A missing or
+/// corrupt summary is an `Err`, mirroring the picker scan's per-entry skip.
+pub fn read_summary_for_dir(session_dir: &Path) -> io::Result<Summary> {
+    crate::session::storage::model_route::read_summary_contained(session_dir)
+}
+
 pub(crate) fn find_persisted_session_dir_by_id_result(
     session_id: &str,
 ) -> io::Result<Option<PathBuf>> {
@@ -2989,14 +2998,32 @@ fn recover_session_relocations_in(root: &Path) -> crate::session::storage::reloc
 }
 
 pub async fn list_summaries(cwd: Option<&str>) -> io::Result<Vec<Summary>> {
+    let started = std::time::Instant::now();
     let root_dir = crate::util::grok_home::grok_home();
     let recovery_root = root_dir.clone();
-    tokio::task::spawn_blocking(move || recover_session_relocations_in(&recovery_root))
-        .await
-        .map_err(io::Error::other)?
-        .map_err(io::Error::other)?;
+    let recovery: Result<(), io::Error> =
+        tokio::task::spawn_blocking(move || recover_session_relocations_in(&recovery_root))
+            .await
+            .map_err(io::Error::other)
+            .and_then(|inner| inner.map_err(io::Error::other));
+    let recovery_ms = started.elapsed().as_millis() as u64;
     let storage: Box<dyn StorageAdapter> = Box::new(JsonlStorageAdapter::with_root(root_dir));
-    storage.list_sessions(cwd).await
+    let result = storage.list_sessions(cwd).await;
+    // Cheap startup/picker observability: counts only, never summaries.
+    xai_grok_telemetry::unified_log::info(
+        "session_history.scan",
+        None,
+        Some(serde_json::json!({
+            "elapsed_ms": xai_grok_telemetry::startup_timing::elapsed_ms(),
+            "duration_ms": started.elapsed().as_millis() as u64,
+            "recovery_ms": recovery_ms,
+            "recovered": recovery.is_ok(),
+            "sessions": result.as_ref().map(Vec::len).unwrap_or(0),
+            "cwd_scoped": cwd.is_some(),
+        })),
+    );
+    recovery?;
+    result
 }
 
 /// Failure modes of [`delete_session_history`].

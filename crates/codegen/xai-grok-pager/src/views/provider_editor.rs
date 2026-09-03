@@ -35,6 +35,9 @@ pub enum EditorField {
     CapabilityMode,
     CatalogTtl,
     RequestTimeout,
+    PoolMaxIdle,
+    PoolIdleTimeout,
+    PoolConnectTimeout,
     Organization,
     Project,
     HeadersSummary,
@@ -90,6 +93,9 @@ impl EditorField {
             Self::CapabilityMode => "Capability mode",
             Self::CatalogTtl => "Catalog TTL secs",
             Self::RequestTimeout => "Request timeout secs",
+            Self::PoolMaxIdle => "Pool max idle (0-64)",
+            Self::PoolIdleTimeout => "Pool idle timeout secs (1-3600)",
+            Self::PoolConnectTimeout => "Pool connect timeout secs (1-120)",
             Self::Organization => "Organization",
             Self::Project => "Project",
             Self::HeadersSummary => "Extra headers",
@@ -157,6 +163,9 @@ fn fields_for_page(page: ProviderEditorPage) -> &'static [EditorField] {
             EditorField::CatalogEnabled,
             EditorField::CatalogTtl,
             EditorField::RequestTimeout,
+            EditorField::PoolMaxIdle,
+            EditorField::PoolIdleTimeout,
+            EditorField::PoolConnectTimeout,
             EditorField::RefreshCatalog,
             EditorField::Save,
         ],
@@ -403,6 +412,21 @@ impl ProviderEditorState {
                 .request_timeout_secs
                 .map(|v| v.to_string())
                 .unwrap_or_default(),
+            EditorField::PoolMaxIdle => self
+                .draft
+                .pool_max_idle
+                .map(|v| v.to_string())
+                .unwrap_or_default(),
+            EditorField::PoolIdleTimeout => self
+                .draft
+                .pool_idle_timeout_secs
+                .map(|v| v.to_string())
+                .unwrap_or_default(),
+            EditorField::PoolConnectTimeout => self
+                .draft
+                .pool_connect_timeout_secs
+                .map(|v| v.to_string())
+                .unwrap_or_default(),
             EditorField::OrMaxCompletionTokens => self
                 .draft
                 .max_completion_tokens
@@ -542,6 +566,27 @@ impl ProviderEditorState {
             EditorField::RequestTimeout => {
                 self.draft.request_timeout_secs = text.trim().parse().ok();
             }
+            EditorField::PoolMaxIdle => self.commit_bounded_pool_number(
+                text,
+                0,
+                64,
+                "Pool max idle must be a number 0-64",
+                |draft, v| draft.pool_max_idle = v.map(|v| u32::try_from(v).unwrap_or(0)),
+            ),
+            EditorField::PoolIdleTimeout => self.commit_bounded_pool_number(
+                text,
+                1,
+                3600,
+                "Pool idle timeout secs must be a number 1-3600",
+                |draft, v| draft.pool_idle_timeout_secs = v,
+            ),
+            EditorField::PoolConnectTimeout => self.commit_bounded_pool_number(
+                text,
+                1,
+                120,
+                "Pool connect timeout secs must be a number 1-120",
+                |draft, v| draft.pool_connect_timeout_secs = v,
+            ),
             EditorField::OrMaxCompletionTokens => {
                 self.draft.max_completion_tokens =
                     text.trim().parse::<u32>().ok().filter(|&n| n > 0);
@@ -629,6 +674,36 @@ impl ProviderEditorState {
         }
         self.editing = false;
         self.editor.reset();
+    }
+
+    /// Commit a bounded numeric pool field. Empty clears to default;
+    /// out-of-range or non-numeric input is refused (draft unchanged) and
+    /// surfaces a validation error in the editor banner.
+    fn commit_bounded_pool_number(
+        &mut self,
+        text: String,
+        min: u64,
+        max: u64,
+        error: &'static str,
+        set: impl FnOnce(&mut ProviderSavePatch, Option<u64>),
+    ) {
+        let trimmed = text.trim();
+        if trimmed.is_empty() {
+            set(&mut self.draft, None);
+            self.error = None;
+            return;
+        }
+        match trimmed.parse::<u64>() {
+            Ok(v) if (min..=max).contains(&v) => {
+                // u32-backed fields (pool_max_idle) never overflow here:
+                // max bound 64 for that field, and these bounds are <= 3600.
+                set(&mut self.draft, Some(v));
+                self.error = None;
+            }
+            _ => {
+                self.error = Some(error.to_owned());
+            }
+        }
     }
 }
 
@@ -1269,6 +1344,21 @@ fn field_value_display(state: &ProviderEditorState, field: EditorField) -> Strin
             .request_timeout_secs
             .map(|v| v.to_string())
             .unwrap_or_else(|| "(default)".into()),
+        EditorField::PoolMaxIdle => state
+            .draft
+            .pool_max_idle
+            .map(|v| v.to_string())
+            .unwrap_or_else(|| "(default)".into()),
+        EditorField::PoolIdleTimeout => state
+            .draft
+            .pool_idle_timeout_secs
+            .map(|v| v.to_string())
+            .unwrap_or_else(|| "(default)".into()),
+        EditorField::PoolConnectTimeout => state
+            .draft
+            .pool_connect_timeout_secs
+            .map(|v| v.to_string())
+            .unwrap_or_else(|| "(default)".into()),
         EditorField::Organization => state.draft.organization.clone().unwrap_or_default(),
         EditorField::Project => state.draft.project.clone().unwrap_or_default(),
         EditorField::HeadersSummary => {
@@ -1488,6 +1578,9 @@ fn draft_from_detail(detail: &ProviderDetailDto) -> ProviderSavePatch {
         openrouter_sort: Some(detail.openrouter_sort.clone()),
         openrouter_pacing: Some(detail.openrouter_pacing),
         max_completion_tokens: detail.max_completion_tokens,
+        pool_max_idle: detail.pool_max_idle,
+        pool_idle_timeout_secs: detail.pool_idle_timeout_secs,
+        pool_connect_timeout_secs: detail.pool_connect_timeout_secs,
         ..Default::default()
     }
 }
@@ -1535,6 +1628,15 @@ fn dirty_patch_against_baseline(
     }
     if draft.request_timeout_secs != baseline.request_timeout_secs {
         out.request_timeout_secs = draft.request_timeout_secs;
+    }
+    if draft.pool_max_idle != baseline.pool_max_idle {
+        out.pool_max_idle = draft.pool_max_idle;
+    }
+    if draft.pool_idle_timeout_secs != baseline.pool_idle_timeout_secs {
+        out.pool_idle_timeout_secs = draft.pool_idle_timeout_secs;
+    }
+    if draft.pool_connect_timeout_secs != baseline.pool_connect_timeout_secs {
+        out.pool_connect_timeout_secs = draft.pool_connect_timeout_secs;
     }
     if draft.organization != baseline.organization {
         out.organization = draft.organization.clone();
@@ -1627,6 +1729,9 @@ mod tests {
             capability_mode: Some("auto".into()),
             catalog_ttl_secs: None,
             request_timeout_secs: None,
+            pool_max_idle: None,
+            pool_idle_timeout_secs: None,
+            pool_connect_timeout_secs: None,
             organization: None,
             project: None,
             api_surface: None,
@@ -1853,5 +1958,59 @@ mod tests {
             state.credential_slot_update().application,
             SecretFieldUpdate::Preserve
         );
+    }
+
+    #[test]
+    fn pool_fields_edit_and_validation_on_catalog_page() {
+        let mut state = ProviderEditorState::new(sample_detail());
+        state.page = ProviderEditorPage::Catalog;
+
+        // 1. Edit PoolMaxIdle
+        state.field_index = fields_for_page(ProviderEditorPage::Catalog)
+            .iter()
+            .position(|f| *f == EditorField::PoolMaxIdle)
+            .unwrap();
+        handle_key(&mut state, &key(KeyCode::Enter));
+        assert!(state.editing);
+        state.editor.reset();
+        let _ = state.editor.insert_paste_with_byte_limit("16", 100);
+        handle_key(&mut state, &key(KeyCode::Enter));
+        assert_eq!(state.draft.pool_max_idle, Some(16));
+        assert!(state.error.is_none());
+
+        // Test invalid pool_max_idle (> 64)
+        handle_key(&mut state, &key(KeyCode::Enter));
+        state.editor.reset();
+        let _ = state.editor.insert_paste_with_byte_limit("100", 100);
+        handle_key(&mut state, &key(KeyCode::Enter));
+        assert!(state.error.as_deref().unwrap().contains("0-64"));
+
+        // 2. Edit PoolIdleTimeout
+        state.field_index = fields_for_page(ProviderEditorPage::Catalog)
+            .iter()
+            .position(|f| *f == EditorField::PoolIdleTimeout)
+            .unwrap();
+        handle_key(&mut state, &key(KeyCode::Enter));
+        state.editor.reset();
+        let _ = state.editor.insert_paste_with_byte_limit("120", 100);
+        handle_key(&mut state, &key(KeyCode::Enter));
+        assert_eq!(state.draft.pool_idle_timeout_secs, Some(120));
+
+        // 3. Edit PoolConnectTimeout
+        state.field_index = fields_for_page(ProviderEditorPage::Catalog)
+            .iter()
+            .position(|f| *f == EditorField::PoolConnectTimeout)
+            .unwrap();
+        handle_key(&mut state, &key(KeyCode::Enter));
+        state.editor.reset();
+        let _ = state.editor.insert_paste_with_byte_limit("15", 100);
+        handle_key(&mut state, &key(KeyCode::Enter));
+        assert_eq!(state.draft.pool_connect_timeout_secs, Some(15));
+
+        // 4. Dirty patch includes the pool changes
+        let patch = state.dirty_save_patch();
+        assert_eq!(patch.pool_max_idle, Some(16));
+        assert_eq!(patch.pool_idle_timeout_secs, Some(120));
+        assert_eq!(patch.pool_connect_timeout_secs, Some(15));
     }
 }

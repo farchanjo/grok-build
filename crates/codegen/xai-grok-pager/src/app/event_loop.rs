@@ -1549,6 +1549,14 @@ pub(crate) async fn run(
 
     // Initial render
     presenter.request_presentation(&mut app, terminal, false);
+    // Time-to-first-paint marker: the metric this startup path is tuned on.
+    crate::unified_log::info(
+        "startup.first_paint",
+        None,
+        Some(serde_json::json!({
+            "elapsed_ms": xai_grok_telemetry::startup_timing::elapsed_ms(),
+        })),
+    );
 
     // status only; shell auto-syncs post-auth
     if matches!(app.auth_state, AuthState::Done) {

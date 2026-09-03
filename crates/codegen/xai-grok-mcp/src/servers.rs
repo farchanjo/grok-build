@@ -1010,6 +1010,40 @@ const OAUTH_DISCOVERY_TIMEOUT: std::time::Duration = std::time::Duration::from_s
 /// a chatty tool cannot trigger a `resources/list` per call.
 const SUBSCRIBE_REFRESH_MIN_GAP: std::time::Duration = std::time::Duration::from_millis(500);
 
+/// Per-uri outcome of one subscribe sweep over a client's resource list.
+/// `subscribed` counts URIs newly subscribed this sweep; `already_subscribed`
+/// counts URIs that were already tracked and were idempotently skipped
+/// (kept as-is with their original label, never duplicated or re-sent).
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct SubscribeResourcesOutcome {
+    /// URIs newly subscribed this sweep.
+    pub subscribed: usize,
+    /// URIs already subscribed (idempotent no-ops this sweep).
+    pub already_subscribed: usize,
+}
+
+impl SubscribeResourcesOutcome {
+    /// Total URIs the sweep saw as subscribed after it ran (new + already).
+    pub fn total_subscribed(&self) -> usize {
+        self.subscribed.saturating_add(self.already_subscribed)
+    }
+}
+
+/// Human-readable display label for a resource: its `title` when non-empty,
+/// falling back to its `name`. `None` when neither carries usable text.
+fn resource_display_label(resource: &rmcp::model::Resource) -> Option<String> {
+    let title = resource.title.as_deref().map(str::trim);
+    if title.is_some_and(|t| !t.is_empty()) {
+        return Some(resource.title.clone().unwrap_or_default());
+    }
+    let name = resource.name.trim();
+    if name.is_empty() {
+        None
+    } else {
+        Some(name.to_string())
+    }
+}
+
 /// Per-MCP-server config overrides from `_meta.mcpConfig` in session/new or session/load.
 #[derive(Debug, Clone, Default, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -2626,6 +2660,14 @@ pub struct McpClient {
     /// subscribe) does not silently re-subscribe an intentionally-dropped
     /// stream. Cleared with the client instance when the connection restarts.
     unsubscribed_uris: parking_lot::Mutex<std::collections::HashSet<String>>,
+    /// Human-readable display label per subscribed URI, captured at
+    /// subscribe time from the resource's `title` (falling back to its
+    /// `name`). Feeds the TUI "Subscribed Tools" sheet so rows show a
+    /// friendly label instead of a raw URI. Existing labels are never
+    /// overwritten (subscribing an already-subscribed URI is idempotent
+    /// and keeps the original label). `parking_lot::Mutex` is fine:
+    /// never held across an `.await`.
+    subscribed_labels: parking_lot::Mutex<HashMap<String, String>>,
     /// Millis-since-epoch of the last `subscribe_new_resources` refresh, for
     /// the min-gap guard so chatty tools do not trigger a list per call.
     last_subscription_refresh_ms: std::sync::atomic::AtomicU64,
@@ -2766,6 +2808,7 @@ impl McpClient {
             notify_tx: Arc::new(parking_lot::Mutex::new(None)),
             subscribed_uris: parking_lot::Mutex::new(std::collections::HashSet::new()),
             unsubscribed_uris: parking_lot::Mutex::new(std::collections::HashSet::new()),
+            subscribed_labels: parking_lot::Mutex::new(HashMap::new()),
             last_subscription_refresh_ms: std::sync::atomic::AtomicU64::new(0),
             liveness_handle: Arc::new(parking_lot::Mutex::new(None)),
         }
@@ -3431,15 +3474,15 @@ impl McpClient {
     /// `notifications/resources/updated` pushes flow through
     /// [`GrokClientHandler`] as [`McpClientEvent::ResourceUpdated`].
     ///
-    /// Feature-detected: returns `Ok(0)` without any request when the
-    /// server did not advertise `resources.subscribe` at handshake time.
-    /// Per-uri failures are logged and skipped (a server that answered
-    /// `method_not_found` for `resources/subscribe` lied about its
-    /// capability or raced a downgrade) — subscribing is best-effort and
+    /// Feature-detected: returns `Ok` with a zeroed outcome without any
+    /// request when the server did not advertise `resources.subscribe`
+    /// at handshake time. Per-uri failures are logged and skipped (a server
+    /// that answered `method_not_found` for `resources/subscribe` lied about
+    /// its capability or raced a downgrade) — subscribing is best-effort and
     /// must never fail the owning handshake path.
     ///
-    /// Returns the number of successful subscriptions.
-    pub async fn subscribe_all_resources(&self) -> Result<usize, McpError> {
+    /// Returns the per-uri outcome (new subscriptions vs. already-tracked).
+    pub async fn subscribe_all_resources(&self) -> Result<SubscribeResourcesOutcome, McpError> {
         self.subscribe_resources_filtered(false).await
     }
 
@@ -3449,9 +3492,10 @@ impl McpClient {
     /// `sub_open`) that were absent from the handshake-time `resources/list`;
     /// without this refresh their `resources/updated` pushes would never be
     /// requested. Rate-limited per client (see [`SUBSCRIBE_REFRESH_MIN_GAP`]);
-    /// returns the number of NEW subscriptions (0 when rate-limited or when
-    /// nothing is new).
-    pub async fn subscribe_new_resources(&self) -> usize {
+    /// already-tracked URIs are idempotently skipped (counted as
+    /// `already_subscribed`, never re-sent or duplicated). Returns the
+    /// per-uri outcome (zeroed when rate-limited or when nothing is new).
+    pub async fn subscribe_new_resources(&self) -> SubscribeResourcesOutcome {
         let now_ms = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_millis() as u64)
@@ -3460,24 +3504,27 @@ impl McpClient {
             .last_subscription_refresh_ms
             .load(std::sync::atomic::Ordering::Relaxed);
         if now_ms.saturating_sub(last) < SUBSCRIBE_REFRESH_MIN_GAP.as_millis() as u64 {
-            return 0;
+            return SubscribeResourcesOutcome::default();
         }
         self.last_subscription_refresh_ms
             .store(now_ms, std::sync::atomic::Ordering::Relaxed);
         match self.subscribe_resources_filtered(true).await {
-            Ok(count) => count,
+            Ok(outcome) => outcome,
             Err(e) => {
                 tracing::debug!(
                     server = %self.server_name,
                     error = %e,
                     "subscribe_new_resources refresh failed"
                 );
-                0
+                SubscribeResourcesOutcome::default()
             }
         }
     }
 
-    async fn subscribe_resources_filtered(&self, only_new: bool) -> Result<usize, McpError> {
+    async fn subscribe_resources_filtered(
+        &self,
+        only_new: bool,
+    ) -> Result<SubscribeResourcesOutcome, McpError> {
         let service = self.ensure_initialized().await?;
         let subscribe_capable = service.peer_info().is_some_and(|info| {
             info.capabilities
@@ -3491,7 +3538,7 @@ impl McpClient {
                 server = %self.server_name,
                 "MCP server does not advertise resources.subscribe; skipping subscribe"
             );
-            return Ok(0);
+            return Ok(SubscribeResourcesOutcome::default());
         }
 
         let resources = match service.list_all_resources().await {
@@ -3502,14 +3549,18 @@ impl McpClient {
                     error = %e,
                     "list_all_resources failed; cannot subscribe to resource updates"
                 );
-                return Ok(0);
+                return Ok(SubscribeResourcesOutcome::default());
             }
         };
 
-        let mut subscribed = 0usize;
+        let mut outcome = SubscribeResourcesOutcome::default();
         for resource in resources {
             let uri = resource.uri.clone();
-            if only_new && self.subscribed_uris.lock().contains(&uri) {
+            let already_tracked = self.subscribed_uris.lock().contains(&uri);
+            if only_new && already_tracked {
+                // Idempotent dedup: keep the existing subscription (and its
+                // label) untouched; never stack a duplicate or re-send.
+                outcome.already_subscribed += 1;
                 continue;
             }
             if self.unsubscribed_uris.lock().contains(&uri) {
@@ -3525,8 +3576,22 @@ impl McpClient {
                 .await
             {
                 Ok(_) => {
-                    self.subscribed_uris.lock().insert(uri);
-                    subscribed += 1;
+                    self.subscribed_uris.lock().insert(uri.clone());
+                    // Capture the display label at subscribe time (title
+                    // preferred over the programmatic name). Never overwrite:
+                    // re-subscribing an already-tracked URI keeps the
+                    // original label.
+                    if let Some(label) = resource_display_label(&resource) {
+                        self.subscribed_labels
+                            .lock()
+                            .entry(uri.clone())
+                            .or_insert_with(|| label);
+                    }
+                    if already_tracked {
+                        outcome.already_subscribed += 1;
+                    } else {
+                        outcome.subscribed += 1;
+                    }
                 }
                 Err(e) => tracing::warn!(
                     server = %self.server_name,
@@ -3538,10 +3603,11 @@ impl McpClient {
         }
         tracing::debug!(
             server = %self.server_name,
-            subscribed,
+            subscribed = outcome.subscribed,
+            already_subscribed = outcome.already_subscribed,
             "MCP resource subscriptions established"
         );
-        Ok(subscribed)
+        Ok(outcome)
     }
 
     /// Snapshot of currently-tracked subscription URIs (for the TUI
@@ -3549,6 +3615,26 @@ impl McpClient {
     /// underlying set — best-effort, not a contract.
     pub fn subscribed_uris(&self) -> Vec<String> {
         self.subscribed_uris.lock().iter().cloned().collect()
+    }
+
+    /// Snapshot of currently-tracked subscriptions as `(uri, label)` pairs.
+    /// The label is the display name captured at subscribe time, or `None`
+    /// when the resource exposed no usable title/name.
+    pub fn subscribed_resources(&self) -> Vec<(String, Option<String>)> {
+        let labels = self.subscribed_labels.lock();
+        self.subscribed_uris
+            .lock()
+            .iter()
+            .map(|uri| {
+                let label = labels.get(uri).cloned();
+                (uri.clone(), label)
+            })
+            .collect()
+    }
+
+    /// Display label captured at subscribe time for one subscribed URI, if any.
+    pub fn label_for_uri(&self, uri: &str) -> Option<String> {
+        self.subscribed_labels.lock().get(uri).cloned()
     }
 
     /// Unsubscribe from one resource URI: sends `resources/unsubscribe`,
@@ -7961,7 +8047,21 @@ for line in sys.stdin:
         .subscribe_all_resources()
         .await
         .expect("subscribe must succeed against a subscribe-capable server");
-    assert_eq!(subscribed, 1, "exactly one resource uri subscribed");
+    assert_eq!(
+        subscribed.subscribed, 1,
+        "exactly one resource uri subscribed"
+    );
+    assert_eq!(
+        subscribed.already_subscribed, 0,
+        "first sweep has nothing pre-tracked"
+    );
+    // The display label ("name" here — the fixture sets no title) must be
+    // captured at subscribe time for the Subscribed Tools sheet.
+    assert_eq!(
+        client.subscribed_resources(),
+        vec![("res://demo/1".to_string(), Some("demo".to_string()),)],
+        "subscribe must capture the resource's display label"
+    );
 }
 
 /// `subscribe_new_resources` must subscribe ONLY URIs that appeared after the
@@ -8027,12 +8127,22 @@ for line in sys.stdin:
         .subscribe_all_resources()
         .await
         .expect("subscribe_all_resources must succeed");
-    assert_eq!(first, 1, "handshake subscribe covers the base uri only");
+    assert_eq!(
+        first.subscribed, 1,
+        "handshake subscribe covers the base uri only"
+    );
 
     // Post-tool-call refresh: the list now grows by one NEW uri; only that
     // one may be subscribed.
     let second = client.subscribe_new_resources().await;
-    assert_eq!(second, 1, "refresh subscribes exactly the new uri");
+    assert_eq!(
+        second.subscribed, 1,
+        "refresh subscribes exactly the new uri"
+    );
+    assert_eq!(
+        second.already_subscribed, 1,
+        "refresh must count the tracked base uri as already subscribed"
+    );
 
     // A further refresh (rate-limit guard reset for the assertion) must be a
     // no-op: every listed uri is already tracked.
@@ -8040,5 +8150,12 @@ for line in sys.stdin:
         .last_subscription_refresh_ms
         .store(0, std::sync::atomic::Ordering::Relaxed);
     let third = client.subscribe_new_resources().await;
-    assert_eq!(third, 0, "tracked uris must never be re-subscribed");
+    assert_eq!(
+        third.subscribed, 0,
+        "tracked uris must never be re-subscribed"
+    );
+    assert_eq!(
+        third.already_subscribed, 2,
+        "both listed uris are already subscribed — idempotent dedup"
+    );
 }

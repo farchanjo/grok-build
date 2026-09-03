@@ -90,6 +90,103 @@ pub(crate) struct McpPushStats {
     pub(crate) unsubscribed: bool,
 }
 
+/// One tracked subscription in the session's registry
+/// ([`SessionActor::mcp_subscription_registry`]). Recorded at subscribe time
+/// (label + first-seen) and mutated by the resource pump's client-event tee
+/// (dead marks); survives client removal so the "Subscribed Tools" sheet can
+/// keep showing the stream as `dead` instead of silently dropping the row.
+#[derive(Debug, Default, Clone)]
+pub(crate) struct McpSubscriptionRecord {
+    /// Display label captured at subscribe time (resource title/name).
+    pub(crate) label: Option<String>,
+    /// The server's MCP client disconnected or its config was removed —
+    /// the stream can no longer push.
+    pub(crate) dead: bool,
+    /// When the subscription was first recorded; feeds the never-pushed
+    /// idle grace window.
+    pub(crate) first_seen: Option<std::time::Instant>,
+}
+
+/// A subscription with no push for longer than this is `idle`; a
+/// never-pushed subscription younger than this is still `active`
+/// (waiting for the first push).
+pub(crate) const SUBSCRIPTION_IDLE_AFTER: std::time::Duration =
+    std::time::Duration::from_secs(5 * 60);
+
+/// Idle threshold in milliseconds, derived from [`SUBSCRIPTION_IDLE_AFTER`].
+const SUBSCRIPTION_IDLE_AFTER_MS: u64 = SUBSCRIPTION_IDLE_AFTER.as_millis() as u64;
+
+/// Upsert one subscription into the session registry. Idempotent per
+/// `(server, uri)`: an existing entry is kept as-is — its label is never
+/// overwritten (only a missing label may be adopted) — and `false` is
+/// returned to signal "already subscribed" to the caller.
+pub(crate) fn upsert_subscription_record(
+    registry: &mut std::collections::HashMap<(String, String), McpSubscriptionRecord>,
+    server: &str,
+    uri: &str,
+    label: Option<String>,
+    now: std::time::Instant,
+) -> bool {
+    match registry.get_mut(&(server.to_string(), uri.to_string())) {
+        Some(record) => {
+            if record.label.is_none() {
+                record.label = label;
+            }
+            false
+        }
+        None => {
+            registry.insert(
+                (server.to_string(), uri.to_string()),
+                McpSubscriptionRecord {
+                    label,
+                    dead: false,
+                    first_seen: Some(now),
+                },
+            );
+            true
+        }
+    }
+}
+
+/// Mark every subscription of `server` dead (client disconnected / config
+/// removed) or revive it (a fresh `Ready` after a restart proves the
+/// client can push again).
+pub(crate) fn set_server_subscriptions_dead(
+    registry: &mut std::collections::HashMap<(String, String), McpSubscriptionRecord>,
+    server: &str,
+    dead: bool,
+) {
+    for ((entry_server, _uri), record) in registry.iter_mut() {
+        if entry_server == server {
+            record.dead = dead;
+        }
+    }
+}
+
+/// Classify one subscription row's liveness. Pure so the thresholds are
+/// unit-testable: `dead` wins, then last-push age over the idle window,
+/// then never-pushed past the grace window; everything else is `active`.
+pub(crate) fn subscription_state(
+    dead: bool,
+    pushes_seen: Option<u64>,
+    last_push_ms_ago: Option<u64>,
+    first_seen_age_ms: Option<u64>,
+) -> crate::extensions::mcp::McpSubscriptionState {
+    use crate::extensions::mcp::McpSubscriptionState;
+    if dead {
+        return McpSubscriptionState::Dead;
+    }
+    if last_push_ms_ago.is_some_and(|ms| ms > SUBSCRIPTION_IDLE_AFTER_MS) {
+        return McpSubscriptionState::Idle;
+    }
+    if pushes_seen.unwrap_or(0) == 0
+        && first_seen_age_ms.is_some_and(|ms| ms > SUBSCRIPTION_IDLE_AFTER_MS)
+    {
+        return McpSubscriptionState::Idle;
+    }
+    McpSubscriptionState::Active
+}
+
 /// Spawn the per-session pump on the session's local task set. The pump exits
 /// when `rx` closes (session teardown); later `InjectNotification` sends fail
 /// harmlessly against the closed command channel.
@@ -110,46 +207,69 @@ pub(crate) fn spawn_mcp_resource_pump(
                     deadline.saturating_duration_since(now)
                 });
             match tokio::time::timeout(wait, rx.recv()).await {
-                Ok(Some(McpClientEvent::ResourceUpdated { server, uri })) => {
-                    let now = std::time::Instant::now();
-                    let key = (server.clone(), uri.clone());
-                    // Per-key flood guard: skip reads that arrive too fast
-                    // after the previous accepted push for the same stream.
-                    if let Some(pending_update) = pending.get(&key)
-                        && now.duration_since(pending_update.last_at) < MIN_PUSH_GAP
-                    {
-                        tracing::debug!(
-                            server = %server,
-                            uri = %uri,
-                            "mcp push throttled (min-gap)"
-                        );
-                        continue;
-                    }
-                    match read_resource_text(&session, &server, &uri).await {
-                        Ok(text) => {
-                            record_push(&session, &key);
-                            let entry = pending.entry(key).or_insert_with(|| PendingUpdate {
-                                text: String::new(),
-                                truncated: false,
-                                first_at: now,
-                                last_at: now,
-                            });
-                            entry.append(&text);
-                            entry.last_at = now;
-                        }
-                        Err(error) => {
+                Ok(Some(event)) => match event {
+                    McpClientEvent::ResourceUpdated { server, uri } => {
+                        let now = std::time::Instant::now();
+                        let key = (server.clone(), uri.clone());
+                        // Per-key flood guard: skip reads that arrive too fast
+                        // after the previous accepted push for the same stream.
+                        if let Some(pending_update) = pending.get(&key)
+                            && now.duration_since(pending_update.last_at) < MIN_PUSH_GAP
+                        {
                             tracing::debug!(
                                 server = %server,
                                 uri = %uri,
-                                %error,
-                                "mcp resource read after push failed; skipping"
+                                "mcp push throttled (min-gap)"
                             );
+                            continue;
+                        }
+                        match read_resource_text(&session, &server, &uri).await {
+                            Ok(text) => {
+                                record_push(&session, &key);
+                                let entry = pending.entry(key).or_insert_with(|| PendingUpdate {
+                                    text: String::new(),
+                                    truncated: false,
+                                    first_at: now,
+                                    last_at: now,
+                                });
+                                entry.append(&text);
+                                entry.last_at = now;
+                            }
+                            Err(error) => {
+                                tracing::debug!(
+                                    server = %server,
+                                    uri = %uri,
+                                    %error,
+                                    "mcp resource read after push failed; skipping"
+                                );
+                            }
                         }
                     }
-                }
-                Ok(Some(_)) => {
-                    // Other client events belong to the status dispatcher.
-                }
+                    // Client-event tee: a closed transport or a removed
+                    // config means the server's streams can no longer push.
+                    // Mark its subscriptions dead instead of dropping them so
+                    // the sheet explains what happened to the row.
+                    McpClientEvent::TransportClosed { server, .. } => {
+                        mark_server_subscriptions_dead(&session, server.as_str());
+                    }
+                    McpClientEvent::ConfigRemoved { server } => {
+                        mark_server_subscriptions_dead(&session, server.as_str());
+                    }
+                    McpClientEvent::ConfigDiff { removed, .. } => {
+                        for server in removed {
+                            mark_server_subscriptions_dead(&session, server.as_str());
+                        }
+                    }
+                    // A (re-)initialized client can push again — clear any
+                    // stale dead mark left by a prior disconnect.
+                    McpClientEvent::Ready { server } => {
+                        revive_server_subscriptions(&session, server.as_str());
+                    }
+                    other => {
+                        // Other client events belong to the status dispatcher.
+                        let _ = other;
+                    }
+                },
                 Ok(None) => break,
                 Err(_elapsed) => {
                     // Quiet window elapsed for at least one burst: flush every
@@ -189,6 +309,39 @@ fn record_push(session: &SessionActor, key: &(String, String)) {
     let entry = stats.entry(key.clone()).or_default();
     entry.pushes = entry.pushes.saturating_add(1);
     entry.last_push = Some(std::time::Instant::now());
+}
+
+/// Pump client-event tee: the server's MCP client is gone (transport closed
+/// or config removed) — flag its subscriptions dead so the sheet shows a
+/// `dead` row instead of silently dropping the stream.
+fn mark_server_subscriptions_dead(session: &SessionActor, server: &str) {
+    let mut registry = session.mcp_subscription_registry.lock();
+    let marked = registry
+        .keys()
+        .filter(|(entry_server, _)| entry_server == server)
+        .count();
+    set_server_subscriptions_dead(&mut registry, server, true);
+    drop(registry);
+    if marked > 0 {
+        tracing::info!(
+            server = %server,
+            subscriptions = marked,
+            "marked MCP subscriptions dead after client removal"
+        );
+    } else {
+        tracing::debug!(
+            server = %server,
+            "MCP client removed; no tracked subscriptions to mark dead"
+        );
+    }
+}
+
+/// Pump client-event tee: the server's client reached `Ready` again after a
+/// (re)handshake — clear stale dead marks so the sheet stops showing the
+/// streams as dead.
+fn revive_server_subscriptions(session: &SessionActor, server: &str) {
+    let mut registry = session.mcp_subscription_registry.lock();
+    set_server_subscriptions_dead(&mut registry, server, false);
 }
 
 /// Read a resource via the session's MCP state and join its text contents.
@@ -238,14 +391,62 @@ fn inject_resource_update(session: &SessionActor, server: &str, uri: &str, updat
     }
 }
 
+/// Record subscribe-time metadata (display label, first-seen) for one
+/// server's subscriptions into a session registry. Free function so the
+/// background MCP-init task can record labels through its `Arc` handle
+/// without holding the actor. Idempotent per `(server, uri)`: an
+/// already-subscribed stream keeps its existing label and is never stacked;
+/// a successful subscribe also clears stale dead marks (the transport
+/// demonstrably works).
+pub(crate) fn sync_mcp_subscription_registry_into(
+    registry: &parking_lot::Mutex<
+        std::collections::HashMap<(String, String), McpSubscriptionRecord>,
+    >,
+    server_name: &str,
+    client: &crate::session::mcp_servers::McpClient,
+) {
+    let now = std::time::Instant::now();
+    let mut registry = registry.lock();
+    for (uri, label) in client.subscribed_resources() {
+        let inserted = upsert_subscription_record(&mut registry, server_name, &uri, label, now);
+        if let Some(record) = registry.get_mut(&(server_name.to_string(), uri.clone())) {
+            record.dead = false;
+        }
+        if !inserted {
+            tracing::debug!(
+                server = %server_name,
+                uri = %uri,
+                "already subscribed; kept existing subscription and label"
+            );
+        }
+    }
+}
+
 impl SessionActor {
+    /// Record subscribe-time metadata (display label, first-seen) for the
+    /// given server's subscriptions into the session registry. Idempotent
+    /// per `(server, uri)`: an already-subscribed stream keeps its existing
+    /// label and is never stacked. A successful `resources/subscribe` proves
+    /// the client's transport works, so stale dead marks are cleared for the
+    /// URIs the client now tracks.
+    pub(crate) fn sync_mcp_subscription_registry(
+        &self,
+        server_name: &str,
+        client: &crate::session::mcp_servers::McpClient,
+    ) {
+        sync_mcp_subscription_registry_into(&self.mcp_subscription_registry, server_name, client);
+    }
+
     /// Snapshot of this session's active MCP resource subscriptions with
-    /// pump stats, for the pager's "Subscribed Tools" sheet. Servers whose
-    /// clients are missing (disconnected mid-list) contribute no rows.
+    /// pump stats, for the pager's "Subscribed Tools" sheet. Live rows come
+    /// from each client's subscribed set (config order, as before). Streams
+    /// whose MCP client is gone (disconnected mid-list, config removed) stay
+    /// visible and are marked `dead` instead of being dropped; user-tombstoned
+    /// rows keep staying hidden.
     pub(crate) async fn list_mcp_subscriptions(
         &self,
     ) -> Vec<crate::extensions::mcp::McpSubscriptionEntry> {
-        let clients: Vec<(
+        let ordered_clients: Vec<(
             String,
             std::sync::Arc<crate::session::mcp_servers::McpClient>,
         )> = {
@@ -263,15 +464,46 @@ impl SessionActor {
                 .collect()
         };
         let now = std::time::Instant::now();
+
+        // Subscribe-time label plumbing catch-all: sync live clients into
+        // the registry so labels/first-seen exist for subscriptions recorded
+        // outside the explicit subscribe call sites (e.g. the post-tool-call
+        // refresh inside the MCP layer). Never revives — liveness is the
+        // pump's call, client presence alone is not proof.
+        {
+            let mut registry = self.mcp_subscription_registry.lock();
+            for (server, client) in &ordered_clients {
+                for (uri, label) in client.subscribed_resources() {
+                    upsert_subscription_record(&mut registry, server, &uri, label, now);
+                }
+            }
+        }
+
+        let registry = self.mcp_subscription_registry.lock();
+        let stats = self.mcp_push_stats.lock();
+        let live_uris: std::collections::HashSet<(String, String)> = ordered_clients
+            .iter()
+            .flat_map(|(server, client)| {
+                client
+                    .subscribed_uris()
+                    .into_iter()
+                    .map(move |uri| (server.clone(), uri))
+            })
+            .collect();
+
         let mut entries = Vec::new();
-        for (server, client) in clients {
+        // Live rows in config order (unchanged source of truth for live servers).
+        for (server, client) in &ordered_clients {
             for uri in client.subscribed_uris() {
-                let stats = self
-                    .mcp_push_stats
-                    .lock()
-                    .get(&(server.clone(), uri.clone()))
-                    .cloned();
-                let (pushes_seen, last_push_ms_ago, unsubscribed) = match stats {
+                let key = (server.clone(), uri.clone());
+                let record = registry.get(&key);
+                let stat = stats.get(&key);
+                // Tombstoned rows keep staying out of the listing (the user
+                // dropped them; refreshes will not re-subscribe).
+                if stat.is_some_and(|s| s.unsubscribed) {
+                    continue;
+                }
+                let (pushes_seen, last_push_ms_ago, unsubscribed) = match stat {
                     Some(stats) => (
                         Some(stats.pushes),
                         stats
@@ -281,14 +513,61 @@ impl SessionActor {
                     ),
                     None => (None, None, None),
                 };
+                let dead = record.is_some_and(|r| r.dead);
+                let first_seen_age_ms = record
+                    .and_then(|r| r.first_seen)
+                    .map(|at| now.duration_since(at).as_millis() as u64);
+                let state =
+                    subscription_state(dead, pushes_seen, last_push_ms_ago, first_seen_age_ms);
                 entries.push(crate::extensions::mcp::McpSubscriptionEntry {
                     server: server.clone(),
                     uri,
+                    label: record.and_then(|r| r.label.clone()),
                     pushes_seen,
                     last_push_ms_ago,
                     unsubscribed,
+                    state: Some(state),
                 });
             }
+        }
+        // Dead rows: registry entries no longer covered by a live client —
+        // the client for that server disconnected or was removed. Kept
+        // visible (marked dead) instead of dropped. Registry URIs still
+        // tracked by a live client but missing from its subscribed set were
+        // unsubscribed server-side and stay dropped, matching the old
+        // client-driven listing.
+        for ((server, uri), record) in registry.iter() {
+            if live_uris.contains(&(server.clone(), uri.clone())) {
+                continue;
+            }
+            if ordered_clients.iter().any(|(name, _)| name == server) {
+                // Client alive but this URI left its subscribed set (or was
+                // already listed above) — not a dead-client case.
+                continue;
+            }
+            let stat = stats.get(&(server.clone(), uri.clone()));
+            if stat.is_some_and(|s| s.unsubscribed) {
+                continue;
+            }
+            let (pushes_seen, last_push_ms_ago, unsubscribed) = match stat {
+                Some(stats) => (
+                    Some(stats.pushes),
+                    stats
+                        .last_push
+                        .map(|at| now.duration_since(at).as_millis() as u64),
+                    Some(stats.unsubscribed),
+                ),
+                None => (None, None, None),
+            };
+            entries.push(crate::extensions::mcp::McpSubscriptionEntry {
+                server: server.clone(),
+                uri: uri.clone(),
+                label: record.label.clone(),
+                pushes_seen,
+                last_push_ms_ago,
+                unsubscribed,
+                state: Some(crate::extensions::mcp::McpSubscriptionState::Dead),
+            });
         }
         entries
     }

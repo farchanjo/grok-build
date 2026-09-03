@@ -107,5 +107,8 @@ pub use route_context::{
     RouteAuthority, RouteContextUpdate, RouteCredentialRoute, RoutePacingOverride,
     RouteProviderKind,
 };
+pub use shared_http::{
+    ProviderPoolTuning, configure_provider_pool_tuning, effective_provider_connect_timeout,
+};
 pub use stream::{collect_response, stream_chat_completions, stream_messages, stream_responses};
 pub use types::RequestId;

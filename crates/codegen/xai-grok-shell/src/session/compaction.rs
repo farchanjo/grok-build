@@ -2693,6 +2693,7 @@ mod inline_auto_compact_flow_tests {
                 tx
             },
             mcp_push_stats: Default::default(),
+            mcp_subscription_registry: Default::default(),
             repetition_guard: std::cell::RefCell::new(Some(
                 crate::session::repetition_guard::RepetitionGuard::default(),
             )),

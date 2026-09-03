@@ -1,0 +1,27 @@
+---
+source: crates/codegen/xai-grok-pager/src/views/providers_modal.rs
+assertion_line: 2736
+expression: rendered
+---
+               ┌─ Providers ─────────────────────────────────────────────────────────── [✗] ─┐
+               │                                                                             │
+               │  ChatGPT subscription model overrides                                       │
+               │  › GPT-5.6 Sol · 272000 tokens · compact @ 75%                              │
+               │    GPT-5.5 · 400000 tokens · compact @ 85%                                  │
+               │  Enter context window · a compact threshold · x clear · Esc back            │
+               │                                                                             │
+               │                                                                             │
+               │                                                                             │
+               │                                                                             │
+               │                                                                             │
+               │                                                                             │
+               │                                                                             │
+               │                                                                             │
+               │                                                                             │
+               │                                                                             │
+               │                                                                             │
+               │                                                                             │
+               │                                                                             │
+               │                                                                             │
+               │          ↵ context window  |  a threshold  |  x clear  |  Esc back          │
+               └─────────────────────────────────────────────────────────────────────────────┘

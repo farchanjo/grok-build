@@ -266,6 +266,7 @@ pub(crate) async fn create_test_actor_ex(
         deny_read_globs: Vec::new(),
         mcp_state: Arc::new(TokioMutex::new(McpState::new(vec![]))),
         mcp_push_stats: Default::default(),
+        mcp_subscription_registry: Default::default(),
         session_cmd_tx: dummy_session_cmd_tx(),
         mcp_strategy: McpInitStrategy::Blocking,
         chat_state_handle,

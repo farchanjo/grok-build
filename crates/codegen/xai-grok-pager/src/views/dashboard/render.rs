@@ -1243,6 +1243,7 @@ fn render_location_picker(
         /* non_selectable_clickable */ &[],
         Some(theme.bg_base),
         /* loading */ false,
+        "Loading...",
     );
     modal.content_hits = Some(hits);
 }

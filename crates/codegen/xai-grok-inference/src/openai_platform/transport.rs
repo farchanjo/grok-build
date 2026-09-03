@@ -288,14 +288,26 @@ impl PlatformTransport {
         cancel: CancellationToken,
     ) -> PlatformResult<Self> {
         let base = NormalizedBaseUrl::parse(base_url)?;
+        let provider_id = provider_id.into();
         validate_extra_headers(&extra_headers)?;
-        let http = crate::extra_ca::with_extra_root_certificates(reqwest::Client::builder())
-            .connect_timeout(policy.connect_timeout)
-            .timeout(policy.request_timeout)
-            .redirect(reqwest::redirect::Policy::none())
-            .user_agent(policy.user_agent.clone())
-            .build()
-            .map_err(|e| PlatformError::Transport(e.to_string()))?;
+        // Persistent per-provider pool: every PlatformTransport for the same
+        // (provider, connect-timeout) identity shares one warm client. The
+        // registry applies the extra-CA roots, pool sizing, and HTTP/2
+        // keepalive; request timeout and User-Agent are per-request below.
+        // A configured pool override wins over the policy connect timeout.
+        let http = crate::shared_http::provider_client(
+            crate::shared_http::ProviderPoolKey::new(
+                "platform",
+                provider_id.clone(),
+                crate::shared_http::effective_provider_connect_timeout(
+                    &provider_id,
+                    policy.connect_timeout,
+                ),
+                false,
+            ),
+            |builder| builder.redirect(reqwest::redirect::Policy::none()),
+        )
+        .map_err(|e| PlatformError::Transport(e.to_string()))?;
         Ok(Self {
             base,
             provider_id: provider_id.into(),
@@ -450,6 +462,8 @@ impl PlatformTransport {
             }
         };
         builder = builder
+            .header(reqwest::header::USER_AGENT, self.policy.user_agent.as_str())
+            .timeout(self.policy.request_timeout)
             .header("Authorization", format!("Bearer {token}"))
             .header("OpenAI-Request-Id", uuid::Uuid::new_v4().to_string())
             .multipart(form);
@@ -692,6 +706,9 @@ impl PlatformTransport {
                     )));
                 }
             };
+            builder = builder
+                .header(reqwest::header::USER_AGENT, self.policy.user_agent.as_str())
+                .timeout(self.policy.request_timeout);
             builder = builder.header("Authorization", format!("Bearer {token}"));
             builder = builder.header("OpenAI-Request-Id", uuid::Uuid::new_v4().to_string());
             for (k, v) in &self.extra_headers {

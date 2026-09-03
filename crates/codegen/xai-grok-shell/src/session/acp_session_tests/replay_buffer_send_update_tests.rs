@@ -90,6 +90,7 @@ pub(super) async fn make_replay_send_update_fixture() -> ReplaySendUpdateFixture
     let (event_tx, event_rx) = mpsc::unbounded_channel::<SessionEvent>();
     let actor = SessionActor {
         mcp_push_stats: Default::default(),
+        mcp_subscription_registry: Default::default(),
         session_cmd_tx: dummy_session_cmd_tx(),
         repetition_guard: std::cell::RefCell::new(Some(
             crate::session::repetition_guard::RepetitionGuard::default(),

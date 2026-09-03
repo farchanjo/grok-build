@@ -230,6 +230,10 @@ impl SessionActor {
                 error = %e,
                 "resource subscribe after managed re-handshake failed"
             );
+        } else {
+            // Labels captured at subscribe time go into the session
+            // subscription registry for the "Subscribed Tools" sheet.
+            self.sync_mcp_subscription_registry(server_name, &client);
         }
         let mut mcp_state = self.mcp_state.lock().await;
         mcp_state.auth_required.remove(server_name);
@@ -446,6 +450,10 @@ impl SessionActor {
                 error = %e,
                 "resource subscribe after auth_trigger failed"
             );
+        } else {
+            // Labels captured at subscribe time go into the session
+            // subscription registry for the "Subscribed Tools" sheet.
+            self.sync_mcp_subscription_registry(server_name, &client);
         }
         let mut mcp_state = self.mcp_state.lock().await;
         mcp_state.auth_required.remove(server_name);
@@ -1051,6 +1059,11 @@ impl SessionActor {
                 error = %e,
                 "resource re-subscribe after stdio respawn failed"
             );
+        } else {
+            // Labels captured at subscribe time go into the session
+            // subscription registry; the fresh transport also clears any
+            // stale dead mark from the respawned client.
+            self.sync_mcp_subscription_registry(server, &new_client);
         }
         let arc_client = std::sync::Arc::new(new_client);
         let _ = arc_client
@@ -1356,6 +1369,7 @@ impl SessionActor {
                 .collect()
         };
         let mcp_state_bg = std::sync::Arc::clone(&self.mcp_state);
+        let mcp_subscription_registry_bg = std::sync::Arc::clone(&self.mcp_subscription_registry);
         let tool_bridge = self.agent.borrow().tool_bridge().clone();
         let gateway = self.notifications.gateway.clone();
         let tool_snapshot = self.tool_metadata_snapshot.clone();
@@ -1410,6 +1424,7 @@ impl SessionActor {
                     .cloned()
                     .unwrap_or_default();
                 let task_event_tx = dispatcher_event_tx.clone();
+                let subscription_registry = std::sync::Arc::clone(&mcp_subscription_registry_bg);
                 futs.push(async move {
                     let server_name = client.server_name().to_string();
                     let server_start = std::time::Instant::now();
@@ -1447,6 +1462,15 @@ impl SessionActor {
                                     server = %server_name,
                                     error = %e,
                                     "resource subscribe after MCP init failed"
+                                );
+                            } else {
+                                // Labels captured at subscribe time go into
+                                // the session subscription registry for the
+                                // "Subscribed Tools" sheet.
+                                super::mcp_push::sync_mcp_subscription_registry_into(
+                                    &subscription_registry,
+                                    &server_name,
+                                    &client,
                                 );
                             }
                             Ok((server_name, handles, server_start.elapsed(), timeout_sec))
@@ -1783,6 +1807,14 @@ impl SessionActor {
                         server = %server_name,
                         error = %e,
                         "resource subscribe for shared MCP client failed"
+                    );
+                } else {
+                    // Labels captured at subscribe time go into the session
+                    // subscription registry for the "Subscribed Tools" sheet.
+                    super::mcp_push::sync_mcp_subscription_registry_into(
+                        &mcp_subscription_registry_bg,
+                        server_name,
+                        client,
                     );
                 }
                 let mut mcp_state = mcp_state_bg.lock().await;

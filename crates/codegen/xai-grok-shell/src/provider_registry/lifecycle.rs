@@ -81,6 +81,13 @@ pub struct ProviderMetadata {
     pub catalog_ttl_secs: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub request_timeout_secs: Option<u64>,
+    /// Persistent HTTP connection-pool tuning (provider-registry scope).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pool_max_idle: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pool_idle_timeout_secs: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pool_connect_timeout_secs: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub organization: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -151,6 +158,9 @@ impl ProviderRegistrySnapshot {
                 capability_mode: CapabilityMode::Auto,
                 catalog_ttl_secs: None,
                 request_timeout_secs: None,
+                pool_max_idle: None,
+                pool_idle_timeout_secs: None,
+                pool_connect_timeout_secs: None,
                 organization: None,
                 project: None,
                 extra_headers: IndexMap::new(),

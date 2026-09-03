@@ -23,6 +23,10 @@ pub struct ProviderTomlPatch {
     pub capability_mode: Option<String>,
     pub catalog_ttl_secs: Option<u64>,
     pub request_timeout_secs: Option<u64>,
+    /// Persistent HTTP connection-pool tuning for this provider.
+    pub pool_max_idle: Option<u32>,
+    pub pool_idle_timeout_secs: Option<u64>,
+    pub pool_connect_timeout_secs: Option<u64>,
     pub organization: Option<String>,
     pub project: Option<String>,
     pub extra_headers: Option<IndexMap<String, String>>,
@@ -159,6 +163,15 @@ fn apply_patch_to_table(table: &mut toml_edit::Table, patch: &ProviderTomlPatch)
     if let Some(v) = patch.request_timeout_secs {
         table["request_timeout_secs"] = toml_edit::value(v as i64);
     }
+    if let Some(v) = patch.pool_max_idle {
+        table["pool_max_idle"] = toml_edit::value(i64::from(v));
+    }
+    if let Some(v) = patch.pool_idle_timeout_secs {
+        table["pool_idle_timeout_secs"] = toml_edit::value(v as i64);
+    }
+    if let Some(v) = patch.pool_connect_timeout_secs {
+        table["pool_connect_timeout_secs"] = toml_edit::value(v as i64);
+    }
     if let Some(v) = &patch.organization {
         table["organization"] = toml_edit::value(v.as_str());
     }
@@ -206,6 +219,27 @@ fn validate_patch(patch: &ProviderTomlPatch) -> Result<(), ProviderLifecycleErro
     }
     if let Some(url) = &patch.admin_base_url {
         validate_http_base_url(url)?;
+    }
+    if let Some(v) = patch.pool_max_idle {
+        if v > 64 {
+            return Err(ProviderLifecycleError::Validation(format!(
+                "pool_max_idle {v} out of range 0-64"
+            )));
+        }
+    }
+    if let Some(v) = patch.pool_idle_timeout_secs {
+        if !(1..=3600).contains(&v) {
+            return Err(ProviderLifecycleError::Validation(format!(
+                "pool_idle_timeout_secs {v} out of range 1-3600"
+            )));
+        }
+    }
+    if let Some(v) = patch.pool_connect_timeout_secs {
+        if !(1..=120).contains(&v) {
+            return Err(ProviderLifecycleError::Validation(format!(
+                "pool_connect_timeout_secs {v} out of range 1-120"
+            )));
+        }
     }
     if let Some(headers) = &patch.extra_headers {
         validate_extra_headers(headers)?;

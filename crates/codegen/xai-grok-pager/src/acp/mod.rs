@@ -185,8 +185,18 @@ async fn connect_grok_shell(
     flags: ConnectFlags,
 ) -> Result<AcpConnection> {
     // Load agent config from disk
+    let t_config_load = std::time::Instant::now();
     let raw_config = xai_grok_shell::config::load_effective_config()
         .map_err(|e| anyhow::anyhow!("Failed to load config: {}", e))?;
+    crate::unified_log::info(
+        "startup.config_load",
+        None,
+        Some(serde_json::json!({
+            "elapsed_ms": xai_grok_telemetry::startup_timing::elapsed_ms(),
+            "duration_ms": t_config_load.elapsed().as_millis() as u64,
+            "stage": "agent_connect",
+        })),
+    );
     let mut agent_config = AgentConfig::new_from_toml_cfg(&raw_config)
         .map_err(|e| anyhow::anyhow!("Failed to create agent config: {}", e))?;
 

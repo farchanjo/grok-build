@@ -560,6 +560,58 @@ x = 42
     }
 
     #[test]
+    fn pool_configuration_persists_and_populates_inference_tuning() {
+        let dir = TempDir::new().unwrap();
+        let s = ProviderManagementService::new(dir.path());
+        assert!(
+            s.add(ProviderAddRequest {
+                id: "custom_pool".into(),
+                kind: "openai_compatible".into(),
+                base_url: "http://127.0.0.1:8000/v1".into(),
+                display_name: Some("Custom Pool".into()),
+                admin_base_url: None,
+                enabled: true,
+                expected_generation: s.current_generation(),
+            })
+            .ok
+        );
+        let save = s.save(ProviderSaveRequest {
+            id: "custom_pool".into(),
+            expected_generation: s.current_generation(),
+            patch: ProviderSavePatch {
+                pool_max_idle: Some(16),
+                pool_idle_timeout_secs: Some(180),
+                pool_connect_timeout_secs: Some(25),
+                ..Default::default()
+            },
+        });
+        assert!(save.ok, "{:?}", save.error);
+
+        // Verify written to config.toml
+        let text = std::fs::read_to_string(dir.path().join("config.toml")).unwrap();
+        assert!(text.contains("pool_max_idle = 16"));
+        assert!(text.contains("pool_idle_timeout_secs = 180"));
+        assert!(text.contains("pool_connect_timeout_secs = 25"));
+
+        // Verify detail reflects persisted fields
+        let detail = s.detail("custom_pool").unwrap();
+        assert_eq!(detail.pool_max_idle, Some(16));
+        assert_eq!(detail.pool_idle_timeout_secs, Some(180));
+        assert_eq!(detail.pool_connect_timeout_secs, Some(25));
+
+        // Verify runtime_cache loads and tunes inference
+        let (service, _, _) =
+            crate::provider_registry::runtime_cache::load_runtime(dir.path()).unwrap();
+        let desc = service.get("custom_pool").unwrap();
+        assert_eq!(desc.id.as_str(), "custom_pool");
+        let effective_connect = xai_grok_inference::effective_provider_connect_timeout(
+            "custom_pool",
+            std::time::Duration::from_secs(10),
+        );
+        assert_eq!(effective_connect, std::time::Duration::from_secs(25));
+    }
+
+    #[test]
     fn upsert_preserves_unknown_fields_via_toml_edit() {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("config.toml");

@@ -259,6 +259,14 @@ pub struct ModelProviderConfig {
     /// instances use [`OPENROUTER_DEFAULT_MAX_COMPLETION_TOKENS`].
     #[serde(default)]
     pub max_completion_tokens: Option<u32>,
+    /// Persistent HTTP connection-pool tuning for this provider's client
+    /// pools (`platform` rerank/embeddings, `retrieval` routes, and the
+    /// `anthropic-catalog` pool). Absent fields use built-in defaults or
+    /// the `GROK_POOL_*` environment knobs. Bounds: `pool_max_idle` 0-64,
+    /// `pool_idle_timeout_secs` 1-3600, `pool_connect_timeout_secs` 1-120.
+    pub pool_max_idle: Option<u32>,
+    pub pool_idle_timeout_secs: Option<u64>,
+    pub pool_connect_timeout_secs: Option<u64>,
     pub extra_headers: IndexMap<String, String>,
     pub auth_provider: Option<String>,
     pub auth: Option<crate::auth::AuthProviderConfig>,
@@ -296,6 +304,9 @@ impl Default for ModelProviderConfig {
             plugins: Vec::new(),
             openrouter_pacing: false,
             max_completion_tokens: None,
+            pool_max_idle: None,
+            pool_idle_timeout_secs: None,
+            pool_connect_timeout_secs: None,
             extra_headers: IndexMap::new(),
             auth_provider: None,
             auth: None,
@@ -657,6 +668,9 @@ impl ConfigModelOverride {
             plugins,
             openrouter_pacing,
             max_completion_tokens: _,
+            pool_max_idle: _,
+            pool_idle_timeout_secs: _,
+            pool_connect_timeout_secs: _,
             extra_headers,
             auth_provider,
             auth,

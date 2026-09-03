@@ -927,6 +927,9 @@ fn rows_contain_categories_and_settings_through_pr_14() {
             // Deep-link into the Tools sub-sheet (search + pin over the
             // built-in + MCP tool catalog).
             "open_tools",
+            // Deep-link into the Subscribed Tools sub-sheet (live MCP
+            // resource subscriptions with push stats).
+            "open_subscriptions",
             // Per-tip contextual-hints GROUP row, repositioned right after
             // `show_tips`. Its 3 child toggles
             // (`contextual_hints.{undo,plan_mode,image_input}`) are hidden

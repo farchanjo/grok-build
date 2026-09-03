@@ -290,12 +290,24 @@ async fn handle_session_list(
 
     let registry_client = agent.session_registry_client();
     let conversations_client = agent.conversations_client();
+    let scan_started = std::time::Instant::now();
     let result = unified_list::build_unified_list(
         registry_client.as_ref(),
         conversations_client.as_ref(),
         req,
     )
     .await;
+    // Cheap resume-picker observability: this is the session-history scan the
+    // welcome/modal pickers wait on. Counts only, never rows.
+    xai_grok_telemetry::unified_log::info(
+        "session_history.list_request",
+        None,
+        Some(serde_json::json!({
+            "elapsed_ms": xai_grok_telemetry::startup_timing::elapsed_ms(),
+            "duration_ms": scan_started.elapsed().as_millis() as u64,
+            "rows": result.rows.len(),
+        })),
+    );
 
     ExtMethodResult::success(unified_list::ext_list_response(result))
         .to_ext_response()

@@ -216,6 +216,9 @@ impl ProviderManagementService {
             }),
             catalog_ttl_secs: meta.and_then(|m| m.catalog_ttl_secs),
             request_timeout_secs: meta.and_then(|m| m.request_timeout_secs),
+            pool_max_idle: meta.and_then(|m| m.pool_max_idle),
+            pool_idle_timeout_secs: meta.and_then(|m| m.pool_idle_timeout_secs),
+            pool_connect_timeout_secs: meta.and_then(|m| m.pool_connect_timeout_secs),
             organization: meta.and_then(|m| m.organization.clone()),
             project: meta.and_then(|m| m.project.clone()),
             api_surface: desc
@@ -1987,6 +1990,15 @@ impl ProviderManagementService {
         push("capability_mode", patch.capability_mode.is_some());
         push("catalog_ttl_secs", patch.catalog_ttl_secs.is_some());
         push("request_timeout_secs", patch.request_timeout_secs.is_some());
+        push("pool_max_idle", patch.pool_max_idle.is_some());
+        push(
+            "pool_idle_timeout_secs",
+            patch.pool_idle_timeout_secs.is_some(),
+        );
+        push(
+            "pool_connect_timeout_secs",
+            patch.pool_connect_timeout_secs.is_some(),
+        );
         push("organization", patch.organization.is_some());
         push("project", patch.project.is_some());
         push("api_surface", patch.api_surface.is_some());
@@ -2227,6 +2239,9 @@ fn save_patch_to_toml(patch: &ProviderSavePatch) -> ProviderTomlPatch {
         capability_mode: patch.capability_mode.clone(),
         catalog_ttl_secs: patch.catalog_ttl_secs,
         request_timeout_secs: patch.request_timeout_secs,
+        pool_max_idle: patch.pool_max_idle,
+        pool_idle_timeout_secs: patch.pool_idle_timeout_secs,
+        pool_connect_timeout_secs: patch.pool_connect_timeout_secs,
         organization: patch.organization.clone(),
         project: patch.project.clone(),
         extra_headers: patch.extra_headers.clone(),
@@ -2280,6 +2295,9 @@ fn is_empty_toml_patch(p: &ProviderTomlPatch) -> bool {
         && p.capability_mode.is_none()
         && p.catalog_ttl_secs.is_none()
         && p.request_timeout_secs.is_none()
+        && p.pool_max_idle.is_none()
+        && p.pool_idle_timeout_secs.is_none()
+        && p.pool_connect_timeout_secs.is_none()
         && p.organization.is_none()
         && p.project.is_none()
         && p.extra_headers.is_none()
@@ -2308,6 +2326,9 @@ fn restrict_builtin_patch(patch: &mut ProviderSavePatch) -> Result<(), String> {
         || patch.capability_mode.is_some()
         || patch.catalog_ttl_secs.is_some()
         || patch.request_timeout_secs.is_some()
+        || patch.pool_max_idle.is_some()
+        || patch.pool_idle_timeout_secs.is_some()
+        || patch.pool_connect_timeout_secs.is_some()
         || patch.organization.is_some()
         || patch.project.is_some()
         || patch.api_surface.is_some()

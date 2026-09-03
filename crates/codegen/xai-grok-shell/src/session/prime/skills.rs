@@ -174,9 +174,18 @@ fn prompt_path_score(s: &SkillInfo, prompt_paths: &[String], workspace_root: &Pa
         return 0;
     };
     if prompt_paths.iter().any(|pat| {
-        matcher
-            .matched_path_or_any_parents(Path::new(pat), false)
-            .is_ignore()
+        // `matched_path_or_any_parents` panics when the path is not under
+        // the builder root. Prompt-extracted paths are arbitrary — absolute
+        // paths from other workspaces (or `..` segments) routinely escape
+        // this workspace and must be skipped, not crash the turn. Such
+        // paths can never match this workspace's ignore semantics anyway.
+        Path::new(pat)
+            .strip_prefix(workspace_root)
+            .is_ok_and(|under_root| {
+                matcher
+                    .matched_path_or_any_parents(under_root, false)
+                    .is_ignore()
+            })
     }) {
         40
     } else {
@@ -1221,6 +1230,29 @@ mod tests {
     use crate::session::prime::{PrimeError, PrimeInput, run_prime_selection};
     use std::path::PathBuf;
     use std::sync::{Arc, Mutex};
+
+    /// Regression: prompt paths outside the workspace root (absolute paths
+    /// pasted from another repo, `..` segments) used to panic inside the
+    /// `ignore` gitignore matcher ("path is expected to be under the root")
+    /// while ranking skills for the prime reminder. They must simply score
+    /// zero — such paths can never match this workspace's ignore semantics.
+    #[test]
+    fn prompt_path_score_skips_paths_outside_workspace_root() {
+        let skill = SkillInfo {
+            name: "ssh".into(),
+            paths: Some(vec!["docs/**".into()]),
+            ..SkillInfo::default()
+        };
+        let root = PathBuf::from("/tmp/grok-ws-root");
+        let prompt_paths = vec![
+            // Under the root but matching no pattern: contributes nothing.
+            "/tmp/grok-ws-root/src/main.rs".to_string(),
+            // Outside the root: previously panicked inside `ignore`.
+            "/Users/farchanjo/dev/grok-build/docs/guide.md".to_string(),
+            "../escape/../outside.txt".to_string(),
+        ];
+        assert_eq!(prompt_path_score(&skill, &prompt_paths, &root), 0);
+    }
 
     use xai_grok_config_types::{
         EmbeddingEncoding, EmbeddingModelConfig, EmbeddingProtocol, PrimeConfig,

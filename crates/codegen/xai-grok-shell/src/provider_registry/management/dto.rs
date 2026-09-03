@@ -67,6 +67,14 @@ pub struct ProviderDetailDto {
     pub capability_mode: Option<String>,
     pub catalog_ttl_secs: Option<u64>,
     pub request_timeout_secs: Option<u64>,
+    /// Persistent HTTP connection-pool tuning (pool_max_idle 0-64,
+    /// pool_idle_timeout_secs 1-3600, pool_connect_timeout_secs 1-120).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pool_max_idle: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pool_idle_timeout_secs: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pool_connect_timeout_secs: Option<u64>,
     pub organization: Option<String>,
     pub project: Option<String>,
     pub api_surface: Option<String>,
@@ -153,6 +161,11 @@ pub struct ProviderSavePatch {
     pub capability_mode: Option<String>,
     pub catalog_ttl_secs: Option<u64>,
     pub request_timeout_secs: Option<u64>,
+    /// Persistent HTTP connection-pool tuning (pool_max_idle 0-64,
+    /// pool_idle_timeout_secs 1-3600, pool_connect_timeout_secs 1-120).
+    pub pool_max_idle: Option<u32>,
+    pub pool_idle_timeout_secs: Option<u64>,
+    pub pool_connect_timeout_secs: Option<u64>,
     pub organization: Option<String>,
     pub project: Option<String>,
     pub api_surface: Option<String>,

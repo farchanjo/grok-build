@@ -135,13 +135,25 @@ impl RetrievalTransport {
             validate_header_name(name)?;
         }
         let policy = RetrievalTransportPolicy::from_route(route);
-        let http = reqwest::Client::builder()
-            .connect_timeout(policy.connect_timeout)
-            .timeout(policy.request_timeout)
-            .redirect(reqwest::redirect::Policy::none())
-            .user_agent(policy.user_agent.clone())
-            .build()
-            .map_err(|e| RetrievalError::Transport(e.to_string()))?;
+        // Persistent per-provider pool: every RetrievalTransport for the
+        // same (route instance, connect-timeout) identity shares one warm
+        // client across calls instead of paying a TCP+TLS handshake per
+        // embedding/rerank request. Request timeout and User-Agent are
+        // per-request below. A configured pool override wins over the
+        // route connect timeout.
+        let http = crate::shared_http::provider_client(
+            crate::shared_http::ProviderPoolKey::new(
+                "retrieval",
+                route.provider_instance_id.clone(),
+                crate::shared_http::effective_provider_connect_timeout(
+                    &route.provider_instance_id,
+                    policy.connect_timeout,
+                ),
+                false,
+            ),
+            |builder| builder.redirect(reqwest::redirect::Policy::none()),
+        )
+        .map_err(|e| RetrievalError::Transport(e.to_string()))?;
         Ok(Self {
             base,
             provider_id: route.provider_instance_id.clone(),
@@ -273,8 +285,11 @@ impl RetrievalTransport {
                 return Err(RetrievalError::Cancelled);
             }
             let mut builder = self.http.post(current.clone());
-            // Extra headers first, then force Content-Type/Accept/auth/org/project
-            // so extras cannot override typed owners.
+            // User-Agent first (extras may override it, matching the old
+            // client-level default behavior), then extra headers, then
+            // force Content-Type/Accept/auth/org/project so extras cannot
+            // override typed owners.
+            builder = builder.header(reqwest::header::USER_AGENT, self.policy.user_agent.as_str());
             for (k, v) in &self.extra_headers {
                 builder = builder.header(k.as_str(), v.as_str());
             }

@@ -167,10 +167,22 @@ impl AnthropicClient {
                 "base_url must not be empty".into(),
             ));
         }
-        let http = crate::extra_ca::with_extra_root_certificates(reqwest::Client::builder())
-            .connect_timeout(std::time::Duration::from_secs(10))
-            .build()
-            .map_err(|e| AnthropicClientError::Transport(e.to_string()))?;
+        // Persistent per-base-url catalog pool: a catalog refresh paginates
+        // through many pages on one client, and successive refreshes reuse
+        // the same warm pool instead of paying a fresh TCP+TLS handshake
+        // per call. Redirect behavior is unchanged (reqwest default).
+        // Tuning resolves via the built-in `anthropic` registry entry.
+        let http = crate::shared_http::provider_client(
+            crate::shared_http::ProviderPoolKey::new_with_config_key(
+                "anthropic-catalog",
+                base_url.clone(),
+                "anthropic",
+                std::time::Duration::from_secs(10),
+                false,
+            ),
+            |builder| builder,
+        )
+        .map_err(|e| AnthropicClientError::Transport(e.to_string()))?;
         Ok(Self {
             http,
             api_key: config.api_key,

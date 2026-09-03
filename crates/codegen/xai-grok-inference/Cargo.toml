@@ -11,6 +11,7 @@ xai-grok-inference-types = { path = "../xai-grok-inference-types" }
 xai-grok-version = { workspace = true }
 
 # External
+arc-swap = { workspace = true }
 async-openai = { workspace = true }
 async-stream = { workspace = true }
 chrono = { workspace = true, features = ["serde"] }

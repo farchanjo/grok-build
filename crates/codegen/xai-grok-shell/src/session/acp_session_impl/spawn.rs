@@ -1711,6 +1711,7 @@ pub(crate) async fn spawn_session_actor(
         deny_read_globs,
         mcp_state: mcp_state.clone(),
         mcp_push_stats: Default::default(),
+        mcp_subscription_registry: Default::default(),
         session_cmd_tx: cmd_tx.clone(),
         mcp_strategy,
         initial_client_mcp_servers: initial_client_mcp_servers.clone(),

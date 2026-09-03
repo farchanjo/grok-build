@@ -467,8 +467,16 @@ pub async fn run(
     let screen_mode_override = screen_mode_relaunch::take_screen_mode_env_override();
     let cancel = CancellationToken::new();
     let startup_start = std::time::Instant::now();
+    let t_config_load = std::time::Instant::now();
     let raw_config = xai_grok_shell::config::load_effective_config()
         .map_err(|e| anyhow::anyhow!("Failed to load config: {e}"))?;
+    crate::unified_log::info(
+        "startup.config_load",
+        None,
+        Some(xai_grok_telemetry::startup_timing::phase_ctx(
+            &t_config_load,
+        )),
+    );
     let grok_com_config = match xai_grok_shell::agent::config::Config::new_from_toml_cfg(
         &raw_config,
     ) {
@@ -478,7 +486,15 @@ pub async fn run(
             xai_grok_shell::auth::GrokComConfig::default()
         }
     };
+    let t_auth_refresh = std::time::Instant::now();
     let refreshed_auth = xai_grok_shell::auth::try_ensure_fresh_auth(&grok_com_config).await;
+    crate::unified_log::info(
+        "startup.auth_refresh",
+        None,
+        Some(xai_grok_telemetry::startup_timing::phase_ctx(
+            &t_auth_refresh,
+        )),
+    );
     let early_prefetch =
         xai_grok_shell::agent::models::start_early_prefetch_with_auth(refreshed_auth);
     xai_grok_shell::agent::mvp_agent::warm_async_http_client();
@@ -486,13 +502,29 @@ pub async fn run(
     if let Ok(cwd) = std::env::current_dir() {
         crate::git_info::populate_from_cwd_async(cwd);
     }
+    let t_remote_settings = std::time::Instant::now();
     let remote_settings = join_early_prefetch(early_prefetch);
+    crate::unified_log::info(
+        "startup.remote_settings_prefetch",
+        None,
+        Some(xai_grok_telemetry::startup_timing::phase_ctx(
+            &t_remote_settings,
+        )),
+    );
     xai_grok_shell::util::config::cache_remote_auto_mode(
         remote_settings.as_ref().and_then(|s| s.auto_mode.clone()),
     );
     xai_grok_shell::util::config::set_remote_campaigns_from_settings(remote_settings.as_ref());
+    let t_config_reload = std::time::Instant::now();
     let raw_config = xai_grok_shell::config::load_effective_config()
         .map_err(|e| anyhow::anyhow!("Failed to load config: {e}"))?;
+    crate::unified_log::info(
+        "startup.config_reload",
+        None,
+        Some(xai_grok_telemetry::startup_timing::phase_ctx(
+            &t_config_reload,
+        )),
+    );
     let prefetch_elapsed = startup_start.elapsed();
     // Workbench external ACP backend is mutually exclusive with leader mode:
     // the pager speaks ACP to `workbench agent stdio`, not the Grok leader.
@@ -575,12 +607,22 @@ pub async fn run(
         && !args.chat()
         && let Some(id) = title_lookup_id
     {
-        let summaries = xai_grok_shell::session::persistence::list_summaries(None).await?;
-        if let Some(s) = summaries.iter().find(|s| s.info.id.0.as_ref() == id)
-            && let Some(title) = s.display_title_opt()
-        {
-            session_title = Some(title);
-        }
+        // Targeted single-session read (relocation-aware dir lookup + one
+        // summary file) instead of a full `list_summaries` history scan:
+        // resume startup must not pay O(stored sessions) parse cost on the
+        // paint path just to title the terminal. Best-effort — a lookup
+        // failure only costs the title, never the startup.
+        let t_title_lookup = std::time::Instant::now();
+        session_title = session_startup::resume_session_title(&id).await;
+        crate::unified_log::info(
+            "startup.session_title_lookup",
+            None,
+            Some(serde_json::json!({
+                "found": session_title.is_some(),
+                "elapsed_ms": xai_grok_telemetry::startup_timing::elapsed_ms(),
+                "duration_ms": t_title_lookup.elapsed().as_millis() as u64,
+            })),
+        );
     }
     let session_cwd = match &materialized {
         session_startup::MaterializedStartup::Resume { original_cwd, .. }

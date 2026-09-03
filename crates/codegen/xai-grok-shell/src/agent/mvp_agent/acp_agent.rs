@@ -159,7 +159,13 @@ impl acp::Agent for MvpAgent {
         arguments: acp::InitializeRequest,
     ) -> Result<acp::InitializeResponse, acp::Error> {
         tracing::debug!(target: "sampling_log", "Received initialize request");
-        xai_grok_telemetry::unified_log::info("agent initialized", None, None);
+        xai_grok_telemetry::unified_log::info(
+            "agent initialized",
+            None,
+            Some(serde_json::json!({
+                "elapsed_ms": xai_grok_telemetry::startup_timing::elapsed_ms(),
+            })),
+        );
         self.start_subagent_coordinator();
         let (auto_gc_policy, run_auto_gc) = {
             let cfg = self.cfg.borrow();
@@ -189,7 +195,13 @@ impl acp::Agent for MvpAgent {
         });
         {
             let root = crate::util::grok_home::grok_home();
+            let t_search_index = std::time::Instant::now();
             crate::session::storage::search::SEARCH_INDEX_MANAGER.bootstrap_once(root);
+            xai_grok_telemetry::unified_log::info(
+                "startup.shell.search_index_bootstrap",
+                None,
+                Some(xai_grok_telemetry::startup_timing::phase_ctx(&t_search_index)),
+            );
         }
         const PERMISSION_CLEANUP_TTL_DAYS: u64 = 30;
         static CLEANUP_PERMISSIONS_ONCE: std::sync::Once = std::sync::Once::new();
@@ -204,6 +216,7 @@ impl acp::Agent for MvpAgent {
                 );
             });
         xai_grok_workspace::trust::migrate_legacy_hook_trust();
+        let t_auth_init = std::time::Instant::now();
         if let Some(auth) = self.auth_manager.current() {
             let user_id = auth.user_id.trim();
             let needs_user_info = user_id.is_empty()
@@ -420,6 +433,11 @@ impl acp::Agent for MvpAgent {
                 );
             }
         }
+        xai_grok_telemetry::unified_log::info(
+            "startup.shell.auth_init",
+            None,
+            Some(xai_grok_telemetry::startup_timing::phase_ctx(&t_auth_init)),
+        );
         let (
             login_label,
             has_auth_provider,

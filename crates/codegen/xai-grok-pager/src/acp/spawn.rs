@@ -53,24 +53,48 @@ pub async fn spawn_grok_shell(
 
     // Best-effort refresh of managed policy before bootstrap reads it (repairs a wrong-identity/missing
     // cache). Never errors — the OS-protected system/MDM layers still apply.
+    let t_managed_policy = std::time::Instant::now();
     xai_grok_shell::managed_config::ensure_managed_policy_present(&auth_manager).await;
+    crate::unified_log::info(
+        "startup.managed_policy_refresh",
+        None,
+        Some(xai_grok_telemetry::startup_timing::phase_ctx(
+            &t_managed_policy,
+        )),
+    );
 
     // Provider discovery must complete before bootstrap freezes the model
     // catalog. This is the normal in-process TUI/headless path, so refreshing
     // only the stdio/leader entrypoints leaves the first `/model` picker with
     // stale presets until the next process start.
+    let t_provider_catalog = std::time::Instant::now();
     xai_grok_shell::agent::providers::ProviderManager::default()
         .refresh_configured_catalogs()
         .await;
+    crate::unified_log::info(
+        "startup.provider_catalog_refresh",
+        None,
+        Some(xai_grok_telemetry::startup_timing::phase_ctx(
+            &t_provider_catalog,
+        )),
+    );
 
     // Run the full bootstrap sequence: config resolution, process-level
     // singletons, and model catalog construction.
     let (agent_config, models_manager) =
         xai_grok_shell::agent::init::bootstrap(&agent_config, &auth_manager, None)
             .map_err(|e| anyhow::anyhow!(e))?;
+    let t_model_catalog_refresh = std::time::Instant::now();
     models_manager
         .list_models(RefreshStrategy::OnlineIfUncached)
         .await;
+    crate::unified_log::info(
+        "startup.model_catalog_refresh",
+        None,
+        Some(xai_grok_telemetry::startup_timing::phase_ctx(
+            &t_model_catalog_refresh,
+        )),
+    );
 
     let agent_cancel = cancel.child_token();
     let (acp_client, acp_agent) = acp_channels();

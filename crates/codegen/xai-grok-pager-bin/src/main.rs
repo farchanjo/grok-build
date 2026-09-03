@@ -2099,6 +2099,9 @@ fn dispatch_doctor_if_requested(args: &PagerArgs) -> bool {
     true
 }
 fn main() {
+    // Anchor the startup-timing epoch before anything else so every
+    // `startup.*` unified-log event carries a true process-start offset.
+    xai_grok_telemetry::startup_timing::anchor();
     // Out-of-tree tool packs MUST register before any ToolRegistryBuilder::new().
     archanjo::register();
     if let Some(code) = xai_grok_pager::app::mermaid_worker::maybe_run_render_subprocess() {
@@ -2627,11 +2630,19 @@ fn build_update_config() -> UpdateConfig {
     config.npm_registry = std::env::var(obfstr::obfstr!("GROK_NPM_REGISTRY"))
         .ok()
         .or_else(xai_grok_shell::util::config::load_npm_registry_sync);
+    let config_load_started = std::time::Instant::now();
     if let Ok(root) = xai_grok_shell::config::load_effective_config_disk_only()
         && let Some(ch) = xai_grok_shell::util::config::channel_from_toml_opt(&root)
     {
         config.channel = ch;
     }
+    xai_grok_telemetry::unified_log::info(
+        "startup.config_load",
+        None,
+        Some(xai_grok_telemetry::startup_timing::phase_ctx(
+            &config_load_started,
+        )),
+    );
     config
 }
 /// Central gate for auto-update checks; add new suppression rules here,

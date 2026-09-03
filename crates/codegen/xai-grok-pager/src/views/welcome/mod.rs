@@ -1789,10 +1789,17 @@ fn render_welcome_done(
     };
 
     // Session picker height: 1 row per entry (no dividers), scrollable.
+    // The picker renders into the full content area; this height is the
+    // LAYOUT RESERVATION that pushes the prompt/tip blocks below out of the
+    // picker's chrome. While loading, reserve the real loading frame height
+    // (border + title + search + divider + shortcuts + one hint row) so the
+    // loading hint is not overlapped by the prompt while the session-history
+    // scan runs.
+    const PICKER_LOADING_HEIGHT: u16 = 8;
     let picker_count = p.session_picker.map_or(0, |s| s.len());
     let picker_height = if show_picker {
         if p.session_picker_loading {
-            1
+            PICKER_LOADING_HEIGHT
         } else {
             (picker_count as u16).min(15) + 3 // +3 for title + search + gap
         }
@@ -2602,6 +2609,13 @@ pub(crate) fn render_session_picker(
         &picker_entries,
         &config,
         ctx.loading,
+        // Visible hint while the session list is still loading; a filled
+        // list replaces it in a single flicker-free update.
+        if ctx.loading {
+            "loading sessions…"
+        } else {
+            "Loading..."
+        },
     )
 }
 
@@ -2964,6 +2978,40 @@ mod tests {
         let text = render_done_text(&params);
         assert!(text.contains("v9.9.9 available"), "{text}");
         assert!(!text.contains("Coming from Cursor?"), "{text}");
+    }
+
+    /// The resume picker must show a gray "loading sessions…" hint row while
+    /// the session index is still loading, then fill with the fetched list in
+    /// a single update — never a blank strip and never a mid-fill flicker.
+    #[test]
+    fn resume_picker_shows_loading_hint_until_index_arrives() {
+        let auth = AuthState::Done;
+        let trust = TrustState::Done;
+        let render = |session_picker: Option<&[SessionPickerEntry]>, loading: bool| -> String {
+            let mut params = render_params(&auth, &trust, session_picker);
+            params.session_picker_loading = loading;
+            let area = Rect::new(0, 0, 100, 40);
+            let mut buf = Buffer::empty(area);
+            let mut prompt = PromptWidget::new();
+            let mut picker = PickerState::with_mode(crate::views::picker::PickerMode::FullScreen);
+            render_welcome(area, &mut buf, &params, &mut prompt, &mut picker);
+            buffer_text(&buf)
+        };
+
+        // While the index loads: the hint row is visible (not the generic
+        // empty state, and not a blank picker region).
+        let loading_text = render(None, true);
+        assert!(
+            loading_text.contains("loading sessions…"),
+            "loading picker must show the hint: {loading_text}"
+        );
+        assert!(!loading_text.contains("No matches"), "{loading_text}");
+
+        // Once the index arrives: the list fills and the hint row is gone.
+        let entries = vec![make_entry("session-0", "Refactor auth flow", "repo")];
+        let filled_text = render(Some(&entries), false);
+        assert!(filled_text.contains("Refactor auth flow"), "{filled_text}");
+        assert!(!filled_text.contains("loading sessions…"), "{filled_text}");
     }
 
     fn png() -> [u8; 8] {

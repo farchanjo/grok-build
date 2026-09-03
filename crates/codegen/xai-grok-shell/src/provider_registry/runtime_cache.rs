@@ -101,6 +101,12 @@ pub fn load_runtime(home: &Path) -> Result<(ProviderService, ProviderLifecycleSt
         .with_lifecycle_incarnations(home)
         .with_generation(generation);
 
+    // Push per-provider HTTP pool tuning into the inference registry so its
+    // persistent pools (platform / retrieval / anthropic-catalog) size and
+    // connect according to `[model_providers.<id>].pool_*`. The swap is
+    // lock-free; rebuilt runtimes simply refresh the same overrides.
+    xai_grok_inference::configure_provider_pool_tuning(pool_tuning_overrides(&entries));
+
     if let Ok(mut map) = cache().lock() {
         map.insert(
             home_key,
@@ -115,6 +121,32 @@ pub fn load_runtime(home: &Path) -> Result<(ProviderService, ProviderLifecycleSt
         );
     }
     Ok((service, lifecycle, generation))
+}
+
+/// Collect per-provider pool tuning from `[model_providers.<id>]` entries.
+/// Entries with no pool fields are omitted (registry keeps its defaults);
+/// partial entries carry only the configured fields.
+fn pool_tuning_overrides(
+    entries: &indexmap::IndexMap<String, crate::agent::model_providers::ModelProviderConfig>,
+) -> HashMap<String, xai_grok_inference::ProviderPoolTuning> {
+    entries
+        .iter()
+        .filter(|(_, cfg)| {
+            cfg.pool_max_idle.is_some()
+                || cfg.pool_idle_timeout_secs.is_some()
+                || cfg.pool_connect_timeout_secs.is_some()
+        })
+        .map(|(id, cfg)| {
+            (
+                id.clone(),
+                xai_grok_inference::ProviderPoolTuning {
+                    max_idle: cfg.pool_max_idle,
+                    idle_timeout_secs: cfg.pool_idle_timeout_secs,
+                    connect_timeout_secs: cfg.pool_connect_timeout_secs,
+                },
+            )
+        })
+        .collect()
 }
 
 #[cfg(test)]

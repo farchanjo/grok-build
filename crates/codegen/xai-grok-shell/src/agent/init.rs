@@ -5,6 +5,7 @@
 //! [`update_telemetry_config`] re-initializes telemetry after auth changes.
 
 use std::sync::Arc;
+use std::time::Instant;
 
 use indexmap::IndexMap;
 
@@ -12,6 +13,18 @@ use crate::agent::config::{self, Config as AgentConfig, ModelEntry};
 use crate::agent::models::ModelsManager;
 use crate::auth::AuthManager;
 use crate::config::StorageMode;
+
+/// Emit one startup phase event on the shell unified log.
+///
+/// `elapsed_ms` anchors to process start (see
+/// `xai_grok_telemetry::startup_timing`); `duration_ms` covers the phase.
+fn log_phase(msg: &'static str, started: &Instant) {
+    xai_grok_telemetry::unified_log::info(
+        msg,
+        None,
+        Some(xai_grok_telemetry::startup_timing::phase_ctx(started)),
+    );
+}
 
 /// Resolve config, init process singletons, build the model catalog.
 ///
@@ -23,17 +36,25 @@ pub fn bootstrap(
     auth_manager: &Arc<AuthManager>,
     prefetched: Option<IndexMap<String, ModelEntry>>,
 ) -> Result<(AgentConfig, ModelsManager), String> {
+    let started = Instant::now();
     // Fail closed before any policy is read: a tampered managed policy must not run unmanaged.
     crate::managed_config::managed_policy_gate()?;
+    let t_config_resolve = Instant::now();
     let cfg = resolve_config(cfg, auth_manager);
     cfg.validate_model_filters()?;
+    log_phase("startup.shell.config_resolve", &t_config_resolve);
+    let t_init_process = Instant::now();
     init_process(&cfg, auth_manager);
+    log_phase("startup.shell.init_process", &t_init_process);
+    let t_model_catalog = Instant::now();
     let models_manager = ModelsManager::from_config(&cfg, prefetched, auth_manager.clone())?;
+    log_phase("startup.shell.model_catalog_load", &t_model_catalog);
 
     // Refresh on every auth refresh — the FSEvents watcher can silently die after
     // macOS sleep, stranding the catalog on bundled defaults.
     models_manager.start_auth_refresh_watcher(auth_manager.refresh_notifier());
 
+    log_phase("startup.shell.bootstrap_done", &started);
     Ok((cfg, models_manager))
 }
 
@@ -135,8 +156,11 @@ fn init_process(cfg: &AgentConfig, auth_manager: &AuthManager) {
         }
 
         let grok_home = crate::util::grok_home::grok_home();
+        let t_builtin_extract = Instant::now();
         crate::builtin::extract_builtin_files(&grok_home);
+        log_phase("startup.shell.builtin_extract", &t_builtin_extract);
 
+        let t_marketplace = Instant::now();
         crate::extensions::marketplace::purge_default_skills_installs(&grok_home);
 
         // Auto-register is gated (default off; env/remote settings enables). Kept out
@@ -145,6 +169,7 @@ fn init_process(cfg: &AgentConfig, auth_manager: &AuthManager) {
         if cfg.resolve_official_marketplace_auto_register().value {
             crate::extensions::marketplace::ensure_official_marketplace_source(&grok_home);
         }
+        log_phase("startup.shell.marketplace_load", &t_marketplace);
 
         let telemetry_mode = cfg.resolve_telemetry_mode();
         let trace_upload = cfg.resolve_trace_upload();
