@@ -267,6 +267,7 @@ fn render_resume(
         &nsc,
         None,
         false,
+        "",
     );
     state.hit_areas = Some(PickerHitAreas {
         close_button: Rect::default(),
@@ -477,6 +478,7 @@ fn render_mcps(
         &non_sel,
         None,
         loading,
+        "",
     );
     s.picker_state.hit_areas = Some(PickerHitAreas {
         close_button: Rect::default(),
