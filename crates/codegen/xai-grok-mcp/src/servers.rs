@@ -1453,7 +1453,7 @@ impl xai_tool_runtime::Tool for McpErasedTool {
             Err(e) => Err(e),
         };
 
-        let call_result = match dispatch_result {
+        let mut call_result = match dispatch_result {
             Ok(result) => result,
             Err(e) => {
                 ew.emit(xai_file_utils::events::Event::McpToolCallCompleted {
@@ -1484,16 +1484,22 @@ impl xai_tool_runtime::Tool for McpErasedTool {
         }
 
         let is_error = call_result.is_error.unwrap_or(false);
+        // MCP `structuredContent` carries the typed result payload. The model
+        // consumes text, so the payload is folded into the text parts by
+        // `merge_structured_content` instead of being dropped. The same policy
+        // applies to error results: the payload is surfaced, never discarded.
+        let structured_content = call_result.structured_content.take();
         let mut output = if is_error {
-            let error_msg = call_result
+            let error_parts: Vec<String> = call_result
                 .content
                 .iter()
                 .filter_map(|c| match c {
                     rmcp::model::ContentBlock::Text(t) => Some(t.text.clone()),
                     _ => None,
                 })
-                .collect::<Vec<_>>()
-                .join("\n");
+                .collect();
+            let error_msg =
+                merge_structured_content(error_parts, structured_content.as_ref()).join("\n");
             ToolOutput::MCP(MCPOutput::errored(tool.clone(), server.clone(), error_msg))
         } else {
             let expose_base64 = client.expose_image_base64();
@@ -1552,7 +1558,7 @@ impl xai_tool_runtime::Tool for McpErasedTool {
                         .map(|json| format!("[MCP content retained as JSON]\n{json}")),
                 })
                 .collect();
-            let text = parts.join("\n");
+            let text = merge_structured_content(parts, structured_content.as_ref()).join("\n");
             ToolOutput::MCP(MCPOutput::okay_output(tool.clone(), server.clone(), text))
         };
 
@@ -1629,6 +1635,111 @@ fn format_mcp_video(mime: &str, base64_data: &str) -> String {
         "[MCP video content mime={mime} bytes_b64={}]\ndata:{mime};base64,{base64_data}",
         base64_data.len()
     )
+}
+
+/// Marker heading for an appended MCP `structuredContent` payload.
+///
+/// Convention follows the other MCP fallback markers in this file
+/// (`[MCP content retained as JSON]`, `[MCP audio content …]`): a bracketed
+/// header line, then the payload. The model parses the JSON block below the
+/// marker when it needs the typed value instead of the text mirror.
+const MCP_STRUCTURED_CONTENT_MARKER: &str = "[MCP structured content]";
+
+/// Merge MCP text content parts with an optional `structuredContent` payload.
+///
+/// Policy (the consume side of MCP structured output):
+/// - `None` (or a serialisation failure) leaves `parts` untouched — a
+///   malformed or absent payload degrades to plain text, never a panic and
+///   never an empty result.
+/// - When the joined text already mirrors the payload — the whole text, or
+///   just its trailing line, equals the compact JSON or parses to the same
+///   JSON value — the text mirror is kept and nothing is appended (no
+///   duplicate).
+/// - Otherwise the compact JSON is appended as
+///   `[MCP structured content]\n{json}` so the model can parse the typed
+///   payload.
+/// - When `parts` is empty the payload becomes the sole output, so a
+///   structured-only result is never rendered as an empty string.
+fn merge_structured_content(
+    mut parts: Vec<String>,
+    structured: Option<&serde_json::Value>,
+) -> Vec<String> {
+    let Some(value) = structured.filter(|v| !v.is_null()) else {
+        return parts;
+    };
+    // A `serde_json::Value` is always representable, but a serialisation
+    // failure must degrade to the text mirror rather than lose the result.
+    let Ok(compact) = serde_json::to_string(value) else {
+        return parts;
+    };
+    let text = parts.join("\n");
+    if structured_content_mirrored_by_text(&text, &compact, value) {
+        return parts;
+    }
+    if parts.is_empty() {
+        // Structured-only result: the payload IS the output.
+        return vec![compact];
+    }
+    parts.push(format!("{MCP_STRUCTURED_CONTENT_MARKER}\n{compact}"));
+    parts
+}
+
+/// Whether `text` already carries `structured` (whose compact form is
+/// `compact`). Matches the whole text or its trailing line, exactly or by
+/// parsed JSON value (servers mirror the payload with inconsistent
+/// formatting; some prepend a human-readable summary line).
+fn structured_content_mirrored_by_text(
+    text: &str,
+    compact: &str,
+    structured: &serde_json::Value,
+) -> bool {
+    if text == compact || parses_to_same_json(text, structured) {
+        return true;
+    }
+    if let Some((_, trailing)) = text.rsplit_once('\n') {
+        let trailing = trailing.trim();
+        if trailing == compact || parses_to_same_json(trailing, structured) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Whether `text` parses to exactly `expected`.
+fn parses_to_same_json(text: &str, expected: &serde_json::Value) -> bool {
+    text.trim()
+        .parse::<serde_json::Value>()
+        .is_ok_and(|parsed| &parsed == expected)
+}
+
+/// Build the MCP `CallToolResult` for a Grok Build tool output served over
+/// MCP (`tools/call`).
+///
+/// Emit policy for `structured_content` (the serve side of MCP structured
+/// output, applied to the model-facing text that `xai_tool_runtime` output
+/// types such as `MCPOutput` carry):
+/// - A successful result whose text parses as a JSON **object or array** gets
+///   that value mirrored into `structured_content` while the text block is
+///   kept verbatim — the MCP-spec mirrored-output shape. No data loss either
+///   way: clients that ignore `structured_content` see identical text, and
+///   structured clients get the typed payload.
+/// - Quoted strings, numbers, and other non-object/array values are NOT
+///   promoted, and non-JSON text is emitted unchanged.
+/// - Error results stay text-only with `is_error: true`: the MCP spec
+///   reserves `structuredContent` for successful results, and error
+///   consumers read the text.
+pub fn tool_output_to_call_result(text: &str, is_error: bool) -> rmcp::model::CallToolResult {
+    let content = vec![rmcp::model::ContentBlock::text(text)];
+    if is_error {
+        return rmcp::model::CallToolResult::error(content);
+    }
+    let mut result = rmcp::model::CallToolResult::success(content);
+    if let Ok(value) = serde_json::from_str::<serde_json::Value>(text)
+        && (value.is_object() || value.is_array())
+    {
+        result.structured_content = Some(value);
+    }
+    result
 }
 
 /// Check whether a `ServiceError` indicates the underlying transport has died
@@ -7158,6 +7269,312 @@ mod tests {
         );
         // reset_transport + re-handshake replaced the dead service with a live one.
         assert!(matches!(&*client.state.lock().await, ClientState::Ready(_)));
+    }
+
+    // ── MCP structured output: consume side (`merge_structured_content`) ──
+
+    #[test]
+    fn structured_only_result_renders_json_as_sole_output() {
+        let structured = serde_json::json!({ "drawing_id": "abc123", "nodes": [1, 2, 3] });
+        let merged = merge_structured_content(Vec::new(), Some(&structured));
+        // No empty output: the serialized payload IS the result text.
+        assert_eq!(merged, vec![structured.to_string()]);
+    }
+
+    #[test]
+    fn structured_content_not_duplicated_when_text_mirrors_json() {
+        let structured = serde_json::json!({ "q": "rust", "hits": 2 });
+        let parts = vec![structured.to_string()];
+        let merged = merge_structured_content(parts.clone(), Some(&structured));
+        assert_eq!(merged, parts, "text mirror must not gain a duplicate block");
+    }
+
+    #[test]
+    fn structured_content_not_duplicated_when_pretty_text_parses_equal() {
+        let structured = serde_json::json!({ "q": "rust", "hits": 2 });
+        // Servers mirror the payload with inconsistent formatting; the parsed
+        // value — not the byte string — decides the dedupe.
+        let pretty = serde_json::to_string_pretty(&structured).expect("pretty print");
+        let merged = merge_structured_content(vec![pretty], Some(&structured));
+        assert_eq!(merged.len(), 1);
+        assert!(!merged[0].contains(MCP_STRUCTURED_CONTENT_MARKER));
+    }
+
+    #[test]
+    fn structured_content_not_duplicated_when_trailing_text_block_mirrors_json() {
+        let structured = serde_json::json!({ "session_id": "s-1" });
+        let parts = vec!["Summary of the call.".to_string(), structured.to_string()];
+        let merged = merge_structured_content(parts.clone(), Some(&structured));
+        assert_eq!(
+            merged, parts,
+            "superset text whose trailing block mirrors the payload is enough"
+        );
+    }
+
+    #[test]
+    fn structured_content_appended_when_text_differs() {
+        let structured = serde_json::json!({ "drawing_id": "abc123", "title": "sketch" });
+        let merged =
+            merge_structured_content(vec!["Hand-drawn sketch.".to_string()], Some(&structured));
+        // Joined form is what the model sees (`parts.join("\n")` at the call site).
+        assert_eq!(
+            merged.join("\n"),
+            format!(
+                "Hand-drawn sketch.\n{MCP_STRUCTURED_CONTENT_MARKER}\n{}",
+                structured.to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn error_result_text_keeps_structured_content() {
+        let structured = serde_json::json!({ "code": "OUT_OF_RANGE", "min": -50 });
+        // Error with no text blocks: the payload is still surfaced.
+        let merged = merge_structured_content(Vec::new(), Some(&structured));
+        assert_eq!(merged, vec![structured.to_string()]);
+        // Error with text: payload appended, never dropped.
+        let merged = merge_structured_content(vec!["boom".to_string()], Some(&structured));
+        assert_eq!(
+            merged.join("\n"),
+            format!(
+                "boom\n{MCP_STRUCTURED_CONTENT_MARKER}\n{}",
+                structured.to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn null_or_missing_structured_content_leaves_text_unchanged() {
+        let parts = vec!["plain".to_string()];
+        assert_eq!(
+            merge_structured_content(parts.clone(), None),
+            parts,
+            "absent payload must not alter the text"
+        );
+        assert_eq!(
+            merge_structured_content(parts.clone(), Some(&serde_json::Value::Null)),
+            parts,
+            "null payload must degrade to plain text without panicking"
+        );
+    }
+
+    // ── MCP structured output: consume side, end-to-end through `run` ──
+
+    /// Mock MCP server over the ACP bridge returning a canned `tools/call`
+    /// result, so `McpErasedTool::run` (the real conversion path) can be
+    /// driven end-to-end without a subprocess.
+    struct CannedResultInvoker {
+        result: serde_json::Value,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::acp_transport::AcpReverseInvoker for CannedResultInvoker {
+        async fn invoke(
+            &self,
+            _server_id: &str,
+            message: serde_json::Value,
+            _timeout: std::time::Duration,
+        ) -> Result<serde_json::Value, String> {
+            let id = message
+                .get("id")
+                .cloned()
+                .unwrap_or(serde_json::Value::Null);
+            let method = message
+                .get("method")
+                .and_then(|m| m.as_str())
+                .unwrap_or_default();
+            match method {
+                "initialize" => Ok(serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": id,
+                    "result": {
+                        "protocolVersion": message["params"]["protocolVersion"],
+                        "capabilities": { "tools": {} },
+                        "serverInfo": { "name": "structured", "version": "0.0.0" },
+                    }
+                })),
+                "tools/call" => {
+                    Ok(serde_json::json!({ "jsonrpc": "2.0", "id": id, "result": self.result }))
+                }
+                other => Err(format!("unexpected method {other}")),
+            }
+        }
+    }
+
+    /// An `McpErasedTool` wired to a canned `tools/call` result.
+    async fn erased_tool_with_canned_result(result: serde_json::Value) -> McpErasedTool {
+        let client = Arc::new(McpClient::new_acp(
+            "sdk".to_string(),
+            "srv_0".to_string(),
+            Arc::new(CannedResultInvoker { result }),
+            None,
+            None,
+        ));
+        let mut state = McpState::new(vec![]);
+        state
+            .owned_clients
+            .insert("sdk".to_string(), Arc::clone(&client));
+        McpErasedTool {
+            tool: McpTool::new(
+                "echo".to_string(),
+                "echo".to_string(),
+                "sdk".to_string(),
+                Arc::new(Mutex::new(state)),
+                serde_json::json!({}),
+                None,
+            ),
+        }
+    }
+
+    /// Run the erased tool and return `(model text, is_error)`.
+    async fn run_canned_tool(result: serde_json::Value) -> (String, bool) {
+        use xai_tool_runtime::Tool as _;
+        let erased = erased_tool_with_canned_result(result).await;
+        let output = erased
+            .run(
+                xai_tool_runtime::ToolCallContext::default(),
+                serde_json::json!({}),
+            )
+            .await
+            .expect("canned tool call should succeed");
+        let ToolOutput::MCP(mcp) = output else {
+            panic!("expected MCP output, got {output:?}");
+        };
+        let text = match mcp.output() {
+            MCPOutputDetails::OkayOutput(text) | MCPOutputDetails::Error(text) => text.clone(),
+        };
+        (text, mcp.is_error)
+    }
+
+    #[tokio::test]
+    async fn structured_only_result_from_server_surfaces_as_json_text() {
+        let structured = serde_json::json!({ "drawing_id": "abc123", "nodes": [1, 2, 3] });
+        let (text, is_error) = run_canned_tool(serde_json::json!({
+            "content": [],
+            "structuredContent": structured,
+            "isError": false,
+        }))
+        .await;
+        assert!(!is_error);
+        assert_eq!(
+            text,
+            structured.to_string(),
+            "structured-only result must not render empty"
+        );
+    }
+
+    #[tokio::test]
+    async fn mirrored_structured_content_from_server_is_not_duplicated() {
+        let structured = serde_json::json!({ "q": "rust", "hits": 2 });
+        let mirror = structured.to_string();
+        let (text, is_error) = run_canned_tool(serde_json::json!({
+            "content": [{ "type": "text", "text": mirror }],
+            "structuredContent": structured,
+            "isError": false,
+        }))
+        .await;
+        assert!(!is_error);
+        assert_eq!(
+            text, mirror,
+            "text mirror must be kept without an appended duplicate"
+        );
+        assert!(!text.contains(MCP_STRUCTURED_CONTENT_MARKER));
+    }
+
+    #[tokio::test]
+    async fn differing_text_gains_appended_structured_content_block() {
+        let structured = serde_json::json!({ "session_id": "s-1", "reuse": "Auto" });
+        let (text, is_error) = run_canned_tool(serde_json::json!({
+            "content": [{ "type": "text", "text": "Connected to host." }],
+            "structuredContent": structured,
+            "isError": false,
+        }))
+        .await;
+        assert!(!is_error);
+        assert!(
+            text.starts_with(&format!(
+                "Connected to host.\n{MCP_STRUCTURED_CONTENT_MARKER}\n"
+            )),
+            "structured payload must be appended after the text: {text}"
+        );
+        assert!(text.ends_with(&structured.to_string()));
+    }
+
+    #[tokio::test]
+    async fn error_result_with_structured_content_keeps_json() {
+        let structured = serde_json::json!({ "code": "OUT_OF_RANGE", "min": -50 });
+        let (text, is_error) = run_canned_tool(serde_json::json!({
+            "content": [{ "type": "text", "text": "boom" }],
+            "structuredContent": structured,
+            "isError": true,
+        }))
+        .await;
+        assert!(is_error);
+        assert!(text.starts_with(&format!("boom\n{MCP_STRUCTURED_CONTENT_MARKER}\n")));
+        assert!(
+            text.ends_with(&structured.to_string()),
+            "error output must keep the payload: {text}"
+        );
+    }
+
+    // ── MCP structured output: emit side (`tool_output_to_call_result`) ──
+
+    #[test]
+    fn json_object_tool_output_serves_structured_content() {
+        let result = tool_output_to_call_result(r#"{"a":1,"b":["x"]}"#, false);
+        assert_eq!(
+            result.structured_content.as_ref(),
+            Some(&serde_json::json!({ "a": 1, "b": ["x"] })),
+            "JSON object output must be mirrored into structured_content"
+        );
+        // The text block is kept verbatim: no data loss for text-only clients.
+        assert_eq!(result.content.len(), 1);
+        assert_eq!(
+            result.content[0].as_text().expect("text content").text,
+            r#"{"a":1,"b":["x"]}"#
+        );
+        assert_eq!(result.is_error, Some(false));
+    }
+
+    #[test]
+    fn json_array_tool_output_serves_structured_content() {
+        let result = tool_output_to_call_result("[1,2,3]", false);
+        assert_eq!(
+            result.structured_content.as_ref(),
+            Some(&serde_json::json!([1, 2, 3]))
+        );
+    }
+
+    #[test]
+    fn non_json_tool_output_serves_without_structured_content() {
+        for text in ["plain text 42", "", "KEY: value\n--- tape ---"] {
+            let result = tool_output_to_call_result(text, false);
+            assert!(
+                result.structured_content.is_none(),
+                "non-JSON output '{text}' must not gain structured_content"
+            );
+            assert_eq!(
+                result.content[0].as_text().expect("text content").text,
+                text
+            );
+        }
+        // JSON scalars (quoted strings, numbers) are not promoted either.
+        let result = tool_output_to_call_result("\"just a string\"", false);
+        assert!(result.structured_content.is_none());
+    }
+
+    #[test]
+    fn error_tool_output_stays_text_only() {
+        let result = tool_output_to_call_result(r#"{"code":"X"}"#, true);
+        assert_eq!(result.is_error, Some(true));
+        assert!(
+            result.structured_content.is_none(),
+            "error results keep text-only content per the emit policy"
+        );
+        assert_eq!(
+            result.content[0].as_text().expect("text content").text,
+            r#"{"code":"X"}"#
+        );
     }
 
     #[test]
