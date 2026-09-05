@@ -41,9 +41,9 @@ pub use self::doom_loop::{
 };
 pub use self::error::{
     ApiErrorCode, ApiErrorDiagnostics, EmptyReason, EmptyResponseContext, INVALID_IMAGE_ERROR_CODE,
-    InferenceError, ResponseModelMetadata, Result, SentCredential, is_context_length_error,
-    parse_error_code, status_user_message, status_user_message_for, user_facing_api_error_message,
-    user_facing_api_error_message_for,
+    InferenceError, ResponseModelMetadata, Result, SentCredential, extract_max_tokens_limit,
+    is_context_length_error, parse_error_code, status_user_message, status_user_message_for,
+    user_facing_api_error_message, user_facing_api_error_message_for,
 };
 pub use self::tool_overrides::{
     ClearableField, SearchDateBound, SearchDateBoundError, ToolOverrides, ToolOverridesUpdate,

@@ -19,7 +19,7 @@ use tracing::Instrument;
 
 use xai_grok_inference_types::{
     ApiErrorCode, ConversationRequest, ConversationResponse, EmptyResponseContext, InferenceError,
-    error::Result as InferenceResult,
+    error::Result as InferenceResult, extract_max_tokens_limit,
 };
 
 use crate::client::{ApiBackend, InferenceClient};
@@ -42,6 +42,46 @@ use super::pacing::InferencePacer;
 /// (5 minutes -- long enough for cold-start reasoning, short enough
 /// to detect dead streams before the user gives up).
 const DEFAULT_IDLE_TIMEOUT_SECS: u64 = 300;
+
+/// Fallback budget for the max-tokens recovery halving path when neither the
+/// request nor the config carries a request max: half the OpenRouter provider
+/// default (16384) rounded to a conservative power-of-two.
+const MAX_TOKENS_RECOVERY_UNKNOWN_BUDGET: u32 = 8192;
+
+/// Plan the single bounded max-tokens recovery re-issue.
+///
+/// When the provider rejected the attempt because the completion-token budget
+/// exceeds the model cap (a never-retryable 400/422-family error), compute the
+/// reduced budget for ONE re-issue:
+/// - an allowed maximum parsed from the error message wins (the request budget
+///   is clamped to it);
+/// - otherwise the effective budget is halved (never below 1), using a fixed
+///   conservative fallback when neither the request nor the config set one.
+///
+/// Returns `None` when recovery does not apply (not a max-tokens-cap error, or
+/// the single recovery re-issue was already spent). The caller mutates the
+/// request's `max_output_tokens` and re-issues without charging the retry
+/// budget, so a recovery attempt can never turn into a retry storm.
+fn plan_max_tokens_recovery(
+    err: &InferenceError,
+    request: &ConversationRequest,
+    config: &InferenceConfig,
+    recovery_fired: bool,
+) -> Option<u32> {
+    if recovery_fired || !err.is_max_tokens_cap_error() {
+        return None;
+    }
+    let requested = request.max_output_tokens.or(config.max_completion_tokens);
+    let message = match err {
+        InferenceError::Api { message, .. } => message.as_str(),
+        _ => return None,
+    };
+    if let Some(limit) = extract_max_tokens_limit(message) {
+        Some(requested.map_or(limit, |n| n.min(limit)))
+    } else {
+        Some((requested.unwrap_or(MAX_TOKENS_RECOVERY_UNKNOWN_BUDGET) / 2).max(1))
+    }
+}
 
 /// Result type for the `submit_and_collect` oneshot. Carries the rich
 /// `InferenceError` so callers can inspect retryability, status code,
@@ -131,6 +171,9 @@ pub(crate) async fn run_request_task(
 
     let mut request = request;
     let mut retry_count: u32 = 0;
+    // Max-tokens budget recovery: ONE bounded re-issue per request, on its own
+    // budget, so it can never turn into a retry storm.
+    let mut max_tokens_recovery_fired = false;
     // Doom-loop recovery keeps its own resample budget, independent of the
     // transport/empty budget above.
     let doom_policy = (max_retries > 0)
@@ -248,6 +291,8 @@ pub(crate) async fn run_request_task(
                     &mut request,
                     &mut client,
                     &config,
+                    &output_observed,
+                    &mut max_tokens_recovery_fired,
                     route_ref,
                     &cancel_token,
                     &mut completion_tx,
@@ -304,6 +349,8 @@ pub(crate) async fn run_request_task(
                     &mut request,
                     &mut client,
                     &config,
+                    &output_observed,
+                    &mut max_tokens_recovery_fired,
                     route_ref,
                     &cancel_token,
                     &mut completion_tx,
@@ -329,6 +376,8 @@ pub(crate) async fn run_request_task(
                     &mut request,
                     &mut client,
                     &config,
+                    &output_observed,
+                    &mut max_tokens_recovery_fired,
                     route_ref,
                     &cancel_token,
                     &mut completion_tx,
@@ -359,6 +408,8 @@ async fn apply_retry_decision(
     request: &mut ConversationRequest,
     client: &mut InferenceClient,
     config: &InferenceConfig,
+    output_observed: &AtomicBool,
+    max_tokens_recovery_fired: &mut bool,
     route: Option<&ProviderRouteContext>,
     cancel_token: &CancellationToken,
     completion_tx: &mut Option<oneshot::Sender<CompletionResult>>,
@@ -382,6 +433,32 @@ async fn apply_retry_decision(
         retry_policy.rate_limit_retry_threshold
     };
     let decision = classify_error(err, *retry_count, max_retries, rate_limit_threshold);
+
+    // Max-tokens budget recovery: a max-tokens-cap error is otherwise fatal
+    // (400/422 never retry), so intercept it on the FIRST attempt only and
+    // re-issue once with a reduced budget. The re-issue does not charge the
+    // retry budget and no backoff is awaited, keeping the recovery a single
+    // bounded re-issue rather than a retry storm. It never fires after output
+    // was observed, matching the `retry_only_before_output` policy: re-issuing
+    // a request that already streamed output would duplicate it.
+    if matches!(decision, RetryDecision::Fatal(_))
+        && *retry_count == 0
+        && !output_observed.load(Ordering::Relaxed)
+        && let Some(budget) =
+            plan_max_tokens_recovery(err, request, config, *max_tokens_recovery_fired)
+    {
+        *max_tokens_recovery_fired = true;
+        request.max_output_tokens = Some(budget);
+        tracing::info!(
+            target: crate::inference_log::TARGET,
+            event = "max_tokens_recovery",
+            budget,
+            error = %err,
+            "provider reported the completion-token budget exceeds the model cap; \
+             re-issuing once with the reduced budget"
+        );
+        return true;
+    }
 
     // Connection-reset / broken-pipe on body upload often means nginx
     // rejected an oversized payload before responding 413. Strip only if
@@ -1187,6 +1264,115 @@ mod tests {
         ConversationRequest::from_items(vec![user])
     }
 
+    fn api_400(message: &str) -> InferenceError {
+        InferenceError::Api {
+            status: reqwest::StatusCode::BAD_REQUEST,
+            message: message.into(),
+            model_metadata: None,
+            retry_after_secs: None,
+            should_retry: None,
+            diagnostics: None,
+            error_code: Some(ApiErrorCode::parse("invalid_request_error")),
+        }
+    }
+
+    fn config_with_budget(budget: Option<u32>) -> InferenceConfig {
+        InferenceConfig {
+            base_url: "http://localhost".into(),
+            model: "test-model".into(),
+            max_completion_tokens: budget,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn max_tokens_recovery_clamps_to_extracted_limit() {
+        let err = api_400(
+            "Invalid value for 'max_completion_tokens': 200000 is greater than the maximum of 100000",
+        );
+        // Request budget unknown: the extracted cap becomes the re-issue budget.
+        let request = ConversationRequest::default();
+        assert_eq!(
+            plan_max_tokens_recovery(&err, &request, &config_with_budget(None), false),
+            Some(100_000)
+        );
+        // Request budget above the cap is clamped to it (config-default-only case).
+        assert_eq!(
+            plan_max_tokens_recovery(&err, &request, &config_with_budget(Some(200_000)), false),
+            Some(100_000)
+        );
+        // An explicit per-request budget below the cap stays as-is (can't be
+        // the failing value; re-issue with the same budget is the bounded retry).
+        let mut request = ConversationRequest::default();
+        request.max_output_tokens = Some(64_000);
+        assert_eq!(
+            plan_max_tokens_recovery(&err, &request, &config_with_budget(None), false),
+            Some(64_000)
+        );
+    }
+
+    #[test]
+    fn max_tokens_recovery_halves_when_unparseable() {
+        let err = api_400("max_tokens exceeds the model's limit for this deployment");
+        let request = ConversationRequest::default();
+        // Config budget: halved.
+        assert_eq!(
+            plan_max_tokens_recovery(&err, &request, &config_with_budget(Some(128_000)), false),
+            Some(64_000)
+        );
+        // Per-request budget wins over config, and halving never drops to 0.
+        let mut request = ConversationRequest::default();
+        request.max_output_tokens = Some(1);
+        assert_eq!(
+            plan_max_tokens_recovery(&err, &request, &config_with_budget(Some(128_000)), false),
+            Some(1)
+        );
+        // No budget anywhere: fixed conservative fallback.
+        let request = ConversationRequest::default();
+        assert_eq!(
+            plan_max_tokens_recovery(&err, &request, &config_with_budget(None), false),
+            Some(MAX_TOKENS_RECOVERY_UNKNOWN_BUDGET / 2)
+        );
+    }
+
+    #[test]
+    fn max_tokens_recovery_fires_once_and_skips_other_errors() {
+        let err = api_400("max_tokens must be less than or equal to 8192");
+        let request = ConversationRequest::default();
+        let config = config_with_budget(Some(128_000));
+        assert_eq!(
+            plan_max_tokens_recovery(&err, &request, &config, false),
+            Some(8_192)
+        );
+        // The single bounded re-issue is spent: never a second recovery.
+        assert_eq!(
+            plan_max_tokens_recovery(&err, &request, &config, true),
+            None
+        );
+        // Context-length errors belong to compaction, not budget recovery.
+        let context_err =
+            api_400("This model's maximum context length is 200000 tokens; prompt too long");
+        assert_eq!(
+            plan_max_tokens_recovery(&context_err, &request, &config, false),
+            None
+        );
+        // Unrelated 400 never recovers.
+        assert_eq!(
+            plan_max_tokens_recovery(&api_400("unknown option"), &request, &config, false),
+            None
+        );
+        // Non-Api variants never recover.
+        assert_eq!(
+            plan_max_tokens_recovery(
+                &InferenceError::EventStreamError("boom".into()),
+                &request,
+                &config,
+                false,
+            ),
+            None
+        );
+    }
+
     async fn apply_image_decision(
         error: InferenceError,
     ) -> (bool, ConversationRequest, Vec<InferenceEvent>) {
@@ -1201,6 +1387,8 @@ mod tests {
         let mut client = InferenceClient::new(config.clone()).expect("test client");
         let inference_pacer = InferencePacer::default();
         let mut completion_tx = None;
+        let output_observed = Arc::new(AtomicBool::new(false));
+        let mut max_tokens_recovery_fired = false;
         let should_continue = apply_retry_decision(
             &error,
             &mut retry_count,
@@ -1211,6 +1399,8 @@ mod tests {
             &mut request,
             &mut client,
             &config,
+            &output_observed,
+            &mut max_tokens_recovery_fired,
             None,
             &CancellationToken::new(),
             &mut completion_tx,
@@ -1315,6 +1505,8 @@ mod tests {
         let mut client = InferenceClient::new(config.clone()).expect("test client");
         let error = InferenceError::EventStreamError("retry me".into());
         let inference_pacer = InferencePacer::default();
+        let output_observed = Arc::new(AtomicBool::new(false));
+        let mut max_tokens_recovery_fired = false;
 
         let should_continue = apply_retry_decision(
             &error,
@@ -1326,6 +1518,8 @@ mod tests {
             &mut request,
             &mut client,
             &config,
+            &output_observed,
+            &mut max_tokens_recovery_fired,
             None,
             &cancel_token,
             &mut completion_tx,

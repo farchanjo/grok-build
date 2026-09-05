@@ -494,6 +494,68 @@ impl InferenceError {
         }
     }
 
+    /// True when the server rejected the request because the completion-token
+    /// budget exceeds the model's cap. This is the provider-agnostic signal
+    /// for the max-tokens recovery path: clamp the budget and re-issue once.
+    ///
+    /// Matches:
+    /// - OpenRouter's typed `max_tokens_exceeded` code (the older
+    ///   `token_limit_exceeded` alias is accepted too);
+    /// - OpenAI Platform 400 `invalid_request_error` envelopes whose message
+    ///   names `max_tokens` / `max_completion_tokens` / `max_output_tokens`
+    ///   and reports an exceed / maximum / must-be-less condition;
+    /// - Anthropic / Z.ai 400 messages naming `max_tokens` with the same
+    ///   markers.
+    ///
+    /// Context-length overflows are deliberately excluded: they are
+    /// deterministic (re-sending the same payload always fails), the session's
+    /// compaction path owns them, and re-issuing with a smaller output budget
+    /// would not help. The `MaxTokensTruncation` finish-reason variant is a
+    /// distinct, non-API condition and also excluded.
+    pub fn is_max_tokens_cap_error(&self) -> bool {
+        match self {
+            InferenceError::Api {
+                status,
+                message,
+                error_code,
+                ..
+            } if matches!(status.as_u16(), 400 | 422) => {
+                if error_code.as_ref().is_some_and(|code| {
+                    matches!(
+                        code.as_str(),
+                        "max_tokens_exceeded" | "token_limit_exceeded"
+                    )
+                }) {
+                    return true;
+                }
+                let lower = message.to_ascii_lowercase();
+                if is_context_length_error(message) || lower.contains("context window") {
+                    return false;
+                }
+                let names_budget = lower.contains("max_tokens")
+                    || lower.contains("max_completion_tokens")
+                    || lower.contains("max_output_tokens");
+                let condition = lower.contains("exceed")
+                    || lower.contains("maximum")
+                    || lower.contains("must be less");
+                names_budget && condition
+            }
+            // Explicit like `is_retryable`: a new variant must state its
+            // classification instead of silently defaulting to false.
+            InferenceError::Api { .. }
+            | InferenceError::Auth { .. }
+            | InferenceError::InvalidConfiguration(_)
+            | InferenceError::Http(_)
+            | InferenceError::Serialization(_)
+            | InferenceError::EventStreamError(_)
+            | InferenceError::StreamError { .. }
+            | InferenceError::IdleTimeout { .. }
+            | InferenceError::EmptyResponse { .. }
+            | InferenceError::MaxTokensTruncation
+            | InferenceError::DoomLoopDetected { .. } => false,
+        }
+    }
+
     pub fn is_retryable(&self) -> bool {
         match self {
             InferenceError::Auth { .. } => false,
@@ -942,6 +1004,53 @@ pub fn is_context_length_error(message: &str) -> bool {
         || m.contains("context_length_exceeded")
 }
 
+/// Maximum completion-token budget the provider allows for this request, as
+/// encoded in an error message, or `None` when the message carries no cap.
+///
+/// Providers spell the allowed maximum inconsistently:
+/// - `"This model's maximum is 128000 tokens"` (Anthropic/Z.ai style);
+/// - `"Invalid value for 'max_completion_tokens': 200000 is greater than the
+///   maximum of 100000"` (OpenAI Platform — the FIRST number is the requested
+///   budget, so naive first-number extraction would re-issue the same value);
+/// - `"'max_tokens' must be less than or equal to 16384"` (OpenRouter
+///   proxied upstream text).
+///
+/// The deterministic rule therefore prefers, in order: the number after the
+/// LAST `maximum` marker, then after the LAST `must be less than` marker, and
+/// only as a fallback the number after a `max` token. This is the hand-rolled
+/// equivalent of `(?i)max(?:imum)?[^0-9]*([0-9][0-9,]*)` with comma stripping —
+/// kept local so this foundational crate does not gain a `regex` dependency.
+pub fn extract_max_tokens_limit(message: &str) -> Option<u32> {
+    let lower = message.to_ascii_lowercase();
+    for marker in ["maximum", "must be less than", "max"] {
+        let mut search_from = 0;
+        let mut last_match: Option<u32> = None;
+        while let Some(rel) = lower[search_from..].find(marker) {
+            let at = search_from + rel;
+            if let Some(limit) = number_after_marker(&lower[at + marker.len()..]) {
+                last_match = Some(limit);
+            }
+            search_from = at + marker.len();
+        }
+        if let Some(limit) = last_match {
+            return Some(limit);
+        }
+    }
+    None
+}
+
+/// First positive integer starting after `tail`, skipping non-digit text and
+/// allowing `,` separators inside the digit run (`"128,000"`).
+fn number_after_marker(tail: &str) -> Option<u32> {
+    let digit_at = tail.find(|c: char| c.is_ascii_digit())?;
+    let run = tail[digit_at..]
+        .chars()
+        .take_while(|c| c.is_ascii_digit() || *c == ',')
+        .collect::<String>();
+    let digits = run.chars().filter(|c| c.is_ascii_digit()).collect::<String>();
+    digits.parse::<u32>().ok().filter(|n| *n > 0)
+}
+
 /// Decide whether a [`reqwest::Error`] is worth retrying.
 pub fn is_retryable_reqwest(err: &reqwest::Error) -> bool {
     if err.is_timeout() || err.is_connect() {
@@ -1002,6 +1111,110 @@ mod tests {
             .is_context_length_error()
         );
         assert!(!InferenceError::auth_unknown("nope").is_context_length_error());
+    }
+
+    fn api_400(message: &str, code: Option<&str>) -> InferenceError {
+        InferenceError::Api {
+            status: StatusCode::BAD_REQUEST,
+            message: message.into(),
+            model_metadata: None,
+            retry_after_secs: None,
+            should_retry: None,
+            diagnostics: None,
+            error_code: code.map(ApiErrorCode::parse),
+        }
+    }
+
+    #[test]
+    fn max_tokens_cap_error_matches_provider_variants() {
+        // OpenRouter typed code wins regardless of wording.
+        assert!(
+            api_400("some future wording", Some("max_tokens_exceeded"))
+                .is_max_tokens_cap_error()
+        );
+        assert!(
+            api_400("some future wording", Some("token_limit_exceeded"))
+                .is_max_tokens_cap_error()
+        );
+        // OpenAI Platform envelope: requested value vs allowed maximum.
+        assert!(api_400(
+            "Invalid value for 'max_completion_tokens': 200000 is greater than the maximum of 100000",
+            Some("invalid_request_error"),
+        )
+        .is_max_tokens_cap_error());
+        // Anthropic-style message.
+        assert!(api_400(
+            "max_tokens: 100000 exceeds the model's maximum of 65536 tokens",
+            None,
+        )
+        .is_max_tokens_cap_error());
+        // Z.ai / OpenAI-compatible 400.
+        assert!(api_400(
+            "max_tokens must be less than or equal to 8192",
+            None,
+        )
+        .is_max_tokens_cap_error());
+        // Context-length overflows are NOT budget errors (compaction owns them).
+        assert!(!api_400(
+            "This model's maximum context length is 200000 tokens; the prompt is too long",
+            None,
+        )
+        .is_max_tokens_cap_error());
+        assert!(!api_400(
+            "invalid_request_error: prompt is too long: 300000 tokens > 200000 maximum",
+            Some("invalid_request_error"),
+        )
+        .is_max_tokens_cap_error());
+        // 500 with the code is not the 400/422 budget family.
+        assert!(!InferenceError::Api {
+            status: StatusCode::INTERNAL_SERVER_ERROR,
+            message: "max_tokens_exceeded".into(),
+            model_metadata: None,
+            retry_after_secs: None,
+            should_retry: None,
+            diagnostics: None,
+            error_code: Some(ApiErrorCode::parse("max_tokens_exceeded")),
+        }
+        .is_max_tokens_cap_error());
+        // Unrelated 400s never trigger.
+        assert!(!api_400("unknown option 'foo'", None).is_max_tokens_cap_error());
+        // MaxTokensTruncation (finish_reason) is a distinct variant.
+        assert!(!InferenceError::MaxTokensTruncation.is_max_tokens_cap_error());
+    }
+
+    #[test]
+    fn extract_max_tokens_limit_prefers_allowed_maximum() {
+        // The allowed cap is the number after `maximum`, not the first number.
+        assert_eq!(
+            extract_max_tokens_limit(
+                "Invalid value for 'max_completion_tokens': 200000 is greater than the maximum of 100000"
+            ),
+            Some(100_000)
+        );
+        assert_eq!(
+            extract_max_tokens_limit("max_tokens: 100000 exceeds the model's maximum of 65536 tokens"),
+            Some(65_536)
+        );
+        // must-be-less-than phrasing (OpenRouter upstream text).
+        assert_eq!(
+            extract_max_tokens_limit("'max_tokens' must be less than or equal to 16384"),
+            Some(16_384)
+        );
+        // Anthropic/Z.ai bare wording.
+        assert_eq!(
+            extract_max_tokens_limit("This model's maximum output is 128000 tokens"),
+            Some(128_000)
+        );
+        // Comma separators are tolerated (OpenRouter copy).
+        assert_eq!(
+            extract_max_tokens_limit("max_tokens exceeds the maximum of 128,000"),
+            Some(128_000)
+        );
+        // No cap in the message.
+        assert_eq!(extract_max_tokens_limit("unknown option 'foo'"), None);
+        assert_eq!(extract_max_tokens_limit(""), None);
+        // The cap must be positive; a bare zero is not a usable cap.
+        assert_eq!(extract_max_tokens_limit("max_tokens: 0 is invalid"), None);
     }
 
     #[test]

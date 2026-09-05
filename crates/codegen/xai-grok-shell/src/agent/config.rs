@@ -3754,6 +3754,34 @@ fn managed_settings_env_flag(key: &str) -> Option<bool> {
     let json: serde_json::Value = serde_json::from_str(&content).ok()?;
     xai_grok_workspace::permission::resolution::json_env_flag(json.get("env"), key)
 }
+/// Emit a warning (never fail) when a user-set `max_completion_tokens`
+/// exceeds the known output ceiling for that model.
+///
+/// The sampler clamps the wire budget to the ceiling anyway, so an oversized
+/// user value silently does nothing; this makes the mistake visible without
+/// changing behavior. `None` for either side (no user value, no known
+/// ceiling) is silent.
+fn warn_budget_above_ceiling(model_key: &str, user_max: Option<u32>, ceiling: Option<u32>) {
+    if budget_exceeds_ceiling(user_max, ceiling) {
+        tracing::warn!(
+            model_key = %model_key,
+            user_max_completion_tokens = user_max.unwrap_or_default(),
+            max_output_ceiling = ceiling.unwrap_or_default(),
+            "max_completion_tokens exceeds the known output ceiling for this model; \
+             the request budget is clamped to the ceiling"
+        );
+    }
+}
+
+/// Guard-rail predicate: a user budget above a known ceiling for the same
+/// model. Pure so the rule is unit-testable without capturing a log event.
+fn budget_exceeds_ceiling(user_max: Option<u32>, ceiling: Option<u32>) -> bool {
+    match (user_max, ceiling) {
+        (Some(user_max), Some(ceiling)) if user_max > ceiling => true,
+        _ => false,
+    }
+}
+
 /// Assemble the final model map. Priority (highest wins):
 /// config.toml `[model.*]` > prefetched (remote) > hardcoded defaults.
 pub fn resolve_model_list(
@@ -3847,6 +3875,16 @@ pub fn resolve_model_list(
                 });
         let effective = with_provider.as_ref().unwrap_or(model_override);
         let mut entry = effective.apply(key, base, &cfg.endpoints);
+        // Guardrail: a user-set request budget above a known output ceiling
+        // for that model is not an error (the sampler clamps the request to
+        // the ceiling anyway) but is almost certainly a config mistake — make
+        // it visible. `cfg.config_models` is the pre-merge user map, so the
+        // check only fires for values the user actually wrote.
+        warn_budget_above_ceiling(
+            key,
+            cfg.config_models.get(key).and_then(|m| m.max_completion_tokens),
+            model_override.max_output_ceiling,
+        );
         let session_bearer_unsafe = !crate::util::is_xai_api_bearer_url(&entry.info.base_url)
             || entry
                 .api_base_url
@@ -6155,6 +6193,43 @@ pub fn try_inference_config_for_model(
     ))
 }
 
+/// Strongest effort in a model's known advertised menu, for clamping.
+///
+/// Returns `None` when the menu is unknown (`Unknown` — hand-written TOML
+/// without flags, or an unparseable `Unrestricted` string) or explicitly
+/// unsupported (`Unsupported` — `supports_reasoning_effort == Some(false)`);
+/// callers keep the historical strip behavior in those cases. `LegacyFallback`
+/// has a known fixed ladder (xhigh/high/medium/low); `Exact` uses the
+/// advertised option set.
+fn strongest_advertised_effort(
+    selection: ReasoningEffortSelection,
+    options: &[ReasoningEffortOption],
+) -> Option<ReasoningEffort> {
+    match selection {
+        ReasoningEffortSelection::Unknown | ReasoningEffortSelection::Unsupported => None,
+        ReasoningEffortSelection::LegacyFallback => Some(ReasoningEffort::Xhigh),
+        ReasoningEffortSelection::Exact => options
+            .iter()
+            .map(|option| option.value)
+            .max_by_key(|effort| effort_strength(*effort)),
+        ReasoningEffortSelection::Unrestricted => None,
+    }
+}
+
+/// Monotonic strength rank for [`ReasoningEffort`] (enum declaration order is
+/// ascending; the enum does not derive `Ord`).
+fn effort_strength(effort: ReasoningEffort) -> u8 {
+    match effort {
+        ReasoningEffort::None => 0,
+        ReasoningEffort::Minimal => 1,
+        ReasoningEffort::Low => 2,
+        ReasoningEffort::Medium => 3,
+        ReasoningEffort::High => 4,
+        ReasoningEffort::Xhigh => 5,
+        ReasoningEffort::Max => 6,
+    }
+}
+
 fn build_inference_config_for_model(
     model: &ModelEntry,
     credentials: ResolvedCredentials,
@@ -6245,7 +6320,14 @@ fn build_inference_config_for_model(
     // Validate the catalog/default effort against the normalized model-bound
     // selector before it can reach any wire backend. Unknown keeps explicit
     // canonical tokens compatible; Unsupported and stale Exact/Legacy values
-    // are stripped so providers never receive a value outside their contract.
+    // are clamped to the model's strongest advertised effort when the menu is
+    // known (preserving the user's "max" intent, e.g. `max` on a model whose
+    // menu tops out at `high` sends `high`) and stripped when no menu exists.
+    //
+    // Per-backend canonicalization (OpenRouter `xhigh` vs OpenAI `high` vs
+    // Anthropic Messages `low/medium/high` only) deliberately stays at the
+    // wire serialization layer (`ReasoningEffort::to_messages_api` /
+    // `to_responses_api`); no backend rewrites effort tokens today.
     let reasoning_effort = info.reasoning_effort.and_then(|effort| {
         match info
             .reasoning_effort_selection
@@ -6253,13 +6335,28 @@ fn build_inference_config_for_model(
         {
             Ok(validated) => Some(validated),
             Err(error) => {
-                tracing::debug!(
-                    model = %info.model,
-                    effort = %effort,
-                    %error,
-                    "stripping invalid reasoning_effort from inference config",
+                let strongest = strongest_advertised_effort(
+                    info.reasoning_effort_selection,
+                    &info.reasoning_efforts,
                 );
-                None
+                if let Some(strongest) = strongest {
+                    tracing::info!(
+                        model = %info.model,
+                        event = "effort_clamped",
+                        requested = %effort,
+                        effective = %strongest,
+                        "clamping reasoning_effort to the highest advertised value for this model"
+                    );
+                    Some(strongest)
+                } else {
+                    tracing::debug!(
+                        model = %info.model,
+                        effort = %effort,
+                        %error,
+                        "stripping invalid reasoning_effort from inference config",
+                    );
+                    None
+                }
             }
         }
     });
@@ -8447,6 +8544,78 @@ reasoning_effort = "low"
             Some(ReasoningEffort::High),
             "Some(true) must honor an explicit reasoning_effort",
         );
+    }
+    /// Phase C: a requested effort outside a model's known advertised menu is
+    /// clamped to the strongest advertised entry instead of being stripped,
+    /// preserving the user's "max" intent.
+    #[test]
+    fn inference_config_clamps_effort_to_strongest_advertised() {
+        use xai_grok_inference_types::{ReasoningEffort, ReasoningEffortOption};
+        let mut model = test_model_entry(
+            "menu-topped-at-high",
+            "https://openrouter.example/v1",
+            None,
+            None,
+            None,
+        );
+        model.info.reasoning_effort = Some(ReasoningEffort::Max);
+        model.info.supports_reasoning_effort = Some(true);
+        model.info.reasoning_effort_selection = ReasoningEffortSelection::Exact;
+        model.info.reasoning_efforts = vec![
+            ReasoningEffortOption {
+                id: "low".into(),
+                value: ReasoningEffort::Low,
+                label: "Low".into(),
+                description: None,
+                default: false,
+            },
+            ReasoningEffortOption {
+                id: "high".into(),
+                value: ReasoningEffort::High,
+                label: "High".into(),
+                description: None,
+                default: true,
+            },
+        ];
+        let creds = resolve_credentials(&model, None);
+        let config = inference_config_for_model(&model, creds, None, None, None, None);
+        assert_eq!(
+            config.reasoning_effort,
+            Some(ReasoningEffort::High),
+            "`max` on a model whose menu tops out at `high` must send `high`",
+        );
+    }
+    /// Phase C: an unknown or unsupported menu has no clamp target — the
+    /// historical strip behavior stays for those cases (the typed config
+    /// cannot even produce an unparseable effort, so this only matters for
+    /// the helper's contract).
+    #[test]
+    fn strongest_advertised_effort_unknown_or_unsupported_is_none() {
+        use xai_grok_inference_types::ReasoningEffort;
+        assert_eq!(
+            strongest_advertised_effort(ReasoningEffortSelection::Unknown, &[]),
+            None
+        );
+        assert_eq!(
+            strongest_advertised_effort(ReasoningEffortSelection::Unsupported, &[]),
+            None
+        );
+        assert_eq!(
+            strongest_advertised_effort(ReasoningEffortSelection::LegacyFallback, &[]),
+            Some(ReasoningEffort::Xhigh),
+            "the legacy ladder is a known menu; its top is xhigh"
+        );
+    }
+    /// Phase C: the config guard-rail predicate fires only for a user budget
+    /// strictly above a known ceiling (never fails, only warns).
+    #[test]
+    fn budget_exceeds_ceiling_guard_rail_predicate() {
+        assert!(budget_exceeds_ceiling(Some(200_000), Some(128_000)));
+        assert!(!budget_exceeds_ceiling(Some(128_000), Some(128_000)));
+        assert!(!budget_exceeds_ceiling(Some(64_000), Some(128_000)));
+        assert!(!budget_exceeds_ceiling(None, Some(128_000)));
+        assert!(!budget_exceeds_ceiling(Some(200_000), None));
+        assert!(!budget_exceeds_ceiling(None, None));
     }
     /// H4 wire shaping: `None` (unknown, e.g. hand-written TOML with no
     /// `supports_reasoning_effort`) must honor an explicit `reasoning_effort`

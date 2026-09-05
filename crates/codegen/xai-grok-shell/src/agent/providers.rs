@@ -676,6 +676,29 @@ impl ProviderManager {
         Self::install_model_presets_into(&mut config.model_providers, &mut config.config_models);
     }
 
+    /// Normalized completion-token ceiling for a curated preset.
+    ///
+    /// OpenRouter presets carry an explicit routed ceiling (computed from the
+    /// catalog's `top_provider` / per-request limits); it wins verbatim and
+    /// this helper is a no-op flag for them — OpenRouter rows must never
+    /// inherit `max_completion_tokens` as a ceiling because their
+    /// request-budget value can be the 16384 API default rather than a cap.
+    ///
+    /// Every other curated provider (OpenAI Platform, direct Anthropic) has
+    /// no separate routed ceiling today, but its curated
+    /// `max_completion_tokens` IS the known provider cap. Using it as the
+    /// fallback ceiling stops the sampler's `clamp_request_max_tokens` from
+    /// being a no-op: an effort of `max` on GPT-5.6 Sol (cap 128_000) still
+    /// sends max_completion_tokens = 128_000, but a user override above the
+    /// cap is now clamped instead of rejected with a 400.
+    fn preset_ceiling(preset: &ProviderModelPreset) -> Option<u32> {
+        if preset.provider == ProviderId::OpenRouter {
+            preset.max_output_ceiling
+        } else {
+            preset.max_output_ceiling.or(preset.max_completion_tokens)
+        }
+    }
+
     pub(crate) fn install_model_presets_into(
         model_providers: &mut indexmap::IndexMap<
             String,
@@ -798,6 +821,8 @@ impl ProviderManager {
                 .base_url
                 .as_deref()
                 .is_some_and(crate::auth::chatgpt_oauth::is_codex_base_url);
+            // Resolve before the struct literal, which moves `preset` fields.
+            let max_output_ceiling = Self::preset_ceiling(&preset);
             let preset_override = ConfigModelOverride {
                 model: Some(preset.model),
                 base_url: preset.base_url,
@@ -826,7 +851,9 @@ impl ProviderManager {
                 // window here (for example 131072/131072), so storing it as
                 // `max_completion_tokens` makes every non-empty prompt fail
                 // local context validation. Keep it on `max_output_ceiling`
-                // and clamp the provider request default to that cap.
+                // and clamp the provider request default to that cap. For
+                // every other curated provider, `preset_ceiling` fills the
+                // ceiling from the known `max_completion_tokens` cap.
                 max_completion_tokens: if preset.provider == ProviderId::OpenRouter {
                     None
                 } else {
@@ -852,11 +879,9 @@ impl ProviderManager {
                 supports_file_input: preset.supports_file_input,
                 output_has_text: preset.output_has_text,
                 supports_zdr: preset.supports_zdr,
-                max_output_ceiling: if preset.provider == ProviderId::OpenRouter {
-                    preset.max_output_ceiling
-                } else {
-                    None
-                },
+                // OpenRouter rows keep their routed ceiling only; the
+                // explicit ceiling wins over the curated budget fallback.
+                max_output_ceiling,
                 ..Default::default()
             };
             match config_models.entry(preset.id) {
@@ -1816,6 +1841,13 @@ fn inject_configured_instance_catalogs(
                             .and_then(|v| v.as_u64())
                             .and_then(|n| u32::try_from(n).ok())
                     },
+                    // Custom OpenAI-compatible instances (Z.ai, local hosts)
+                    // have no catalog ceiling source today: their per-model
+                    // `max_completion_tokens` is a request budget, not a
+                    // verified provider cap, so it is deliberately NOT
+                    // promoted to `max_output_ceiling`. The sampler relies on
+                    // the provider-agnostic max-tokens recovery path
+                    // (retry-loop re-issue with a clamped budget) for those.
                     max_output_ceiling: if is_openrouter {
                         max_output_ceiling
                     } else {
@@ -3395,6 +3427,12 @@ fn merge_anthropic_catalog(
                 }
                 if let Some(max_out) = info.max_tokens.and_then(|n| u32::try_from(n).ok()) {
                     preset.max_completion_tokens = Some(max_out);
+                    // The Models API `max_tokens` value is the provider output
+                    // cap, so it is also the sampler clamp. Keeping it on the
+                    // preset (and therefore the cache) makes the ceiling
+                    // available even when the request budget is later
+                    // overridden by the user above the cap.
+                    preset.max_output_ceiling = Some(max_out);
                 }
                 if let Some(name) = info.display_name.clone() {
                     preset.label = name;
@@ -3462,6 +3500,9 @@ fn merge_anthropic_catalog(
                 description: Some("Discovered from Anthropic Models API".to_owned()),
                 context_window: info.max_input_tokens.filter(|n| *n > 0),
                 max_completion_tokens: info.max_tokens.and_then(|n| u32::try_from(n).ok()),
+                // Provider-advertised output cap doubles as the sampler clamp
+                // for discovered rows, mirroring the curated merge above.
+                max_output_ceiling: info.max_tokens.and_then(|n| u32::try_from(n).ok()),
                 supports_tools: false,
                 supports_reasoning_effort: supports_effort,
                 reasoning_efforts: effort_options,
@@ -4464,6 +4505,116 @@ mod tests {
             experimental.reasoning_effort_selection,
             Some(xai_grok_inference_types::ReasoningEffortSelection::Unknown),
             "missing effort capability metadata is unknown, not unsupported"
+        );
+    }
+
+    #[test]
+    fn preset_ceiling_uses_known_cap_except_for_openrouter_rows() {
+        use ProviderId;
+        for preset in ProviderManager::presets() {
+            if preset.provider == ProviderId::OpenRouter {
+                // OpenRouter rows never inherit their request budget as a
+                // ceiling: the catalog computes a routed ceiling when present.
+                assert_eq!(
+                    ProviderManager::preset_ceiling(&preset),
+                    preset.max_output_ceiling,
+                    "OpenRouter preset {} must keep its explicit ceiling only",
+                    preset.id,
+                );
+            } else if let Some(cap) = preset.max_completion_tokens {
+                assert_eq!(
+                    ProviderManager::preset_ceiling(&preset),
+                    Some(cap),
+                    "{} preset {} must use its known cap as the ceiling",
+                    preset.provider.display_name(),
+                    preset.id,
+                );
+            } else {
+                assert_eq!(
+                    ProviderManager::preset_ceiling(&preset),
+                    None,
+                    "{} preset {} has no known cap",
+                    preset.provider.display_name(),
+                    preset.id,
+                );
+            }
+        }
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn curated_openai_and_anthropic_presets_install_with_ceiling() {
+        let home = tempfile::tempdir().unwrap();
+        set_stored_key_home_for_tests(Some(home.path().to_path_buf()));
+        let manager = ProviderManager::new(home.path());
+        manager.set_api_key(ProviderId::OpenAi, "test-key").unwrap();
+        manager
+            .set_api_key(ProviderId::OpenRouter, "test-key")
+            .unwrap();
+        manager
+            .set_api_key(ProviderId::Anthropic, "test-key")
+            .unwrap();
+        // Zero TTL disables the stale-while-revalidate background refresh, so
+        // this test never attempts a live catalog fetch.
+        let _openrouter_ttl =
+            EnvGuard::set(OPENROUTER_CATALOG_TTL_ENV, "0");
+        let _anthropic_ttl = EnvGuard::set(ANTHROPIC_CATALOG_TTL_ENV, "0");
+
+        let mut model_providers = indexmap::IndexMap::new();
+        let mut config_models = indexmap::IndexMap::new();
+        ProviderManager::install_model_presets_into(&mut model_providers, &mut config_models);
+
+        let openai = config_models
+            .get("openai-gpt-5.6-sol")
+            .expect("curated OpenAI preset");
+        assert_eq!(openai.max_completion_tokens, Some(128_000));
+        assert_eq!(openai.max_output_ceiling, Some(128_000));
+
+        let anthropic = config_models
+            .get("anthropic-claude-sonnet-5")
+            .expect("curated Anthropic preset");
+        assert_eq!(anthropic.max_completion_tokens, Some(128_000));
+        assert_eq!(anthropic.max_output_ceiling, Some(128_000));
+
+        let haiku = config_models
+            .get("anthropic-claude-haiku-4-5")
+            .expect("curated Anthropic preset");
+        assert_eq!(haiku.max_completion_tokens, Some(64_000));
+        assert_eq!(haiku.max_output_ceiling, Some(64_000));
+
+        // OpenRouter curated rows keep no ceiling while the catalog is absent:
+        // their request budget must never become a clamp.
+        let openrouter = config_models
+            .get("openrouter-openai-gpt-5.6-sol")
+            .expect("curated OpenRouter preset");
+        assert_eq!(openrouter.max_completion_tokens, None);
+        assert_eq!(openrouter.max_output_ceiling, None);
+
+        set_stored_key_home_for_tests(None);
+    }
+
+    #[test]
+    fn anthropic_catalog_max_tokens_maps_onto_ceiling() {
+        let discovered = vec![xai_grok_inference::ModelInfo {
+            id: "claude-sonnet-5".into(),
+            display_name: Some("Claude Sonnet 5".into()),
+            created_at: None,
+            r#type: Some("model".into()),
+            max_input_tokens: Some(1_000_000),
+            max_tokens: Some(96_000),
+            capabilities: None,
+            extra: Default::default(),
+        }];
+        let merged = merge_anthropic_catalog(discovered);
+        let curated = merged
+            .iter()
+            .find(|m| m.model == "claude-sonnet-5")
+            .unwrap();
+        assert_eq!(curated.max_completion_tokens, Some(96_000));
+        assert_eq!(
+            curated.max_output_ceiling,
+            Some(96_000),
+            "Models API max_tokens must populate the sampler clamp on curated rows"
         );
     }
 
