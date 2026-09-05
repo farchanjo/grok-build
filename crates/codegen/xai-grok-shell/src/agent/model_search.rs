@@ -173,9 +173,28 @@ fn build_hit(row: &CatalogRow, score: Option<f32>) -> SearchModelsHit {
         provider_instance_id: Some(instance),
         provider_kind: Some(kind),
         upstream_model_id: Some(upstream),
+        description: row.entry.info.description.clone(),
         task_eligible: row.task_eligible,
         supports_tools: row.entry.info.supports_tools,
+        supports_image_input: row.entry.info.supports_image_input,
+        supports_audio_input: row.entry.info.supports_audio_input,
+        supports_video_input: row.entry.info.supports_video_input,
+        supports_file_input: row.entry.info.supports_file_input,
+        output_has_text: row.entry.info.output_has_text,
         context_window: Some(row.entry.info.context_window.get()),
+        max_completion_tokens: row.entry.info.max_completion_tokens,
+        max_output_ceiling: row.entry.info.max_output_ceiling,
+        supports_zdr: row.entry.info.supports_zdr,
+        supports_native_schema: row.entry.info.supports_native_schema,
+        supports_strict_tools: row.entry.info.supports_strict_tools,
+        supports_reasoning_effort: row.entry.info.supports_reasoning_effort,
+        reasoning_efforts: row
+            .entry
+            .info
+            .reasoning_efforts
+            .iter()
+            .map(|option| option.value.as_str().to_string())
+            .collect(),
         call: String::new(),
         score,
     }

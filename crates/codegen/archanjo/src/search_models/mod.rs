@@ -40,16 +40,33 @@ impl std::fmt::Debug for ModelCatalogSearch {
 
 xai_grok_tools::register_resource!("archanjo", "ModelCatalogSearch", ModelCatalogSearch);
 
-const DESCRIPTION: &str = r#"Search available model catalog entries for subagent spawning.
+const DESCRIPTION: &str = r#"Search the live model catalog to resolve a product name or version into an exact `slug` for `spawn_subagent` / `task` `model=` (e.g. "GLM 5.2" — "openrouter:z-ai/glm-5.2").
 
-Use when the user names a model by product name or version (e.g. "GLM 5.2",
-"gpt-oss-120b") and you need the exact catalog slug for `spawn_subagent` `model=`.
+When to use:
+- The user names a model by product name, version, or slug fragment and you do not know the exact catalog slug.
+- You need to see what a provider offers or compare candidates before spawning.
 
-Returns ranked hits with: name, slug, provider, task_eligible, and a `call`
-example. Pass the **slug** field exactly as `model` — do not invent slugs.
+When not to use:
+- The user did not name a model — omit `model` and inherit the parent.
+- You already know the exact slug.
 
-If the user does not request a model, omit `model` on spawn to inherit the parent.
-Empty query returns a short provider summary only (not the full catalog)."#;
+How to use:
+1. Pass a short query (name/version, e.g. "GLM 5.2"); long queries rank worse.
+2. Optional `provider`: "openrouter", "openai", "xai", "anthropic", "zai", or an instance id.
+3. `task_eligible_only` defaults to true (spawn-able models only); set false to see the whole catalog.
+4. Pass the returned `slug` exactly as `model` — never invent or modify it. The `call` field shows the exact spawn invocation.
+
+Hits are structured objects with:
+- Identity: name, slug, provider, provider_instance_id, provider_kind, upstream_model_id, description.
+- Capabilities: supports_tools, supports_image_input, supports_audio_input, supports_video_input, supports_file_input, output_has_text. Each modal field is tri-state: true, false, or null when the catalog is silent. Null means unknown, NOT supported.
+- Limits: context_window, max_completion_tokens, max_output_ceiling, supports_zdr.
+- Reasoning: supports_reasoning_effort, reasoning_efforts.
+- Spawn decision: task_eligible (same gate as Task.model validation), call.
+
+Caveats:
+- Only task_eligible hits can be spawned; a model without tool support is rejected by the spawn tool.
+- "openai:"-prefixed entries are discovery rows and are never spawn-able.
+- Empty query returns a provider summary only, not the full catalog."#;
 
 /// Archanjo catalog search tool (`Archanjo:search_models`).
 #[derive(Debug, Default)]
@@ -111,8 +128,15 @@ impl xai_tool_runtime::Tool for SearchModelsTool {
         ctx: xai_tool_runtime::ToolCallContext,
         input: SearchModelsInput,
     ) -> Result<ToolOutput, xai_tool_runtime::ToolError> {
+        use xai_grok_tools::types::output::SearchModelsOutput;
         use xai_grok_tools::types::tool_metadata::shared_resources;
         let resources = shared_resources(&ctx)?;
+
+        let content = |result: &SearchModelsResult| -> String {
+            serde_json::to_string_pretty(result).unwrap_or_else(|_| {
+                format!("results={}", result.results.len())
+            })
+        };
 
         let Some(catalog) = resources.lock().await.get::<ModelCatalogSearch>().cloned() else {
             let payload = SearchModelsResult {
@@ -123,7 +147,13 @@ impl xai_tool_runtime::Tool for SearchModelsTool {
                         .to_string(),
                 ),
             };
-            return Ok(ToolOutput::Text(format_result(&payload).into()));
+            let content = content(&payload);
+            return Ok(ToolOutput::SearchModels(SearchModelsOutput {
+                results: payload.results,
+                truncated: payload.truncated,
+                note: payload.note,
+                content,
+            }));
         };
 
         let limit = input.limit_or_default();
@@ -141,20 +171,20 @@ impl xai_tool_runtime::Tool for SearchModelsTool {
             "archanjo.search_models.search"
         );
 
-        Ok(ToolOutput::Text(format_result(&result).into()))
+        let content = content(&result);
+        Ok(ToolOutput::SearchModels(SearchModelsOutput {
+            results: result.results,
+            truncated: result.truncated,
+            note: result.note,
+            content,
+        }))
     }
-}
-
-fn format_result(result: &SearchModelsResult) -> String {
-    if let Ok(pretty) = serde_json::to_string_pretty(result) {
-        return pretty;
-    }
-    format!("results={}", result.results.len())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use xai_grok_tools::types::output::SearchModelsOutput;
     use xai_grok_tools::types::resources::Resources;
     use xai_grok_tools::types::tool_metadata::test_ctx;
 
@@ -173,11 +203,11 @@ mod tests {
         )
         .await
         .expect("ok");
-        let ToolOutput::Text(text) = out else {
-            panic!("expected Text");
+        let ToolOutput::SearchModels(out) = out else {
+            panic!("expected SearchModels");
         };
-        assert!(text.text.contains("not available") || text.text.contains("backend"));
-        assert!(text.text.contains("\"results\""));
+        assert!(out.content.contains("not available") || out.content.contains("backend"));
+        assert!(out.content.contains("\"results\""));
     }
 
     #[tokio::test]
@@ -195,9 +225,22 @@ mod tests {
                         provider_instance_id: Some("openrouter".into()),
                         provider_kind: Some("openrouter".into()),
                         upstream_model_id: Some("z-ai/glm-5.2".into()),
+                        description: Some("Z.ai GLM 5.2 model".into()),
                         task_eligible: true,
                         supports_tools: Some(true),
+                        supports_image_input: Some(true),
+                        supports_audio_input: None,
+                        supports_video_input: None,
+                        supports_file_input: Some(true),
+                        output_has_text: Some(true),
                         context_window: Some(131072),
+                        max_completion_tokens: Some(8192),
+                        max_output_ceiling: Some(8192),
+                        supports_zdr: None,
+                        supports_native_schema: None,
+                        supports_strict_tools: None,
+                        supports_reasoning_effort: Some(true),
+                        reasoning_efforts: vec!["low".into(), "medium".into(), "high".into()],
                         call: String::new(),
                         score: Some(1.0),
                     }
@@ -219,12 +262,62 @@ mod tests {
         )
         .await
         .expect("ok");
-        let ToolOutput::Text(text) = out else {
-            panic!("expected Text");
+        let ToolOutput::SearchModels(out) = out else {
+            panic!("expected SearchModels");
         };
-        assert!(text.text.contains("openrouter:z-ai/glm-5.2"));
-        assert!(text.text.contains("spawn_subagent model="));
-        assert!(text.text.contains("Z.ai: GLM 5.2"));
+        assert_eq!(out.results.len(), 1);
+        let hit = &out.results[0];
+        assert_eq!(hit.slug, "openrouter:z-ai/glm-5.2");
+        assert_eq!(hit.supports_image_input, Some(true));
+        assert_eq!(hit.supports_audio_input, None);
+        assert_eq!(hit.reasoning_efforts, vec!["low", "medium", "high"]);
+        assert!(hit.call.contains("spawn_subagent model="));
+        assert!(out.content.contains("openrouter:z-ai/glm-5.2"));
+        assert!(out.content.contains("Z.ai: GLM 5.2"));
+    }
+
+    /// Full-field round-trip through the typed payload: every field must
+    /// survive the serialized `content` the model reads.
+    #[test]
+    fn typed_output_round_trips_full_fields() {
+        let hit = SearchModelsHit {
+            name: "Z.ai: GLM 5.2".into(),
+            slug: "openrouter:z-ai/glm-5.2".into(),
+            provider: "openrouter".into(),
+            provider_instance_id: Some("openrouter".into()),
+            provider_kind: Some("openrouter".into()),
+            upstream_model_id: Some("z-ai/glm-5.2".into()),
+            description: Some("Z.ai GLM 5.2 model".into()),
+            task_eligible: true,
+            supports_tools: Some(true),
+            supports_image_input: Some(true),
+            supports_audio_input: Some(false),
+            supports_video_input: None,
+            supports_file_input: Some(true),
+            output_has_text: Some(true),
+            context_window: Some(131072),
+            max_completion_tokens: Some(8192),
+            max_output_ceiling: Some(8192),
+            supports_zdr: Some(true),
+            supports_native_schema: None,
+            supports_strict_tools: Some(false),
+            supports_reasoning_effort: Some(true),
+            reasoning_efforts: vec!["low".into(), "high".into()],
+            call: String::new(),
+            score: Some(1.0),
+        }
+        .with_call();
+        let payload = SearchModelsOutput {
+            results: vec![hit],
+            truncated: false,
+            note: None,
+            content: String::new(),
+        };
+        let json = serde_json::to_value(&payload).unwrap();
+        let reparsed: SearchModelsOutput = serde_json::from_value(json).unwrap();
+        assert_eq!(reparsed.results.len(), 1);
+        assert_eq!(reparsed.results[0].upstream_model_id.as_deref(), Some("z-ai/glm-5.2"));
+        assert_eq!(reparsed.results[0].supports_zdr, Some(true));
     }
 
     #[test]

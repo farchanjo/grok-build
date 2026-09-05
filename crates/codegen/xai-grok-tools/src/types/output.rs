@@ -660,6 +660,19 @@ pub struct SearchToolOutput {
     pub result_count: usize,
     pub content: String,
 }
+
+/// Typed payload for the out-of-tree `search_models` tool (Archanjo pack).
+///
+/// `results` is the structured contract; `content` is the pre-formatted
+/// prompt text the model sees (pretty JSON), mirroring `SearchToolOutput`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SearchModelsOutput {
+    pub results: Vec<xai_tool_types::SearchModelsHit>,
+    pub truncated: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+    pub content: String,
+}
 #[derive(Debug, Clone, Serialize, Deserialize, derive_more::From)]
 #[serde(tag = "type")]
 pub enum ToolOutput {
@@ -679,6 +692,7 @@ pub enum ToolOutput {
     ApplyPatch(ApplyPatchOutput),
     CodexGrepFiles(CodexGrepFilesOutput),
     SearchTool(SearchToolOutput),
+    SearchModels(SearchModelsOutput),
     SubagentCompleted(SubagentCompletedOutput),
     EnterPlanMode(EnterPlanModeOutput),
     ExitPlanMode(ExitPlanModeOutput),
@@ -913,6 +927,7 @@ impl ToolOutput {
                 }
             },
             ToolOutput::SearchTool(out) => out.content.clone(),
+            ToolOutput::SearchModels(out) => out.content.clone(),
             ToolOutput::SubagentCompleted(sub) => {
                 let mut text = sub.output.clone();
                 if let Some(ref wt) = sub.worktree_path {
@@ -1317,6 +1332,7 @@ impl xai_tool_runtime::ToolOutput for SkillOutput {}
 impl xai_tool_runtime::ToolOutput for ApplyPatchOutput {}
 impl xai_tool_runtime::ToolOutput for CodexGrepFilesOutput {}
 impl xai_tool_runtime::ToolOutput for SearchToolOutput {}
+impl xai_tool_runtime::ToolOutput for SearchModelsOutput {}
 impl xai_tool_runtime::ToolOutput for EnterPlanModeOutput {}
 impl xai_tool_runtime::ToolOutput for ExitPlanModeOutput {}
 impl xai_tool_runtime::ToolOutput for AskUserQuestionOutput {}

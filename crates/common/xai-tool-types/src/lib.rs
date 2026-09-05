@@ -1,12 +1,16 @@
 //! Canonical, extensible tool types.
 mod ext;
 mod schema_utils;
+pub mod search_models;
 pub mod serde_lenient;
 mod task;
 mod types;
 
 pub use ext::Extensions;
 pub use schema_utils::parse_arguments_from_schema_lossy;
+pub use search_models::{
+    ModelCatalogQuery, SearchModelsHit, SearchModelsResult,
+};
 pub use serde_lenient::{
     deserialize_lenient_bool, deserialize_lenient_option_bool, lenient_bool_from_json,
 };

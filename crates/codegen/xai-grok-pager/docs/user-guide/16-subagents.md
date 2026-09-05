@@ -190,14 +190,17 @@ Do **not** use `openai:` discovery slugs for subagents. Entries like `openai:<up
 
 ### Resolving a product name to a slug (`search_models`)
 
-When you (or the agent) only know a product name such as “GLM 5.2” or “gpt-oss-120b”, use the **`search_models`** tool (`Archanjo:search_models` from the out-of-tree Archanjo tool pack) before spawning. It is registered on every stock Grok toolset (including explore/plan/concise), including when the primary model is an OpenAI ChatGPT OAuth or API-key model. It ranks the live catalog with BM25 over name, slug, provider, and description, and returns task-eligible hits with:
+When you (or the agent) only know a product name such as “GLM 5.2” or “gpt-oss-120b”, use the **`search_models`** tool (`Archanjo:search_models` from the out-of-tree Archanjo tool pack) before spawning. It is registered on every stock Grok toolset (including explore/plan/concise), including when the primary model is an OpenAI ChatGPT OAuth or API-key model. It ranks the live catalog with BM25 over name, slug, provider, and description, and returns task-eligible hits as **structured JSON** with:
 
-- **name** — display label
-- **slug** — exact value for `spawn_subagent` `model=`
-- **provider** — e.g. `openrouter`
-- **call** — example `spawn_subagent model="<slug>"`
+- **Identity** — `name`, `slug` (exact value for `spawn_subagent` `model=`), `provider`, `provider_instance_id`, `provider_kind`, `upstream_model_id`, `description`
+- **Capabilities** — `supports_tools` plus tri-state media flags: `supports_image_input`, `supports_audio_input`, `supports_video_input`, `supports_file_input`, and `output_has_text`. Each modal field is `true`, `false`, or `null` when the catalog is silent — **null means unknown, not supported** (same rule as [Media Understanding](28-media-understanding.md)).
+- **Limits** — `context_window`, `max_completion_tokens`, `max_output_ceiling`, `supports_zdr`
+- **Reasoning** — `supports_reasoning_effort`, `reasoning_efforts` (canonical names such as `low`/`high`/`max`)
+- **Spawn decision** — `task_eligible` (same gate as `Task.model` validation) and `call`, e.g. `spawn_subagent model="<slug>"`
 
-Example: `search_models` with query `GLM 5.2` → slug `openrouter:z-ai/glm-5.2`. Pass that slug exactly; do not invent ids. If the user does not name a model, omit `model` and inherit the parent.
+The tool call renders in the chat with the label **“Search Model”**.
+
+Example: `search_models` with query `GLM 5.2` → slug `openrouter:z-ai/glm-5.2`. Pass that slug exactly; do not invent ids. Only `task_eligible` hits can be spawned — a model without tool support is rejected by the spawn tool, and `openai:`-prefixed entries are discovery rows that are never spawn-able. If the user does not name a model, omit `model` and inherit the parent.
 
 ### Rate-limit pacing
 

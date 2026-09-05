@@ -16,6 +16,13 @@ composition pattern:
 | --- | --- | --- |
 | `Archanjo:search_models` | `SearchModels` | Product name → catalog slug for `spawn_subagent` / host `task` |
 
+Output is a **named typed variant** (`ToolOutput::SearchModels`) carrying the
+full structured result (identity, capabilities incl. tri-state media flags,
+limits, reasoning, and the `task_eligible`/`call` spawn decision) plus the
+pre-formatted prompt text. The wire types live in the shared leaf
+(`xai-tool-types::search_models`); the tool, port, ranking, description, and
+tests stay here. The chat renders the call with the label **“Search Model”**.
+
 ## Registration (default on)
 
 `search_models` is **enabled by default** for every agent:

@@ -65,7 +65,7 @@ impl ToolKind {
             ToolKind::ReferenceToVideo => "Generate Video",
             ToolKind::DeployApp => "Deploy App",
             ToolKind::SearchTool => "Search Tools",
-            ToolKind::SearchModels => "Search Models",
+            ToolKind::SearchModels => "Search Model",
             ToolKind::UseTool => "Use Tool",
             ToolKind::Monitor => "Monitor",
             ToolKind::GoalUpdate => "Update Goal",
@@ -244,6 +244,28 @@ impl CanonicalToolMeta {
 pub fn tool_meta_json_schema_str() -> &'static str {
     include_str!("../schema/tool_meta.schema.json")
 }
+
+/// Mutable handle on the `ToolNamespace` enum array inside a schema document.
+///
+/// Two generator shapes exist: a plain `enum` array, or (current schemars with
+/// aliased/renamed variants) a `oneOf` whose first entry carries the `enum`
+/// array. Uses `get_mut` so a missing key is never inserted into the document.
+fn namespace_enum_array_mut(
+    schema: &mut serde_json::Value,
+) -> Option<&mut Vec<serde_json::Value>> {
+    let def = schema
+        .get_mut("definitions")?
+        .get_mut("ToolNamespace")?;
+    // Probe immutably so a missing `enum` key is never inserted into the doc.
+    if def.get("enum").is_some() {
+        def.get_mut("enum").and_then(|e| e.as_array_mut())
+    } else {
+        def.get_mut("oneOf")?
+            .get_mut(0)?
+            .get_mut("enum")?
+            .as_array_mut()
+    }
+}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -256,6 +278,10 @@ mod tests {
         }
     }
     #[test]
+    fn search_models_presentation_label_is_singular() {
+        assert_eq!(ToolKind::SearchModels.presentation_name(), "Search Model");
+    }
+    #[test]
     fn is_read_only_classifies_kinds() {
         assert!(ToolKind::Read.is_read_only());
         assert!(ToolKind::Search.is_read_only());
@@ -263,6 +289,7 @@ mod tests {
         assert!(!ToolKind::Edit.is_read_only());
         assert!(!ToolKind::Execute.is_read_only());
         assert!(!ToolKind::Delete.is_read_only());
+        assert!(ToolKind::SearchModels.is_read_only());
     }
     #[test]
     fn namespace_round_trips_snake_case_with_pascal_aliases() {
@@ -310,7 +337,20 @@ mod tests {
             "known values must be listed in the description"
         );
         let ns = serde_json::to_value(schemars::schema_for!(ToolNamespace)).unwrap();
-        assert!(ns.get("enum").is_some(), "namespace is a closed enum");
+        // The namespace schema is a closed enum: either a plain `enum` array
+        // or (current generator, aliased variants) a `oneOf` whose first entry
+        // carries the `enum` array.
+        let closed = ns.get("enum").is_some()
+            || ns
+                .get("oneOf")
+                .and_then(|o| o.as_array())
+                .is_some_and(|entries| {
+                    entries
+                        .get(0)
+                        .and_then(|e| e.get("enum"))
+                        .is_some_and(|e| e.is_array())
+                });
+        assert!(closed, "namespace is a closed enum");
     }
     #[test]
     fn canonical_meta_wire_shape_round_trips() {
@@ -350,7 +390,7 @@ mod tests {
         }
         let mut expected: serde_json::Value =
             serde_json::from_str(tool_meta_json_schema_str()).expect("checked-in schema parses");
-        if let Some(values) = expected["definitions"]["ToolNamespace"]["enum"].as_array_mut() {
+        if let Some(values) = namespace_enum_array_mut(&mut expected) {
             use std::collections::HashSet;
             use strum::IntoEnumIterator;
             let compiled: HashSet<String> = ToolNamespace::iter()

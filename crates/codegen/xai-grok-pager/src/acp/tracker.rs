@@ -1946,6 +1946,24 @@ fn tool_call_to_block(tc: &acp::ToolCall, session_cwd: Option<&Path>) -> RenderB
             }
             RenderBlock::ToolCall(ToolCallBlock::IntegrationSearch(block))
         }
+        _ if extract_raw_field(tc, "variant").as_deref() == Some("SearchModels") => {
+            let mut block = OtherToolCallBlock::new(tool_call_title(tc), String::new());
+            if let Some(ref raw) = tc.raw_output
+                && let Ok(ToolOutput::SearchModels(out)) =
+                    serde_json::from_value::<ToolOutput>(raw.clone())
+            {
+                block.set_output_text(out.content);
+            } else {
+                let text = content_text(tc);
+                if !text.is_empty() {
+                    block.set_output_text(text);
+                }
+            }
+            if !success {
+                block = block.with_error("Search Model failed");
+            }
+            RenderBlock::ToolCall(ToolCallBlock::Other(block))
+        }
         _ if extract_raw_field(tc, "variant").as_deref() == Some("UseTool") => {
             let tool_name = extract_raw_field(tc, "tool_name").unwrap_or_else(|| tc.title.clone());
             let mut block = UseToolCallBlock::new(tool_name);
