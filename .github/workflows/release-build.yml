@@ -40,7 +40,10 @@ permissions:
 
 concurrency:
   group: release-build-${{ github.ref }}
-  cancel-in-progress: false
+  # Branch builds are throwaway proof-of-build runs: the newest push wins
+  # and cancels an older in-flight branch run. Tag/release runs are never
+  # cancelled mid-flight.
+  cancel-in-progress: ${{ github.ref == 'refs/heads/fcustom' }}
 
 jobs:
   build:
@@ -95,13 +98,13 @@ jobs:
           # Same protoc the DotSlash wrapper pins (bin/protoc has no Windows
           # platform entry, and find_protoc falls through to PATH when the
           # wrapper is not executable).
-          $zip = Join-Path $env:RUNNER_TEMP 'protoc.zip'
+          $root = Join-Path $env:RUNNER_TEMP 'protoc'
           Invoke-WebRequest `
             -Uri 'https://github.com/protocolbuffers/protobuf/releases/download/v29.3/protoc-29.3-win64.zip' `
-            -OutFile $zip
-          Expand-Archive -Path $zip -DestinationPath (Join-Path $env:RUNNER_TEMP 'protoc')
-          "$((Join-Path $env:RUNNER_TEMP 'protoc')\bin)" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
-          & (Join-Path $env:RUNNER_TEMP 'protoc\bin\protoc.exe') --version
+            -OutFile "$env:RUNNER_TEMP\protoc.zip"
+          Expand-Archive -Path "$env:RUNNER_TEMP\protoc.zip" -DestinationPath $root
+          Join-Path $root 'bin' | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          & (Join-Path $root 'bin\protoc.exe') --version
 
       - name: Build release-dist
         run: cargo build -p xai-grok-pager-bin --profile release-dist --locked
