@@ -389,6 +389,10 @@ impl AgentView {
             self.vim_mode,
             self.is_subagent_view,
             self.session.state.is_turn_running() && !self.renders_parked(),
+            matches!(
+                self.session.state,
+                crate::app::agent::AgentState::CommandRunning { .. }
+            ) && !self.renders_parked(),
             self.esc_would_cancel_turn(esc_owned_before_agent),
             !self.visible_queue_is_empty(),
             selected_is_user_prompt,

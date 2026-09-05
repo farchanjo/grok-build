@@ -216,6 +216,7 @@ async fn test_e2e_idle_resume_refreshes_model_metadata() {
                     prefix_released: std::sync::atomic::AtomicBool::new(false),
                     cancel: Default::default(),
                     rolling_in_flight: std::sync::atomic::AtomicBool::new(false),
+                    manual_in_flight: std::sync::atomic::AtomicBool::new(false),
                 },
                 memory: crate::session::memory_state::SessionMemory {
                     flush_config: crate::config::MemoryFlushConfig::default(),

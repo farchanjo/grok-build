@@ -7992,6 +7992,51 @@ pub(crate) mod tests {
         assert!(matches!(outcome, InputOutcome::Action(Action::CancelTurn)));
         assert!(app.pending_action.is_none());
     }
+    /// Ctrl+C is the cancel key for a running `/compact` too: the first press
+    /// dispatches CancelTurn (the dispatch layer flips the agent to
+    /// `CommandCancelling`), and a second press escalates toward quit — but
+    /// quit always goes through the double-press confirmation, so the second
+    /// press ARMS the pending quit and only the third returns Action(Quit).
+    #[test]
+    fn ctrl_c_command_running_cancels_then_escalates() {
+        let mut app = test_app_with_agent();
+        let id = super::super::agent::AgentId(0);
+        app.agents.get_mut(&id).unwrap().session.state = AgentState::CommandRunning {
+            command: super::super::agent::AgentCommand::Compact,
+            started_at: std::time::Instant::now(),
+        };
+        let outcome = app.handle_input(&ctrl_c());
+        assert!(
+            matches!(outcome, InputOutcome::Action(Action::CancelTurn)),
+            "Ctrl+C during /compact must dispatch CancelTurn, got {outcome:?}"
+        );
+        assert!(app.pending_action.is_none());
+        assert_eq!(
+            app.agents[&id].cancel_trigger_hint,
+            Some(crate::app::actions::CancelTrigger::CtrlC)
+        );
+        // The dispatch handler flips the state; simulate what it did so the
+        // next presses exercise the escalation arm.
+        app.agents.get_mut(&id).unwrap().session.state = AgentState::CommandCancelling {
+            command: super::super::agent::AgentCommand::Compact,
+        };
+        let outcome = app.handle_input(&ctrl_c());
+        assert!(
+            matches!(outcome, InputOutcome::Changed),
+            "second Ctrl+C while a command cancel is pending arms quit (double-press), got {outcome:?}"
+        );
+        assert!(
+            app.pending_action
+                .as_ref()
+                .is_some_and(|p| matches!(p.action, Action::Quit)),
+            "second Ctrl+C must arm the quit double-press"
+        );
+        let outcome = app.handle_input(&ctrl_c());
+        assert!(
+            matches!(outcome, InputOutcome::Action(Action::Quit)),
+            "third Ctrl+C confirms quit, got {outcome:?}"
+        );
+    }
     #[test]
     fn ctrl_c_consumed_by_text_clear_does_not_set_pending() {
         let mut app = test_app_with_agent();
@@ -8060,7 +8105,7 @@ pub(crate) mod tests {
         );
     }
     #[test]
-    fn esc_from_prompt_pane_running_turn_cancels_in_non_vim_mode() {
+    fn esc_from_prompt_pane_running_turn_is_swallowed() {
         let mut app = test_app_with_agent();
         let id = super::super::agent::AgentId(0);
         let agent = app.agents.get_mut(&id).unwrap();
@@ -8069,17 +8114,18 @@ pub(crate) mod tests {
         agent.vim_mode = false;
         let outcome = app.handle_input(&key_event(KeyCode::Esc, KeyModifiers::NONE));
         assert!(
-            matches!(outcome, InputOutcome::Action(Action::CancelTurn)),
-            "1× Esc while running must cancel in non-vim mode, got {outcome:?}"
+            matches!(outcome, InputOutcome::Changed),
+            "1× Esc while running must swallow (Ctrl+C is the only cancel), got {outcome:?}"
         );
         assert!(app.pending_action.is_none());
-        assert_eq!(
-            app.agents[&id].cancel_trigger_hint,
-            Some(crate::app::actions::CancelTrigger::Esc)
+        assert!(
+            app.agents[&id].cancel_trigger_hint.is_none(),
+            "Esc must not set a cancel trigger while a turn runs"
         );
+        assert!(app.agents[&id].session.state.is_turn_running());
     }
     #[test]
-    fn esc_from_prompt_pane_running_turn_with_draft_cancels_preserving_draft() {
+    fn esc_from_prompt_pane_running_turn_with_draft_preserves_draft_without_cancelling() {
         let mut app = test_app_with_agent();
         let id = super::super::agent::AgentId(0);
         let agent = app.agents.get_mut(&id).unwrap();
@@ -8089,22 +8135,20 @@ pub(crate) mod tests {
         agent.prompt.textarea.set_text("draft while streaming");
         let outcome = app.handle_input(&key_event(KeyCode::Esc, KeyModifiers::NONE));
         assert!(
-            matches!(outcome, InputOutcome::Action(Action::CancelTurn)),
-            "mid-turn Esc with draft must cancel in non-vim mode, got {outcome:?}"
+            matches!(outcome, InputOutcome::Changed),
+            "mid-turn Esc with draft must swallow, got {outcome:?}"
         );
         assert!(app.pending_action.is_none(), "must not arm idle clear");
         assert_eq!(
             app.agents[&id].prompt.textarea.text(),
             "draft while streaming",
-            "Esc cancel must preserve the draft (not clear it like Ctrl+C)"
+            "Esc must leave the draft untouched"
         );
-        assert_eq!(
-            app.agents[&id].cancel_trigger_hint,
-            Some(crate::app::actions::CancelTrigger::Esc)
-        );
+        assert!(app.agents[&id].cancel_trigger_hint.is_none());
+        assert!(app.agents[&id].session.state.is_turn_running());
     }
     #[test]
-    fn esc_from_scrollback_pane_running_turn_cancels_in_non_vim_mode() {
+    fn esc_from_scrollback_pane_running_turn_is_swallowed() {
         let mut app = test_app_with_agent();
         let id = super::super::agent::AgentId(0);
         let agent = app.agents.get_mut(&id).unwrap();
@@ -8113,14 +8157,11 @@ pub(crate) mod tests {
         agent.vim_mode = false;
         let outcome = app.handle_input(&key_event(KeyCode::Esc, KeyModifiers::NONE));
         assert!(
-            matches!(outcome, InputOutcome::Action(Action::CancelTurn)),
-            "1× Esc from scrollback while running must cancel in non-vim mode, got {outcome:?}"
+            matches!(outcome, InputOutcome::Changed),
+            "1× Esc from scrollback while running must swallow, got {outcome:?}"
         );
         assert!(app.pending_action.is_none());
-        assert_eq!(
-            app.agents[&id].cancel_trigger_hint,
-            Some(crate::app::actions::CancelTrigger::Esc)
-        );
+        assert!(app.agents[&id].cancel_trigger_hint.is_none());
     }
     #[test]
     fn esc_from_prompt_pane_running_turn_vim_mode_is_swallowed() {
@@ -8162,15 +8203,29 @@ pub(crate) mod tests {
         assert!(app.agents[&id].cancel_trigger_hint.is_none());
         assert!(app.agents[&id].session.state.is_turn_running());
     }
+    /// The old mode-gated Esc-cancel gate is gone: a running COMMAND
+    /// (`/compact`) must also swallow Esc and never arm idle clear/rewind.
     #[test]
-    fn esc_cancels_turn_gate_truth_table() {
-        assert!(crate::app::esc_cancels_turn(true, true));
-        assert!(crate::app::esc_cancels_turn(true, false));
-        assert!(crate::app::esc_cancels_turn(false, false));
-        assert!(!crate::app::esc_cancels_turn(false, true));
+    fn esc_during_command_running_is_swallowed() {
+        let mut app = test_app_with_agent();
+        let id = super::super::agent::AgentId(0);
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent.session.state = AgentState::CommandRunning {
+            command: super::super::agent::AgentCommand::Compact,
+            started_at: std::time::Instant::now(),
+        };
+        agent.active_pane = crate::views::agent::ActivePane::Prompt;
+        agent.vim_mode = false;
+        let outcome = app.handle_input(&key_event(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(
+            matches!(outcome, InputOutcome::Changed),
+            "Esc during /compact must swallow (not cancel, not arm), got {outcome:?}"
+        );
+        assert!(app.pending_action.is_none());
+        assert!(app.agents[&id].cancel_trigger_hint.is_none());
     }
     #[test]
-    fn esc_running_turn_minimal_screen_mode_cancels_even_with_vim_on() {
+    fn esc_running_turn_minimal_screen_mode_is_swallowed_too() {
         let mut app = test_app_with_agent();
         let id = super::super::agent::AgentId(0);
         let agent = app.agents.get_mut(&id).unwrap();
@@ -8182,13 +8237,10 @@ pub(crate) mod tests {
             .set_screen_mode(crate::app::ScreenMode::Minimal);
         let outcome = app.handle_input(&key_event(KeyCode::Esc, KeyModifiers::NONE));
         assert!(
-            matches!(outcome, InputOutcome::Action(Action::CancelTurn)),
-            "minimal mode must Esc-cancel even with vim scrollback nav on, got {outcome:?}"
+            matches!(outcome, InputOutcome::Changed),
+            "minimal mode must swallow Esc too (Ctrl+C is the only cancel), got {outcome:?}"
         );
-        assert_eq!(
-            app.agents[&id].cancel_trigger_hint,
-            Some(crate::app::actions::CancelTrigger::Esc)
-        );
+        assert!(app.agents[&id].cancel_trigger_hint.is_none());
     }
     #[test]
     fn esc_owned_before_agent_covers_app_level_owners() {
@@ -8254,7 +8306,7 @@ pub(crate) mod tests {
         let mut app = test_app_with_agent();
         let id = super::super::agent::AgentId(0);
         let agent = app.agents.get_mut(&id).unwrap();
-        agent.session.state = AgentState::TurnRunning;
+        agent.session.state = AgentState::TurnCancelling;
         agent.active_pane = crate::views::agent::ActivePane::Prompt;
         agent.vim_mode = false;
         agent
@@ -8262,6 +8314,8 @@ pub(crate) mod tests {
             .push_block(crate::scrollback::block::RenderBlock::user_prompt(
                 "earlier",
             ));
+        // The Esc-fired cancel retry arms the grace (Esc no longer cancels a
+        // RUNNING turn, so the grace is set from the cancelling retry path).
         let outcome = app.handle_input(&key_event(KeyCode::Esc, KeyModifiers::NONE));
         assert!(matches!(outcome, InputOutcome::Action(Action::CancelTurn)));
         assert!(app.agents[&id].rewind_suppress_deadline.is_some());
@@ -10258,7 +10312,7 @@ pub(crate) mod tests {
     /// Overlay + non-vim: mid-turn Esc CANCELS (matching full-screen), and
     /// still must not detach to the dashboard.
     #[test]
-    fn overlay_esc_running_turn_non_vim_cancels_not_backout() {
+    fn overlay_esc_running_turn_swallows_not_backout() {
         let mut app = test_app_with_agent();
         let id = super::super::agent::AgentId(0);
         app.active_view = ActiveView::Agent(id);
@@ -10272,13 +10326,18 @@ pub(crate) mod tests {
         agent.vim_mode = false;
         let outcome = app.handle_input(&key_event(KeyCode::Esc, KeyModifiers::NONE));
         assert!(
-            matches!(outcome, InputOutcome::Action(Action::CancelTurn)),
-            "running-turn overlay Esc must cancel in non-vim mode, got {outcome:?}",
+            matches!(outcome, InputOutcome::Changed),
+            "running-turn overlay Esc must swallow (Ctrl+C is the only cancel), got {outcome:?}",
         );
-        assert_eq!(
-            app.agents[&id].cancel_trigger_hint,
-            Some(crate::app::actions::CancelTrigger::Esc)
+        assert!(
+            !matches!(outcome, InputOutcome::Action(Action::CancelTurn)),
+            "overlay Esc must not cancel a running turn anymore"
         );
+        assert!(
+            !matches!(outcome, InputOutcome::Action(Action::DashboardOverlayExit)),
+            "Esc must not detach either while a turn runs",
+        );
+        assert!(app.agents[&id].cancel_trigger_hint.is_none());
     }
     /// Overlay + TurnCancelling: Esc retries cancel (does not detach).
     #[test]

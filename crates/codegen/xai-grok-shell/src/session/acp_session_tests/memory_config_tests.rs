@@ -202,6 +202,7 @@ async fn create_test_actor_with_memory(
             prefix_released: std::sync::atomic::AtomicBool::new(false),
             cancel: Default::default(),
             rolling_in_flight: std::sync::atomic::AtomicBool::new(false),
+            manual_in_flight: std::sync::atomic::AtomicBool::new(false),
         },
         memory: crate::session::memory_state::SessionMemory {
             flush_config: memory_config
@@ -1062,7 +1063,10 @@ async fn startup_reindex_backfill_milvus_mode_reconciles_remote_seam() {
         "pinned-model",
     ));
     let mirror = std::sync::Arc::new(xai_grok_memory::InMemoryVectorMirror::new());
-    let handle = std::sync::Arc::new(xai_grok_memory::MirrorHandle::new(mirror.clone(), "grok_mem_test"));
+    let handle = std::sync::Arc::new(xai_grok_memory::MirrorHandle::new(
+        mirror.clone(),
+        "grok_mem_test",
+    ));
 
     let credentials = crate::session::memory::EndpointScopedCredentials::none();
 
@@ -1082,7 +1086,10 @@ async fn startup_reindex_backfill_milvus_mode_reconciles_remote_seam() {
     )
     .await;
 
-    assert_eq!(embedded, 1, "startup backfill in milvus mode must embed the chunk");
+    assert_eq!(
+        embedded, 1,
+        "startup backfill in milvus mode must embed the chunk"
+    );
     assert_eq!(handle.snapshot().state, xai_grok_memory::MirrorState::Ready);
 
     // Second run in milvus mode (steady state) skips already embedded chunks
@@ -1101,5 +1108,8 @@ async fn startup_reindex_backfill_milvus_mode_reconciles_remote_seam() {
     )
     .await;
 
-    assert_eq!(embedded_again, 0, "steady state backfill in milvus mode must skip unchanged chunk");
+    assert_eq!(
+        embedded_again, 0,
+        "steady state backfill in milvus mode must skip unchanged chunk"
+    );
 }

@@ -411,6 +411,16 @@ pub struct CompactionConfig {
     /// discarded. Prompt promotion pauses while this is set, making the CAS
     /// application an idle safe point rather than racing an in-flight sample.
     pub rolling_in_flight: AtomicBool,
+    /// True while the `x.ai/compact_conversation` RPC runs (`run_compact` in
+    /// the detached `CompactSession` handler). Manual compaction runs outside
+    /// the actor loop and never takes a `running_task` slot, so without this
+    /// flag a prompt promoted mid-compaction (immediate-send from another
+    /// client, scheduler fire, task auto-wake) mutates the conversation and
+    /// the apply CAS rejects the finished summary as `Stale` — the turn wins
+    /// and the compaction's tokens are wasted. Prompt promotion pauses while
+    /// this is set (same safe-point discipline as `rolling_in_flight`), and
+    /// the handler re-kicks promotion when compaction resolves.
+    pub manual_in_flight: AtomicBool,
 }
 
 #[cfg(test)]

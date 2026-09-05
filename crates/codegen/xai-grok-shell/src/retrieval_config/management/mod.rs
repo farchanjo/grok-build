@@ -1360,12 +1360,12 @@ mod tests {
         );
         let g2 = s.current_generation();
         // First set memory profile (no prior → may or may not need confirm).
-        let r = s.save_memory_profile(g2, Some("p1".into()), false, None);
+        let r = s.save_memory_profile(g2, Some("p1".into()), None, None, false, None);
         // From none → profile is a fingerprint change.
         if !r.ok {
             assert!(r.memory_reindex.is_some());
             let g2b = s.current_generation();
-            let r2 = s.save_memory_profile(g2b, Some("p1".into()), true, None);
+            let r2 = s.save_memory_profile(g2b, Some("p1".into()), None, None, true, None);
             assert!(r2.ok, "{:?}", r2.error);
             // Confirm no reindex side effect: no extra files under memory.
             assert!(
@@ -1449,7 +1449,8 @@ mod tests {
             .ok
         );
         let g2 = s.current_generation();
-        let denied = s.save_memory_profile(g2, Some("p1".into()), false, Some("op3".into()));
+        let denied =
+            s.save_memory_profile(g2, Some("p1".into()), None, None, false, Some("op3".into()));
         assert!(!denied.ok, "none→profile must require confirm");
         assert!(
             denied
@@ -1466,7 +1467,7 @@ mod tests {
                 .is_none()
         );
         // Confirmed with exact draft profile writes.
-        let ok = s.save_memory_profile(g2, Some("p1".into()), true, Some("op4".into()));
+        let ok = s.save_memory_profile(g2, Some("p1".into()), None, None, true, Some("op4".into()));
         assert!(ok.ok, "{:?}", ok.error);
         assert_eq!(
             s.graph_snapshot()
@@ -1520,7 +1521,10 @@ mod tests {
             .ok
         );
         let g2 = s.current_generation();
-        assert!(s.save_memory_profile(g2, Some("p1".into()), true, None).ok);
+        assert!(
+            s.save_memory_profile(g2, Some("p1".into()), None, None, true, None)
+                .ok
+        );
         let g3 = s.current_generation();
         let denied = s.upsert_embedding(UpsertEmbeddingRequest {
             expected_generation: g3,

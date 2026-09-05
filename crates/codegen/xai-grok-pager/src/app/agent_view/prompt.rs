@@ -801,21 +801,30 @@ impl AgentView {
         // dump.
         self.esc_pressed_at = None;
 
-        // Mid-turn running, fullscreen vim mode: swallow Esc (do not cancel or
-        // arm clear/rewind — Ctrl+C stays the cancel gesture there).
-        // `is_minimal_mode` is the per-agent injected screen mode, not the
-        // process global, so tests stay race-free.
-        if self.session.state.is_turn_running()
-            && !crate::app::esc_cancels_turn(self.is_minimal_mode(), self.vim_mode)
-        {
+        // Mid-turn running: Esc NEVER cancels — Ctrl+C is the sole cancel
+        // gesture (turns and `/compact` alike). Swallow the key in every mode
+        // (fullscreen vim swallowed it already; minimal / non-vim used to
+        // cancel here) so it cannot fall through to the idle clear/rewind arms
+        // either, and the draft survives untouched.
+        if self.session.state.is_turn_running() {
             return Some(InputOutcome::Changed);
         }
-        // Mid-turn (minimal / non-vim): cancel immediately from prompt or
-        // scrollback, even with a draft. Also — in every mode — while already
-        // cancelling, so a lost cancel notification is re-sent (Ctrl+C
-        // escalates to Quit instead). Push the grace deadline out so an Esc
-        // mash past the cancel cannot silently arm the rewind picker below.
-        if self.session.state.is_turn_running() || self.session.state.is_cancelling() {
+        // A slash command in flight (manual `/compact`): swallow as well, so
+        // Esc can neither arm the rewind picker nor clear-prompt mid-command
+        // (the queue is blocked and the summary is mutating the transcript).
+        if matches!(
+            self.session.state,
+            crate::app::agent::AgentState::CommandRunning { .. }
+        ) {
+            return Some(InputOutcome::Changed);
+        }
+        // While already cancelling (turn or command): retry the cancel in
+        // every mode, so a lost cancel notification is never a dead spinner
+        // (Ctrl+C escalates to Quit instead). This is a resend of an
+        // already-requested cancel, not a fresh Esc-cancel gesture. Push the
+        // grace deadline out so an Esc mash past the cancel cannot silently
+        // arm the rewind picker below.
+        if self.session.state.is_cancelling() {
             self.cancel_trigger_hint = Some(crate::app::actions::CancelTrigger::Esc);
             self.suppress_rewind_arm(std::time::Instant::now());
             return Some(InputOutcome::Action(Action::CancelTurn));

@@ -304,6 +304,7 @@ pub(crate) async fn create_test_actor_ex(
             prefix_released: std::sync::atomic::AtomicBool::new(false),
             cancel: Default::default(),
             rolling_in_flight: std::sync::atomic::AtomicBool::new(false),
+            manual_in_flight: std::sync::atomic::AtomicBool::new(false),
         },
         memory: crate::session::memory_state::SessionMemory {
             flush_config: crate::config::MemoryFlushConfig::default(),

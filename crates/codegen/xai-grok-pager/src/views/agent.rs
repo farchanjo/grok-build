@@ -927,6 +927,7 @@ pub fn build_hints(
     vim_mode: bool,
     is_subagent_view: bool,
     is_turn_running: bool,
+    command_in_flight: bool,
     esc_would_cancel_turn: bool,
     has_queued_follow_up: bool,
     selected_is_user_prompt: bool,
@@ -1191,7 +1192,13 @@ pub fn build_hints(
             hints
         }
     };
-    if is_turn_running && let Some(def) = registry.find(ActionId::CancelTurn) {
+    // Ctrl+C is the sole cancel gesture: advertise it for a running turn AND
+    // for a running slash command (`/compact`), where Ctrl+C now cancels the
+    // compaction too. `esc_would_cancel_turn` is permanently false (Esc never
+    // cancels), so the registry binding (Ctrl+C) always renders.
+    if (is_turn_running || command_in_flight)
+        && let Some(def) = registry.find(ActionId::CancelTurn)
+    {
         let mut hint = def.hint();
         if esc_would_cancel_turn {
             hint.keys = vec![crate::key!(Esc)];
@@ -1267,6 +1274,7 @@ mod tests {
             false,
             false,
             false,
+            false,
             selected_is_user_prompt,
             selected_is_agent_message,
             false,
@@ -1304,6 +1312,7 @@ mod tests {
             false,
             false,
             false,
+            false,
             None,
         );
         let hint = hints
@@ -1331,6 +1340,7 @@ mod tests {
             false,
             false,
             true,
+            false,
             false,
             false,
             false,
@@ -1504,6 +1514,7 @@ mod tests {
             false,
             false,
             false,
+            false,
             Some(&search),
         )
     }
@@ -1608,6 +1619,7 @@ mod tests {
             false,
             false,
             false,
+            false,
             None,
         );
         assert!(
@@ -1647,6 +1659,7 @@ mod tests {
             true,
             false,
             is_turn_running,
+            false,
             false,
             false,
             false,
@@ -1708,6 +1721,7 @@ mod tests {
                 false,
                 true,
                 false,
+                false,
                 true,
                 false,
                 false,
@@ -1754,6 +1768,7 @@ mod tests {
                 true,
                 false,
                 true,
+                false,
                 esc_would_cancel_turn,
                 false,
                 false,
@@ -1805,6 +1820,7 @@ mod tests {
             false,
             false,
             false,
+            false,
             Some(&search),
         );
         let esc_cancels: Vec<&HintItem> = hints
@@ -1850,6 +1866,7 @@ mod tests {
             false,
             false,
             true,
+            false,
             false,
             false,
             false,

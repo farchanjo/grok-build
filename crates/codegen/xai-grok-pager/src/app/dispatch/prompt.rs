@@ -1690,18 +1690,34 @@ pub(super) fn handle_prompt_response(
     vec![]
 }
 
+/// The shell answers a cancelled `x.ai/compact_conversation` with its
+/// `COMPACT_CANCELLED_MSG` payload ("compact cancelled"). Match it (case
+/// insensitively) so a Ctrl+C-cancelled `/compact` renders the neutral
+/// cancelled event instead of an error block.
+fn is_compact_cancelled_error(err: &str) -> bool {
+    err.to_ascii_lowercase().contains("compact cancelled")
+}
+
 pub(super) fn handle_compact_complete(
     app: &mut AppView,
     agent_id: AgentId,
     result: Result<(), String>,
 ) -> Vec<Effect> {
     if let Some(agent) = app.agents.get_mut(&agent_id) {
-        // Defensive: only process if we're still in CommandRunning state.
-        // This guards against state machine bugs or future cancellation support.
-        if !matches!(agent.session.state, AgentState::CommandRunning { .. }) {
+        // Defensive: only process while the command is in flight or its
+        // cancel is pending. This guards against state machine bugs.
+        if !matches!(
+            agent.session.state,
+            AgentState::CommandRunning { .. } | AgentState::CommandCancelling { .. }
+        ) {
             tracing::debug!("Ignoring CompactComplete (not in CommandRunning state)");
             return vec![];
         }
+        // Ctrl+C on a manual `/compact` flips the pager to CommandCancelling
+        // and forwards the cancel with the `ctrl_c` trigger; the shell aborts
+        // the summary and answers this RPC with the cancelled error. Render
+        // the neutral cancelled event instead of an error block.
+        let cancel_requested = matches!(agent.session.state, AgentState::CommandCancelling { .. });
 
         let elapsed = agent.turn_elapsed();
         agent.session.finish_command();
@@ -1712,6 +1728,11 @@ pub(super) fn handle_compact_complete(
                     SessionEvent::CompactCompleted {
                         elapsed: elapsed.unwrap_or_default(),
                     },
+                ));
+            }
+            Err(err) if cancel_requested || is_compact_cancelled_error(err) => {
+                agent.scrollback.push_block(RenderBlock::session_event(
+                    SessionEvent::CompactionCancelled,
                 ));
             }
             Err(err) => {

@@ -1533,10 +1533,70 @@ pub(super) async fn run_session(
                             }
                         }
                         SessionCommand::CompactSession { user_context, respond_to } => {
+                            // Reject only a true collision (a running turn or
+                            // an already-running manual compaction). Queued
+                            // rows wait — the compaction runs first and
+                            // promotion re-kicks when it resolves, so
+                            // `pending_inputs` must NOT block an explicit
+                            // user `/compact`. The flag is set under the same
+                            // state lock so no `SessionCommand::Prompt`
+                            // promote can slip between this arm and the
+                            // spawned task's first poll.
+                            {
+                                let state = session.state.lock().await;
+                                if state.running_task.is_some() {
+                                    drop(state);
+                                    let _ = respond_to.send(Err(acp::Error::invalid_request()
+                                        .data(
+                                            "a turn is running; wait for it to finish or cancel it first"
+                                                .to_string(),
+                                        )));
+                                    continue;
+                                }
+                                if session
+                                    .compaction
+                                    .manual_in_flight
+                                    .compare_exchange(
+                                        false,
+                                        true,
+                                        std::sync::atomic::Ordering::AcqRel,
+                                        std::sync::atomic::Ordering::Acquire,
+                                    )
+                                    .is_err()
+                                {
+                                    drop(state);
+                                    let _ = respond_to.send(Err(
+                                        acp::Error::invalid_request().data(
+                                            "a compaction is already running".to_string(),
+                                        ),
+                                    ));
+                                    continue;
+                                }
+                            }
                             let s = session.clone();
+                            let ctx = completion_tx.clone();
                             tokio::task::spawn_local(async move {
+                                // Promotion pauses while the flag is set:
+                                // manual compaction holds no `running_task`
+                                // slot, so without this a promoted turn
+                                // mutates the conversation and the apply CAS
+                                // drops the finished summary (see
+                                // `CompactionConfig::manual_in_flight`).
                                 let compact_session = s.run_compact(user_context).await;
+                                s.compaction.manual_in_flight.store(
+                                    false,
+                                    std::sync::atomic::Ordering::Release,
+                                );
                                 let _ = respond_to.send(compact_session);
+                                // The queue paused on the gate; resume it now
+                                // that the safe point has arrived (same
+                                // re-kick discipline as the rolling apply path).
+                                SessionActor::maybe_start_running_task(
+                                    s.clone(),
+                                    ctx.clone(),
+                                )
+                                .await;
+                                SessionActor::maybe_drain_notifications(s, ctx).await;
                             });
                         }
                         SessionCommand::ReloadPlugins { registry } => {

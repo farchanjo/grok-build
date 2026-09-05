@@ -260,6 +260,47 @@ fn cancel_turn_without_trigger_hint_sends_none() {
 }
 
 #[test]
+fn cancel_turn_on_command_running_flips_to_cancelling_and_forwards_trigger() {
+    use crate::app::agent::AgentCommand;
+    // Ctrl+C while a manual `/compact` runs: the dispatch layer must flip
+    // CommandRunning → CommandCancelling (so the status row shows
+    // "Cancelling…" and a second Ctrl+C escalates to quit) and forward the
+    // ctrl_c trigger so the shell aborts the in-flight summary.
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    {
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent.session.state = AgentState::CommandRunning {
+            command: AgentCommand::Compact,
+            started_at: std::time::Instant::now(),
+        };
+        agent.cancel_trigger_hint = Some(crate::app::actions::CancelTrigger::CtrlC);
+    }
+
+    let effects = dispatch(Action::CancelTurn, &mut app);
+
+    assert!(matches!(
+        &effects[0],
+        Effect::CancelTurn {
+            trigger: Some(crate::app::actions::CancelTrigger::CtrlC),
+            rewind_if_pristine: false,
+            ..
+        }
+    ));
+    assert!(
+        matches!(
+            app.agents[&id].session.state,
+            AgentState::CommandCancelling {
+                command: AgentCommand::Compact
+            }
+        ),
+        "CommandRunning must flip to CommandCancelling on Ctrl+C"
+    );
+    // One-shot: consumed when the cancel is built.
+    assert_eq!(app.agents[&id].cancel_trigger_hint, None);
+}
+
+#[test]
 fn cancel_turn_leaves_shared_queue_for_agent_to_drain() {
     use crate::app::prompt_queue::QueueEntryWire;
     // Prompts typed while a turn runs live on the server-authoritative

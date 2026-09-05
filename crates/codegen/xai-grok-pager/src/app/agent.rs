@@ -1312,6 +1312,28 @@ impl AgentSession {
             started_at: Instant::now(),
         };
     }
+    /// Mark an in-flight command's cancel as sent (Ctrl+C on `/compact`).
+    ///
+    /// `CommandRunning → CommandCancelling`: the status row flips to
+    /// "Cancelling…", the queue stays blocked (`is_idle()` is false), and a
+    /// second Ctrl+C escalates to the quit arm instead of re-cancelling. The
+    /// command still resolves through its own completion path
+    /// (`handle_compact_complete` accepts any `CommandRunning`-family state
+    /// guard below).
+    pub fn cancel_command(&mut self) -> Option<AgentCommand> {
+        match std::mem::replace(&mut self.state, AgentState::Idle) {
+            AgentState::CommandRunning { command, .. } => {
+                self.state = AgentState::CommandCancelling {
+                    command: command.clone(),
+                };
+                Some(command)
+            }
+            other => {
+                self.state = other;
+                None
+            }
+        }
+    }
     /// Finish a running command, return to Idle.
     pub fn finish_command(&mut self) {
         self.state = AgentState::Idle;

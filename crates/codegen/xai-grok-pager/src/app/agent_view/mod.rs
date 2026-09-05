@@ -19,18 +19,20 @@
 //!         registry.lookup(key, ScrollbackFocused) → navigation, view, etc.
 //!   → 2. agent level (if pane returned Unchanged):
 //!       registry.lookup(key, AgentScreen) → CancelTurn (Ctrl+C), ToggleYolo, NextModel
-//!       CancelTurn has runtime guards (Running→cancel, Cancelling→quit on Ctrl+C).
+//!       CancelTurn has runtime guards (Running→cancel, CommandRunning→cancel
+//!       (`/compact`), Cancelling→quit on Ctrl+C).
 //!       From the prompt pane, Ctrl+C CancelTurn is a two-step gesture:
 //!       a non-empty prompt skips the AgentScreen promotion so the key
 //!       falls through to the widget's clear path; the next Ctrl+C (now
 //!       on an empty prompt) re-enters this level and runs CancelTurn.
 //!   → 3. Esc policy (try_handle_esc_policy) on Prompt or Scrollback only,
 //!       after overlays/dropdowns/selection returned Changed / stole Esc:
-//!       turn running, gate ON (`esc_cancels_turn`: minimal mode OR
-//!         `[ui].vim_mode` off) → CancelTurn (even with a draft; the draft
-//!         is preserved, unlike Ctrl+C's clear-first gesture)
-//!       turn running, gate OFF (fullscreen vim mode) → Changed (swallow)
-//!       turn cancelling → CancelTurn in every mode (retry lost ack;
+//!       turn running (ANY mode, even minimal / vim off) → Changed (swallow);
+//!         command in flight (`/compact`) → Changed (swallow). Ctrl+C is the
+//!         sole mid-turn cancel gesture (turns and commands alike) — the
+//!         two-step clear/quit gesture keeps an accidental Ctrl+C from
+//!         exiting the app, so Esc must never be the "easy" cancel key.
+//!       turn/command cancelling → CancelTurn retry in every mode (lost ack;
 //!         Ctrl+C escalates to Quit)
 //!       idle + non-empty prompt, prompt pane only → ArmPending ClearPrompt (2× within 800ms, hint)
 //!       idle + empty + messages, either pane (Normal composer mode, no
@@ -43,8 +45,9 @@
 //!   → 4. return Unchanged → bubbles to app_view for global actions (quit)
 //! ```
 //!
-//! The mid-turn cancel is the only Esc-policy branch gated on `[ui].vim_mode`
-//! (scrollback nav); everything else — and all of it with respect to
+//! No Esc-policy branch is gated on `[ui].vim_mode` anymore (the mid-turn
+//! swallow is universal since Ctrl+C became the sole cancel gesture);
+//! everything else — and all of it with respect to
 //! `[ui].simple_mode` (prompt editor) — is mode-independent. Tab remains
 //! leave-prompt in both modes.
 //!

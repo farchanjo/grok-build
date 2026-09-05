@@ -187,10 +187,13 @@ pub(crate) async fn startup_reindex_backfill(
                 storage,
                 index_config,
                 spec.dimensions,
-            ).ok() else {
+            )
+            .ok() else {
                 return 0;
             };
-            match xai_grok_memory::reconcile_milvus_mode(&mut index, &*provider, handle, &fp.hash).await {
+            match xai_grok_memory::reconcile_milvus_mode(&mut index, &*provider, handle, &fp.hash)
+                .await
+            {
                 Ok(report) => return report.embedded,
                 Err(e) => {
                     tracing::warn!(
@@ -1013,10 +1016,7 @@ pub(crate) async fn spawn_session_actor(
         // lookup, connect) is bounded by the store timeout and fully
         // failure-isolated: any problem logs once and memory stays pure
         // sqlite-vec. The resolved handle is registered for `/context`.
-        let memory_mode = memory_config
-            .as_ref()
-            .map(|mc| mc.mode)
-            .unwrap_or_default();
+        let memory_mode = memory_config.as_ref().map(|mc| mc.mode).unwrap_or_default();
         let memory_vector_mirror: Option<std::sync::Arc<xai_grok_memory::MirrorHandle>> =
             if memory_mode == xai_grok_config_types::MemoryMode::Milvus {
                 match memory_config
@@ -1859,6 +1859,7 @@ pub(crate) async fn spawn_session_actor(
                 prefix_released: std::sync::atomic::AtomicBool::new(false),
                 cancel: compaction_cancel.clone(),
                 rolling_in_flight: std::sync::atomic::AtomicBool::new(false),
+                manual_in_flight: std::sync::atomic::AtomicBool::new(false),
             }
         },
         memory: super::memory_state::SessionMemory {

@@ -2,15 +2,16 @@
 #[allow(unused_imports)]
 use crate::common::*;
 
-/// Esc cancels a running turn in minimal mode (the prompt is always focused, so
-/// the turn-running Esc branch wins; minimal enables the Esc-cancel gate
-/// regardless of vim mode). The cancellation marker is finalized and committed
-/// to native scrollback like any other block.
+/// Ctrl+C is the sole mid-turn cancel gesture: Esc must NOT cancel a running
+/// turn (even in minimal mode, where it used to), while Ctrl+C still does. The
+/// test streams a paced response, presses Esc (turn keeps streaming, no cancel
+/// marker), then Ctrl+C (cancellation marker committed to native scrollback).
+/// The cancellation marker is finalized and committed like any other block.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore]
-async fn minimal_esc_cancels_running_turn() {
+async fn minimal_esc_does_not_cancel_ctrl_c_does() {
     let content = ContentController::start().await.expect("start content");
-    // Paced, long stream so the turn is provably still running when Esc lands.
+    // Paced, long stream so the turn is provably still running when each key lands.
     let long = format!(
         "{MOCK_RESPONSE_SENTINEL} {}",
         "streaming filler words for the cancellation window. ".repeat(120)
@@ -28,7 +29,22 @@ async fn minimal_esc_cancels_running_turn() {
         .wait_for_text(MOCK_RESPONSE_SENTINEL, Duration::from_secs(30))
         .expect("turn streaming in the live tail");
 
-    harness.inject_keys(keys::ESC).expect("press esc to cancel");
+    // Esc must be a no-op: no cancel marker may appear after pressing it.
+    harness.inject_keys(keys::ESC).expect("press esc");
+    std::thread::sleep(Duration::from_millis(1500));
+    harness
+        .wait_for_text(MOCK_RESPONSE_SENTINEL, Duration::from_millis(500))
+        .expect("turn still streaming after Esc");
+    assert!(
+        !harness.contains_text("Turn cancelled by user"),
+        "Esc must NOT cancel a running turn anymore\nscreen:\n{}",
+        harness.screen_contents()
+    );
+
+    // Ctrl+C is the cancel key: the marker must commit to scrollback.
+    harness
+        .inject_keys(keys::CTRL_C)
+        .expect("press ctrl+c to cancel");
 
     // Full-text: minimal commits the cancel marker to native scrollback, so it
     // may sit above the pinned viewport — check scrollback + screen.

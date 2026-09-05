@@ -93,6 +93,36 @@ pub(super) fn dispatch_cancel_turn(app: &mut AppView) -> Vec<Effect> {
                 rewind_if_pristine: false,
             }];
         }
+        // A queued slash command in flight (`/compact`): flip to
+        // `CommandCancelling` and forward the cancel. The shell treats the
+        // `ctrl_c` trigger as an explicit compaction cancel; the command then
+        // resolves through `CompactComplete` (Err "compact cancelled"), which
+        // returns the agent to Idle and drains the queue.
+        if matches!(
+            agent.session.state,
+            crate::app::agent::AgentState::CommandRunning { .. }
+        ) {
+            let Some(session_id) = agent.session.session_id.clone() else {
+                return vec![];
+            };
+            agent.session.cancel_command();
+            crate::unified_log::info(
+                "cancel.command",
+                Some(&session_id.0),
+                Some(serde_json::json!({
+                    "command": format!("{:?}", agent.session.state.command_in_flight()),
+                })),
+            );
+            // A running command has no subagent picker semantics; consume the
+            // gesture hint here so it never lingers into the next turn.
+            agent.cancel_turn_view = None;
+            return vec![Effect::CancelTurn {
+                session_id,
+                cancel_subagents: resolved_pref.unwrap_or(true),
+                trigger: agent.cancel_trigger_hint.take(),
+                rewind_if_pristine: false,
+            }];
+        }
         if !agent.session.state.is_turn_running() {
             return vec![];
         }
