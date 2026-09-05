@@ -157,10 +157,19 @@ jobs:
         run: |
           mkdir -p dist
           for dir in blobs/grok-*; do
-            name="$(basename "$dir")"          # grok-<target>
-            cp "$dir/grok" "dist/${name}"       # one asset per platform
-            cp "$dir/grok.sha256" "dist/${name}.sha256" 2>/dev/null || true
+            name="$(basename "$dir")"   # grok-<target>
+            # Windows artifacts carry `grok.exe`; POSIX ones carry `grok`.
+            if [ -f "$dir/grok.exe" ]; then
+              cp "$dir/grok.exe" "dist/${name}.exe"
+            else
+              cp "$dir/grok" "dist/${name}"
+            fi
           done
+          # Checksums are computed against the final asset names.
+          (cd dist && for f in grok-*; do
+             case "$f" in *.sha256) continue ;; esac
+             sha256sum "$f" > "$f.sha256"
+           done)
           ls -la dist/
 
       - name: Create or refresh GitHub Release
