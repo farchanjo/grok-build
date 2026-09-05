@@ -151,6 +151,19 @@ pub(crate) fn validate_identity_field(value: &str) -> Result<(), String> {
 }
 
 impl EmbeddingSourceSpec {
+    /// Compute the canonical vector fingerprint for this source spec and index config.
+    pub fn fingerprint(
+        &self,
+        index_cfg: &xai_grok_config_types::MemoryIndexConfig,
+    ) -> Result<VectorFingerprint, String> {
+        VectorFingerprint::build(
+            self.clone(),
+            DocPreparationSpec::from_index_config(index_cfg),
+            VECTOR_SCHEMA_VERSION,
+        )
+        .map(|(fp, _)| fp)
+    }
+
     fn phys_bytes(&self) -> Vec<u8> {
         // Unambiguous length-framed encoding: every field is prefixed with its
         // byte length (u64 LE) so crafted fields (e.g. embedded NULs) can

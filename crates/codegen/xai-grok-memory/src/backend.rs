@@ -183,6 +183,13 @@ pub struct MemoryBackendParams {
     /// Seconds to back off between failed vector-rebuild attempts (FTS-only
     /// while backing off), so repeated failures do not rebuild on every search.
     pub rebuild_backoff_secs: i64,
+    /// Optional remote vector-store mirror bound to this index's collection.
+    /// SQLite stays the authority: the mirror receives best-effort fan-out
+    /// and serves KNN reads only when verified-ready; any error falls back
+    /// to sqlite-vec. `None` keeps pure sqlite-vec behavior.
+    pub vector_mirror: Option<std::sync::Arc<crate::mirror::MirrorHandle>>,
+    /// Active memory mode: `local` (default) or `milvus` (primary remote).
+    pub mode: xai_grok_config_types::MemoryMode,
 }
 
 impl MemoryBackendParams {
@@ -336,6 +343,8 @@ pub struct MemoryBackendImpl {
     retrieval: Option<Arc<dyn super::retrieval::MemoryRetrieval>>,
     index_config: xai_grok_config_types::MemoryIndexConfig,
     rebuild_backoff_secs: i64,
+    vector_mirror: Option<Arc<crate::mirror::MirrorHandle>>,
+    mode: xai_grok_config_types::MemoryMode,
 }
 
 impl MemoryBackendImpl {
@@ -374,8 +383,21 @@ impl MemoryBackendImpl {
             retrieval: None,
             index_config: xai_grok_config_types::MemoryIndexConfig::default(),
             rebuild_backoff_secs: 0,
+            vector_mirror: None,
+            mode: xai_grok_config_types::MemoryMode::Local,
             search_counter: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
         }
+    }
+
+    /// The active memory mode (`local` or `milvus`).
+    pub fn mode(&self) -> xai_grok_config_types::MemoryMode {
+        self.mode
+    }
+
+    /// Set the memory mode.
+    pub fn with_mode(mut self, mode: xai_grok_config_types::MemoryMode) -> Self {
+        self.mode = mode;
+        self
     }
 
     /// Set the session ID for telemetry.
@@ -447,6 +469,8 @@ impl MemoryBackendImpl {
         backend.retrieval = params.retrieval.clone();
         backend.index_config = params.index_config.clone();
         backend.rebuild_backoff_secs = params.rebuild_backoff_secs;
+        backend.vector_mirror = params.vector_mirror.clone();
+        backend.mode = params.mode;
         backend
     }
 
@@ -592,8 +616,9 @@ impl MemoryBackend for MemoryBackendImpl {
         let rebuild_backoff_secs = self.rebuild_backoff_secs;
         let rebuild_batches_per_call = 4usize;
         // Reconcile / transactionally rebuild vectors through the pinned source.
+        // In milvus mode, local SQLite vec rebuild is bypassed (Milvus handles vectors).
         let readiness = match &spec {
-            Some(s) => {
+            Some(s) if self.mode == xai_grok_config_types::MemoryMode::Local => {
                 crate::rebuild::ensure_vectors_ready(
                     &self.db_path,
                     self.storage.clone(),
@@ -607,7 +632,7 @@ impl MemoryBackend for MemoryBackendImpl {
                 )
                 .await
             }
-            None => crate::rebuild::VectorReadiness::Disabled,
+            _ => crate::rebuild::VectorReadiness::Disabled,
         };
         // Vector search is active for `Ready` (compatible + complete) and for
         // `ReadyMissing` (compatible, a few current chunks lack vectors — the
@@ -619,6 +644,7 @@ impl MemoryBackend for MemoryBackendImpl {
                 | crate::rebuild::VectorReadiness::ReadyMissing { .. }
         );
 
+        let index_config_fallback = index_config.clone();
         let mut index = super::index::MemoryIndex::open_or_create(
             &self.db_path,
             self.storage.clone(),
@@ -652,6 +678,8 @@ impl MemoryBackend for MemoryBackendImpl {
             // under-reporting delete-only syncs (where reindex_file is never
             // called and the old `reindexed_count` would stay at 0).
             let mut changed_chunk_count: usize = 0;
+            // Chunk ids removed by file deletions, for mirror delete fan-out.
+            let mut deleted_chunk_ids: Vec<String> = Vec::new();
             for file in &dirty_files {
                 if file.exists() {
                     // File was created or modified — reindex it.
@@ -664,9 +692,24 @@ impl MemoryBackend for MemoryBackendImpl {
                     // they are no longer searchable.  Without this call, reindex_file
                     // returns early when the file is unreadable and leaves orphaned
                     // chunks behind indefinitely.
-                    if let Ok(n) = index.delete_path(file) {
-                        changed_chunk_count += n;
+                    if let Ok(ids) = index.delete_path_ids(file) {
+                        changed_chunk_count += ids.len();
+                        deleted_chunk_ids.extend(ids);
                     }
+                }
+            }
+            if let Some(handle) = &self.vector_mirror
+                && !deleted_chunk_ids.is_empty()
+            {
+                let timeout = crate::mirror::mirror_timeout(None);
+                if let Err(e) =
+                    crate::mirror::mirror_delete_ids(handle, &deleted_chunk_ids, timeout).await
+                {
+                    tracing::warn!(
+                        target: xai_grok_telemetry::memory_log::TARGET,
+                        error = %e,
+                        "memory mirror delete fan-out failed; stale mirror rows are healed by the next resync"
+                    );
                 }
             }
             if dirty_count > 0 {
@@ -782,7 +825,32 @@ impl MemoryBackend for MemoryBackendImpl {
                 let _ = index.upsert_embedding(chunk_id, emb);
             }
             embedded_count = upserts.len();
+            // Best-effort mirror fan-out of the fresh vectors (time-bounded,
+            // failure-isolated; SQLite stays the authority). The plan is
+            // computed synchronously (borrows &index) so only owned data
+            // crosses the execute await — this future must stay `Send`.
+            if let Some(handle) = &self.vector_mirror
+                && !upserts.is_empty()
+                && let Some(plan) = crate::mirror_fanout_plan(&index, handle, &upserts)
+            {
+                crate::mirror_fanout_execute(plan, handle).await;
+            }
         }
+
+        // In milvus mode, reconcile with remote schema-v2 collection when unready or reindex claimed.
+        if self.mode == xai_grok_config_types::MemoryMode::Milvus {
+            if let Some(ref handle) = self.vector_mirror
+                && let Some(ref embedder) = embedder
+                && let Some(ref spec) = spec
+                && let Ok(fp) = spec.fingerprint(&self.index_config)
+            {
+                let dims = spec.dimensions as u32;
+                if !handle.is_ready_for(&fp.hash, dims) || reindex_claim.is_some() {
+                    let _ = crate::reconcile_milvus_mode(&mut index, &**embedder, handle, &fp.hash).await;
+                }
+            }
+        }
+
         if let Some(claim) = reindex_claim {
             // Owner-scoped release: never clears a claim stolen via the stale
             // window while we were working.
@@ -806,6 +874,51 @@ impl MemoryBackend for MemoryBackendImpl {
         let mut search_config = self.search_config.clone();
         search_config.max_results = max_results;
         search_config.min_score = min_score as f32;
+
+        // In milvus mode, execute hard-remote search (BM25 + KNN) and bypass local FTS/vec search.
+        if self.mode == xai_grok_config_types::MemoryMode::Milvus {
+            if let Some(ref handle) = self.vector_mirror
+                && let Some(ref spec) = spec
+            {
+                let fp_hash = spec.fingerprint(&self.index_config).map(|f| f.hash).unwrap_or_default();
+                let dims = spec.dimensions as u32;
+
+                let results = crate::search::milvus_search(
+                    handle,
+                    embedder.as_deref(),
+                    query,
+                    &fp_hash,
+                    dims,
+                    &search_config,
+                )
+                .await
+                .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> {
+                    Box::new(std::io::Error::other(e.to_string()))
+                })?;
+
+                self.search_counter
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                return Ok(results
+                    .into_iter()
+                    .map(|r| MemorySearchResult {
+                        chunk_id: r.chunk_id,
+                        path: r.path,
+                        start_line: r.start_line,
+                        end_line: r.end_line,
+                        score: r.score,
+                        snippet: r.snippet,
+                        source: r.source,
+                        created_at: Some(r.created_at),
+                    })
+                    .collect());
+            } else {
+                tracing::warn!(
+                    target: xai_grok_telemetry::memory_log::TARGET,
+                    "milvus mode active but vector_mirror or spec missing; returning empty results"
+                );
+                return Ok(Vec::new());
+            }
+        }
 
         let search_start = std::time::Instant::now();
         let keyword_count = super::query_expansion::extract_keywords(query).len();
@@ -848,11 +961,62 @@ impl MemoryBackend for MemoryBackendImpl {
             None
         };
 
-        // ── Sync phase 3: local ordering (borrows &index) ──
-        let (mut candidates, mut relevance) = super::search::build_local_candidates(
+        // ── Vector candidates: mirror-first with sqlite-vec fallback ──
+        // The readiness gate runs synchronously with the &index borrow
+        // (fingerprint + dims + vec_row_count from one SQLite read set);
+        // only owned data (handle + fingerprint + query vector) crosses the
+        // mirror `.await`, and the fallback re-opens a fresh index handle —
+        // the original borrow has ended — keeping this future `Send`.
+        let mirror_decision = super::search::mirror_knn_decision(
+            &index,
+            self.vector_mirror.as_ref(),
+            query_embedding.as_deref(),
+        );
+        let vec_results = match mirror_decision {
+            Some((handle, fingerprint_hash, query)) => {
+                match super::search::mirror_knn_execute(
+                    handle.clone(),
+                    fingerprint_hash,
+                    query.clone(),
+                    candidate_limit,
+                )
+                .await
+                {
+                    Ok(hits) => hits,
+                    Err(e) => {
+                        tracing::warn!(
+                            target: xai_grok_telemetry::memory_log::TARGET,
+                            error = %e,
+                            "mirror KNN failed; falling back to sqlite-vec"
+                        );
+                        handle.mark_unavailable();
+                        // Re-borrow SQLite: fresh index handle (Send-safe —
+                        // the original borrow ended before the await).
+                        match super::index::MemoryIndex::open_or_create(
+                            &self.db_path,
+                            self.storage.clone(),
+                            index_config_fallback,
+                            embed_dims,
+                        ) {
+                            Ok(fallback_index) => fallback_index
+                                .vector_search(&query, candidate_limit)
+                                .unwrap_or_default(),
+                            Err(_) => Vec::new(),
+                        }
+                    }
+                }
+            }
+            None => match query_embedding.as_deref() {
+                Some(embedding) => index
+                    .vector_search(embedding, candidate_limit)
+                    .unwrap_or_default(),
+                None => Vec::new(),
+            },
+        };
+        let (mut candidates, mut relevance) = super::search::build_local_candidates_from_vec(
             &index,
             fts_results,
-            query_embedding.as_deref(),
+            vec_results,
             &search_config,
         )
         .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> {
@@ -991,6 +1155,8 @@ mod factory_tests {
             retrieval: None,
             index_config: xai_grok_config_types::MemoryIndexConfig::default(),
             rebuild_backoff_secs: 0,
+            vector_mirror: None,
+            mode: xai_grok_config_types::MemoryMode::Local,
         }
     }
 
@@ -1603,6 +1769,8 @@ mod factory_tests {
             retrieval: None,
             index_config: xai_grok_config_types::MemoryIndexConfig::default(),
             rebuild_backoff_secs: 0,
+            vector_mirror: None,
+            mode: xai_grok_config_types::MemoryMode::Local,
         };
 
         let provider = params.make_embedding_provider().await;
@@ -2031,6 +2199,7 @@ mod factory_tests {
             retrieval: Some(failing.clone()),
             watcher: None,
             rebuild_backoff_secs: 60,
+            vector_mirror: None,
             ..make_params_fts_only("backoff-test")
         };
         let backend = MemoryBackendImpl::from_session_params(storage.clone(), &params);
@@ -3044,7 +3213,312 @@ mod tests {
 #[cfg(test)]
 mod index_embedding_tests {
     use crate::index::MemoryIndex;
+    use crate::mirror::{MirrorError, MirrorHandle, VectorMirror};
     use crate::storage::MemoryStorage;
+    use std::sync::{Arc, Mutex};
+
+    /// Fingerprint hash installed by the test fixture (matches the shape
+    /// the rebuild state machine persists).
+    const FP: &str = "0123456789abcdef0123456789abcdef";
+
+    /// Recording in-memory mirror: captures resync upserts for assertions.
+    #[derive(Default)]
+    struct RecordingMirror {
+        upserts: Mutex<Vec<(Vec<String>, String)>>,
+    }
+
+    impl RecordingMirror {
+        fn upserted_ids(&self) -> Vec<String> {
+            self.upserts
+                .lock()
+                .unwrap()
+                .iter()
+                .flat_map(|(ids, _)| ids.iter().cloned())
+                .collect()
+        }
+
+        fn fingerprints(&self) -> Vec<String> {
+            self.upserts
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|(_, fp)| fp.clone())
+                .collect()
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl VectorMirror for RecordingMirror {
+        fn backend_id(&self) -> &str {
+            "recording"
+        }
+
+        async fn ensure_collection(
+            &self,
+            _name: &str,
+            _dims: u32,
+            _fingerprint_hash: &str,
+        ) -> Result<(), MirrorError> {
+            Ok(())
+        }
+
+        async fn upsert(
+            &self,
+            _name: &str,
+            ids: &[String],
+            _vectors: &[Vec<f32>],
+            fingerprint_hash: &str,
+        ) -> Result<(), MirrorError> {
+            self.upserts
+                .lock()
+                .unwrap()
+                .push((ids.to_vec(), fingerprint_hash.to_owned()));
+            Ok(())
+        }
+
+        async fn delete(&self, _name: &str, _ids: &[String]) -> Result<(), MirrorError> {
+            Ok(())
+        }
+
+        async fn knn(
+            &self,
+            _name: &str,
+            _query: &[f32],
+            _k: usize,
+            _fingerprint_hash: &str,
+        ) -> Result<Vec<(String, f32)>, MirrorError> {
+            Ok(Vec::new())
+        }
+
+        async fn count(&self, _name: &str, _fingerprint_hash: &str) -> Result<u64, MirrorError> {
+            let upserts = self.upserts.lock().unwrap();
+            Ok(upserts.iter().map(|(ids, _)| ids.len()).sum::<usize>() as u64)
+        }
+
+        async fn drop_collection(&self, _name: &str) -> Result<(), MirrorError> {
+            Ok(())
+        }
+    }
+
+    /// Deterministic provider: every text maps to the same 4-dim vector.
+    struct GoodProvider;
+
+    #[async_trait::async_trait]
+    impl crate::embedding::EmbeddingProvider for GoodProvider {
+        async fn embed_batch(
+            &self,
+            texts: &[&str],
+        ) -> Result<Vec<Vec<f32>>, Box<dyn std::error::Error>> {
+            Ok(texts.iter().map(|_| vec![0.25f32; 4]).collect())
+        }
+        fn model_name(&self) -> &str {
+            "good"
+        }
+        fn dimensions(&self) -> usize {
+            4
+        }
+    }
+
+    /// Regression: with zero missing chunks (steady state) the mirror
+    /// fan-out must still run, so a not-yet-populated mirror is healed
+    /// from the SQLite vec table on the next embed pass instead of
+    /// staying empty forever.
+    #[tokio::test]
+    async fn test_steady_state_embed_pass_still_populates_mirror() {
+        crate::index::init_sqlite_vec();
+        let tmp = tempfile::TempDir::new().unwrap();
+        let global = tmp.path().join("memory");
+        let workspace = global.join("test_ws");
+        let storage = MemoryStorage::with_paths(global, workspace);
+        // Must match `MemoryIndex::db_path()` (storage workspace layout) —
+        // the resync source derives its connection from that path.
+        let db_path = storage.workspace_dir().join("index.sqlite");
+
+        let mut idx = MemoryIndex::open_or_create(
+            &db_path,
+            storage,
+            xai_grok_config_types::MemoryIndexConfig::default(),
+            4,
+        )
+        .unwrap();
+
+        if !idx.vec_available() {
+            // Without sqlite-vec there is no `chunks_vec` table to drain;
+            // the mirror falls back by design and this test is vacuous.
+            return;
+        }
+
+        let file_path = tmp.path().join("test.md");
+        std::fs::write(&file_path, "# Title\n\nSteady-state mirror content.").unwrap();
+        idx.reindex_file(&file_path, "workspace").unwrap();
+
+        // Install a pinned vector space the way the rebuild state machine
+        // does, then embed the chunk: one row in `chunks_vec`, zero chunks
+        // missing embeddings.
+        idx.db()
+            .execute(
+                "INSERT OR REPLACE INTO meta(key, value) VALUES (?1, ?2), (?3, ?4)",
+                rusqlite::params![
+                    crate::schema::META_VECTOR_FINGERPRINT_HASH,
+                    FP,
+                    crate::schema::META_VECTOR_SCHEMA_VERSION,
+                    "1"
+                ],
+            )
+            .unwrap();
+
+        assert_eq!(crate::embed_missing_chunks(&idx, &GoodProvider).await, 1);
+        assert!(idx.chunks_without_embeddings().unwrap().is_empty());
+        assert_eq!(idx.vec_row_count(), 1);
+
+        // Fresh (unready) mirror + steady-state pass: nothing to embed,
+        // yet the fan-out must resync the row from SQLite into the mirror.
+        let mirror = Arc::new(RecordingMirror::default());
+        let handle = MirrorHandle::new(mirror.clone(), "grok_mem_test");
+        let embedded =
+            crate::embed_missing_chunks_with_mirror(&idx, &GoodProvider, Some(&handle)).await;
+        assert_eq!(embedded, 0, "steady state: no chunk needed embedding");
+        assert_eq!(
+            mirror.upserted_ids().len(),
+            1,
+            "mirror must be populated by the steady-state pass"
+        );
+        assert_eq!(mirror.fingerprints(), vec![FP.to_owned()]);
+        assert!(
+            handle.is_ready_for_count(FP, 4, 1),
+            "resync verified: mirror ready for the installed space"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_reconcile_milvus_mode_lifecycle() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let global = tmp.path().join("memory");
+        let workspace = global.join("test_ws");
+        let storage = MemoryStorage::with_paths(global, workspace);
+        let db_path = storage.workspace_dir().join("index.sqlite");
+
+        let mut idx = MemoryIndex::open_or_create(
+            &db_path,
+            storage,
+            xai_grok_config_types::MemoryIndexConfig::default(),
+            4,
+        )
+        .unwrap();
+
+        let file1 = tmp.path().join("test1.md");
+        let file2 = tmp.path().join("test2.md");
+        std::fs::write(&file1, "# Section 1\n\nFirst chunk content.").unwrap();
+        std::fs::write(&file2, "# Section 2\n\nSecond chunk content.").unwrap();
+        idx.reindex_file(&file1, "workspace").unwrap();
+        idx.reindex_file(&file2, "workspace").unwrap();
+
+        let mirror = Arc::new(crate::mirror::InMemoryVectorMirror::new());
+        let handle = MirrorHandle::new(mirror.clone(), "grok_mem_milvus_test");
+
+        // First reconcile: 2 chunks embedded and upserted
+        let report1 = crate::reconcile_milvus_mode(&mut idx, &GoodProvider, &handle, FP)
+            .await
+            .expect("first reconcile succeeds");
+        assert_eq!(report1.embedded, 2);
+        assert_eq!(report1.unchanged, 0);
+        assert_eq!(report1.deleted, 0);
+        assert_eq!(report1.total, 2);
+        assert!(handle.is_ready_for(FP, 4));
+
+        // Second reconcile (steady state): unchanged chunks skipped, 0 embedded!
+        let report2 = crate::reconcile_milvus_mode(&mut idx, &GoodProvider, &handle, FP)
+            .await
+            .expect("second reconcile succeeds");
+        assert_eq!(report2.embedded, 0);
+        assert_eq!(report2.unchanged, 2);
+        assert_eq!(report2.deleted, 0);
+        assert_eq!(report2.total, 2);
+
+        // Edit one file
+        std::fs::write(&file1, "# Section 1\n\nFirst chunk content UPDATED.").unwrap();
+        idx.reindex_file(&file1, "workspace").unwrap();
+
+        // Third reconcile: 1 embedded (changed), 1 unchanged
+        let report3 = crate::reconcile_milvus_mode(&mut idx, &GoodProvider, &handle, FP)
+            .await
+            .expect("third reconcile succeeds");
+        assert_eq!(report3.embedded, 1);
+        assert_eq!(report3.unchanged, 1);
+        assert_eq!(report3.deleted, 0);
+
+        // Delete file2 and reindex
+        std::fs::remove_file(&file2).unwrap();
+        idx.delete_path_ids(&file2).unwrap();
+
+        // Fourth reconcile: 0 embedded, 1 unchanged (file1), 1 deleted (file2)
+        let report4 = crate::reconcile_milvus_mode(&mut idx, &GoodProvider, &handle, FP)
+            .await
+            .expect("fourth reconcile succeeds");
+        assert_eq!(report4.embedded, 0);
+        assert_eq!(report4.unchanged, 1);
+        assert_eq!(report4.deleted, 1);
+        assert_eq!(report4.total, 1);
+    }
+
+    #[tokio::test]
+    async fn test_drain_local_to_milvus_preserves_local_and_populates_remote() {
+        crate::index::init_sqlite_vec();
+        let tmp = tempfile::TempDir::new().unwrap();
+        let global = tmp.path().join("memory");
+        let workspace = global.join("test_ws");
+        let storage = MemoryStorage::with_paths(global, workspace);
+        let db_path = storage.workspace_dir().join("index.sqlite");
+
+        let mut idx = MemoryIndex::open_or_create(
+            &db_path,
+            storage,
+            xai_grok_config_types::MemoryIndexConfig::default(),
+            4,
+        )
+        .unwrap();
+
+        if !idx.vec_available() {
+            return;
+        }
+
+        let file = tmp.path().join("local_note.md");
+        std::fs::write(&file, "# Local Memory\n\nExisting local chunk content.").unwrap();
+        idx.reindex_file(&file, "workspace").unwrap();
+
+        // Install local fingerprint and embed locally
+        idx.db()
+            .execute(
+                "INSERT OR REPLACE INTO meta(key, value) VALUES (?1, ?2), (?3, ?4)",
+                rusqlite::params![
+                    crate::schema::META_VECTOR_FINGERPRINT_HASH,
+                    FP,
+                    crate::schema::META_VECTOR_SCHEMA_VERSION,
+                    "1"
+                ],
+            )
+            .unwrap();
+        assert_eq!(crate::embed_missing_chunks(&idx, &GoodProvider).await, 1);
+        assert_eq!(idx.vec_row_count(), 1);
+
+        // Switch to milvus mode: drain local SQLite rows into Milvus
+        let mirror = Arc::new(crate::mirror::InMemoryVectorMirror::new());
+        let handle = MirrorHandle::new(mirror.clone(), "grok_mem_drain_test");
+
+        let report = crate::drain_local_to_milvus(&mut idx, None, &handle, FP, 4)
+            .await
+            .expect("drain local to milvus succeeds");
+        assert_eq!(report.unchanged, 1, "1 local chunk drained without re-embedding");
+        assert_eq!(report.embedded, 0);
+        assert!(handle.is_ready_for(FP, 4));
+
+        // Milvus remote collection now has the chunk
+        assert_eq!(mirror.count("grok_mem_drain_test", FP).await.unwrap(), 1);
+
+        // Local SQLite tables are completely intact (non-destructive)
+        assert_eq!(idx.vec_row_count(), 1);
+        assert_eq!(idx.all_chunks().unwrap().len(), 1);
+    }
 
     #[test]
     fn test_chunks_without_embeddings() {

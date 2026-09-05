@@ -126,6 +126,28 @@ impl FrozenEmbeddingPin {
     }
 }
 
+/// Optional per-collection mirror handles sharing one backend. `skills` and
+/// `callable_agents` front distinct remote collections.
+#[derive(Clone)]
+pub struct PrimeMirrorPair {
+    pub skills: Arc<xai_grok_memory::MirrorHandle>,
+    pub callable_agents: Arc<xai_grok_memory::MirrorHandle>,
+}
+
+impl PrimeMirrorPair {
+    /// The handle fronting `collection`, if one is attached.
+    #[must_use]
+    pub fn for_collection(
+        &self,
+        collection: CollectionKind,
+    ) -> Option<&Arc<xai_grok_memory::MirrorHandle>> {
+        match collection {
+            CollectionKind::Skills => Some(&self.skills),
+            CollectionKind::CallableAgents => Some(&self.callable_agents),
+        }
+    }
+}
+
 /// Process-level handle. Cheap to clone (`Arc` internals).
 pub struct PrimeIndexHandle {
     home: PathBuf,
@@ -135,6 +157,9 @@ pub struct PrimeIndexHandle {
     inventory_generation: AtomicI64,
     callable_generation: AtomicI64,
     backfill: tokio::sync::Mutex<()>,
+    /// Remote vector-store mirror pair (None keeps pure sqlite-vec
+    /// behavior). Attached once at session spawn; reads are lock-free.
+    mirror: parking_lot::RwLock<Option<PrimeMirrorPair>>,
 }
 
 impl std::fmt::Debug for PrimeIndexHandle {
@@ -157,6 +182,7 @@ pub enum PrimeIndexError {
     SpaceMismatch,
     StaleGeneration,
     EmbedFailed,
+    StagingIncomplete,
     InvalidItem,
     Unavailable,
 }
@@ -168,6 +194,9 @@ impl std::fmt::Display for PrimeIndexError {
             Self::SpaceMismatch => f.write_str("prime index embedding space pin mismatch"),
             Self::StaleGeneration => f.write_str("prime index generation or hash is stale"),
             Self::EmbedFailed => f.write_str("prime index embedding failed"),
+            Self::StagingIncomplete => {
+                f.write_str("prime index staging did not complete or install")
+            }
             Self::InvalidItem => f.write_str("prime index rejected an invalid metadata item"),
             Self::Unavailable => f.write_str("prime index is unavailable"),
         }
@@ -199,6 +228,7 @@ impl PrimeIndexHandle {
             inventory_generation: AtomicI64::new(0),
             callable_generation: AtomicI64::new(0),
             backfill: tokio::sync::Mutex::new(()),
+            mirror: parking_lot::RwLock::new(None),
         });
         w.insert(key, handle.clone());
         handle
@@ -206,6 +236,19 @@ impl PrimeIndexHandle {
 
     pub fn db_path(&self) -> &Path {
         &self.db_path
+    }
+
+    /// Attach the remote vector-store mirror pair (session-spawn time).
+    /// Re-attachment with the same handles is a no-op in practice and the
+    /// latest value wins; reads take a cheap clone.
+    pub fn attach_mirrors(&self, pair: Option<PrimeMirrorPair>) {
+        *self.mirror.write() = pair;
+    }
+
+    /// Currently attached mirror pair, if any.
+    #[must_use]
+    pub fn mirror_pair(&self) -> Option<PrimeMirrorPair> {
+        self.mirror.read().clone()
     }
 
     pub fn workspace_identity(&self) -> &str {
@@ -503,7 +546,7 @@ impl PrimeIndexHandle {
             inner: Arc::clone(&embedder),
         });
         if !compatible {
-            let _ = stage_collection_vectors(
+            let staged = stage_collection_vectors(
                 &self.db_path,
                 collection,
                 &frozen.space().spec,
@@ -518,12 +561,39 @@ impl PrimeIndexHandle {
                 discard_collection_rebuild(&self.db_path, collection);
                 return Err(PrimeIndexError::Unavailable);
             }
-            if let Err(e) = self.assert_install_matches_frozen(&frozen, generation) {
+            // Stage-only reports `Pending { owned: true }` even on full
+            // success (the caller installs). Anything else means the claim
+            // was lost, the embedder failed, or staging never converged —
+            // surface that instead of silently completing with zero vectors.
+            if !matches!(
+                staged,
+                xai_grok_memory::rebuild::VectorReadiness::Pending { owned: true }
+            ) {
+                tracing::warn!(
+                    collection = %collection.as_str(),
+                    readiness = ?staged,
+                    "prime index staging did not complete"
+                );
+                discard_collection_rebuild(&self.db_path, collection);
+                return Err(PrimeIndexError::StagingIncomplete);
+            }
+            if let Err(e) = self.assert_install_matches_frozen(&frozen, generation, false) {
                 discard_collection_rebuild(&self.db_path, collection);
                 return Err(e);
             }
-            let _ = commit_staged_vectors(&self.db_path, collection, &frozen.space().spec);
-            self.assert_install_matches_frozen(&frozen, generation)?;
+            let committed = commit_staged_vectors(&self.db_path, collection, &frozen.space().spec);
+            if !committed {
+                discard_collection_rebuild(&self.db_path, collection);
+                return Err(PrimeIndexError::StagingIncomplete);
+            }
+            if let Err(e) = self.assert_install_matches_frozen(&frozen, generation, true) {
+                return Err(e);
+            }
+            // Post-commit mirror resync (plan Phase 3): the SQLite install is
+            // authoritative and complete; stream the collection into the
+            // remote mirror best-effort. Failures never fail the vector job —
+            // reads fall back to SQLite until the mirror verifies ready.
+            self.mirror_resync_after_install(&frozen).await;
             if let Ok((live, _, _)) = self.collection_snapshot(collection) {
                 on_progress(live.vec_count.max(0) as u64, total);
             }
@@ -562,7 +632,7 @@ impl PrimeIndexHandle {
             }
             validate_embedding_batch(texts.len(), frozen.dimensions(), &embeddings)
                 .map_err(|_| PrimeIndexError::EmbedFailed)?;
-            self.assert_install_matches_frozen(&frozen, generation)?;
+            self.assert_install_matches_frozen(&frozen, generation, false)?;
 
             let idx = self.open()?;
             let live = idx
@@ -576,14 +646,19 @@ impl PrimeIndexHandle {
             {
                 return Err(PrimeIndexError::SpaceMismatch);
             }
+            let mut missing_item = 0u32;
+            let mut text_mismatch = 0u32;
+            let mut upsert_errors = 0u32;
             for ((item_id, expected_text), embedding) in batch.iter().zip(embeddings.iter()) {
                 let Some(item) = idx
                     .get_item(collection, item_id)
                     .map_err(|_| PrimeIndexError::Unavailable)?
                 else {
+                    missing_item += 1;
                     continue;
                 };
                 if item.fts_text() != *expected_text {
+                    text_mismatch += 1;
                     continue;
                 }
                 match idx.upsert_embedding_for_fingerprint(
@@ -598,8 +673,19 @@ impl PrimeIndexHandle {
                     )) => {
                         return Err(PrimeIndexError::SpaceMismatch);
                     }
-                    Err(_) => {}
+                    Err(_) => {
+                        upsert_errors += 1;
+                    }
                 }
+            }
+            if missing_item + text_mismatch + upsert_errors > 0 {
+                tracing::warn!(
+                    collection = %collection.as_str(),
+                    missing_item,
+                    text_mismatch,
+                    upsert_errors,
+                    "prime index backfill skipped items while filling"
+                );
             }
             drop(idx);
             on_progress(written as u64, total);
@@ -633,11 +719,16 @@ impl PrimeIndexHandle {
     }
 
     /// After an embed await: install only if the live pin identity and the
-    /// collection fingerprint still equal the frozen token.
+    /// collection fingerprint still equal the frozen token. With
+    /// `require_installed` the fingerprint must already be installed and
+    /// equal to the frozen token (post-commit verification); otherwise an
+    /// empty fingerprint passes (pre-install check) but a different
+    /// installed space still fails.
     fn assert_install_matches_frozen(
         &self,
         frozen: &FrozenEmbeddingPin,
         generation: i64,
+        require_installed: bool,
     ) -> Result<(), PrimeIndexError> {
         let live = self.pinned_space().ok_or(PrimeIndexError::SpaceMismatch)?;
         if !frozen.matches_live(&live) {
@@ -649,6 +740,18 @@ impl PrimeIndexHandle {
             .map_err(|_| PrimeIndexError::Unavailable)?;
         if state.inventory_generation != generation {
             return Err(PrimeIndexError::StaleGeneration);
+        }
+        if require_installed {
+            if state.fingerprint_hash.is_empty()
+                || state.fingerprint_hash != frozen.fingerprint_hash()
+            {
+                tracing::warn!(
+                    collection = %frozen.collection().as_str(),
+                    "prime index install did not land after commit"
+                );
+                return Err(PrimeIndexError::StagingIncomplete);
+            }
+            return Ok(());
         }
         if !state.fingerprint_hash.is_empty() && state.fingerprint_hash != frozen.fingerprint_hash()
         {
@@ -696,20 +799,40 @@ impl PrimeIndexHandle {
             .await
             .map_err(|err| match err {
                 OrchestratorError::Cancelled { .. } => PrimeIndexError::Unavailable,
-                _ => PrimeIndexError::EmbedFailed,
+                other => {
+                    tracing::warn!(error = %other, "prime index embed pipeline failed");
+                    PrimeIndexError::EmbedFailed
+                }
             })?;
         if stage.embedding_space.fingerprint() != pin.space().space_fingerprint {
+            tracing::warn!(
+                pinned = %pin.space().space_fingerprint,
+                pipeline = %stage.embedding_space.fingerprint(),
+                "prime index embed returned a different embedding space"
+            );
             return Err(PrimeIndexError::SpaceMismatch);
         }
         if stage.provider_instance_id != pin.space().spec.provider_instance_id {
+            tracing::warn!(
+                pinned = %pin.space().spec.provider_instance_id,
+                pipeline = %stage.provider_instance_id,
+                "prime index embed returned a different provider instance"
+            );
             return Err(PrimeIndexError::SpaceMismatch);
         }
         let mut out = Vec::with_capacity(stage.result.vectors.len());
         for v in &stage.result.vectors {
             out.push(v.values.clone());
         }
-        validate_embedding_batch(texts.len(), pin.dimensions(), &out)
-            .map_err(|_| PrimeIndexError::EmbedFailed)?;
+        if let Err(_err) = validate_embedding_batch(texts.len(), pin.dimensions(), &out) {
+            tracing::warn!(
+                inputs = texts.len(),
+                vectors = out.len(),
+                expected_dims = pin.dimensions(),
+                "prime index embed batch failed validation"
+            );
+            return Err(PrimeIndexError::EmbedFailed);
+        }
         for row in out.iter_mut() {
             l2_normalize_v1(row).map_err(|_| PrimeIndexError::EmbedFailed)?;
         }
@@ -801,6 +924,150 @@ impl PrimeIndexHandle {
             .map_err(|_| PrimeIndexError::Unavailable)?;
         Self::require_knn_space(&idx, pin)?;
         Ok(hits)
+    }
+
+    /// [`Self::search_knn_with_pin`] with mirror-first reads.
+    ///
+    /// When a mirror is attached and verified-ready for the frozen pin's
+    /// fingerprint/dims/row-count, KNN is served from the mirror; hits are
+    /// filtered to live items by the same SQLite join the sync path uses and
+    /// the space pin is re-checked after the read (identical contract). Any
+    /// mirror failure marks it unavailable and falls back to sqlite-vec.
+    pub async fn search_knn_with_pin_mirror_first(
+        &self,
+        pin: &FrozenEmbeddingPin,
+        query_embedding: &[f32],
+        k: usize,
+    ) -> Result<Vec<MetadataKnnHit>, PrimeIndexError> {
+        if query_embedding.len() != pin.dimensions() {
+            return Err(PrimeIndexError::SpaceMismatch);
+        }
+        let bounded_k = k.max(1).min(DEFAULT_SEARCH_LIMIT);
+        // Sync gate: one SQLite read set (space pin + row count) decides the
+        // source before any await; owned data only crosses the mirror call.
+        let mirror_target = self.mirror_pair().and_then(|pair| {
+            let handle = pair.for_collection(pin.collection())?;
+            let gate = (|| -> Option<u64> {
+                let idx = self.open().ok()?;
+                // SpaceMismatch is not a fallback reason; surface it.
+                match Self::require_knn_space(&idx, pin) {
+                    Ok(()) => {}
+                    Err(PrimeIndexError::SpaceMismatch) => return None,
+                    Err(_) => return None,
+                }
+                let count = idx.vec_count(pin.collection()).max(0) as u64;
+                handle
+                    .is_ready_for_count(pin.fingerprint_hash(), pin.dimensions() as u32, count)
+                    .then_some(count)
+            })();
+            gate.map(|count| (Arc::clone(handle), count))
+        });
+        if let Some((handle, _expected_count)) = mirror_target {
+            let timeout = xai_grok_memory::mirror::mirror_timeout(None);
+            let mirror_knn = handle.mirror().knn(
+                handle.collection(),
+                query_embedding,
+                bounded_k,
+                pin.fingerprint_hash(),
+            );
+            match xai_grok_memory::mirror::mirror_call(mirror_knn, timeout).await {
+                Ok(hits) => {
+                    let idx = self.open()?;
+                    // Post-read space re-check (sync-path contract).
+                    Self::require_knn_space(&idx, pin)?;
+                    let mut out = Vec::with_capacity(hits.len());
+                    for (item_id, distance) in hits {
+                        if idx.item_exists(pin.collection(), &item_id).unwrap_or(false) {
+                            out.push(MetadataKnnHit { item_id, distance });
+                        }
+                        if out.len() >= bounded_k {
+                            break;
+                        }
+                    }
+                    return Ok(out);
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        collection = %pin.collection().as_str(),
+                        error = %e,
+                        "prime mirror KNN failed; falling back to sqlite-vec"
+                    );
+                    handle.mark_unavailable();
+                }
+            }
+        }
+        self.search_knn_with_pin(pin, query_embedding, k)
+    }
+
+    /// Best-effort mirror resync for the collection after a verified
+    /// SQLite install. Never fails the vector job.
+    async fn mirror_resync_after_install(&self, frozen: &FrozenEmbeddingPin) {
+        let Some(pair) = self.mirror_pair() else {
+            return;
+        };
+        let Some(handle) = pair.for_collection(frozen.collection()) else {
+            return;
+        };
+        let collection = frozen.collection();
+        let fingerprint_hash = frozen.fingerprint_hash().to_owned();
+        let dims = frozen.dimensions() as u32;
+        let expected_count = match self.open() {
+            Ok(idx) => idx.vec_count(collection).max(0) as u64,
+            Err(_) => {
+                handle.mark_unavailable();
+                return;
+            }
+        };
+        let mut source = match xai_grok_memory::metadata_index::PrimeVecResyncSource::open(
+            &self.db_path,
+            collection,
+        ) {
+            Ok(source) => source,
+            Err(e) => {
+                handle.mark_unavailable();
+                tracing::warn!(
+                    collection = %collection.as_str(),
+                    error = %e,
+                    "prime mirror resync source unavailable; reads fall back to sqlite-vec"
+                );
+                return;
+            }
+        };
+        let timeout = xai_grok_memory::mirror::mirror_timeout(None);
+        match xai_grok_memory::mirror::resync_collection(
+            handle,
+            &fingerprint_hash,
+            dims,
+            &mut source,
+            timeout,
+        )
+        .await
+        {
+            Ok(report) => {
+                if report.mirror_row_count == expected_count {
+                    tracing::info!(
+                        collection = %collection.as_str(),
+                        rows = report.rows_upserted,
+                        "prime mirror resync complete and verified"
+                    );
+                } else {
+                    handle.mark_syncing();
+                    tracing::warn!(
+                        collection = %collection.as_str(),
+                        mirror = report.mirror_row_count,
+                        sqlite = expected_count,
+                        "prime mirror resync count drift; reads fall back to sqlite-vec"
+                    );
+                }
+            }
+            Err(e) => {
+                tracing::warn!(
+                    collection = %collection.as_str(),
+                    error = %e,
+                    "prime mirror resync failed; reads fall back to sqlite-vec"
+                );
+            }
+        }
     }
 
     pub fn list_skill_items(&self) -> Result<Vec<MetadataItem>, PrimeIndexError> {
@@ -2195,5 +2462,238 @@ mod tests {
             doc.contains("src/**"),
             "accepted relative path dropped: {doc}"
         );
+    }
+    // -------------------------------------------------------------------
+    // Mirror-first KNN (hermetic: scripted fake mirror, real SQLite index)
+    // -------------------------------------------------------------------
+
+    /// Scripted fake mirror recording KNN calls; serves fixed hits or fails.
+    struct PrimeTestMirror {
+        hits: Vec<(String, f32)>,
+        fail: bool,
+        calls: std::sync::Mutex<Vec<String>>,
+    }
+
+    impl PrimeTestMirror {
+        fn serving(hits: Vec<(String, f32)>) -> Arc<Self> {
+            Arc::new(Self {
+                hits,
+                fail: false,
+                calls: std::sync::Mutex::new(Vec::new()),
+            })
+        }
+
+        fn failing() -> Arc<Self> {
+            Arc::new(Self {
+                hits: Vec::new(),
+                fail: true,
+                calls: std::sync::Mutex::new(Vec::new()),
+            })
+        }
+
+        fn knn_call_count(&self) -> usize {
+            self.calls.lock().unwrap().len()
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl xai_grok_memory::VectorMirror for PrimeTestMirror {
+        fn backend_id(&self) -> &'static str {
+            "prime-test"
+        }
+
+        async fn ensure_collection(
+            &self,
+            _name: &str,
+            _dims: u32,
+            _fingerprint_hash: &str,
+        ) -> Result<(), xai_grok_memory::MirrorError> {
+            Ok(())
+        }
+
+        async fn upsert(
+            &self,
+            _name: &str,
+            _ids: &[String],
+            _vectors: &[Vec<f32>],
+            _fingerprint_hash: &str,
+        ) -> Result<(), xai_grok_memory::MirrorError> {
+            Ok(())
+        }
+
+        async fn delete(
+            &self,
+            _name: &str,
+            _ids: &[String],
+        ) -> Result<(), xai_grok_memory::MirrorError> {
+            Ok(())
+        }
+
+        async fn knn(
+            &self,
+            name: &str,
+            _query: &[f32],
+            _k: usize,
+            _fingerprint_hash: &str,
+        ) -> Result<Vec<(String, f32)>, xai_grok_memory::MirrorError> {
+            self.calls.lock().unwrap().push(name.to_owned());
+            if self.fail {
+                return Err(xai_grok_memory::MirrorError::new(
+                    xai_grok_memory::MirrorErrorKind::Transient,
+                ));
+            }
+            Ok(self.hits.clone())
+        }
+
+        async fn count(
+            &self,
+            _name: &str,
+            _fingerprint_hash: &str,
+        ) -> Result<u64, xai_grok_memory::MirrorError> {
+            Ok(0)
+        }
+
+        async fn drop_collection(&self, _name: &str) -> Result<(), xai_grok_memory::MirrorError> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn prime_mirror_knn_serves_live_hits_and_filters_ghosts() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("home");
+        let cwd = tmp.path().join("ws");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::create_dir_all(&cwd).unwrap();
+        let handle = PrimeIndexHandle::get_or_create(&home, &cwd);
+        let items = skills_to_index_items(&[skill("alpha", "skills/alpha/SKILL.md")]);
+        handle.sync_skills(1, &items).unwrap();
+        let spec = EmbeddingSourceSpec {
+            model: "mock-a".into(),
+            ..mock_spec(4, NORMALIZATION_L2_V1)
+        };
+        handle
+            .pin_primary_space(PinnedEmbeddingSpace {
+                snapshot_generation: 1,
+                route_id: "emb-a".into(),
+                space_fingerprint: "fp-a".into(),
+                spec: spec.clone(),
+            })
+            .unwrap();
+        handle
+            .backfill(
+                Arc::new(MockEmbeddingProvider { dimensions: 4 }),
+                handle.freeze_pin().unwrap(),
+                CancellationToken::new(),
+            )
+            .await
+            .expect("backfill");
+        let frozen = handle.freeze_pin().unwrap();
+        let live_id = items[0].item_id.clone();
+        let vec_count = handle
+            .collection_snapshot(CollectionKind::Skills)
+            .unwrap()
+            .0
+            .vec_count as u64;
+
+        // Mirror verified-ready for exactly this frozen space + row count.
+        let mirror = PrimeTestMirror::serving(vec![
+            (live_id.clone(), 0.25),
+            ("ghost-item-id".to_owned(), 0.05),
+        ]);
+        let mirror_handle = Arc::new(xai_grok_memory::MirrorHandle::new(
+            mirror.clone(),
+            format!("grok_prime_test_skills"),
+        ));
+        mirror_handle.mark_ready(frozen.fingerprint_hash(), 4, vec_count);
+        handle.attach_mirrors(Some(PrimeMirrorPair {
+            skills: mirror_handle,
+            callable_agents: Arc::new(xai_grok_memory::MirrorHandle::new(
+                PrimeTestMirror::serving(vec![]),
+                "grok_prime_test_callable_agents",
+            )),
+        }));
+
+        let query = vec![0.5f32, 0.5, 0.5, 0.5];
+        let hits = handle
+            .search_knn_with_pin_mirror_first(&frozen, &query, 4)
+            .await
+            .expect("mirror-first KNN");
+        assert_eq!(mirror.knn_call_count(), 1, "ready mirror must be consulted");
+        // Ghost hit (no live item) is filtered by the SQLite join.
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].item_id, live_id);
+        uninstall_prime_index(&home, &cwd);
+    }
+
+    #[tokio::test]
+    async fn prime_mirror_knn_error_falls_back_to_sqlite() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("home");
+        let cwd = tmp.path().join("ws");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::create_dir_all(&cwd).unwrap();
+        let handle = PrimeIndexHandle::get_or_create(&home, &cwd);
+        let items = skills_to_index_items(&[skill("alpha", "skills/alpha/SKILL.md")]);
+        handle.sync_skills(1, &items).unwrap();
+        let spec = EmbeddingSourceSpec {
+            model: "mock-a".into(),
+            ..mock_spec(4, NORMALIZATION_L2_V1)
+        };
+        handle
+            .pin_primary_space(PinnedEmbeddingSpace {
+                snapshot_generation: 1,
+                route_id: "emb-a".into(),
+                space_fingerprint: "fp-a".into(),
+                spec: spec.clone(),
+            })
+            .unwrap();
+        handle
+            .backfill(
+                Arc::new(MockEmbeddingProvider { dimensions: 4 }),
+                handle.freeze_pin().unwrap(),
+                CancellationToken::new(),
+            )
+            .await
+            .expect("backfill");
+        let frozen = handle.freeze_pin().unwrap();
+        let vec_count = handle
+            .collection_snapshot(CollectionKind::Skills)
+            .unwrap()
+            .0
+            .vec_count as u64;
+
+        let mirror = PrimeTestMirror::failing();
+        let mirror_handle = Arc::new(xai_grok_memory::MirrorHandle::new(
+            mirror.clone(),
+            "grok_prime_test_skills",
+        ));
+        mirror_handle.mark_ready(frozen.fingerprint_hash(), 4, vec_count);
+        handle.attach_mirrors(Some(PrimeMirrorPair {
+            skills: mirror_handle.clone(),
+            callable_agents: Arc::new(xai_grok_memory::MirrorHandle::new(
+                PrimeTestMirror::serving(vec![]),
+                "grok_prime_test_callable_agents",
+            )),
+        }));
+
+        let query = vec![0.5f32, 0.5, 0.5, 0.5];
+        let expected = handle.search_knn_with_pin(&frozen, &query, 4).unwrap();
+        let hits = handle
+            .search_knn_with_pin_mirror_first(&frozen, &query, 4)
+            .await
+            .expect("fallback KNN");
+        assert_eq!(
+            mirror.knn_call_count(),
+            1,
+            "mirror consulted once, then fallback"
+        );
+        assert_eq!(hits, expected, "fallback must equal the sqlite-vec path");
+        assert_eq!(
+            mirror_handle.snapshot().state,
+            xai_grok_memory::MirrorState::Unavailable,
+            "failure must mark the mirror unavailable"
+        );
+        uninstall_prime_index(&home, &cwd);
     }
 }

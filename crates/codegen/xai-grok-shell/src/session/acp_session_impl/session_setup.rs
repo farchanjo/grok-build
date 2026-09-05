@@ -612,6 +612,29 @@ impl SessionActor {
             .borrow()
             .as_ref()
             .map(LastPrimeOutcome::to_projection);
+        let memory = if let Some(ref bp) = self.memory.backend_params {
+            let mode = bp.mode.as_str().to_string();
+            let (backend, status) = if let Some(ref h) = bp.vector_mirror {
+                let status_str = match h.snapshot().state {
+                    xai_grok_memory::MirrorState::Ready => "ready",
+                    xai_grok_memory::MirrorState::Syncing => "syncing",
+                    xai_grok_memory::MirrorState::Unavailable => "unavailable",
+                    xai_grok_memory::MirrorState::Unconfigured => "unconfigured",
+                };
+                (h.mirror().backend_id().to_string(), status_str.to_string())
+            } else {
+                ("sqlite".to_string(), "ready".to_string())
+            };
+            let total_chunks = self.memory.chunks_added.load(std::sync::atomic::Ordering::Relaxed);
+            Some(crate::session::acp_types::MemoryContextInfo {
+                mode,
+                backend,
+                status,
+                total_chunks,
+            })
+        } else {
+            None
+        };
         SessionInfoData {
             model,
             model_display_name: None,
@@ -639,6 +662,7 @@ impl SessionActor {
                 auto_compact_threshold_percent: self.compaction.threshold_percent.get(),
                 usage_categories,
                 prime,
+                memory,
             },
         }
     }

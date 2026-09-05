@@ -32,6 +32,8 @@ pub fn parse_retrieval_graph(raw_config: &toml::Value) -> ParsedRetrievalGraph {
     let retrieval_profiles = parse_retrieval_profiles(raw_config, &mut warnings);
     let prime = parse_prime(raw_config, &mut warnings);
     let memory_retrieval_profile = parse_memory_retrieval_profile(raw_config, &mut warnings);
+    let memory_mode = parse_memory_mode(raw_config);
+    let memory_vector_store = parse_memory_vector_store(raw_config);
     ParsedRetrievalGraph {
         graph: RetrievalGraphConfig {
             embedding_models,
@@ -39,6 +41,8 @@ pub fn parse_retrieval_graph(raw_config: &toml::Value) -> ParsedRetrievalGraph {
             retrieval_profiles,
             prime,
             memory_retrieval_profile,
+            memory_mode,
+            memory_vector_store,
         },
         warnings,
     }
@@ -1038,6 +1042,24 @@ fn parse_memory_retrieval_profile(
             None
         }
     }
+}
+
+fn parse_memory_mode(raw: &toml::Value) -> Option<xai_grok_config_types::MemoryMode> {
+    let mem = raw.get("memory")?;
+    let table = mem.as_table()?;
+    let v = table.get("mode")?;
+    v.as_str().and_then(|s| match s.trim() {
+        "milvus" => Some(xai_grok_config_types::MemoryMode::Milvus),
+        "local" => Some(xai_grok_config_types::MemoryMode::Local),
+        _ => None,
+    })
+}
+
+fn parse_memory_vector_store(raw: &toml::Value) -> Option<String> {
+    let mem = raw.get("memory")?;
+    let table = mem.as_table()?;
+    let v = table.get("vector_store")?;
+    v.as_str().map(|s| s.trim().to_owned()).filter(|s| !s.is_empty())
 }
 
 fn parse_embedding_protocol(s: &str) -> Option<EmbeddingProtocol> {

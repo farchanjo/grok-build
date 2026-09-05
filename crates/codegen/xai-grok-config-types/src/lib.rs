@@ -17,7 +17,9 @@ mod permission;
 pub use permission::*;
 mod pool;
 pub use pool::*;
+mod vector_store;
 use serde::{Deserialize, Serialize};
+pub use vector_store::*;
 use xai_grok_announcements::RemoteAnnouncement;
 /// A remote `campaigns[]` entry: an `id` gate plus a full-power
 /// flattened config patch (the JSON sibling of a `[[campaigns]]` TOML override).

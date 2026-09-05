@@ -195,7 +195,16 @@ impl SessionMemory {
             xai_grok_memory::rebuild::VectorReadiness::Ready
                 | xai_grok_memory::rebuild::VectorReadiness::ReadyMissing { .. }
         ) {
-            crate::session::memory::embed_missing_chunks(&index, &*provider).await;
+            let mirror = self
+                .backend_params
+                .as_ref()
+                .and_then(|p| p.vector_mirror.clone());
+            crate::session::memory::embed_missing_chunks_with_mirror(
+                &index,
+                &*provider,
+                mirror.as_deref(),
+            )
+            .await;
         }
     }
 
@@ -203,38 +212,94 @@ impl SessionMemory {
     ///
     /// Used after dream consolidation deletes processed session files so
     /// that stale chunks don't linger in the index. Best-effort: errors
-    /// are logged but don't propagate.
+    /// are logged but don't propagate. See
+    /// [`Self::delete_paths_from_index_with_mirror`] for the mirror-aware
+    /// variant.
     pub fn delete_paths_from_index(&self, paths: &[std::path::PathBuf]) {
-        if paths.is_empty() {
-            return;
+        let (removed, _) = self.delete_paths_sync(paths);
+        if removed > 0 {
+            tracing::info!(
+                target: xai_grok_telemetry::memory_log::TARGET,
+                chunks_removed = removed,
+                files = paths.len(),
+                "DREAM_CLEANUP: removed stale chunks from index"
+            );
         }
-        let Some(storage) = self.storage.borrow().clone() else {
+    }
+
+    /// [`Self::delete_paths_from_index`] plus a best-effort mirror delete
+    /// fan-out so removed chunk ids also leave the remote mirror (stale
+    /// mirror rows that slip through are healed by the next resync; reads
+    /// re-join live chunk ids either way). Time-bounded and
+    /// failure-isolated: SQLite deletion always happens first and is never
+    /// rolled back by a mirror failure.
+    pub async fn delete_paths_from_index_with_mirror(&self, paths: &[std::path::PathBuf]) {
+        let (removed, deleted_ids) = self.delete_paths_sync(paths);
+        if removed > 0 {
+            tracing::info!(
+                target: xai_grok_telemetry::memory_log::TARGET,
+                chunks_removed = removed,
+                files = paths.len(),
+                "DREAM_CLEANUP: removed stale chunks from index"
+            );
+        }
+        let Some(handle) = self
+            .backend_params
+            .as_ref()
+            .and_then(|p| p.vector_mirror.clone())
+        else {
             return;
         };
-        if let Some(mut index) = self.open_index(&storage) {
-            let mut total_removed = 0usize;
-            for path in paths {
-                match index.delete_path(path) {
-                    Ok(n) => total_removed += n,
-                    Err(e) => {
-                        tracing::warn!(
-                            target: xai_grok_telemetry::memory_log::TARGET,
-                            path = %path.display(),
-                            error = %e,
-                            "DREAM_CLEANUP: failed to remove chunks from index"
-                        );
-                    }
+        if deleted_ids.is_empty() {
+            return;
+        }
+        // Best-effort, time-bounded delete fan-out. SQLite deletion already
+        // succeeded; a mirror failure only leaves rows that the read path
+        // filters (live-id join) and the next resync heals.
+        let timeout = xai_grok_memory::mirror::mirror_timeout(None);
+        if let Err(e) =
+            xai_grok_memory::mirror::mirror_delete_ids(&handle, &deleted_ids, timeout).await
+        {
+            tracing::warn!(
+                target: xai_grok_telemetry::memory_log::TARGET,
+                error = %e,
+                "DREAM_CLEANUP: mirror delete fan-out failed; stale mirror rows are healed by the next resync"
+            );
+        }
+    }
+
+    /// Synchronous SQLite-side path deletion shared by both variants.
+    /// Returns the number of chunks removed and the removed chunk ids
+    /// (for the mirror delete fan-out).
+    fn delete_paths_sync(&self, paths: &[std::path::PathBuf]) -> (usize, Vec<String>) {
+        if paths.is_empty() {
+            return (0, Vec::new());
+        }
+        let Some(storage) = self.storage.borrow().clone() else {
+            return (0, Vec::new());
+        };
+        let Some(mut index) = self.open_index(&storage) else {
+            return (0, Vec::new());
+        };
+        let mut total_removed = 0usize;
+        let mut deleted_ids: Vec<String> = Vec::new();
+        for path in paths {
+            match index.delete_path_ids(path) {
+                Ok(ids) => {
+                    total_removed += ids.len();
+                    deleted_ids.extend(ids);
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        target: xai_grok_telemetry::memory_log::TARGET,
+                        path = %path.display(),
+                        error = %e,
+                        "DREAM_CLEANUP: failed to remove chunks from index"
+                    );
                 }
             }
-            if total_removed > 0 {
-                tracing::info!(
-                    target: xai_grok_telemetry::memory_log::TARGET,
-                    chunks_removed = total_removed,
-                    files = paths.len(),
-                    "DREAM_CLEANUP: removed stale chunks from index"
-                );
-            }
         }
+        (total_removed, deleted_ids)
     }
 
     /// Collect telemetry counters for session-end summary.

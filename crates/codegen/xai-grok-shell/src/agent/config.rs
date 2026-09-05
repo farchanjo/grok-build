@@ -1581,6 +1581,13 @@ pub struct Config {
     /// retrieval registry. Absorbed so it isn't flagged as an unrecognized key.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prime: Option<toml::Value>,
+    /// Named `[vector_stores.<id>]` backends for the remote vector mirror
+    /// (memory + prime). Consumed out-of-band from the effective config by
+    /// `crate::session::vector_mirror`; selected via `[memory] vector_store`
+    /// and `[prime] vector_store`. Absorbed so it isn't flagged as an
+    /// unrecognized key.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vector_stores: Option<toml::Value>,
     /// Written and read by the client (privacy banner acknowledgment);
     /// absorbed so it isn't flagged as an unrecognized key.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2025,6 +2032,7 @@ impl Default for Config {
             embedding_models: None,
             reranker_models: None,
             prime: None,
+            vector_stores: None,
             privacy: None,
             ui: UiConfig::default(),
             toolset: ShellToolsetConfig::default(),
@@ -2480,7 +2488,7 @@ impl Config {
             ctx.raw_config,
             ctx.remote_settings,
         );
-        self.memory_config = if mem.enabled { Some(mem) } else { None };
+        self.memory_config = mem.validated_for_runtime();
         self.disable_web_search = self.disable_web_search || ctx.disable_web_search;
         self.todo_gate = ctx.todo_gate;
         self.laziness_debug_log = ctx.laziness_debug_log.map(std::path::Path::to_path_buf);

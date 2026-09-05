@@ -154,6 +154,8 @@ pub(crate) async fn startup_reindex_backfill(
     static_api_key: Option<&str>,
     base_url: &str,
     rebuild_backoff_secs: i64,
+    mirror: Option<std::sync::Arc<xai_grok_memory::MirrorHandle>>,
+    mode: xai_grok_config_types::MemoryMode,
 ) -> usize {
     let Some(provider) = xai_grok_memory::resolve_embedding_provider(
         facade.clone(),
@@ -174,6 +176,35 @@ pub(crate) async fn startup_reindex_backfill(
     let Some(spec) = spec else {
         return 0;
     };
+
+    if mode == xai_grok_config_types::MemoryMode::Milvus {
+        if let Some(ref handle) = mirror {
+            let Ok(fp) = spec.fingerprint(&index_config) else {
+                return 0;
+            };
+            let Some(mut index) = crate::session::memory::MemoryIndex::open_or_create(
+                db_path,
+                storage,
+                index_config,
+                spec.dimensions,
+            ).ok() else {
+                return 0;
+            };
+            match xai_grok_memory::reconcile_milvus_mode(&mut index, &*provider, handle, &fp.hash).await {
+                Ok(report) => return report.embedded,
+                Err(e) => {
+                    tracing::warn!(
+                        target: xai_grok_telemetry::memory_log::TARGET,
+                        error = %e,
+                        "startup milvus reconciliation failed"
+                    );
+                    return 0;
+                }
+            }
+        }
+        return 0;
+    }
+
     let readiness = xai_grok_memory::rebuild::ensure_vectors_ready(
         db_path,
         storage.clone(),
@@ -202,7 +233,8 @@ pub(crate) async fn startup_reindex_backfill(
     .ok() else {
         return 0;
     };
-    crate::session::memory::embed_missing_chunks(&index, &*provider).await
+    crate::session::memory::embed_missing_chunks_with_mirror(&index, &*provider, mirror.as_deref())
+        .await
 }
 
 /// Spawns a session actor and returns the session handle plus a receiver for permission events.
@@ -912,6 +944,11 @@ pub(crate) async fn spawn_session_actor(
     let mut memory_backend_params_for_session: Option<crate::session::memory::MemoryBackendParams> =
         None;
     let mut memory_search_counter: Option<std::sync::Arc<std::sync::atomic::AtomicU64>> = None;
+    // Effective config snapshot for vector-mirror resolution (memory +
+    // prime). Loaded once per session spawn; mirror resolution is skipped
+    // entirely when no `vector_store` selection exists.
+    let memory_and_prime_mirror_config: Option<toml::Value> =
+        crate::config::load_effective_config().ok();
     let memory_backend_for_spec: Option<
         std::sync::Arc<dyn xai_grok_tools::types::memory_backend::MemoryBackend>,
     > = if let Some(ref storage) = memory_storage_for_session {
@@ -971,6 +1008,37 @@ pub(crate) async fn spawn_session_actor(
                 embed_api_key.as_ref(),
                 &embed_base_url,
             );
+        // Remote vector mirror: `[memory] vector_store` selects a named
+        // `[vector_stores.<id>]` entry. Resolution (config validation, token
+        // lookup, connect) is bounded by the store timeout and fully
+        // failure-isolated: any problem logs once and memory stays pure
+        // sqlite-vec. The resolved handle is registered for `/context`.
+        let memory_mode = memory_config
+            .as_ref()
+            .map(|mc| mc.mode)
+            .unwrap_or_default();
+        let memory_vector_mirror: Option<std::sync::Arc<xai_grok_memory::MirrorHandle>> =
+            if memory_mode == xai_grok_config_types::MemoryMode::Milvus {
+                match memory_config
+                    .as_ref()
+                    .and_then(|mc| mc.vector_store.clone())
+                {
+                    Some(store_id) => {
+                        crate::session::vector_mirror::resolve_memory_mirror(
+                            memory_and_prime_mirror_config
+                                .as_ref()
+                                .unwrap_or(&toml::Value::Table(toml::Table::new())),
+                            &crate::util::grok_home::grok_home(),
+                            tool_context.cwd.as_path(),
+                            &store_id,
+                        )
+                        .await
+                    }
+                    None => None,
+                }
+            } else {
+                None
+            };
         let params = crate::session::memory::MemoryBackendParams {
             session_id: session_info.id.to_string(),
             embed_config,
@@ -992,6 +1060,8 @@ pub(crate) async fn spawn_session_actor(
             // Throttle failed vector rebuilds so pending searches stay
             // FTS-only instead of rebuilding on every query.
             rebuild_backoff_secs: MEMORY_REBUILD_BACKOFF_SECS,
+            vector_mirror: memory_vector_mirror.clone(),
+            mode: memory_mode,
         };
         let backend = crate::session::memory::MemoryBackendImpl::from_session_params(
             storage.clone(),
@@ -1079,6 +1149,36 @@ pub(crate) async fn spawn_session_actor(
         }
         Arc::new(TokioMutex::new(state))
     };
+    // Remote prime mirror: `[prime] vector_store` selects a named
+    // `[vector_stores.<id>]` entry shared by the skills and callable_agents
+    // collections. Resolution is bounded and failure-isolated; attaching is
+    // idempotent per process and SQLite keeps serving on any failure.
+    if let Some(prime_store_id) = memory_and_prime_mirror_config
+        .as_ref()
+        .and_then(|cfg| cfg.get("prime"))
+        .and_then(|prime| prime.get("vector_store"))
+        .and_then(toml::Value::as_str)
+    {
+        match crate::session::vector_mirror::resolve_prime_mirrors(
+            memory_and_prime_mirror_config.as_ref().unwrap(),
+            &crate::util::grok_home::grok_home(),
+            tool_context.cwd.as_path(),
+            prime_store_id,
+        )
+        .await
+        {
+            Some(pair) => {
+                crate::session::prime::prime_index_for(
+                    &crate::util::grok_home::grok_home(),
+                    tool_context.cwd.as_path(),
+                )
+                .attach_mirrors(Some(pair));
+            }
+            None => {
+                tracing::warn!("prime vector mirror unresolved; prime KNN stays on sqlite-vec");
+            }
+        }
+    }
     let rebuild_spec = std::sync::Arc::new(crate::session::agent_rebuild::AgentRebuildSpec {
         working_directory: tool_context.cwd.as_path().to_path_buf(),
         terminal_backend: terminal_backend.clone(),
@@ -2095,6 +2195,17 @@ pub(crate) async fn spawn_session_actor(
         );
         let session_id_for_reindex = session_info.id.to_string();
         let chunks_added_counter = session.memory.chunks_added.clone();
+        let startup_mirror = session
+            .memory
+            .backend_params
+            .as_ref()
+            .and_then(|params| params.vector_mirror.clone());
+        let startup_mode = session
+            .memory
+            .backend_params
+            .as_ref()
+            .map(|params| params.mode)
+            .unwrap_or_default();
         tokio::task::spawn_local(async move {
             let db_path = storage.workspace_dir().join("index.sqlite");
             if let Ok(mut index) = crate::session::memory::MemoryIndex::open_or_create(
@@ -2130,6 +2241,8 @@ pub(crate) async fn spawn_session_actor(
                     startup_api_key.as_deref(),
                     &startup_base_url,
                     MEMORY_REBUILD_BACKOFF_SECS,
+                    startup_mirror,
+                    startup_mode,
                 )
                 .await;
                 xai_grok_telemetry::session_ctx::log_event(

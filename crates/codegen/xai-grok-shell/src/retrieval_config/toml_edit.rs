@@ -62,8 +62,8 @@ fn apply_graph_to_document(doc: &mut toml_edit::DocumentMut, graph: &RetrievalGr
     );
     // prime
     write_prime(doc, &graph.prime);
-    // memory.retrieval_profile only (do not disturb other memory keys)
-    write_memory_retrieval_profile(doc, graph.memory_retrieval_profile.as_deref());
+    // memory section
+    write_memory_section(doc, graph);
 }
 
 /// Known keys for embedding model tables (optional None values are cleared).
@@ -248,21 +248,26 @@ fn write_agent_table(cfg: &xai_grok_config_types::AgentPrimeConfig) -> toml_edit
     t
 }
 
-fn write_memory_retrieval_profile(doc: &mut toml_edit::DocumentMut, profile: Option<&str>) {
-    match profile {
-        Some(p) if !p.is_empty() => {
-            if !doc.contains_key("memory") {
-                doc["memory"] = toml_edit::Item::Table(toml_edit::Table::new());
-            }
-            if let Some(mem) = doc["memory"].as_table_mut() {
-                mem["retrieval_profile"] = toml_edit::value(p);
-            }
+fn write_memory_section(doc: &mut toml_edit::DocumentMut, graph: &RetrievalGraphConfig) {
+    let has_any = graph.memory_retrieval_profile.is_some()
+        || graph.memory_mode.is_some()
+        || graph.memory_vector_store.is_some();
+    if has_any && !doc.contains_key("memory") {
+        doc["memory"] = toml_edit::Item::Table(toml_edit::Table::new());
+    }
+    if let Some(mem) = doc.get_mut("memory").and_then(|i| i.as_table_mut()) {
+        if let Some(p) = graph.memory_retrieval_profile.as_deref().filter(|s| !s.is_empty()) {
+            mem["retrieval_profile"] = toml_edit::value(p);
+        } else {
+            mem.remove("retrieval_profile");
         }
-        _ => {
-            // Clear only the retrieval_profile key; leave legacy memory.* intact.
-            if let Some(mem) = doc.get_mut("memory").and_then(|i| i.as_table_mut()) {
-                mem.remove("retrieval_profile");
-            }
+        if let Some(m) = graph.memory_mode {
+            mem["mode"] = toml_edit::value(m.as_str());
+        }
+        if let Some(vs) = graph.memory_vector_store.as_deref().filter(|s| !s.is_empty()) {
+            mem["vector_store"] = toml_edit::value(vs);
+        } else {
+            mem.remove("vector_store");
         }
     }
 }

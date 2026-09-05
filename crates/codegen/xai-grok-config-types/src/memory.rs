@@ -8,6 +8,33 @@
 
 use serde::{Deserialize, Serialize};
 
+/// Memory backend mode (`[memory] mode`).
+///
+/// - [`MemoryMode::Local`] (default): the classic pipeline — memory files
+///   are indexed into the local SQLite index (FTS5 + sqlite-vec) and
+///   searched locally. No remote dependency.
+/// - [`MemoryMode::Milvus`]: the searchable plane (chunk text, BM25
+///   keyword index, dense vectors) lives in the named `[vector_stores.<id>]`
+///   Milvus deployment. Hard-remote: when the store is unreachable,
+///   searches return no results — there is no local fallback. Requires
+///   `vector_store` to be set; memory is disabled with a warning otherwise.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum MemoryMode {
+    #[default]
+    Local,
+    Milvus,
+}
+
+impl MemoryMode {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Local => "local",
+            Self::Milvus => "milvus",
+        }
+    }
+}
+
 /// Index and chunking configuration (`[memory.index]`).
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(default)]
@@ -437,6 +464,17 @@ mod tests {
         assert!(MemorySessionConfig::default().save_on_end);
         assert_eq!(MemoryGcConfig::default().max_age_days, 30);
         assert_eq!(PruningConfig::default().keep_last_n_turns, 3);
+    }
+
+    #[test]
+    fn memory_mode_defaults_to_local_and_parses_lowercase() {
+        assert_eq!(MemoryMode::default(), MemoryMode::Local);
+        let m: MemoryMode = serde_json::from_str(r#""local""#).unwrap();
+        assert_eq!(m, MemoryMode::Local);
+        let m: MemoryMode = serde_json::from_str(r#""milvus""#).unwrap();
+        assert_eq!(m, MemoryMode::Milvus);
+        assert!(serde_json::from_str::<MemoryMode>(r#""remote""#).is_err());
+        assert!(serde_json::from_str::<MemoryMode>(r#""Milvus""#).is_err());
     }
 
     #[test]

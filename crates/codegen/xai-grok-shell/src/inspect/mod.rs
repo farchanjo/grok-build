@@ -600,6 +600,11 @@ pub struct RetrievalInspect {
     pub memory_retrieval_profile: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub memory_pin: Option<MemoryPinInspect>,
+    /// Remote vector-store mirrors resolved in this process (memory and
+    /// prime collections). Secret-free: backend label, lifecycle state, and
+    /// row count only — no URI, token, or fingerprint hash.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub vector_mirrors: Vec<VectorMirrorInspect>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub warnings: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -729,6 +734,23 @@ struct InstalledMemorySource {
 #[derive(Debug, Clone, Deserialize)]
 struct InstalledMemoryFingerprint {
     source: InstalledMemorySource,
+}
+
+/// Secret-free live mirror state for `/context` (see
+/// `crate::session::vector_mirror`).
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VectorMirrorInspect {
+    /// Backend label (`milvus`).
+    pub backend: String,
+    /// Remote collection name (contains no secrets — workspace identity
+    /// hash prefix + kind).
+    pub collection: String,
+    /// Lifecycle state: `syncing` | `ready` | `unavailable`.
+    pub state: String,
+    /// Row count last reported by the mirror, when known.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub row_count: Option<u64>,
 }
 
 /// Installed memory-vector identity, emitted only when no rebuild is pending.
@@ -1572,6 +1594,24 @@ fn build_retrieval(home: &Path, cwd: Option<&Path>) -> RetrievalInspect {
             )
             .map(str::to_owned),
         }),
+        vector_mirrors: crate::session::vector_mirror::registered_mirrors()
+            .iter()
+            .map(|handle| {
+                let snapshot = handle.snapshot();
+                VectorMirrorInspect {
+                    backend: handle.mirror().backend_id().to_owned(),
+                    collection: handle.collection().to_owned(),
+                    state: match snapshot.state {
+                        xai_grok_memory::MirrorState::Syncing => "syncing",
+                        xai_grok_memory::MirrorState::Ready => "ready",
+                        xai_grok_memory::MirrorState::Unavailable => "unavailable",
+                        xai_grok_memory::MirrorState::Unconfigured => "unconfigured",
+                    }
+                    .to_owned(),
+                    row_count: snapshot.row_count,
+                }
+            })
+            .collect(),
     }
 }
 
@@ -3166,6 +3206,18 @@ fn print_retrieval(r: &RetrievalInspect) {
         if let Some(route) = &idx.configured_route {
             println!("  {TREE} prime index route {route}");
         }
+    }
+    for mirror in &r.vector_mirrors {
+        println!(
+            "  {TREE} vector mirror {} {} [{}] (rows {}) — sqlite-vec fallback on any error",
+            mirror.backend,
+            mirror.collection,
+            mirror.state,
+            mirror
+                .row_count
+                .map(|n| n.to_string())
+                .unwrap_or_else(|| "?".into()),
+        );
     }
 }
 

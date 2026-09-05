@@ -152,6 +152,42 @@ fn memory_config_toml_disabled() {
         assert!(!mem.enabled);
     });
 }
+
+#[test]
+fn memory_config_mode_parses_and_defaults_local() {
+    without_grok_memory(|| {
+        let config: toml::Value = toml::from_str("[memory]\nenabled = true").unwrap();
+        let mem = MemoryConfig::resolve(false, false, &config, None);
+        assert_eq!(mem.mode, MemoryMode::Local);
+
+        let config: toml::Value = toml::from_str(
+            "[memory]\nenabled = true\nmode = \"milvus\"\nvector_store = \"vm\"",
+        )
+        .unwrap();
+        let mem = MemoryConfig::resolve(false, false, &config, None);
+        assert_eq!(mem.mode, MemoryMode::Milvus);
+        assert_eq!(mem.vector_store.as_deref(), Some("vm"));
+    });
+}
+
+#[test]
+fn validated_for_runtime_milvus_requires_store() {
+    let mut mem = MemoryConfig::default();
+    mem.enabled = true;
+    // `local` mode needs no store.
+    assert!(mem.clone().validated_for_runtime().is_some());
+    // `milvus` without a store is a hard configuration error: memory off.
+    mem.mode = MemoryMode::Milvus;
+    assert!(mem.clone().validated_for_runtime().is_none());
+    // `milvus` with a named store runs.
+    mem.vector_store = Some("vm".into());
+    assert!(mem.validated_for_runtime().is_some());
+    // Disabled memory stays off regardless of mode.
+    let mut off = MemoryConfig::default();
+    off.enabled = false;
+    off.mode = MemoryMode::Milvus;
+    assert!(off.validated_for_runtime().is_none());
+}
 #[test]
 fn memory_config_env_var_enables() {
     with_grok_memory(

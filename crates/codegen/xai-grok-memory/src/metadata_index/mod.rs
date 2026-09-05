@@ -379,6 +379,16 @@ impl MetadataIndex {
             .unwrap_or(0)
     }
 
+    /// Whether `item_id` is a live item of `collection` (mirror KNN hits
+    /// are filtered through this before being served).
+    pub fn item_exists(
+        &self,
+        collection: CollectionKind,
+        item_id: &str,
+    ) -> Result<bool, MetadataIndexError> {
+        Ok(existing_item(&self.db, collection, item_id)?.is_some())
+    }
+
     pub fn vec_count(&self, collection: CollectionKind) -> i64 {
         if !self.vec_available || !self.vec_table_exists(collection) {
             return 0;
@@ -1616,4 +1626,77 @@ fn hex_encode(bytes: &[u8]) -> String {
         out.push(HEX[(b & 0xf) as usize] as char);
     }
     out
+}
+
+/// [`crate::mirror::MirrorResyncSource`] draining a prime collection vec
+/// table for the vector-mirror resync engine.
+///
+/// Opens its own read-only connection (the sqlite-vec module is registered
+/// process-wide) so no [`MetadataIndex`] borrow is ever held across an
+/// `.await`. Row order is keyset-paginated by `item_id`, matching the
+/// pagination contract of the resync engine.
+pub struct PrimeVecResyncSource {
+    conn: rusqlite::Connection,
+    table: String,
+}
+
+impl PrimeVecResyncSource {
+    /// Open a read-only drain connection over `collection`'s vec table.
+    pub fn open(
+        db_path: &Path,
+        collection: CollectionKind,
+    ) -> Result<Self, crate::mirror::MirrorError> {
+        use crate::mirror::{MirrorError, MirrorErrorKind};
+        init_sqlite_vec();
+        let conn = rusqlite::Connection::open_with_flags(
+            db_path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .map_err(|e| {
+            MirrorError::with_detail(
+                MirrorErrorKind::SourceUnavailable,
+                format!("open prime index for resync: {e}"),
+                None,
+            )
+        })?;
+        Ok(Self {
+            conn,
+            table: collection.vec_table().to_owned(),
+        })
+    }
+}
+
+impl crate::mirror::MirrorResyncSource for PrimeVecResyncSource {
+    fn next_batch(
+        &mut self,
+        cursor: Option<String>,
+        max: usize,
+    ) -> Result<(Option<String>, Vec<(String, Vec<f32>)>), crate::mirror::MirrorError> {
+        use crate::mirror::{MirrorError, MirrorErrorKind};
+        let sql = format!(
+            "SELECT item_id, embedding FROM {} \
+             WHERE (?1 IS NULL OR item_id > ?1) \
+             ORDER BY item_id LIMIT ?2",
+            self.table
+        );
+        let map_err = |e: rusqlite::Error| {
+            MirrorError::with_detail(MirrorErrorKind::SourceUnavailable, e.to_string(), None)
+        };
+        let mut stmt = self.conn.prepare(&sql).map_err(map_err)?;
+        let rows = stmt
+            .query_map(rusqlite::params![cursor, max as i64], |row| {
+                let id: String = row.get(0)?;
+                let blob: Vec<u8> = row.get(1)?;
+                Ok((id, crate::mirror::decode_f32_le(&blob)))
+            })
+            .map_err(map_err)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(map_err)?;
+        let next = if rows.len() < max.max(1) {
+            None
+        } else {
+            rows.last().map(|(id, _)| id.clone())
+        };
+        Ok((next, rows))
+    }
 }

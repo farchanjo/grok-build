@@ -168,11 +168,28 @@ BM25 and sqlite-vec KNN over a disposable metadata index. Vectors are
 locally L2-normalized (`l2_v1`) and fingerprinted so mixed embedding spaces
 cannot share a collection.
 
+SQLite remains the authoritative vector store for this path.
+For memory, `[memory] mode` selects between `"local"` (the default: local
+SQLite index with sqlite-vec and FTS5, zero Milvus involvement) and
+`"milvus"` (hard-remote primary store: Milvus BM25 keyword search and dense
+KNN, local SQLite for chunk bookkeeping only). The mode is selectable in
+the TUI (`/retrieval-settings`) and configurable per-workspace in
+`.grok/config.toml` (gated by folder trust). A `[vector_stores.<id>]` entry
+(backend `milvus`) describes the remote Milvus server: mirror reads require a
+fingerprint/dims/row-count match and fall back to sqlite-vec in local mode,
+while milvus mode enforces hard-remote semantics with no silent fallback.
+Resync streams vectors from SQLite without re-embedding. The mirror bearer
+token resolves from the vault scope `milvus::<store-id>::token` or the
+`MILVUS_TOKEN_FOR_<ID>` environment variable, never from config. A
+configured store receives memory text, so mirror tests stay hermetic (fake
+mirrors); live-server conformance tests are `#[ignore]`-gated.
+
 Development and tests for this path must stay hermetic: no live embedding
 or rerank providers, no production `GROK_HOME`, and no secret/path leakage
 in inspect JSON, logs, or rendered `<skill_prime>` blocks. Routing-quality
 metrics live beside the Prime code. Operator docs:
 
+- [`crates/codegen/xai-grok-pager/docs/user-guide/13-memory.md`](crates/codegen/xai-grok-pager/docs/user-guide/13-memory.md)
 - [`crates/codegen/xai-grok-pager/docs/user-guide/30-retrieval-and-prime.md`](crates/codegen/xai-grok-pager/docs/user-guide/30-retrieval-and-prime.md)
 - [`crates/codegen/xai-grok-pager/docs/user-guide/31-strict-skills-migration.md`](crates/codegen/xai-grok-pager/docs/user-guide/31-strict-skills-migration.md)
 

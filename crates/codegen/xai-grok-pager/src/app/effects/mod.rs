@@ -5962,15 +5962,28 @@ async fn run_retrieval_operation(
             )),
             RetrievalCommand::SaveMemoryProfile {
                 profile,
+                mode,
+                vector_store,
                 expected_generation,
                 confirm_memory_reindex,
                 operation_id,
-            } => RetrievalManagementResult::Mutation(svc.save_memory_profile(
-                expected_generation,
-                profile,
-                confirm_memory_reindex,
-                Some(operation_id),
-            )),
+            } => {
+                let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+                let mode_str = mode.map(|m| m.as_str().to_string()).unwrap_or_else(|| "local".into());
+                let _ = crate::config_toml_edit::write_project_memory_config(
+                    &cwd,
+                    &mode_str,
+                    vector_store.as_deref(),
+                );
+                RetrievalManagementResult::Mutation(svc.save_memory_profile(
+                    expected_generation,
+                    profile,
+                    mode,
+                    vector_store,
+                    confirm_memory_reindex,
+                    Some(operation_id),
+                ))
+            }
             // Confirm without pending draft is a programming error; fail closed.
             RetrievalCommand::ConfirmMemoryReindex => RetrievalManagementResult::Error(
                 "reindex confirmation missing pending draft mutation; reload and retry".into(),

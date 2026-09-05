@@ -8,6 +8,10 @@ edition.workspace = true
 # Exposes `#[cfg(test)]`-only helpers (`MemoryStorage::with_paths`,
 # `MockEmbeddingProvider`) to downstream crates' test targets.
 test-support = []
+# Milvus vector-mirror backend (`mirror_milvus.rs`). Default-on so fcustom
+# builds include it; slim builds can opt out with `--no-default-features`.
+default = ["milvus"]
+milvus = ["dep:milvus-sdk-rust"]
 
 [dependencies]
 anyhow = { workspace = true }
@@ -20,6 +24,10 @@ flate2 = { workspace = true }
 git2 = { version = "0.20", default-features = false, features = [
     "vendored-libgit2",
 ] }
+# Official Milvus SDK (ClientV2 gRPC). Exact pin, like sqlite-vec. The SDK
+# pins tonic 0.13 while this workspace uses tonic 0.14: semver-incompatible
+# coexistence is intentional — do not unify the versions here.
+milvus-sdk-rust = { version = "=2.6.0", optional = true }
 notify = { workspace = true }
 reqwest = { workspace = true }
 reqwest-middleware = { workspace = true }

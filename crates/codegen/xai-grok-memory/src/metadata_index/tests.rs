@@ -1189,6 +1189,93 @@ async fn stage_only_does_not_install_until_commit() {
     assert!(state.vec_count > 0);
 }
 
+/// A failed embedding era (e.g., missing credential) leaves a `running`
+/// pending marker with empty staging behind. The next successful backfill
+/// must still stage and install over that marker instead of silently
+/// reporting completion with zero vectors.
+#[tokio::test]
+async fn failed_embedding_era_must_not_block_next_successful_backfill() {
+    struct FailingEmbedder;
+
+    #[async_trait::async_trait]
+    impl EmbeddingProvider for FailingEmbedder {
+        async fn embed_batch(
+            &self,
+            _texts: &[&str],
+        ) -> Result<Vec<Vec<f32>>, Box<dyn std::error::Error>> {
+            Err("embedding route unavailable".into())
+        }
+
+        fn model_name(&self) -> &str {
+            "failing"
+        }
+
+        fn dimensions(&self) -> usize {
+            1536
+        }
+    }
+
+    let tmp = TempDir::new().unwrap();
+    let (db_path, idx) = open(&tmp);
+    // Production-shaped inventory: 39 skills with large index documents
+    // (descriptions are bounded at 1024 chars, as in production).
+    let items: Vec<MetadataItem> = (0..39)
+        .map(|i| {
+            item(
+                &format!("s{i:032}"),
+                &format!("skill-{i}"),
+                &"d".repeat(900),
+            )
+        })
+        .collect();
+    idx.replace_inventory(CollectionKind::Skills, 1, &items)
+        .unwrap();
+    drop(idx);
+
+    // Era 1: every embed fails; the marker stays `running` with empty
+    // staging, exactly like the production missing-credential period.
+    let failing: Option<Arc<dyn EmbeddingProvider>> = Some(Arc::new(FailingEmbedder));
+    let _ = stage_collection_vectors(
+        &db_path,
+        CollectionKind::Skills,
+        &spec("m", 1536),
+        failing,
+        60,
+        0,
+        Some(8),
+        CancellationToken::new(),
+    )
+    .await;
+
+    // Era 2: the production call with a working embedder must converge.
+    let good: Option<Arc<dyn EmbeddingProvider>> =
+        Some(Arc::new(MockEmbeddingProvider { dimensions: 1536 }));
+    let staged = stage_collection_vectors(
+        &db_path,
+        CollectionKind::Skills,
+        &spec("m", 1536),
+        good,
+        60,
+        0,
+        Some(8),
+        CancellationToken::new(),
+    )
+    .await;
+    assert!(
+        matches!(staged, VectorReadiness::Pending { owned: true }),
+        "successful stage-only must report pending-owned, got {staged:?}"
+    );
+    assert!(
+        commit_staged_vectors(&db_path, CollectionKind::Skills, &spec("m", 1536)),
+        "complete staging must install after the failed era"
+    );
+    let idx = MetadataIndex::open_or_create(&db_path).unwrap();
+    let state = idx.collection_state(CollectionKind::Skills).unwrap();
+    assert_eq!(state.vec_count, 39, "era-2 backfill must fill all vectors");
+    assert_eq!(state.embedding_dimensions, 1536);
+    assert!(!state.fingerprint_hash.is_empty());
+}
+
 #[tokio::test]
 async fn incremental_compatible_gap_is_ready_missing_not_rebuild() {
     let tmp = TempDir::new().unwrap();

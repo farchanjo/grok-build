@@ -528,6 +528,23 @@ pub struct ContextInfo {
     /// native turn. `None` on partials or when no prime outcome was recorded.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub prime: Option<PrimeContextInfo>,
+    /// Secret-free memory system info surfaced for /context.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub memory: Option<MemoryContextInfo>,
+}
+
+/// Secret-free memory system info surfaced for /context.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct MemoryContextInfo {
+    /// Active mode: "local" or "milvus".
+    pub mode: String,
+    /// Backend store identifier, e.g. "sqlite" or "milvus".
+    pub backend: String,
+    /// Health/readiness status: "ready", "syncing", "unavailable".
+    pub status: String,
+    /// Number of chunks / rows.
+    pub total_chunks: u64,
 }
 
 impl ContextInfo {

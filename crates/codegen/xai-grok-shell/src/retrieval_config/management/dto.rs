@@ -37,6 +37,9 @@ pub struct RetrievalProfileDto {
 pub struct PrimeDto {
     pub skills: SkillPrimeConfig,
     pub agents: AgentPrimeConfig,
+    /// Optional `[prime] vector_store` selection; carried so TUI drafts
+    /// preserve the live value across save.
+    pub vector_store: Option<String>,
 }
 
 impl From<PrimeConfig> for PrimeDto {
@@ -44,6 +47,7 @@ impl From<PrimeConfig> for PrimeDto {
         Self {
             skills: p.skills,
             agents: p.agents,
+            vector_store: p.vector_store,
         }
     }
 }
@@ -58,6 +62,12 @@ pub struct RetrievalGraphSnapshot {
     pub prime: PrimeDto,
     /// Optional `[memory] retrieval_profile`.
     pub memory_retrieval_profile: Option<String>,
+    /// Memory mode: "local" or "milvus".
+    #[serde(default = "default_memory_mode_str")]
+    pub memory_mode: String,
+    /// Optional `[memory] vector_store`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory_vector_store: Option<String>,
     /// Structured warning messages (secret-free).
     pub warnings: Vec<String>,
     /// Hard validation issues (paths + messages).
@@ -66,6 +76,10 @@ pub struct RetrievalGraphSnapshot {
     pub validation_warnings: Vec<String>,
     /// Whether the graph is currently valid for save (no hard errors).
     pub is_valid: bool,
+}
+
+fn default_memory_mode_str() -> String {
+    "local".into()
 }
 
 /// Multi-client conflict info (safe field names only).
@@ -233,6 +247,10 @@ pub struct SavePrimeRequest {
 pub struct SaveMemoryProfileRequest {
     pub expected_generation: RegistryGeneration,
     pub profile: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vector_store: Option<String>,
     #[serde(default)]
     pub confirm_memory_reindex: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]

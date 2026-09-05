@@ -684,6 +684,7 @@ pub mod mcp_servers;
 pub mod memory;
 pub(crate) mod normalize_cache;
 pub mod persistence;
+pub mod vector_mirror;
 pub use xai_grok_shared::placeholder_images;
 pub mod plan_mode;
 pub mod prompt_history;

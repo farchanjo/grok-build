@@ -138,6 +138,8 @@ pub enum RetrievalCommand {
     },
     SaveMemoryProfile {
         profile: Option<String>,
+        mode: Option<xai_grok_shell::config::MemoryMode>,
+        vector_store: Option<String>,
         expected_generation: RegistryGeneration,
         confirm_memory_reindex: bool,
         operation_id: String,
@@ -254,11 +256,15 @@ impl RetrievalCommand {
             },
             Self::SaveMemoryProfile {
                 profile,
+                mode,
+                vector_store,
                 expected_generation,
                 operation_id,
                 ..
             } => Self::SaveMemoryProfile {
                 profile,
+                mode,
+                vector_store,
                 expected_generation,
                 confirm_memory_reindex: confirm,
                 operation_id,
@@ -374,11 +380,15 @@ impl RetrievalCommand {
             },
             Self::SaveMemoryProfile {
                 profile,
+                mode,
+                vector_store,
                 expected_generation,
                 confirm_memory_reindex,
                 ..
             } => Self::SaveMemoryProfile {
                 profile,
+                mode,
+                vector_store,
                 expected_generation,
                 confirm_memory_reindex,
                 operation_id,
@@ -450,6 +460,8 @@ pub struct RetrievalSettingsState {
     pub dirty: bool,
     pub conflict: Option<RetrievalConflictInfo>,
     pub draft_prime: PrimeConfig,
+    pub draft_memory_mode: String,
+    pub draft_memory_vector_store: Option<String>,
     pub draft_memory_profile: Option<String>,
     pub(crate) line_editor: LineEditor,
     pub window: ModalWindowState,
@@ -483,6 +495,8 @@ impl RetrievalSettingsState {
             dirty: false,
             conflict: None,
             draft_prime: PrimeConfig::default(),
+            draft_memory_mode: "local".into(),
+            draft_memory_vector_store: None,
             draft_memory_profile: None,
             line_editor: LineEditor::default(),
             window: ModalWindowState::default(),
@@ -564,7 +578,10 @@ impl RetrievalSettingsState {
         self.draft_prime = PrimeConfig {
             skills: snap.prime.skills.clone(),
             agents: snap.prime.agents.clone(),
+            vector_store: snap.prime.vector_store.clone(),
         };
+        self.draft_memory_mode = snap.memory_mode.clone();
+        self.draft_memory_vector_store = snap.memory_vector_store.clone();
         self.draft_memory_profile = snap.memory_retrieval_profile.clone();
         self.snapshot = Some(snap);
         self.loading = false;
@@ -1071,12 +1088,19 @@ impl RetrievalSettingsState {
             ),
             RetrievalPage::Memory => (
                 "memory".to_string(),
-                "selection".to_string(),
+                "settings".to_string(),
                 false,
-                vec![(
-                    "retrieval_profile".to_string(),
-                    self.draft_memory_profile.clone().unwrap_or_default(),
-                )],
+                vec![
+                    ("mode".to_string(), self.draft_memory_mode.clone()),
+                    (
+                        "vector_store".to_string(),
+                        self.draft_memory_vector_store.clone().unwrap_or_default(),
+                    ),
+                    (
+                        "retrieval_profile".to_string(),
+                        self.draft_memory_profile.clone().unwrap_or_default(),
+                    ),
+                ],
             ),
             RetrievalPage::Validate => return,
         };
@@ -1430,18 +1454,34 @@ impl RetrievalSettingsState {
                 }))
             }
             "memory" => {
+                let m = get("mode");
+                let mode = if m.trim() == "milvus" {
+                    Some(xai_grok_shell::config::MemoryMode::Milvus)
+                } else {
+                    Some(xai_grok_shell::config::MemoryMode::Local)
+                };
+                let vs = get("vector_store");
+                let vector_store = if vs.trim().is_empty() {
+                    None
+                } else {
+                    Some(vs.trim().to_owned())
+                };
                 let p = get("retrieval_profile");
                 let profile = if p.trim().is_empty() {
                     None
                 } else {
                     Some(p.trim().to_owned())
                 };
+                self.draft_memory_mode = mode.map(|m| m.as_str().to_string()).unwrap_or_else(|| "local".into());
+                self.draft_memory_vector_store = vector_store.clone();
                 self.draft_memory_profile = profile.clone();
                 self.dirty = true;
                 self.edit = RetrievalEditMode::Browse;
                 let op = self.next_op_id();
                 Some(self.stamp_mutation(RetrievalCommand::SaveMemoryProfile {
                     profile,
+                    mode,
+                    vector_store,
                     expected_generation: self.generation,
                     confirm_memory_reindex: false,
                     operation_id: op,
@@ -2009,24 +2049,45 @@ impl RetrievalSettingsState {
                 )));
             }
             RetrievalPage::Memory => {
-                let shown = if self.dirty {
+                let mode = if self.dirty {
+                    &self.draft_memory_mode
+                } else {
+                    snap.memory_mode.as_str()
+                };
+                let store = if self.dirty {
+                    self.draft_memory_vector_store.as_deref()
+                } else {
+                    snap.memory_vector_store.as_deref()
+                };
+                let profile = if self.dirty {
                     self.draft_memory_profile.as_ref()
                 } else {
                     snap.memory_retrieval_profile.as_ref()
                 };
-                lines.push(Line::from(format!("> retrieval_profile = {:?}", shown)));
+                lines.push(Line::from(format!("> mode = \"{mode}\"")));
+                if let Some(s) = store {
+                    lines.push(Line::from(format!("  vector_store = \"{s}\"")));
+                }
+                if let Some(p) = profile {
+                    lines.push(Line::from(format!("  retrieval_profile = \"{p}\"")));
+                }
                 if self.dirty {
                     lines.push(Line::from(Span::styled(
                         "(draft — not yet saved)",
                         Style::default().fg(theme.warning),
                     )));
                 }
+                lines.push(Line::from(""));
                 lines.push(Line::from(Span::styled(
-                    "Legacy [memory.embedding]/[memory.search] remain readable and unchanged.",
+                    "Mode 'local' = isolated local SQLite/FTS5 (default).",
                     Style::default().fg(theme.gray),
                 )));
                 lines.push(Line::from(Span::styled(
-                    "Changing the profile may require reindex confirmation (not executed here).",
+                    "Mode 'milvus' = hard remote Milvus BM25 + dense vector store.",
+                    Style::default().fg(theme.gray),
+                )));
+                lines.push(Line::from(Span::styled(
+                    "Saved per-workspace in .grok/config.toml (folder trust required).",
                     Style::default().fg(theme.gray),
                 )));
             }
@@ -2844,6 +2905,8 @@ mod tests {
         s.apply_snapshot(snap_with_emb());
         let draft = RetrievalCommand::SaveMemoryProfile {
             profile: Some("p1".into()),
+            mode: None,
+            vector_store: None,
             expected_generation: RegistryGeneration(1),
             confirm_memory_reindex: false,
             operation_id: "op-mem".into(),
@@ -2865,6 +2928,7 @@ mod tests {
                 expected_generation,
                 confirm_memory_reindex,
                 operation_id,
+                ..
             }) => {
                 assert_eq!(profile.as_deref(), Some("p1"));
                 assert_eq!(expected_generation.get(), 1);
@@ -2933,6 +2997,8 @@ mod tests {
         s.apply_snapshot(snap_with_emb());
         let draft = RetrievalCommand::SaveMemoryProfile {
             profile: Some("p1".into()),
+            mode: None,
+            vector_store: None,
             expected_generation: RegistryGeneration(1),
             confirm_memory_reindex: false,
             operation_id: "op-mem".into(),
@@ -2954,6 +3020,7 @@ mod tests {
                 operation_id,
                 profile,
                 expected_generation,
+                ..
             }) => {
                 assert_eq!(profile.as_deref(), Some("p1"));
                 assert_eq!(expected_generation.get(), 1);

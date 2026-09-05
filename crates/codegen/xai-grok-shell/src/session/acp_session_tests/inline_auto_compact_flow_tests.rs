@@ -527,6 +527,8 @@ fn initial_injection_backend_params_use_override_min_score() {
         retrieval: None,
         index_config: crate::config::MemoryIndexConfig::default(),
         rebuild_backoff_secs: 0,
+        vector_mirror: None,
+        mode: xai_grok_config_types::MemoryMode::Local,
     };
     let initial_injection = crate::config::MemoryInitialInjectionConfig {
         enabled: true,
@@ -558,6 +560,8 @@ fn initial_injection_backend_params_preserve_default_zero_min_score() {
         retrieval: None,
         index_config: crate::config::MemoryIndexConfig::default(),
         rebuild_backoff_secs: 0,
+        vector_mirror: None,
+        mode: xai_grok_config_types::MemoryMode::Local,
     };
     let (adjusted, effective_min_score) = build_initial_injection_backend_params(
         &params,

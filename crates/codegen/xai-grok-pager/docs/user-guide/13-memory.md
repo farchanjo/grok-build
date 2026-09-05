@@ -121,6 +121,32 @@ Named routes live under `[embedding_models.*]`, `[reranker_models.*]`, and
 `[memory] retrieval_profile = "<PROFILE_NAME>"` (see
 [Configuration](05-configuration.md)).
 
+### Remote vector-store mirror
+
+The SQLite index is always the authoritative vector store. Memory can
+optionally mirror its vectors to a remote vector server and serve vector
+search from that mirror:
+
+- **SQLite stays authoritative.** Grok writes vectors to SQLite first; the
+  remote mirror is a best-effort serving copy.
+- **The mirror is optional and opt-in.** By default memory is sqlite-only
+  and Grok contacts no remote server.
+- **Search falls back automatically.** Whenever the mirror is not ready or
+  the server is unreachable, Grok serves vector search from SQLite with
+  identical results.
+- **Resync is self-healing.** When the server is reachable again, Grok
+  rebuilds the mirror from the vectors already stored in SQLite -- no
+  re-embedding and no data loss.
+
+Currently the only supported backend is Milvus. For configuration and
+credentials, see the Configuration Reference below and
+[Retrieval and Prime](30-retrieval-and-prime.md).
+
+Security note: enabling a Milvus store sends memory text to that server.
+Memory chunk text and the vectors derived from it are transmitted to and
+stored on the configured server. Treat the server as trusted as your memory
+files.
+
 ---
 
 ## Automatic Saves
@@ -382,6 +408,54 @@ To edit memory from the shell, open the files in your editor directly -- for exa
 | `enabled` | `false` | Enable memory |
 | `session.save_on_end` | `true` | Write metadata summary on session end |
 | `watcher.enabled` | `true` | Watch `~/.grok/memory/` for external edits and reindex |
+| `vector_store` | unset | Named `[vector_stores.<id>]` entry the memory index mirrors to. Unset keeps memory sqlite-only. |
+
+### Vector-Store Settings (`[vector_stores.<id>]`)
+
+A named `[vector_stores.<id>]` entry describes one optional remote vector
+store that the memory index or the Prime metadata index can mirror to. Only
+non-secret fields live in config; the bearer token resolves at runtime (see
+[Vector-Store Credentials](#vector-store-credentials) below).
+
+| Key | Default | Description |
+|-----|---------|-------------|
+| `backend` | *(required)* | Backend implementation. Currently only `"milvus"` is supported. |
+| `uri` | *(required)* | Server URI, for example `http://localhost:19530`. Must start with `http://` or `https://`. |
+| `timeout_secs` | `10` | Per-call timeout in seconds, floored at `1`. |
+
+Select a store from a consumer with a sibling selection key:
+
+| Key | Default | Description |
+|-----|---------|-------------|
+| `[memory] mode` | `"local"` | Memory storage mode: `"local"` (default, SQLite/FTS5) or `"milvus"` (hard-remote Milvus BM25 + dense vectors). Can be configured per-workspace in `.grok/config.toml` (requires folder trust). |
+| `[memory] vector_store` | unset | Named `[vector_stores.<id>]` entry the memory index targets (required when `mode = "milvus"`). |
+| `[prime] vector_store` | unset | Named `[vector_stores.<id>]` entry the Prime metadata index mirrors to (shared by the `skills` and `callable_agents` collections). |
+
+An unset selection key keeps that consumer sqlite-only. For example:
+
+```toml
+[vector_stores.local-milvus]
+backend = "milvus"
+uri = "http://localhost:19530"
+timeout_secs = 10
+
+[memory]
+mode = "milvus"
+vector_store = "local-milvus"
+```
+
+### Vector-Store Credentials
+
+The Milvus bearer token never lives in `config.toml`. Grok resolves it in
+this order:
+
+1. The `MILVUS_TOKEN_FOR_<ID>` environment variable, where `<ID>` is the
+   store id uppercased with non-alphanumeric characters replaced by `_`
+   (store `local-milvus` maps to `MILVUS_TOKEN_FOR_LOCAL_MILVUS`).
+2. The app credential file (`auth.json` under the Grok home) at the vault
+   scope `milvus::<store-id>::token`.
+
+The token is never logged.
 
 ### Index Settings (`[memory.index]`)
 
@@ -483,6 +557,14 @@ enabled = true    # default
 ### Memory Not Appearing in Sessions
 
 Memory is injected on the first turn. If you started a session before enabling memory, start a new session with `/new`.
+
+### Milvus Server Unreachable
+
+If a configured Milvus server is down, memory search keeps working: vector
+search falls back to SQLite, and Grok logs the failure once instead of on
+every search. Writes continue to land in SQLite. When the server is
+reachable again, the mirror resyncs from the stored SQLite vectors
+automatically -- you do not need to reindex or re-embed anything.
 
 ### Viewing Memory Files
 

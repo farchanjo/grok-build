@@ -667,6 +667,8 @@ async fn first_turn_memory_injection_disabled_does_not_persist_to_chat_history()
                 retrieval: None,
                 index_config: crate::config::MemoryIndexConfig::default(),
                 rebuild_backoff_secs: 0,
+                vector_mirror: None,
+                mode: xai_grok_config_types::MemoryMode::Local,
             };
             let (event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel::<SessionEvent>();
             let actor = Arc::new(SessionActor {

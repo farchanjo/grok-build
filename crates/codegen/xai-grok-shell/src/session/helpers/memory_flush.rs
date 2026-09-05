@@ -243,6 +243,43 @@ const MAX_L2_DISTANCE: f64 = 2.0;
 /// Number of nearest neighbors to check during semantic dedup.
 const SEMANTIC_DEDUP_KNN_LIMIT: usize = 3;
 
+/// Version of [`is_semantically_duplicate`] that supports remote KNN in `milvus` mode.
+pub async fn is_semantically_duplicate_with_mirror(
+    content: &str,
+    index: &crate::session::memory::MemoryIndex,
+    embedding_provider: Option<&dyn crate::session::memory::embedding::EmbeddingProvider>,
+    mirror: Option<&xai_grok_memory::MirrorHandle>,
+    mode: xai_grok_config_types::MemoryMode,
+    fingerprint_hash: Option<&str>,
+    threshold: f64,
+) -> bool {
+    if mode == xai_grok_config_types::MemoryMode::Milvus {
+        let (Some(handle), Some(provider), Some(fp)) = (mirror, embedding_provider, fingerprint_hash) else {
+            return false;
+        };
+        if handle.snapshot().state != xai_grok_memory::MirrorState::Ready {
+            return false;
+        }
+        let embedding = match provider.embed_batch(&[content]).await {
+            Ok(mut vecs) if !vecs.is_empty() => vecs.swap_remove(0),
+            _ => return false,
+        };
+        let hits = match handle.knn_v2(&embedding, SEMANTIC_DEDUP_KNN_LIMIT, fp).await {
+            Ok(h) => h,
+            Err(_) => return false,
+        };
+        for hit in &hits {
+            let similarity = (1.0 - (hit.score as f64 / MAX_L2_DISTANCE)).clamp(0.0, 1.0);
+            if similarity > threshold {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    is_semantically_duplicate(content, index, embedding_provider, threshold).await
+}
+
 /// Check if flush content is semantically similar to existing memory chunks.
 /// The caller must reconcile the provider source before calling this helper.
 ///

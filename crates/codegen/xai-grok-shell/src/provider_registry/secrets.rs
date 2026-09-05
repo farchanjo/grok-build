@@ -19,6 +19,9 @@ use std::path::Path;
 pub enum ProviderCredentialKind {
     Application,
     Admin,
+    /// Bearer token for a remote vector-store mirror
+    /// (`milvus::<store-id>::token`). Never written by the provider CLI.
+    Token,
 }
 
 impl ProviderCredentialKind {
@@ -26,6 +29,7 @@ impl ProviderCredentialKind {
         match self {
             Self::Application => "api_key",
             Self::Admin => "admin_key",
+            Self::Token => "token",
         }
     }
 }
@@ -41,6 +45,9 @@ impl ProviderCredentialKind {
 pub enum ProviderSecretNamespace {
     OpenAiCompatible,
     OpenRouter,
+    /// Remote vector-store mirror (`milvus::<store-id>::token`). The only
+    /// namespace that accepts kind `token`; it rejects `api_key`/`admin_key`.
+    Milvus,
 }
 
 impl ProviderSecretNamespace {
@@ -48,6 +55,7 @@ impl ProviderSecretNamespace {
         match self {
             Self::OpenAiCompatible => "openai_compatible",
             Self::OpenRouter => "openrouter",
+            Self::Milvus => "milvus",
         }
     }
 }
@@ -272,7 +280,28 @@ pub fn parse_secret_scope(scope: &str) -> Result<ParsedSecretScope, ScopeParseEr
     if let Some(parsed) = parse_extra_openrouter_scope(scope)? {
         return Ok(parsed);
     }
+    if let Some(parsed) = parse_milvus_token_scope(scope)? {
+        return Ok(parsed);
+    }
     Err(ScopeParseError::UnknownScheme)
+}
+
+/// Parse `milvus::<store-id>::token` — the vault scope for a remote
+/// vector-store mirror bearer token. The kind is fixed (`token`); sibling
+/// kinds (`api_key` / `admin_key`) under the `milvus` namespace are
+/// rejected by [`configured_scope`].
+fn parse_milvus_token_scope(scope: &str) -> Result<Option<ParsedSecretScope>, ScopeParseError> {
+    let Some(rest) = scope.strip_prefix("milvus::") else {
+        return Ok(None);
+    };
+    let Some((id_part, kind_part)) = rest.rsplit_once("::") else {
+        return Err(ScopeParseError::Malformed);
+    };
+    Ok(Some(ParsedSecretScope::Configured(configured_scope(
+        id_part,
+        kind_part,
+        ProviderSecretNamespace::Milvus,
+    )?)))
 }
 
 fn parse_openai_compatible_scope(
@@ -316,9 +345,15 @@ fn configured_scope(
     namespace: ProviderSecretNamespace,
 ) -> Result<ProviderSecretScope, ScopeParseError> {
     validate_provider_id_str(id_part).map_err(ScopeParseError::InvalidId)?;
-    let kind = match kind_part {
-        "api_key" => ProviderCredentialKind::Application,
-        "admin_key" => ProviderCredentialKind::Admin,
+    let kind = match (kind_part, namespace) {
+        // `token` is exclusively a Milvus mirror scope; the Milvus namespace
+        // carries nothing else — provider kinds can never masquerade as
+        // mirror tokens and mirror tokens can never become API keys.
+        ("token", ProviderSecretNamespace::Milvus) => ProviderCredentialKind::Token,
+        ("token", _) => return Err(ScopeParseError::UnknownKind),
+        (_, ProviderSecretNamespace::Milvus) => return Err(ScopeParseError::UnknownKind),
+        ("api_key", _) => ProviderCredentialKind::Application,
+        ("admin_key", _) => ProviderCredentialKind::Admin,
         _ => return Err(ScopeParseError::UnknownKind),
     };
     let provider_id = ProviderId::new(id_part).map_err(ScopeParseError::InvalidId)?;
@@ -692,5 +727,50 @@ mod tests {
             }))
             .is_err()
         );
+    }
+
+    #[test]
+    fn milvus_token_scope_is_accepted_and_routed() {
+        let scope = "milvus::local-milvus::token";
+        assert!(
+            is_allowed_provider_scope(scope),
+            "milvus token must be allowed"
+        );
+        match parse_secret_scope(scope).unwrap() {
+            ParsedSecretScope::Configured(parsed) => {
+                assert_eq!(parsed.namespace, ProviderSecretNamespace::Milvus);
+                assert_eq!(parsed.kind, ProviderCredentialKind::Token);
+                assert_eq!(parsed.provider_id.as_str(), "local-milvus");
+                assert_eq!(parsed.as_scope_string(), scope);
+            }
+            other => panic!("unexpected parse: {other:?}"),
+        }
+        // read/store/clear secret paths accept the scope (they only validate
+        // the allowlist before touching auth.json).
+        let home = tempfile::tempdir().unwrap();
+        assert_eq!(
+            read_provider_secret(home.path(), scope).unwrap(),
+            None,
+            "unset vault entry reads as None"
+        );
+    }
+
+    #[test]
+    fn milvus_scope_rejects_sibling_kinds_and_namespaces_reject_token() {
+        // The milvus namespace only ever carries tokens.
+        assert!(!is_allowed_provider_scope("milvus::local-milvus::api_key"));
+        assert!(!is_allowed_provider_scope(
+            "milvus::local-milvus::admin_key"
+        ));
+        // Provider namespaces never accept token kind: a bearer token cannot
+        // masquerade as an API-key scope.
+        assert!(!is_allowed_provider_scope(
+            "openai_compatible::local_vllm::token"
+        ));
+        assert!(!is_allowed_provider_scope("openrouter::extra-acct::token"));
+        // Malformed shapes fail closed.
+        assert!(!is_allowed_provider_scope("milvus::local-milvus"));
+        assert!(!is_allowed_provider_scope("milvus::"));
+        assert!(!is_allowed_provider_scope("milvus::a::b::token"));
     }
 }

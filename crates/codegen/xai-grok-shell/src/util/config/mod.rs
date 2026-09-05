@@ -15,8 +15,9 @@ mod worktree;
 
 pub use announcements::*;
 pub use campaigns::{
-    load_effective_config, load_effective_config_disk_only, persist_models_default,
-    remote_campaigns_from_settings, set_remote_campaigns_from_settings, sync_campaign_fields,
+    load_effective_config, load_effective_config_disk_only, merge_project_memory_layer,
+    persist_models_default, remote_campaigns_from_settings, set_remote_campaigns_from_settings,
+    sync_campaign_fields,
 };
 pub use hints::*;
 pub use load::*;

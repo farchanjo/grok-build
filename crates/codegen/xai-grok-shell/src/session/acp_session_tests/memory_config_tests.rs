@@ -22,6 +22,8 @@ fn initial_injection_backend_params_use_override_min_score() {
         retrieval: None,
         index_config: crate::config::MemoryIndexConfig::default(),
         rebuild_backoff_secs: 0,
+        vector_mirror: None,
+        mode: xai_grok_config_types::MemoryMode::Local,
     };
     let initial_injection = crate::config::MemoryInitialInjectionConfig {
         enabled: true,
@@ -53,6 +55,8 @@ fn initial_injection_backend_params_preserve_default_zero_min_score() {
         retrieval: None,
         index_config: crate::config::MemoryIndexConfig::default(),
         rebuild_backoff_secs: 0,
+        vector_mirror: None,
+        mode: xai_grok_config_types::MemoryMode::Local,
     };
     let (adjusted, effective_min_score) = build_initial_injection_backend_params(
         &params,
@@ -585,6 +589,8 @@ async fn create_injection_ready_actor(
         retrieval: None,
         index_config: crate::config::MemoryIndexConfig::default(),
         rebuild_backoff_secs: 0,
+        vector_mirror: None,
+        mode: xai_grok_config_types::MemoryMode::Local,
     });
     actor
         .chat_state_handle
@@ -740,6 +746,8 @@ async fn facade_powers_flush_and_dream_embedding_emitters() {
         retrieval: Some(fake.clone()),
         index_config: crate::config::MemoryIndexConfig::default(),
         rebuild_backoff_secs: 0,
+        vector_mirror: None,
+        mode: xai_grok_config_types::MemoryMode::Local,
     };
     let provider = params.make_embedding_provider().await;
     assert!(
@@ -875,6 +883,8 @@ async fn startup_reindex_backfill_mixed_config_uses_facade_only() {
         Some("chat-secret"),
         "http://chat.example/v1",
         60,
+        None,
+        xai_grok_config_types::MemoryMode::Local,
     )
     .await;
     assert_eq!(
@@ -990,6 +1000,8 @@ async fn startup_reindex_backfill_unresolved_named_is_fts_only() {
         Some("chat-secret"),
         "http://chat.example/v1",
         60,
+        None,
+        xai_grok_config_types::MemoryMode::Local,
     )
     .await;
     assert_eq!(
@@ -1022,4 +1034,72 @@ fn startup_reindex_embedding_inputs_legacy_only_when_no_named_profile() {
         dims, 768,
         "index must open in the legacy space when no named profile"
     );
+}
+
+/// In milvus mode, startup reindex backfill reconciles against the remote mirror.
+#[tokio::test]
+async fn startup_reindex_backfill_milvus_mode_reconciles_remote_seam() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let global_dir = tmp.path().join("memory");
+    let ws_dir = global_dir.join("test_ws");
+    let storage = crate::session::memory::MemoryStorage::with_paths(global_dir, ws_dir);
+    let db_path = storage.workspace_dir().join("index.sqlite");
+
+    let mut idx = crate::session::memory::MemoryIndex::open_or_create(
+        &db_path,
+        storage.clone(),
+        crate::config::MemoryIndexConfig::default(),
+        4,
+    )
+    .unwrap();
+    let note = tmp.path().join("milvus_note.md");
+    std::fs::write(&note, "# Title\n\nMilvus startup backfill note.").unwrap();
+    idx.reindex_file(&note, "workspace").unwrap();
+    drop(idx);
+
+    let fake = std::sync::Arc::new(crate::session::memory::retrieval::FakeMemoryRetrieval::new(
+        4,
+        "pinned-model",
+    ));
+    let mirror = std::sync::Arc::new(xai_grok_memory::InMemoryVectorMirror::new());
+    let handle = std::sync::Arc::new(xai_grok_memory::MirrorHandle::new(mirror.clone(), "grok_mem_test"));
+
+    let credentials = crate::session::memory::EndpointScopedCredentials::none();
+
+    // First run in milvus mode embeds the chunk to remote
+    let embedded = super::spawn::startup_reindex_backfill(
+        &db_path,
+        storage.clone(),
+        Some(fake.clone()),
+        None,
+        crate::config::MemoryIndexConfig::default(),
+        &credentials,
+        Some("chat-secret"),
+        "http://chat.example/v1",
+        60,
+        Some(handle.clone()),
+        xai_grok_config_types::MemoryMode::Milvus,
+    )
+    .await;
+
+    assert_eq!(embedded, 1, "startup backfill in milvus mode must embed the chunk");
+    assert_eq!(handle.snapshot().state, xai_grok_memory::MirrorState::Ready);
+
+    // Second run in milvus mode (steady state) skips already embedded chunks
+    let embedded_again = super::spawn::startup_reindex_backfill(
+        &db_path,
+        storage.clone(),
+        Some(fake.clone()),
+        None,
+        crate::config::MemoryIndexConfig::default(),
+        &credentials,
+        Some("chat-secret"),
+        "http://chat.example/v1",
+        60,
+        Some(handle.clone()),
+        xai_grok_config_types::MemoryMode::Milvus,
+    )
+    .await;
+
+    assert_eq!(embedded_again, 0, "steady state backfill in milvus mode must skip unchanged chunk");
 }

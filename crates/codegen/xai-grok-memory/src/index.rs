@@ -82,7 +82,8 @@ pub struct ReindexResult {
 /// SQLite-backed memory index.
 pub struct MemoryIndex {
     db: rusqlite::Connection,
-    #[expect(dead_code, reason = "used by later PRs for reindex_all / file reads")]
+    /// Workspace storage handle; also identifies the database file for the
+    /// mirror resync engine's read-only drain connection (`db_path`).
     storage: MemoryStorage,
     chunk_config: MemoryIndexConfig,
     /// Whether sqlite-vec loaded successfully (FTS always available).
@@ -252,6 +253,14 @@ impl MemoryIndex {
         self.vec_available
     }
 
+    /// Path of the underlying SQLite database (workspace `index.sqlite`).
+    ///
+    /// Used by the mirror resync engine to open its own read-only drain
+    /// connection instead of borrowing this index across awaits.
+    pub fn db_path(&self) -> std::path::PathBuf {
+        self.storage.workspace_dir().join("index.sqlite")
+    }
+
     /// Embedding dimensions configured for this index.
     pub fn embedding_dimensions(&self) -> usize {
         self.embedding_dimensions
@@ -270,6 +279,26 @@ impl MemoryIndex {
                 r.get::<_, String>(0)
             })
             .ok()
+    }
+
+    /// Write a `meta` value (insert or update).
+    pub(crate) fn meta_set(&mut self, key: &str, value: &str) -> Result<(), rusqlite::Error> {
+        self.db.execute(
+            "INSERT INTO meta(key, value) VALUES (?1, ?2) \
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            params![key, value],
+        )?;
+        Ok(())
+    }
+
+    /// Record installed vector fingerprint in SQLite meta table (for milvus mode bookkeeping).
+    pub fn record_installed_fingerprint(&mut self, fp_hash: &str) -> Result<(), rusqlite::Error> {
+        self.meta_set(schema::META_VECTOR_FINGERPRINT_HASH, fp_hash)?;
+        self.meta_set(
+            schema::META_VECTOR_SCHEMA_VERSION,
+            &crate::mirror::MEMORY_SCHEMA_VERSION_V2.to_string(),
+        )?;
+        Ok(())
     }
 
     /// Installed canonical vector fingerprint hash, if any.
@@ -670,6 +699,31 @@ impl MemoryIndex {
         Ok(paths)
     }
 
+    /// Return all chunks in the `chunks` table (for milvus mode reconciliation).
+    pub fn all_chunks(&self) -> Result<Vec<ChunkRecord>, rusqlite::Error> {
+        let mut stmt = self.db.prepare(
+            "SELECT rowid, id, path, start_line, end_line, text, hash, source, access_count, created_at \
+             FROM chunks ORDER BY id",
+        )?;
+        let results = stmt
+            .query_map([], |row| {
+                Ok(ChunkRecord {
+                    rowid: row.get(0)?,
+                    id: row.get(1)?,
+                    path: row.get(2)?,
+                    start_line: row.get(3)?,
+                    end_line: row.get(4)?,
+                    text: row.get(5)?,
+                    hash: row.get(6)?,
+                    source: row.get(7)?,
+                    access_count: row.get(8)?,
+                    created_at: row.get(9)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(results)
+    }
+
     /// Record an access to a chunk (increments access_count, updates last_accessed).
     pub fn record_access(&mut self, chunk_id: &str) -> Result<(), rusqlite::Error> {
         let now = std::time::SystemTime::now()
@@ -885,13 +939,20 @@ impl MemoryIndex {
     /// Returns the number of chunks removed, which is 0 when the path was not
     /// previously indexed (idempotent).
     pub fn delete_path(&mut self, path: &Path) -> Result<usize, rusqlite::Error> {
+        self.delete_path_ids(path).map(|ids| ids.len())
+    }
+
+    /// [`Self::delete_path`] returning the removed chunk ids, for the
+    /// vector-mirror delete fan-out (mirror rows are keyed by chunk id).
+    pub fn delete_path_ids(&mut self, path: &Path) -> Result<Vec<String>, rusqlite::Error> {
         let path_str = path.to_string_lossy().to_string();
         let existing = self.get_chunks_for_path(&path_str)?;
 
         if existing.is_empty() {
-            return Ok(0);
+            return Ok(Vec::new());
         }
 
+        let ids: Vec<String> = existing.keys().cloned().collect();
         let tx = self.db.transaction()?;
         for (chunk_id, record) in &existing {
             // Contentless FTS5 requires the original text for the 'delete' command.
@@ -914,7 +975,7 @@ impl MemoryIndex {
             count = existing.len(),
             "memory index: deleted chunks for removed file"
         );
-        Ok(existing.len())
+        Ok(ids)
     }
 
     /// Get all existing chunks for a path, keyed by chunk ID.
@@ -1574,5 +1635,85 @@ mod tests {
         // The actual owner can release.
         idx.release_claim(&stolen);
         assert_eq!(idx.get_reindex_claim(), "");
+    }
+}
+/// Pins the sqlite-vec distance contract the vector-mirror score conversion
+/// must match (see `mirror::similarity_to_l2_distance`): orthogonal unit
+/// vectors are exactly `sqrt(2)` apart.
+#[cfg(test)]
+mod vec_distance_contract_tests {
+    use super::init_sqlite_vec;
+
+    #[test]
+    fn sqlite_vec_knn_returns_true_euclidean_l2_distance() {
+        init_sqlite_vec();
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE VIRTUAL TABLE probe_vec USING vec0(id TEXT PRIMARY KEY, embedding FLOAT[2]);",
+        )
+        .unwrap();
+        let put = |id: &str, v: [f32; 2]| {
+            let bytes: Vec<u8> = v.iter().flat_map(|f| f.to_le_bytes()).collect();
+            conn.execute(
+                "INSERT OR REPLACE INTO probe_vec(id, embedding) VALUES (?1, ?2)",
+                rusqlite::params![id, bytes],
+            )
+            .unwrap();
+        };
+        // Query q = (1,0); target t = (0,1): cosine 0, true L2 = sqrt(2).
+        put("q", [1.0, 0.0]);
+        put("t", [0.0, 1.0]);
+        let qbytes: Vec<u8> = [1.0f32, 0.0].iter().flat_map(|f| f.to_le_bytes()).collect();
+        let mut stmt = conn
+            .prepare("SELECT id, distance FROM probe_vec WHERE embedding MATCH ?1 AND k = 2")
+            .unwrap();
+        let rows: Vec<(String, f32)> = stmt
+            .query_map(rusqlite::params![qbytes], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        let distance = rows
+            .iter()
+            .find(|(id, _)| id == "t")
+            .map(|(_, d)| *d)
+            .unwrap();
+        // True euclidean L2 between orthogonal unit vectors — NOT the
+        // squared distance. The mirror score conversion must agree.
+        assert!(
+            (distance - 2.0f32.sqrt()).abs() < 1e-6,
+            "distance={distance}"
+        );
+    }
+}
+/// Delete fan-out support: `delete_path_ids` returns the removed chunk ids
+/// (mirror rows are keyed by chunk id) while `delete_path` keeps its count
+/// contract.
+#[cfg(test)]
+mod delete_ids_tests {
+    use super::{MemoryIndex, init_sqlite_vec};
+    use crate::storage::MemoryStorage;
+    use tempfile::TempDir;
+    use xai_grok_config_types::MemoryIndexConfig;
+
+    #[test]
+    fn delete_path_ids_returns_removed_chunk_ids() {
+        init_sqlite_vec();
+        let tmp = TempDir::new().unwrap();
+        let storage =
+            MemoryStorage::with_paths(tmp.path().join("memory"), tmp.path().join("memory/ws"));
+        let db_path = tmp.path().join("delete-ids.sqlite");
+        let mut idx =
+            MemoryIndex::open_or_create(&db_path, storage, MemoryIndexConfig::default(), 4)
+                .unwrap();
+        let file = tmp.path().join("gone.md");
+        std::fs::write(&file, "# T\n\nsome durable content").unwrap();
+        idx.reindex_file(&file, "workspace").unwrap();
+        let ids = idx.delete_path_ids(&file).unwrap();
+        assert!(!ids.is_empty(), "reindexed chunk ids must be returned");
+        assert!(ids.iter().all(|id| id.contains("gone.md")));
+        // Idempotent: second delete returns no ids; count-shaped delegate
+        // stays in sync.
+        assert!(idx.delete_path_ids(&file).unwrap().is_empty());
+        assert_eq!(idx.delete_path(&file).unwrap(), 0);
     }
 }

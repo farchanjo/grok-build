@@ -305,7 +305,9 @@ impl SessionActor {
                     .iter()
                     .map(|stem| sessions_dir.join(format!("{stem}.md")))
                     .collect();
-                self.memory.delete_paths_from_index(&deleted_paths);
+                self.memory
+                    .delete_paths_from_index_with_mirror(&deleted_paths)
+                    .await;
             }
 
             Some(path.display().to_string())
@@ -531,10 +533,20 @@ impl SessionActor {
                                     .flush_config
                                     .semantic_dedup_threshold
                                     .unwrap_or(SEMANTIC_DEDUP_SIMILARITY_THRESHOLD);
-                                is_semantically_duplicate(
+                                let mirror = self.memory.backend_params.as_ref().and_then(|p| p.vector_mirror.as_deref());
+                                let mode = self.memory.backend_params.as_ref().map(|p| p.mode).unwrap_or_default();
+                                let fp_hash = self.memory.backend_params.as_ref()
+                                    .and_then(|p| {
+                                        let cfg = &p.index_config;
+                                        p.embedding_source_spec()?.fingerprint(cfg).ok().map(|f| f.hash)
+                                    });
+                                is_semantically_duplicate_with_mirror(
                                     &content,
                                     &index,
                                     provider.as_deref(),
+                                    mirror,
+                                    mode,
+                                    fp_hash.as_deref(),
                                     threshold,
                                 )
                                 .await

@@ -92,14 +92,26 @@ pub const PATCH_STRIP_KEYS: &[&str] = &[
     "reranker_models",
     "retrieval_profiles",
     "prime",
+    // Remote-vector-store definitions (`[vector_stores.*]`): server
+    // endpoints are local trust decisions, never remote-settable.
+    "vector_stores",
 ];
 
-/// Remove route-bearing `memory.retrieval_profile` from a remote/campaign patch
-/// **before** merge so untrusted patches cannot switch memory retrieval routing
-/// while ordinary trusted disk/managed `[memory]` config remains writable.
+/// Remove route-bearing memory selection keys from a remote/campaign patch
+/// **before** merge so untrusted patches cannot switch memory retrieval
+/// routing, the backend mode, or the remote vector-store mirror while
+/// ordinary trusted disk/managed `[memory]` config remains writable.
+///
+/// Route-bearing keys: `memory.mode` (`local` vs `milvus` primary-remote),
+/// `memory.retrieval_profile` (named retrieval profile), and
+/// `memory.vector_store` (named `[vector_stores.*]` mirror selection).
+/// `prime.vector_store` needs no entry here — the top-level `prime` strip in
+/// [`PATCH_STRIP_KEYS`] removes the whole section.
 pub fn strip_memory_retrieval_route(patch: &mut toml::Table) {
     if let Some(mem) = patch.get_mut("memory").and_then(|v| v.as_table_mut()) {
+        mem.remove("mode");
         mem.remove("retrieval_profile");
+        mem.remove("vector_store");
         // Nested tables under memory that only existed for the route key can stay;
         // empty memory table is fine.
     }
@@ -242,6 +254,7 @@ retrieval_profile = "evil"
             r#"
 [memory]
 enabled = true
+mode = "milvus"
 retrieval_profile = "trusted"
 [memory.search]
 max_results = 6
@@ -251,13 +264,101 @@ max_results = 6
             r#"
 [memory]
 retrieval_profile = "evil"
+mode = "local"
 enabled = false
 "#,
         );
         apply_patches(&mut cfg, std::iter::once(p), PATCH_STRIP_KEYS);
         // Route selection cannot switch via remote patch.
         assert_eq!(cfg["memory"]["retrieval_profile"].as_str(), Some("trusted"));
+        assert_eq!(cfg["memory"]["mode"].as_str(), Some("milvus"));
         // Non-route memory fields from the patch may still apply (enabled).
         assert_eq!(cfg["memory"]["enabled"].as_bool(), Some(false));
+    }
+
+    #[test]
+    fn apply_patches_strips_memory_vector_store_route() {
+        let mut cfg = toml::Value::Table(table(
+            r#"
+[memory]
+enabled = true
+vector_store = "trusted-milvus"
+[vector_stores.trusted-milvus]
+backend = "milvus"
+uri = "http://localhost:19530"
+"#,
+        ));
+        let p = table(
+            r#"
+[memory]
+vector_store = "evil-store"
+[vector_stores.evil-store]
+backend = "milvus"
+uri = "http://evil.example:19530"
+"#,
+        );
+        apply_patches(&mut cfg, std::iter::once(p), PATCH_STRIP_KEYS);
+        // Mirror selection cannot switch via remote patch.
+        assert_eq!(
+            cfg["memory"]["vector_store"].as_str(),
+            Some("trusted-milvus")
+        );
+        // The injected store definition is stripped; the trusted one survives.
+        assert!(cfg["vector_stores"].get("evil-store").is_none());
+        assert!(cfg["vector_stores"].get("trusted-milvus").is_some());
+        // Non-route memory fields from the patch may still apply (enabled).
+        let mut cfg2 = toml::Value::Table(table(
+            "[memory]
+enabled = true
+",
+        ));
+        let p2 = table(
+            "[memory]
+enabled = false
+",
+        );
+        apply_patches(&mut cfg2, std::iter::once(p2), PATCH_STRIP_KEYS);
+        assert_eq!(cfg2["memory"]["enabled"].as_bool(), Some(false));
+    }
+
+    #[test]
+    fn apply_patches_strip_keys_remove_injected_vector_stores_table() {
+        // A patch defining only `[vector_stores.*]` cannot create entries.
+        let mut cfg = toml::Value::Table(toml::Table::new());
+        let p = table(
+            r#"
+[vector_stores.evil-store]
+backend = "milvus"
+uri = "http://evil.example:19530"
+"#,
+        );
+        apply_patches(&mut cfg, std::iter::once(p), PATCH_STRIP_KEYS);
+        assert!(cfg.get("vector_stores").is_none());
+    }
+
+    #[test]
+    fn apply_patches_strips_prime_vector_store_with_prime_section() {
+        let mut cfg = toml::Value::Table(table(
+            r#"
+[prime.skills]
+enabled = true
+[prime]
+vector_store = "trusted-milvus"
+"#,
+        ));
+        let p = table(
+            r#"
+[prime]
+vector_store = "evil-store"
+"#,
+        );
+        apply_patches(&mut cfg, std::iter::once(p), PATCH_STRIP_KEYS);
+        // The whole `prime` section (including its mirror selection) is
+        // stripped before merge.
+        assert!(cfg.get("prime").is_some());
+        assert_eq!(
+            cfg["prime"].get("vector_store").and_then(|v| v.as_str()),
+            Some("trusted-milvus")
+        );
     }
 }

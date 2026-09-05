@@ -9,7 +9,7 @@ use xai_grok_inference::RetrievalError;
 
 use super::clients::{FakeEmbedScript, FakeRerankScript, FakeRetrievalExecutor, RetrievalExecutor};
 use super::clock::MockClock;
-use super::error::{DegradationKind, OrchestratorError, RouteFailureClass};
+use super::error::{DegradationKind, LimitKind, OrchestratorError, RouteFailureClass};
 use super::pipeline::{CandidateRow, PipelineOptions};
 use super::registry::RetrievalRegistry;
 use super::reload::{
@@ -1301,11 +1301,12 @@ async fn retrieve_shares_deadline_and_attempts_across_embed_rerank() {
 }
 
 #[tokio::test]
-async fn output_budget_overflow_fails_closed_on_embed() {
+async fn embed_output_is_not_charged_against_text_budget() {
     let clock = Arc::new(MockClock::new());
     let reg = RetrievalRegistry::disabled_with_clock("/tmp/pr17-outbudget", clock);
     let mut graph = test_graph_two_embed_routes();
-    // Tiny output token budget so a small vector batch overflows.
+    // Tiny text-output budget: embedding payloads are `N × dims` floats,
+    // not text, so a normal batch must not trip `max_output_tokens`.
     graph
         .retrieval_profiles
         .get_mut("default")
@@ -1324,7 +1325,6 @@ async fn output_budget_overflow_fails_closed_on_embed() {
         },
     );
     let fake = Arc::new(FakeRetrievalExecutor::new());
-    // 64 dims * 1 vector * 4 bytes = 256 bytes ≈ 64 tokens > 1
     fake.set_embed(
         "emb-a",
         FakeEmbedScript::Ok {
@@ -1333,7 +1333,7 @@ async fn output_budget_overflow_fails_closed_on_embed() {
         },
     );
     let (svc, _) = service(reg, fake);
-    let err = svc
+    let stage = svc
         .embed(
             "default",
             vec!["q".into()],
@@ -1341,11 +1341,49 @@ async fn output_budget_overflow_fails_closed_on_embed() {
             CancellationToken::new(),
         )
         .await
-        .unwrap_err();
-    assert!(
-        matches!(err, OrchestratorError::OutputBudgetExceeded { .. }),
-        "{err:?}"
+        .expect("embedding payload must not trip the text-output budget");
+    assert_eq!(stage.result.vectors.len(), 1);
+}
+
+#[tokio::test]
+async fn embed_input_splits_into_route_bounded_subrequests() {
+    let clock = Arc::new(MockClock::new());
+    let reg = RetrievalRegistry::disabled_with_clock("/tmp/pr17-embcount", clock);
+    let mut graph = test_graph_two_embed_routes();
+    // The count bound (max_batch_documents, from the route batch_size) caps
+    // ONE upstream request, not the stage input: oversized stage inputs
+    // (prime staging/backfill, memory facade) split into ordered
+    // sub-requests sharing the single route attempt.
+    graph.embedding_models.get_mut("emb-a").unwrap().batch_size = 1;
+    let (views, meta) = test_provider_views_capable(&["acct-a", "acct-b"]);
+    reg.publish_build_input(
+        0,
+        SnapshotBuildInput {
+            graph,
+            graph_generation: 1,
+            provider_generation: 1,
+            provider_views: views,
+            provider_meta: meta,
+            parse_warnings: Vec::new(),
+        },
     );
+    let fake = Arc::new(FakeRetrievalExecutor::new());
+    fake.set_embed("emb-a", FakeEmbedScript::Ok { dims: 8, fill: 0.1 });
+    let (svc, _) = service(reg, Arc::clone(&fake));
+    let stage = svc
+        .embed(
+            "default",
+            vec!["q".into(), "r".into()],
+            PipelineOptions::default(),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("oversized stage input must split into route-bounded sub-requests");
+    assert_eq!(stage.result.vectors.len(), 2);
+    // Ordered sub-requests to the same pinned route, one per document.
+    assert_eq!(fake.embed_calls(), vec!["emb-a", "emb-a"]);
+    // Sub-requests share one route attempt.
+    assert_eq!(stage.attempts_used, 1);
 }
 
 #[tokio::test]

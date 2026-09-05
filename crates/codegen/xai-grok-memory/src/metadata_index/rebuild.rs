@@ -774,6 +774,10 @@ pub fn commit_staged_vectors(
     if pending.intended != fp.hash {
         return false;
     }
+    let complete = staging_complete(&idx, collection, &pending.id).unwrap_or(false);
+    if !complete {
+        return false;
+    }
     install_vectors(&idx, collection, &pending, &fp, &payload, spec.dimensions).unwrap_or(false)
 }
 
@@ -963,6 +967,11 @@ async fn ensure_collection_vectors(
             let vectors = match embedder.embed_batch(&texts).await {
                 Ok(v) => v,
                 Err(_) => {
+                    tracing::warn!(
+                        collection = %collection.as_str(),
+                        items = batch.len(),
+                        "prime index staging embed request failed"
+                    );
                     if let Ok(idx) = open_index(db_path) {
                         record_attempt(&idx, collection, &pending, now_secs(), backoff_secs);
                     }
@@ -970,6 +979,13 @@ async fn ensure_collection_vectors(
                 }
             };
             if validate_embedding_batch(batch.len(), spec.dimensions, &vectors).is_err() {
+                tracing::warn!(
+                    collection = %collection.as_str(),
+                    items = batch.len(),
+                    returned = vectors.len(),
+                    expected_dims = spec.dimensions,
+                    "prime index staging embed failed validation"
+                );
                 if let Ok(idx) = open_index(db_path) {
                     record_attempt(&idx, collection, &pending, now_secs(), backoff_secs);
                 }
@@ -981,11 +997,21 @@ async fn ensure_collection_vectors(
             };
             match pending_state(&idx, collection) {
                 Some(p) if p.id == pending.id => {}
-                _ => return VectorReadiness::Pending { owned: true },
+                _ => {
+                    tracing::warn!(
+                        collection = %collection.as_str(),
+                        "prime index staging lost its pending claim after embed"
+                    );
+                    return VectorReadiness::Pending { owned: true };
+                }
             }
             for ((item_id, hash, _), v) in batch.iter().zip(vectors.iter()) {
                 let mut row = v.clone();
                 if l2_normalize_v1(&mut row).is_err() {
+                    tracing::warn!(
+                        collection = %collection.as_str(),
+                        "prime index staging normalization failed"
+                    );
                     return VectorReadiness::Pending { owned: true };
                 }
                 if stage_vector(
@@ -999,6 +1025,10 @@ async fn ensure_collection_vectors(
                 )
                 .is_err()
                 {
+                    tracing::warn!(
+                        collection = %collection.as_str(),
+                        "prime index staging write failed"
+                    );
                     return VectorReadiness::Pending { owned: true };
                 }
             }

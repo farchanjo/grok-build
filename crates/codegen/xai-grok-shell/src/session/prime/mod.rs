@@ -56,10 +56,10 @@ use self::inventory::{InventoryLimits, WorkspaceInventory};
 use self::render::render_skills;
 
 pub use self::index::{
-    FrozenEmbeddingPin, PrimeIndexError, PrimeIndexHandle, agent_index_text, agent_rerank_document,
-    agent_source_class, agent_to_metadata_item, agents_to_index_items, bounded_cancel,
-    opaque_agent_id, opaque_skill_id, prime_index_for, skill_index_text, skill_rerank_document,
-    skill_to_metadata_item, skills_to_index_items, uninstall_prime_index,
+    FrozenEmbeddingPin, PrimeIndexError, PrimeIndexHandle, PrimeMirrorPair, agent_index_text,
+    agent_rerank_document, agent_source_class, agent_to_metadata_item, agents_to_index_items,
+    bounded_cancel, opaque_agent_id, opaque_skill_id, prime_index_for, skill_index_text,
+    skill_rerank_document, skill_to_metadata_item, skills_to_index_items, uninstall_prime_index,
 };
 pub use self::ops::{
     PRIME_FAILURE_CONFIRM_REQUIRED, PRIME_INDEX_API_VERSION, PRIME_INDEX_SCHEMA_VERSION,

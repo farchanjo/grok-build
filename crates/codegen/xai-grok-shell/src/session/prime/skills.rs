@@ -644,7 +644,10 @@ async fn fill_from_index(
     };
 
     let knn = match (pin_still_frozen, space_after) {
-        (true, Ok(())) => match handle.search_knn_with_pin(&frozen, &query_vec, knn_k) {
+        (true, Ok(())) => match handle
+            .search_knn_with_pin_mirror_first(&frozen, &query_vec, knn_k)
+            .await
+        {
             Ok(hits) => hits,
             Err(super::index::PrimeIndexError::SpaceMismatch) => {
                 return Err(knn_space_error(profile_id));

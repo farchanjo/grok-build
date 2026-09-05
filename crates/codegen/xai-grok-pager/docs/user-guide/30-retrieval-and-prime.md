@@ -4,7 +4,8 @@
 skills) before a turn, and *prime* is the bounded injection of that gathered
 context into the conversation. This guide explains named retrieval profiles,
 typed embedding and rerank protocols, ordered fallback and deadline
-enforcement, prime budgets, and the memory boundary.
+enforcement, prime budgets, the memory boundary, and the optional remote
+vector-store mirror.
 
 See also [Configuration](05-configuration.md), [Memory](13-memory.md),
 [Multi-Account Providers](29-multi-account-providers.md), and the provider
@@ -280,6 +281,14 @@ a second token category.
   selected profile.
 - **Rollback-safe warning.** Reverting does not rewrite active vectors; there
   is no destructive cleanup step.
+- **Memory Modes (`local` vs `milvus`).** `[memory] mode` chooses between
+  `"local"` (the default: local SQLite index with sqlite-vec and FTS5, zero
+  Milvus involvement) and `"milvus"` (hard-remote primary store: Milvus BM25
+  keyword search and dense KNN, local SQLite for chunk bookkeeping only).
+  Configurable per-workspace in `.grok/config.toml` (gated by folder trust).
+- **Remote vector-store mirror.** `[memory] vector_store` points to a named
+  `[vector_stores.<id>]` entry (required in `milvus` mode). In `local` mode,
+  leaving it unset keeps memory entirely local.
 
 ---
 
@@ -340,6 +349,81 @@ Configured-profile embedding runs only after explicit confirmation. The UI
 shows the profile id, never an endpoint. See
 [Strict Skills Migration](31-strict-skills-migration.md#index-operations).
 
+## Remote vector-store mirror
+
+SQLite stays the authoritative vector store for Memory and the Prime
+metadata index. A named `[vector_stores.<id>]` entry describes an optional
+remote **serving mirror**: Grok writes vectors to SQLite first, then fans
+the change out to the mirror best-effort. Reads go mirror-first only when
+the mirror is verified ready — the collection fingerprint, dimensions, and
+row count agree with SQLite — and any mismatch, error, or unreachable
+server falls back to the sqlite-vec path with identical result semantics.
+Mirror operations never block a turn or fail a session.
+
+Resync is self-healing. A stale, empty, or newly reachable mirror is
+repopulated by streaming the stored vectors from the SQLite vec tables in
+idempotent batches, verified by row count and fingerprint tag. No
+re-embedding happens and no data is lost; during a resync window, reads
+continue from SQLite, so there is no serving gap. The default is
+sqlite-only: with no store selected, no remote server is contacted.
+
+### Configuration
+
+```toml
+[vector_stores.local-milvus]
+backend = "milvus" # currently the only supported backend
+uri = "http://localhost:19530"
+timeout_secs = 10  # optional per-call timeout; default 10, minimum 1
+
+[memory]
+vector_store = "local-milvus" # mirror the memory index (optional)
+
+[prime]
+vector_store = "local-milvus" # mirror the prime metadata index (optional)
+```
+
+- `[vector_stores.<id>]` declares the store. `backend` currently accepts
+  only `"milvus"`; `uri` must start with `http://` or `https://`; the
+  optional `timeout_secs` bounds each mirror call (default `10`, floored at
+  `1`). Only non-secret fields live in config; a token key is rejected.
+- `[memory] vector_store` selects the store for the memory index, and
+  `[prime] vector_store` selects the store shared by the `skills` and
+  `callable_agents` metadata collections. Both keys are optional siblings of
+  `retrieval_profile`; the `[vector_stores.*]` table and both selection keys
+  are stripped from untrusted configuration patches, so a patch can neither
+  define a store nor redirect a selection.
+- An unset selection key keeps that consumer sqlite-only.
+
+### Credentials
+
+The Milvus bearer token never lives in config. Grok resolves it in order:
+
+1. The `MILVUS_TOKEN_FOR_<ID>` environment variable, where `<ID>` is the
+   store id uppercased with non-alphanumeric characters replaced by
+   underscores (`local-milvus` becomes `MILVUS_TOKEN_FOR_LOCAL_MILVUS`).
+2. The application credential file (`auth.json` under the Grok home) at the
+   vault scope `milvus::<store-id>::token`, read through the same
+   provider-secret chain as model-provider credentials.
+
+The token is never logged and is passed only to the store client.
+
+### Security note
+
+Enabling a Milvus store sends memory text to that server. Memory chunk text
+and the vectors derived from it are transmitted to and stored on the
+configured Milvus server (the prime collections mirror metadata vectors the
+same way). Treat the server as trusted as the Grok home itself. Inspect,
+`/context`, and `/session-info` disclose only bounded, non-secret mirror
+state — backend, state, and row counts — never vectors or tokens.
+
+### Troubleshooting
+
+- **Server unreachable.** Search keeps working: memory and prime vector
+  reads fall back to SQLite, the mirror is marked unavailable, and the
+  failure is logged once rather than per query.
+- **Server reachable again.** The mirror resyncs from the stored SQLite
+  vectors automatically; no reindex or re-embed step is required.
+
 ---
 
 ## Privacy
@@ -347,6 +431,8 @@ shows the profile id, never an endpoint. See
 Retrieval and prime accept only bounded, non-secret context. Inspect,
 `/context`, and `/session-info` report categories, counts, and states — never
 retrieved bodies, prompts, vectors, raw provider errors, or credentials.
-Memory and Prime databases remain isolated. Rollback retains last-known-good
+Memory and Prime databases remain isolated. Enabling a remote vector store
+additionally sends the mirrored memory text and its derived vectors to the
+configured server. Rollback retains last-known-good
 state and never treats quarantine as repaired. See
 [Strict Skills Migration](31-strict-skills-migration.md#privacy).

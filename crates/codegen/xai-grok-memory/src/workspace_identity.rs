@@ -55,6 +55,28 @@ pub fn workspace_storage_identity(cwd: &Path) -> String {
     format!("{slug}-{hash8}")
 }
 
+/// Compute the stable 16-hex workspace identity hash used for remote
+/// collection naming (e.g. Milvus mirror collections).
+///
+/// Uses the same identity input as [`workspace_storage_identity`]: the
+/// normalized git remote `org/repo` when the workspace has an `origin`
+/// remote (so clones, worktrees, and copies of one repository share one
+/// hash), otherwise the canonical filesystem path. The digest is blake3
+/// truncated to 16 hex characters; its first 8 characters always equal the
+/// `hash8` suffix of [`workspace_storage_identity`].
+#[must_use]
+pub fn workspace_identity_hash16(cwd: &Path) -> String {
+    let hash_input = match extract_repo_identity(cwd) {
+        Some(repo_id) => repo_id,
+        None => dunce::canonicalize(cwd)
+            .unwrap_or_else(|_| cwd.to_path_buf())
+            .to_string_lossy()
+            .into_owned(),
+    };
+    let hash = blake3::hash(hash_input.as_bytes());
+    hash.to_hex()[..16].to_string()
+}
+
 /// Extract a normalized `org/repo` identifier from the git remote URL.
 ///
 /// Uses `git2` to discover the repository from `cwd` and read the `origin`
@@ -133,4 +155,52 @@ pub fn slugify(input: &str, max_len: usize) -> String {
     // Truncate by char count (safe for multi-byte), then trim dashes
     let truncated: String = result.chars().take(max_len).collect();
     truncated.trim_matches('-').to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hash16_is_stable_16_lowercase_hex_for_same_cwd() {
+        let cwd = std::env::temp_dir().join("grok-mirror-hash16-stability");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let a = workspace_identity_hash16(&cwd);
+        let b = workspace_identity_hash16(&cwd);
+        assert_eq!(a, b, "same cwd must hash identically");
+        assert_eq!(a.len(), 16, "hash16 must be 16 chars: {a}");
+        assert!(
+            a.chars()
+                .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()),
+            "hash16 must be lowercase hex: {a}"
+        );
+    }
+
+    #[test]
+    fn hash16_prefix_matches_storage_identity_hash8() {
+        // A temp dir outside any repo hashes its canonical path; the first
+        // 8 chars of hash16 must equal the hash8 suffix of the storage
+        // identity computed from the same input.
+        let cwd = std::env::temp_dir().join("grok-mirror-hash16-prefix");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let hash16 = workspace_identity_hash16(&cwd);
+        let storage = workspace_storage_identity(&cwd);
+        let hash8 = storage.rsplit('-').next().unwrap();
+        assert_eq!(&hash16[..8], hash8);
+    }
+
+    #[test]
+    fn hash16_tracks_this_repo_remote_identity() {
+        // This crate lives in a git checkout with an `origin` remote; the
+        // identity (and therefore the collection name) must be path- and
+        // clone-stable, i.e. derived from `org/repo`, not the filesystem.
+        let cwd = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        if extract_repo_identity(cwd).is_none() {
+            return; // no origin remote in this checkout: nothing to assert
+        }
+        let hash16 = workspace_identity_hash16(cwd);
+        let identity = extract_repo_identity(cwd).unwrap();
+        let expected = blake3::hash(identity.as_bytes());
+        assert_eq!(hash16, &expected.to_hex()[..16]);
+    }
 }

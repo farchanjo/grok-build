@@ -587,6 +587,11 @@ fn set_secret(
     let scope = match kind {
         ProviderCredentialKind::Application => application_key_scope_for_kind(&pid, instance_kind),
         ProviderCredentialKind::Admin => admin_key_scope_for_kind(&pid, instance_kind),
+        // Milvus mirror tokens have their own store flow; the provider CLI
+        // never writes them.
+        ProviderCredentialKind::Token => {
+            return Err("token credentials are managed by the vector-store mirror flow".into());
+        }
     };
     store_provider_secret(&home, &scope, secret.trim()).map_err(|e| e.to_string())?;
     // Never print the secret.

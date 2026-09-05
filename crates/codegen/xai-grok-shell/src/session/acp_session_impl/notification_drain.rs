@@ -8,10 +8,6 @@ pub(super) const MAX_PENDING_NOTIFICATIONS: usize = 50;
 
 /// A notification buffered for idle-gated drain (see `maybe_drain_notifications`).
 pub(crate) struct PendingNotification {
-    #[expect(
-        dead_code,
-        reason = "Retained for debugging / future per-notification tracing."
-    )]
     pub(crate) prompt_id: String,
     pub(crate) prompt_blocks: Vec<acp::ContentBlock>,
     pub(crate) priority: NotificationPriority,
@@ -646,6 +642,7 @@ impl SessionActor {
 
         tracing::info!(
             count = notifications.len(),
+            prompt_ids = %notifications.iter().map(|n| n.prompt_id.as_str()).collect::<Vec<_>>().join(","),
             next_count = notifications.iter().filter(|n| n.priority == NotificationPriority::Next).count(),
             later_count = notifications.iter().filter(|n| n.priority == NotificationPriority::Later).count(),
             sources = %notifications.iter().map(|n| match &n.source {

@@ -4,8 +4,9 @@ use crate::bundle;
 use serde::Deserialize;
 pub use xai_grok_config_types::{
     DEFAULT_RECENCY_DECAY, MemoryDreamConfig, MemoryEmbeddingConfig, MemoryFlushConfig,
-    MemoryGcConfig, MemoryIndexConfig, MemoryInitialInjectionConfig, MemorySearchConfig,
-    MemorySessionConfig, MemoryWatcherConfig, MmrConfig, PruningConfig, TemporalDecayConfig,
+    MemoryGcConfig, MemoryIndexConfig, MemoryInitialInjectionConfig, MemoryMode,
+    MemorySearchConfig, MemorySessionConfig, MemoryWatcherConfig, MmrConfig, PruningConfig,
+    TemporalDecayConfig,
 };
 // Re-export retrieval graph types for shell consumers.
 pub use xai_grok_config_types::{
@@ -52,6 +53,20 @@ pub struct MemoryConfig {
     /// unchanged when this field is absent. Does not store credentials.
     #[serde(default)]
     pub retrieval_profile: Option<String>,
+    /// Optional named `[vector_stores.*]` entry the memory index mirrors to.
+    ///
+    /// Additive sibling of `retrieval_profile`: when absent, memory stays
+    /// pure sqlite-vec. The bearer token never lives in config — it
+    /// resolves from the vault (`milvus::<store-id>::token`) or the
+    /// `MILVUS_TOKEN_FOR_<ID>` environment variable at runtime.
+    #[serde(default)]
+    pub vector_store: Option<String>,
+    /// Memory backend mode. `local` (default) is the classic SQLite-only
+    /// pipeline; `milvus` makes the named `[vector_stores.*]` deployment
+    /// the primary searchable plane (BM25 + dense KNN, hard-remote — no
+    /// local fallback). Per-workspace via project `.grok/config.toml`.
+    #[serde(default)]
+    pub mode: MemoryMode,
     /// Pre-compaction memory flush settings.
     ///
     /// **Note:** Configured under `[compaction.memory_flush]` in config.toml,
@@ -90,10 +105,21 @@ impl MemoryConfig {
         config: &toml::Value,
         remote: Option<&crate::util::config::RemoteSettings>,
     ) -> Self {
-        let mut result: Self = config
+        // Per-workspace override: project `.grok/config.toml` `[memory]`
+        // tables deep-merge over the global section (route-bearing keys are
+        // folder-trust gated) before typed parsing.
+        let mut memory_table = config
             .get("memory")
-            .and_then(|v| v.clone().try_into().ok())
-            .unwrap_or_default();
+            .cloned()
+            .unwrap_or_else(|| toml::Value::Table(toml::map::Map::new()));
+        crate::util::config::merge_project_memory_layer(&mut memory_table);
+        let mut result: Self = match memory_table.clone().try_into() {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::warn!(error = %e, "failed to parse [memory]; using defaults");
+                Self::default()
+            }
+        };
         if let Some(compaction) = config.get("compaction") {
             if let Some(flush) = compaction.get("memory_flush")
                 && let Ok(f) = flush.clone().try_into()
@@ -107,7 +133,7 @@ impl MemoryConfig {
             }
         }
         if let Some(remote) = remote {
-            let has_local_search = config.get("memory").and_then(|m| m.get("search")).is_some();
+            let has_local_search = memory_table.get("search").is_some();
             if !has_local_search {
                 if let Some(v) = remote.memory_search_max_results {
                     result.search.max_results = v as usize;
@@ -128,10 +154,7 @@ impl MemoryConfig {
                     result.search.mmr.lambda = v.clamp(0.0, 1.0);
                 }
             }
-            let has_local_initial_injection = config
-                .get("memory")
-                .and_then(|m| m.get("initial_injection"))
-                .is_some();
+            let has_local_initial_injection = memory_table.get("initial_injection").is_some();
             if !has_local_initial_injection {
                 if let Some(v) = remote.memory_initial_injection_enabled {
                     result.initial_injection.enabled = v;
@@ -140,10 +163,7 @@ impl MemoryConfig {
                     result.initial_injection.min_score = Some(v);
                 }
             }
-            let has_local_embedding = config
-                .get("memory")
-                .and_then(|m| m.get("embedding"))
-                .is_some();
+            let has_local_embedding = memory_table.get("embedding").is_some();
             if !has_local_embedding {
                 if let Some(ref v) = remote.memory_embedding_model {
                     result.embedding.model = Some(v.clone());
@@ -185,14 +205,11 @@ impl MemoryConfig {
                     result.flush.semantic_dedup_threshold = Some(v.clamp(0.0, 1.0));
                 }
             }
-            let has_local_watcher = config
-                .get("memory")
-                .and_then(|m| m.get("watcher"))
-                .is_some();
+            let has_local_watcher = memory_table.get("watcher").is_some();
             if !has_local_watcher && let Some(v) = remote.memory_watcher_enabled {
                 result.watcher.enabled = v;
             }
-            let has_local_dream = config.get("memory").and_then(|m| m.get("dream")).is_some();
+            let has_local_dream = memory_table.get("dream").is_some();
             if !has_local_dream {
                 if let Some(v) = remote.dream_enabled {
                     result.dream.enabled = v;
@@ -216,7 +233,7 @@ impl MemoryConfig {
             },
             "GROK_MEMORY",
             result.enabled,
-            config.get("memory").is_some(),
+            memory_table.as_table().is_some_and(|t| !t.is_empty()),
             remote.and_then(|r| r.memory_enabled),
             false,
         );
@@ -225,6 +242,25 @@ impl MemoryConfig {
             result.enabled = false;
         }
         result
+    }
+
+    /// Runtime seam with hard mode validation: `mode = "milvus"` without a
+    /// named `vector_store` would otherwise silently run the local pipeline,
+    /// defeating the mode's meaning — memory is disabled (with a warn)
+    /// instead. Also collapses `enabled = false` to `None` (previous
+    /// caller-side behavior).
+    pub fn validated_for_runtime(self) -> Option<Self> {
+        if !self.enabled {
+            return None;
+        }
+        if self.mode == MemoryMode::Milvus && self.vector_store.is_none() {
+            tracing::warn!(
+                "[memory] mode = \"milvus\" requires [memory] vector_store = \"<id>\"; \
+                 memory is disabled for this session"
+            );
+            return None;
+        }
+        Some(self)
     }
 }
 /// Configuration for subagent (task tool) support.

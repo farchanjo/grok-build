@@ -148,6 +148,8 @@ impl RetrievalManagementService {
             retrieval_profiles: req.retrieval_profiles,
             prime: req.prime,
             memory_retrieval_profile: req.memory_retrieval_profile,
+            memory_mode: None,
+            memory_vector_store: None,
         };
         // Normalize ids.
         if let Err(e) = normalize_graph_ids(&mut graph) {
@@ -453,12 +455,20 @@ impl RetrievalManagementService {
         &self,
         expected: RegistryGeneration,
         profile: Option<String>,
+        mode: Option<xai_grok_config_types::MemoryMode>,
+        vector_store: Option<String>,
         confirm_memory_reindex: bool,
         operation_id: Option<String>,
     ) -> RetrievalMutationResult {
         self.mutate(expected, operation_id, confirm_memory_reindex, |graph| {
             graph.memory_retrieval_profile = profile;
-            Ok(vec!["memory.retrieval_profile".into()])
+            graph.memory_mode = mode;
+            graph.memory_vector_store = vector_store;
+            Ok(vec![
+                "memory.retrieval_profile".into(),
+                "memory.mode".into(),
+                "memory.vector_store".into(),
+            ])
         })
     }
 
@@ -643,6 +653,11 @@ impl RetrievalManagementService {
                 .collect(),
             prime: graph.prime.into(),
             memory_retrieval_profile: graph.memory_retrieval_profile,
+            memory_mode: graph
+                .memory_mode
+                .map(|m| m.as_str().to_string())
+                .unwrap_or_else(|| "local".into()),
+            memory_vector_store: graph.memory_vector_store,
             warnings,
             validation_errors,
             validation_warnings,

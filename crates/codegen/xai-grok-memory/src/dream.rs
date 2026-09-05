@@ -156,8 +156,13 @@ pub struct DreamMessage {
 /// fed to the dream model as existing memory context.
 ///
 /// A file is scaffold only if it is short (< 500 bytes trimmed) AND contains
-/// a scaffold marker. Files with substantial content are never scaffold, even
-/// if they contain leftover marker strings from the initial template.
+/// a scaffold marker AND only template structure remains once HTML comments
+/// are stripped. Template structure means: blank lines, the known template
+/// blockquote boilerplate, and headings whose text belongs to the template
+/// itself. Anything else is user content — notes appended under the template
+/// (including heading-only note sections, the shape the memory writer
+/// produces) keep the chunk searchable and mergeable. The old marker-only
+/// heuristic silently hid such notes from memory search and dream merging.
 pub(crate) fn is_scaffold_template(content: &str) -> bool {
     const SCAFFOLD_MAX_LEN: usize = 500;
     const MARKERS: &[&str] = &[
@@ -165,8 +170,47 @@ pub(crate) fn is_scaffold_template(content: &str) -> bool {
         "Add project-specific knowledge here",
         "Add any cross-project preferences here",
     ];
+    /// Blockquote boilerplate lines of the auto-generated MEMORY.md
+    /// templates (global + workspace). Not user content.
+    const BOILERPLATE_QUOTES: &[&str] = &[
+        "This file is automatically managed by Grok's memory system",
+        "You can also edit it manually",
+        "Auto-populated by dream consolidation",
+    ];
     let trimmed = content.trim();
-    trimmed.len() < SCAFFOLD_MAX_LEN && MARKERS.iter().any(|marker| trimmed.contains(marker))
+    if trimmed.len() >= SCAFFOLD_MAX_LEN || !MARKERS.iter().any(|m| trimmed.contains(m)) {
+        return false;
+    }
+    let without_comments = super::search::strip_html_comments(trimmed);
+    for line in without_comments.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        if super::chunker::header_level(line).is_some() {
+            if is_template_heading(line.trim_start_matches('#').trim()) {
+                continue;
+            }
+            // A heading outside the template set is a user note section.
+            return false;
+        }
+        if let Some(quoted) = line.strip_prefix('>')
+            && BOILERPLATE_QUOTES.iter().any(|b| quoted.trim().contains(b))
+        {
+            continue;
+        }
+        // A non-heading, non-boilerplate line is real user content.
+        return false;
+    }
+    true
+}
+
+/// Heading texts that belong to the auto-generated MEMORY.md templates.
+/// `Project Memory` also matches the `Project Memory — <path>` title
+/// variant the workspace template writes.
+fn is_template_heading(text: &str) -> bool {
+    matches!(text, "Global Memory" | "Preferences" | "Project Context")
+        || text.starts_with("Project Memory")
 }
 
 /// Build the user message for the dream model call from session log contents.
@@ -1350,25 +1394,84 @@ mod tests {
 
     #[test]
     fn scaffold_boundary_499_bytes_is_scaffold() {
-        let marker = "Add project-specific knowledge here";
-        let pad_len = 499 - marker.len();
-        let content = format!("{}{}", "x".repeat(pad_len), marker);
+        // Scaffold-shaped padding: template headings carry no user content,
+        // so the length boundary (not structure) decides.
+        // 18 (prefix) + 23 × 19 ("## Project Context\n") + 44 (marker) = 499.
+        let marker = "<!-- Add project-specific knowledge here -->";
+        let content = format!(
+            "# Project Memory\n\n{}{}",
+            "## Project Context\n".repeat(23),
+            marker
+        );
         assert_eq!(content.trim().len(), 499);
         assert!(
             is_scaffold_template(&content),
-            "499-byte content with marker must be classified as scaffold"
+            "499-byte scaffold-shaped content with marker must be classified as scaffold"
         );
     }
 
     #[test]
     fn scaffold_boundary_500_bytes_is_not_scaffold() {
-        let marker = "Add project-specific knowledge here";
-        let pad_len = 500 - marker.len();
-        let content = format!("{}{}", "x".repeat(pad_len), marker);
+        let marker = "<!-- Add project-specific knowledge here -->";
+        let content = format!(
+            "# Project Memory\n\n{}{}\n{}",
+            "## Project Context\n".repeat(23),
+            "",
+            marker
+        );
         assert_eq!(content.trim().len(), 500);
         assert!(
             !is_scaffold_template(&content),
             "500-byte content with marker must NOT be classified as scaffold"
+        );
+    }
+
+    /// Regression: a global MEMORY.md that grew real notes under its
+    /// template (the scaffold marker comment still present, total under
+    /// 500 bytes) must NOT be classified as scaffold — it used to be
+    /// silently excluded from memory search by `is_content_free`.
+    #[test]
+    fn scaffold_with_real_notes_under_leftover_marker_is_not_scaffold() {
+        let content = "# Global Memory\n\n\
+            > This file is automatically managed by Grok's memory system.\n\
+            > You can also edit it manually — changes will be indexed on next session.\n\n\
+            ## Preferences\n\n\
+            <!-- Add any cross-project preferences here -->\n\n\
+            ## the milvus mirror drive-through note: grok-milvus-vm serves vectors\n\n\
+            with native sqlite fallback\n";
+        assert!(
+            !is_scaffold_template(content),
+            "template with real appended notes must not be scaffold"
+        );
+    }
+
+    /// A user blockquote that is not template boilerplate is real content.
+    #[test]
+    fn scaffold_with_user_blockquote_note_is_not_scaffold() {
+        let content = "# Global Memory\n\n\
+            <!-- Add any cross-project preferences here -->\n\n\
+            > remember the codeword LANTERN-77\n";
+        assert!(!is_scaffold_template(content));
+    }
+
+    /// Real-world regression: the memory writer stores notes as
+    /// heading-only sections under the global MEMORY.md template. With the
+    /// marker comment still present and the total under 500 bytes, the old
+    /// heuristic classified the whole chunk as scaffold and it silently
+    /// disappeared from memory search. Heading text outside the template
+    /// set is content.
+    #[test]
+    fn scaffold_global_template_with_heading_only_notes_is_not_scaffold() {
+        let content = "# Global Memory\n\n\
+            > This file is automatically managed by Grok's memory system.\n\
+            > You can also edit it manually — changes will be indexed on next session.\n\n\
+            ## Preferences\n\n\
+            <!-- Add any cross-project preferences here -->\n\n\
+            ## the milvus mirror drive-through note: grok-milvus-vm serves vectors at vm.services port 19530 with native sqlite fallback\n\n\
+            ## milvus drive-through second note: fallback verification pending\n";
+        assert!(
+            !is_scaffold_template(content),
+            "heading-only note sections under the template are user content"
         );
     }
 

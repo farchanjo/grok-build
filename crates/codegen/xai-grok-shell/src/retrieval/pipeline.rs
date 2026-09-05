@@ -169,10 +169,6 @@ pub async fn embed_with_profile(
         ));
     }
 
-    budget.check_batch_documents(texts.len())?;
-    let bytes = total_input_bytes(texts.iter().map(|s| s.as_str()));
-    budget.charge_input(bytes, RetrievalStage::Embed)?;
-
     if cancel.is_cancelled() {
         return Err(OrchestratorError::Cancelled {
             profile_id: ctx.profile.id.clone(),
@@ -287,104 +283,136 @@ pub async fn embed_with_profile(
             });
         }
 
-        let pins = RouteCallPins {
-            provenance_incarnation: route.incarnation.clone(),
-            session_registry_generation: Some(ctx.snapshot.provider_generation).filter(|&g| g > 0),
-            total_deadline: Some(effective),
-        };
-
-        let started = ctx.clock.now();
-        let call = ctx.executor.embed(
-            ctx.home,
-            route_id,
-            &route.config,
-            &pins,
-            texts.clone(),
-            cancel.child_token(),
-        );
-        let outcome = tokio::select! {
-            biased;
-            _ = cancel.cancelled() => Err(RetrievalError::Cancelled),
-            res = call => res,
-        };
-        let elapsed = ctx.clock.now().saturating_duration_since(started);
-
-        match outcome {
-            Ok(result) => {
-                // First successful route pins this embedding space only.
-                // Failed routes never retain vectors — no cross-space merge.
-                let out_bytes = result
-                    .vectors
-                    .first()
-                    .map(|v| {
-                        v.values
-                            .len()
-                            .saturating_mul(result.vectors.len())
-                            .saturating_mul(4)
-                    })
-                    .unwrap_or(0);
-                // Fail closed on output/response budget overflow before
-                // clearing cooldown (Issue 5: charge before record_success).
-                budget.charge_output_bytes(out_bytes)?;
-                ctx.cooldown.record_success(&cd_key);
-
-                emit(
-                    ctx,
-                    RetrievalStage::Embed,
-                    Some(idx as u32),
-                    Some(route_id),
-                    Some(&route.provider_instance_id),
-                    budget,
-                    BudgetFlags::default(),
-                    TelemetryOutcome::Success,
-                    Some(elapsed),
-                    Some(texts.len() as u32),
-                    Some(result.vectors.len() as u32),
-                );
-                return Ok(EmbedStageResult {
-                    route_model_id: route_id.clone(),
-                    provider_instance_id: route.provider_instance_id.clone(),
-                    embedding_space: route.embedding_space.clone(),
-                    result,
-                    route_index: idx as u32,
-                    attempts_used: budget.attempts_used,
-                    degradation: None,
+        // Per-request document bound: `max_batch_documents` (from the route
+        // batch_size) caps ONE upstream request, not the stage input. Prime
+        // staging/backfill and the memory facade submit large stage inputs,
+        // so split them into ordered sub-requests sharing this route
+        // attempt; each sub-request is count-checked and charged for its
+        // own payload (per-request payload accounting).
+        let max_docs = budget.limits.max_batch_documents.max(1) as usize;
+        let mut merged_model: Option<String> = None;
+        let mut merged_vectors: Vec<xai_grok_inference::EmbeddingVector> =
+            Vec::with_capacity(texts.len());
+        let route_started = ctx.clock.now();
+        let mut route_failed = false;
+        for chunk in texts.chunks(max_docs) {
+            if cancel.is_cancelled() {
+                return Err(OrchestratorError::Cancelled {
+                    profile_id: ctx.profile.id.clone(),
+                    stage: RetrievalStage::Embed,
                 });
             }
-            Err(err) => {
-                let class = RouteFailureClass::from_retrieval_error(&err);
-                last_failure = Some(class);
-                // Auth/config permanent failures: skip route, no cooldown.
-                // Retryable classes may enter exact-route cooldown.
-                // Cancelled is handled immediately (only non-fallback class).
-                ctx.cooldown.record_failure(cd_key, class);
-                emit(
-                    ctx,
-                    RetrievalStage::Embed,
-                    Some(idx as u32),
-                    Some(route_id),
-                    Some(&route.provider_instance_id),
-                    budget,
-                    BudgetFlags {
-                        cancelled: matches!(class, RouteFailureClass::Cancelled),
-                        deadline_hit: matches!(class, RouteFailureClass::Deadline),
-                        ..Default::default()
-                    },
-                    TelemetryOutcome::RouteFailure(class),
-                    Some(elapsed),
-                    Some(texts.len() as u32),
-                    None,
-                );
-                if matches!(class, RouteFailureClass::Cancelled) {
-                    return Err(OrchestratorError::Cancelled {
-                        profile_id: ctx.profile.id.clone(),
-                        stage: RetrievalStage::Embed,
-                    });
+            budget.check_batch_documents(chunk.len())?;
+            budget.charge_input(
+                total_input_bytes(chunk.iter().map(|s| s.as_str())),
+                RetrievalStage::Embed,
+            )?;
+            let pins = RouteCallPins {
+                provenance_incarnation: route.incarnation.clone(),
+                session_registry_generation: Some(ctx.snapshot.provider_generation)
+                    .filter(|&g| g > 0),
+                total_deadline: Some(effective),
+            };
+
+            let started = ctx.clock.now();
+            let call = ctx.executor.embed(
+                ctx.home,
+                route_id,
+                &route.config,
+                &pins,
+                chunk.to_vec(),
+                cancel.child_token(),
+            );
+            let outcome = tokio::select! {
+                biased;
+                _ = cancel.cancelled() => Err(RetrievalError::Cancelled),
+                res = call => res,
+            };
+            let elapsed = ctx.clock.now().saturating_duration_since(started);
+
+            match outcome {
+                Ok(result) => {
+                    // Embedding payloads are `N × dims` floats, not text: the
+                    // profile's text-output budget (`max_output_tokens` and its
+                    // derived response-byte ceiling) does not apply to them, and
+                    // charging it misclassifies every full batch as overflow.
+                    // Bound the vector count per request; the transport still
+                    // enforces its own response-byte ceiling.
+                    budget.check_batch_documents(result.vectors.len())?;
+                    if merged_model.is_none() {
+                        merged_model = Some(result.model.clone());
+                    }
+                    merged_vectors.extend(result.vectors);
                 }
-                // All remaining classes allow the next explicitly configured route.
-                continue;
+                Err(err) => {
+                    let class = RouteFailureClass::from_retrieval_error(&err);
+                    last_failure = Some(class);
+                    // Auth/config permanent failures: skip route, no cooldown.
+                    // Retryable classes may enter exact-route cooldown.
+                    // Cancelled is handled immediately (only non-fallback class).
+                    ctx.cooldown.record_failure(cd_key.clone(), class);
+                    emit(
+                        ctx,
+                        RetrievalStage::Embed,
+                        Some(idx as u32),
+                        Some(route_id),
+                        Some(&route.provider_instance_id),
+                        budget,
+                        BudgetFlags {
+                            cancelled: matches!(class, RouteFailureClass::Cancelled),
+                            deadline_hit: matches!(class, RouteFailureClass::Deadline),
+                            ..Default::default()
+                        },
+                        TelemetryOutcome::RouteFailure(class),
+                        Some(elapsed),
+                        Some(texts.len() as u32),
+                        None,
+                    );
+                    if matches!(class, RouteFailureClass::Cancelled) {
+                        return Err(OrchestratorError::Cancelled {
+                            profile_id: ctx.profile.id.clone(),
+                            stage: RetrievalStage::Embed,
+                        });
+                    }
+                    // All remaining classes allow the next explicitly configured route.
+                    route_failed = true;
+                    break;
+                }
             }
         }
+        if route_failed {
+            continue;
+        }
+        // First successful route pins this embedding space only. Failed
+        // routes never retain vectors — no cross-space merge.
+        ctx.cooldown.record_success(&cd_key);
+
+        let elapsed = ctx.clock.now().saturating_duration_since(route_started);
+        emit(
+            ctx,
+            RetrievalStage::Embed,
+            Some(idx as u32),
+            Some(route_id),
+            Some(&route.provider_instance_id),
+            budget,
+            BudgetFlags::default(),
+            TelemetryOutcome::Success,
+            Some(elapsed),
+            Some(texts.len() as u32),
+            Some(merged_vectors.len() as u32),
+        );
+        return Ok(EmbedStageResult {
+            route_model_id: route_id.clone(),
+            provider_instance_id: route.provider_instance_id.clone(),
+            embedding_space: route.embedding_space.clone(),
+            result: EmbeddingResult {
+                model: merged_model.unwrap_or_else(|| route.config.model.clone()),
+                vectors: merged_vectors,
+            },
+            route_index: idx as u32,
+            attempts_used: budget.attempts_used,
+            degradation: None,
+        });
     }
 
     semantic_fail(ctx, budget, last_failure)

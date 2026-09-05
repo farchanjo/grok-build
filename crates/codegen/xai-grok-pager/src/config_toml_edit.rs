@@ -68,6 +68,29 @@ pub(crate) fn set_pinned_tools(tools: &[String]) -> std::io::Result<()> {
     set_pinned_tools_at(&path, tools)
 }
 
+/// Write per-workspace `[memory]` settings (`mode` and `vector_store`)
+/// to `<workspace>/.grok/config.toml`, falling back to `~/.grok/config.toml`
+/// if the workspace is not inside a git repo or project dir.
+pub(crate) fn write_project_memory_config(
+    workspace_dir: &Path,
+    mode: &str,
+    vector_store: Option<&str>,
+) -> std::io::Result<()> {
+    let project_dir = workspace_dir.join(".grok");
+    let path = if project_dir.is_dir() || workspace_dir.join(".git").exists() {
+        project_dir.join("config.toml")
+    } else {
+        xai_grok_tools::util::grok_home::grok_home().join("config.toml")
+    };
+    set_table_field_at(&path, "memory", "mode", mode)?;
+    if let Some(vs) = vector_store.filter(|s| !s.trim().is_empty()) {
+        set_table_field_at(&path, "memory", "vector_store", vs)?;
+    } else {
+        remove_table_key_at(&path, "memory", "vector_store")?;
+    }
+    Ok(())
+}
+
 /// Like [`set_pinned_tools`] but targeting an explicit `config.toml` path
 /// (test seam).
 fn set_pinned_tools_at(path: &Path, tools: &[String]) -> std::io::Result<()> {
@@ -996,5 +1019,28 @@ mod tests {
             expected,
             "non-chatgpt ids and out-of-range values must be skipped"
         );
+    }
+
+    #[test]
+    fn write_project_memory_config_round_trip() {
+        let dir = tempdir().unwrap();
+        // Create workspace dir with .git marker
+        let ws = dir.path().join("my_workspace");
+        fs::create_dir_all(ws.join(".git")).unwrap();
+
+        // Write milvus mode with vector_store
+        write_project_memory_config(&ws, "milvus", Some("milvus-vm")).unwrap();
+
+        let cfg_path = ws.join(".grok").join("config.toml");
+        assert!(cfg_path.is_file(), "expected .grok/config.toml to be created");
+        let doc = read_config_document_for_edit(&cfg_path).expect("reparse");
+        assert_eq!(doc["memory"]["mode"].as_str(), Some("milvus"));
+        assert_eq!(doc["memory"]["vector_store"].as_str(), Some("milvus-vm"));
+
+        // Switch to local mode (clears vector_store)
+        write_project_memory_config(&ws, "local", None).unwrap();
+        let doc2 = read_config_document_for_edit(&cfg_path).expect("reparse");
+        assert_eq!(doc2["memory"]["mode"].as_str(), Some("local"));
+        assert!(doc2["memory"].get("vector_store").is_none());
     }
 }

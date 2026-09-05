@@ -18,9 +18,11 @@
 //! with `text_weight = 1.0`.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use super::embedding::EmbeddingProvider;
 use super::index::MemoryIndex;
+use crate::mirror::{MirrorHandle, RemoteSearchHit};
 use xai_grok_config_types::MemorySearchConfig;
 
 /// A search result with merged scoring from FTS and vector search.
@@ -65,8 +67,14 @@ fn is_structurally_empty(text: &str) -> bool {
     if !text.contains("<!--") {
         return lines_are_scaffolding(text);
     }
+    lines_are_scaffolding(&strip_html_comments(text))
+}
 
-    // Strip HTML comments (which may span lines) before the line scan.
+/// Strip `<!-- ... -->` HTML comments (which may span lines) from `text`.
+///
+/// An unterminated comment keeps its remainder as literal text so a comment
+/// split across a chunk boundary can't drop real content.
+pub(crate) fn strip_html_comments(text: &str) -> String {
     let mut without_comments = String::with_capacity(text.len());
     let mut rest = text;
     while let Some(start) = rest.find("<!--") {
@@ -86,8 +94,7 @@ fn is_structurally_empty(text: &str) -> bool {
         }
     }
     without_comments.push_str(rest);
-
-    lines_are_scaffolding(&without_comments)
+    without_comments
 }
 
 /// Returns `true` when every non-blank line is an ATX heading (per
@@ -136,16 +143,33 @@ fn temporal_decay_multiplier(
 /// Run a hybrid search across the memory index.
 ///
 /// Combines FTS5 keyword search with optional vector KNN similarity.
-/// Falls back to FTS-only when vector search is unavailable.
-///
-/// Structured so that `&MemoryIndex` is never held across `.await` points,
-/// allowing the caller's future to be `Send` even though `MemoryIndex` is `!Sync`.
+/// Falls back to FTS-only when vector search is unavailable. See
+/// [`hybrid_search_with_mirror`] for the mirror-first variant.
 #[tracing::instrument(name = "memory.hybrid_search", skip_all, fields(
     max_results = config.max_results,
 ))]
 pub async fn hybrid_search(
     index: &MemoryIndex,
     embedding_provider: Option<&dyn EmbeddingProvider>,
+    query: &str,
+    config: &MemorySearchConfig,
+) -> Result<Vec<SearchResult>, Box<dyn std::error::Error>> {
+    hybrid_search_with_mirror(index, embedding_provider, None, query, config).await
+}
+
+/// [`hybrid_search`] with optional mirror-first vector reads.
+///
+/// When the mirror reports itself verified-ready (fingerprint + dims + row
+/// count match the live SQLite facts), KNN is served from the mirror; any
+/// error or readiness mismatch falls back to sqlite-vec — search results
+/// are identical either way (same ids, converted distances).
+#[tracing::instrument(name = "memory.hybrid_search", skip_all, fields(
+    max_results = config.max_results,
+))]
+pub async fn hybrid_search_with_mirror(
+    index: &MemoryIndex,
+    embedding_provider: Option<&dyn EmbeddingProvider>,
+    mirror: Option<&Arc<MirrorHandle>>,
     query: &str,
     config: &MemorySearchConfig,
 ) -> Result<Vec<SearchResult>, Box<dyn std::error::Error>> {
@@ -186,8 +210,286 @@ pub async fn hybrid_search(
         None
     };
 
-    // Phase 3 (sync): vector search + scoring + merge
-    hybrid_search_merge(index, fts_results, query_embedding.as_deref(), config)
+    // Phase 3: vector candidates (mirror-first with sqlite-vec fallback),
+    // then scoring + merge.
+    let vec_results =
+        mirror_first_vec_results(index, mirror, query_embedding.as_deref(), candidate_limit).await;
+    let (results, relevance) =
+        build_local_candidates_from_vec(index, fts_results, vec_results, config)?;
+    Ok(finalize_order(results, relevance, config))
+}
+
+/// Hard-remote search for `milvus` mode: queries remote BM25 keyword search
+/// and dense KNN vector search, then merges candidate hits through the standard
+/// scoring pipeline (normalization, temporal decay, source weighting, MMR).
+///
+/// If Milvus is unreachable, returns an empty Vec and logs a warning (hard remote
+/// semantics: no silent local fallback).
+pub async fn milvus_search(
+    handle: &Arc<MirrorHandle>,
+    embedding_provider: Option<&dyn EmbeddingProvider>,
+    query: &str,
+    fingerprint_hash: &str,
+    dims: u32,
+    config: &MemorySearchConfig,
+) -> Result<Vec<SearchResult>, Box<dyn std::error::Error>> {
+    let candidate_limit = config.max_results * 3;
+
+    // Hard-remote gate: handle must be verified ready for the active fingerprint space.
+    if !handle.is_ready_for(fingerprint_hash, dims) {
+        tracing::warn!(
+            target: xai_grok_telemetry::memory_log::TARGET,
+            "milvus memory mirror is not ready; hard-remote mode returns empty results"
+        );
+        return Ok(Vec::new());
+    }
+
+    // 1. BM25 full-text search against the remote collection
+    let bm25_hits = match handle.bm25_search_v2(query, candidate_limit, fingerprint_hash).await {
+        Ok(hits) => hits,
+        Err(e) => {
+            tracing::warn!(
+                target: xai_grok_telemetry::memory_log::TARGET,
+                error = %e,
+                "milvus BM25 search failed; hard-remote mode returns empty results"
+            );
+            handle.mark_unavailable();
+            return Ok(Vec::new());
+        }
+    };
+
+    // 2. Dense KNN vector search against the remote collection
+    let query_vec = if let Some(provider) = embedding_provider {
+        let emb_res = provider.embed_batch(&[query]).await.map_err(|e| e.to_string());
+        match emb_res {
+            Ok(mut embeddings) if !embeddings.is_empty() => Some(embeddings.swap_remove(0)),
+            Ok(_) => None,
+            Err(e) => {
+                tracing::warn!(
+                    target: xai_grok_telemetry::memory_log::TARGET,
+                    error = %e,
+                    "embedding query failed in milvus mode; proceeding with BM25 only"
+                );
+                None
+            }
+        }
+    } else {
+        None
+    };
+
+    let knn_hits = if let Some(ref q_vec) = query_vec {
+        match handle.knn_v2(q_vec, candidate_limit, fingerprint_hash).await {
+            Ok(hits) => hits,
+            Err(e) => {
+                tracing::warn!(
+                    target: xai_grok_telemetry::memory_log::TARGET,
+                    error = %e,
+                    "milvus KNN search failed; hard-remote mode returns empty results"
+                );
+                handle.mark_unavailable();
+                return Ok(Vec::new());
+            }
+        }
+    } else {
+        Vec::new()
+    };
+
+    // 3. Score normalization, decay, and candidate fusion
+    let (results, relevance) = build_remote_candidates(bm25_hits, knn_hits, config)?;
+    Ok(finalize_order(results, relevance, config))
+}
+
+/// Normalized candidate building for remote search (BM25 + KNN).
+pub(super) fn build_remote_candidates(
+    bm25_hits: Vec<RemoteSearchHit>,
+    knn_hits: Vec<RemoteSearchHit>,
+    config: &MemorySearchConfig,
+) -> Result<(Vec<SearchResult>, Vec<f64>), Box<dyn std::error::Error>> {
+    let mut bm25_scores: HashMap<String, f64> = HashMap::new();
+    let mut knn_scores: HashMap<String, f64> = HashMap::new();
+    let mut hits_by_id: HashMap<String, RemoteSearchHit> = HashMap::new();
+
+    // Normalize BM25 scores to [0, 1] (higher = better, >= 0.0)
+    if !bm25_hits.is_empty() {
+        let min_score = bm25_hits
+            .iter()
+            .map(|h| h.score)
+            .fold(f32::INFINITY, f32::min);
+        let max_score = bm25_hits
+            .iter()
+            .map(|h| h.score)
+            .fold(f32::NEG_INFINITY, f32::max);
+        let range = (max_score - min_score).max(1e-6);
+
+        for h in bm25_hits {
+            let normalized = if (max_score - min_score).abs() < 1e-6 {
+                1.0
+            } else {
+                ((h.score - min_score) / range).clamp(0.0, 1.0) as f64
+            };
+            bm25_scores.insert(h.id.clone(), normalized);
+            hits_by_id.insert(h.id.clone(), h);
+        }
+    }
+
+    // Normalize dense vector distances to [0, 1] similarity using absolute L2 scale:
+    const MAX_L2_DISTANCE: f64 = 2.0;
+    for h in knn_hits {
+        let similarity = (1.0 - (h.score as f64 / MAX_L2_DISTANCE)).clamp(0.0, 1.0);
+        knn_scores.insert(h.id.clone(), similarity);
+        hits_by_id.entry(h.id.clone()).or_insert(h);
+    }
+
+    // Merge scores per chunk: max(bm25_only, hybrid)
+    let text_weight = config.text_weight as f64;
+    let vector_weight = config.vector_weight as f64;
+    let mut combined_scores: HashMap<String, f64> = HashMap::new();
+
+    let all_chunk_ids: std::collections::HashSet<&String> =
+        bm25_scores.keys().chain(knn_scores.keys()).collect();
+
+    for chunk_id in all_chunk_ids {
+        let bm25 = bm25_scores.get(chunk_id).copied().unwrap_or(0.0);
+        let vec = knn_scores.get(chunk_id).copied().unwrap_or(0.0);
+
+        let score = if bm25 > 0.0 && vec > 0.0 {
+            let hybrid = text_weight * bm25 + vector_weight * vec;
+            hybrid.max(bm25)
+        } else if bm25 > 0.0 {
+            bm25
+        } else {
+            vector_weight * vec
+        };
+        combined_scores.insert(chunk_id.clone(), score);
+    }
+
+    // Temporal decay, source weights, content filter
+    let now_secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64;
+    let half_life = config.effective_half_life_days();
+
+    let mut ranked: Vec<(f64, SearchResult)> = Vec::new();
+
+    for (chunk_id, base_score) in &combined_scores {
+        let Some(hit) = hits_by_id.get(chunk_id) else {
+            continue;
+        };
+
+        if is_content_free(&hit.text, &hit.source) {
+            continue;
+        }
+
+        let decay_multiplier =
+            temporal_decay_multiplier(&hit.source, hit.created_at, now_secs, half_life);
+        let source_weight = config
+            .source_weights
+            .get(&hit.source)
+            .copied()
+            .unwrap_or(1.0) as f64;
+        let relevance = *base_score * decay_multiplier * source_weight;
+
+        if relevance >= config.min_score as f64 {
+            ranked.push((
+                relevance,
+                SearchResult {
+                    chunk_id: hit.id.clone(),
+                    path: hit.path.clone(),
+                    start_line: 0,
+                    end_line: 0,
+                    score: relevance.clamp(0.0, 1.0),
+                    snippet: hit.text.clone(),
+                    source: hit.source.clone(),
+                    created_at: hit.created_at,
+                },
+            ));
+        }
+    }
+
+    ranked.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+    let (relevance, results): (Vec<f64>, Vec<SearchResult>) = ranked.into_iter().unzip();
+    Ok((results, relevance))
+}
+
+/// Synchronous mirror-readiness decision (borrows the index; no awaits).
+///
+/// The gate compares one SQLite read set — installed fingerprint,
+/// dimensions, and `vec_row_count` — against the handle snapshot. Returns
+/// owned data only (handle clone, fingerprint hash, query vector) so the
+/// caller's `.await` of [`mirror_knn_execute`] never captures a
+/// `&MemoryIndex` (which is `!Send`).
+pub(super) fn mirror_knn_decision(
+    index: &MemoryIndex,
+    mirror: Option<&Arc<MirrorHandle>>,
+    query_embedding: Option<&[f32]>,
+) -> Option<(Arc<MirrorHandle>, String, Vec<f32>)> {
+    let handle = mirror?;
+    let embedding = query_embedding?;
+    if !index.vec_available() {
+        return None;
+    }
+    let dims = index.embedding_dimensions() as u32;
+    let fingerprint_hash = index.installed_vector_fingerprint_hash()?;
+    if !handle.is_ready_for_count(&fingerprint_hash, dims, index.vec_row_count().max(0) as u64) {
+        return None;
+    }
+    Some((Arc::clone(handle), fingerprint_hash, embedding.to_vec()))
+}
+
+/// Execute the decided mirror KNN with the default per-call timeout.
+/// Owned data only; no SQLite state is touched inside.
+pub(super) async fn mirror_knn_execute(
+    handle: Arc<MirrorHandle>,
+    fingerprint_hash: String,
+    query: Vec<f32>,
+    candidate_limit: usize,
+) -> Result<Vec<(String, f32)>, crate::mirror::MirrorError> {
+    let timeout = crate::mirror::mirror_timeout(None);
+    crate::mirror::mirror_call(
+        handle.mirror().knn(
+            handle.collection(),
+            &query,
+            candidate_limit,
+            &fingerprint_hash,
+        ),
+        timeout,
+    )
+    .await
+}
+
+/// Convenience wrapper: mirror-first vector candidates with sqlite-vec
+/// fallback (see [`mirror_knn_decision`] for the borrow pattern). Callers
+/// with `Send` futures must use the decision/execute split instead.
+pub(super) async fn mirror_first_vec_results(
+    index: &MemoryIndex,
+    mirror: Option<&Arc<MirrorHandle>>,
+    query_embedding: Option<&[f32]>,
+    candidate_limit: usize,
+) -> Vec<(String, f32)> {
+    let Some(embedding) = query_embedding else {
+        return Vec::new();
+    };
+    if !index.vec_available() {
+        return Vec::new();
+    }
+    let decision = mirror_knn_decision(index, mirror, Some(embedding));
+    if let Some((handle, fingerprint_hash, query)) = decision {
+        match mirror_knn_execute(handle.clone(), fingerprint_hash, query, candidate_limit).await {
+            Ok(hits) => return hits,
+            Err(e) => {
+                tracing::warn!(
+                    target: xai_grok_telemetry::memory_log::TARGET,
+                    error = %e,
+                    "mirror KNN failed; falling back to sqlite-vec"
+                );
+                handle.mark_unavailable();
+            }
+        }
+    }
+    index
+        .vector_search(embedding, candidate_limit)
+        .unwrap_or_default()
 }
 
 /// Synchronous local-ordering phase: vector search (if embedding provided),
@@ -197,6 +499,7 @@ pub async fn hybrid_search(
 /// unclamped `relevance` score, aligned index-for-index. MMR and truncation
 /// are intentionally deferred (see [`finalize_order`]) so the optional remote
 /// rerank can run between local ordering and MMR/truncation.
+#[cfg(test)]
 pub(super) fn build_local_candidates(
     index: &MemoryIndex,
     fts_results: Vec<super::index::FtsResult>,
@@ -212,7 +515,20 @@ pub(super) fn build_local_candidates(
     } else {
         vec![]
     };
+    build_local_candidates_from_vec(index, fts_results, vec_results, config)
+}
 
+/// [`build_local_candidates`] with pre-computed vector candidates (mirror
+/// hits or sqlite-vec hits — the merge and orphan filtering are identical).
+///
+/// Mirror hits whose ids no longer exist in `chunks` are dropped by the
+/// same local join (`index.get_chunk`) that filters sqlite-vec orphans.
+pub(super) fn build_local_candidates_from_vec(
+    index: &MemoryIndex,
+    fts_results: Vec<super::index::FtsResult>,
+    vec_results: Vec<(String, f32)>,
+    config: &MemorySearchConfig,
+) -> Result<(Vec<SearchResult>, Vec<f64>), Box<dyn std::error::Error>> {
     // Normalize and merge scores.
     //
     // Per-chunk scoring strategy:
@@ -408,7 +724,9 @@ pub(super) fn finalize_order(
 }
 
 /// Backward-compatible synchronous merge (no remote rerank): local ordering
-/// then finalize (MMR + truncate).
+/// then finalize (MMR + truncate). Production callers use the async
+/// [`hybrid_search_with_mirror`] (mirror-first) or the rerank pipeline.
+#[cfg(test)]
 pub(super) fn hybrid_search_merge(
     index: &MemoryIndex,
     fts_results: Vec<super::index::FtsResult>,
@@ -1268,8 +1586,11 @@ mod tests {
     }
 
     /// The scaffold-marker branch is scoped to evergreen sources: a short
-    /// non-evergreen chunk that merely quotes a marker phrase must be kept,
-    /// while the same text on an evergreen source is filtered.
+    /// non-evergreen chunk that merely quotes a marker phrase must be kept.
+    /// On an evergreen source the scaffold check requires template
+    /// *structure* — a plain-text sentence quoting a marker is real content
+    /// and is kept (regression guard: notes appended under the template must
+    /// stay searchable), while the pristine template is still filtered.
     #[test]
     fn test_is_content_free_marker_branch_scoped_to_evergreen() {
         // A short session note that happens to quote a scaffold marker phrase.
@@ -1280,8 +1601,15 @@ mod tests {
             "non-evergreen chunk quoting a marker phrase must NOT be filtered"
         );
         assert!(
-            is_content_free(quotes_marker, "global"),
-            "the same short text on an evergreen source is treated as scaffold"
+            !is_content_free(quotes_marker, "global"),
+            "an evergreen chunk whose only line is prose quoting a marker is real content"
+        );
+        assert!(
+            is_content_free(
+                "# Global Memory\n\n## Preferences\n\n<!-- Add any cross-project preferences here -->\n",
+                "global"
+            ),
+            "the pristine template (structure only) is still scaffold on evergreen sources"
         );
     }
 
@@ -1529,8 +1857,6 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let (results, relevance) = two_chunk_local_candidates(&tmp).await;
         let local_ids: Vec<String> = results.iter().map(|r| r.chunk_id.clone()).collect();
-        let mut results = results.clone();
-        let mut relevance = relevance.clone();
 
         for bad_perm in [
             vec![0, 0],    // duplicate
@@ -1683,5 +2009,310 @@ mod tests {
                 "invalid prefix indices must keep the complete exact local order"
             );
         }
+    }
+}
+
+/// Mirror read-interception tests (hermetic: in-memory SQLite + fake mirror).
+#[cfg(test)]
+mod mirror_read_tests {
+    use super::*;
+    use crate::index::{MemoryIndex, init_sqlite_vec};
+    use crate::mirror::{
+        MirrorError, MirrorErrorKind, MirrorHandle, MirrorSnapshot, MirrorState, VectorMirror,
+    };
+    use crate::schema::{META_VECTOR_FINGERPRINT_HASH, META_VECTOR_SCHEMA_VERSION};
+    use crate::storage::MemoryStorage;
+    use async_trait::async_trait;
+    use std::sync::Mutex;
+    use tempfile::TempDir;
+    use xai_grok_config_types::MemoryIndexConfig;
+
+    const FP: &str = "ab12cd34ef56ab12";
+
+    struct FakeMirror {
+        hits: Vec<(String, f32)>,
+        fail: bool,
+        calls: Mutex<Vec<String>>,
+    }
+
+    impl FakeMirror {
+        fn serving(hits: Vec<(String, f32)>) -> Self {
+            Self {
+                hits,
+                fail: false,
+                calls: Mutex::new(Vec::new()),
+            }
+        }
+
+        fn failing() -> Self {
+            Self {
+                hits: Vec::new(),
+                fail: true,
+                calls: Mutex::new(Vec::new()),
+            }
+        }
+
+        fn knn_call_count(&self) -> usize {
+            self.calls.lock().unwrap().len()
+        }
+    }
+
+    #[async_trait]
+    impl VectorMirror for FakeMirror {
+        fn backend_id(&self) -> &str {
+            "fake"
+        }
+
+        async fn ensure_collection(
+            &self,
+            _name: &str,
+            _dims: u32,
+            _fingerprint_hash: &str,
+        ) -> Result<(), MirrorError> {
+            Ok(())
+        }
+
+        async fn upsert(
+            &self,
+            _name: &str,
+            _ids: &[String],
+            _vectors: &[Vec<f32>],
+            _fingerprint_hash: &str,
+        ) -> Result<(), MirrorError> {
+            Ok(())
+        }
+
+        async fn delete(&self, _name: &str, _ids: &[String]) -> Result<(), MirrorError> {
+            Ok(())
+        }
+
+        async fn knn(
+            &self,
+            name: &str,
+            _query: &[f32],
+            _k: usize,
+            _fingerprint_hash: &str,
+        ) -> Result<Vec<(String, f32)>, MirrorError> {
+            self.calls.lock().unwrap().push(name.to_owned());
+            if self.fail {
+                return Err(MirrorError::new(MirrorErrorKind::Transient));
+            }
+            Ok(self.hits.clone())
+        }
+
+        async fn count(&self, _name: &str, _fingerprint_hash: &str) -> Result<u64, MirrorError> {
+            Ok(0)
+        }
+
+        async fn drop_collection(&self, _name: &str) -> Result<(), MirrorError> {
+            Ok(())
+        }
+    }
+
+    fn mirror_index(tmp: &TempDir) -> MemoryIndex {
+        init_sqlite_vec();
+        let storage =
+            MemoryStorage::with_paths(tmp.path().join("memory"), tmp.path().join("memory/ws"));
+        let db_path = tmp.path().join("mirror-test.sqlite");
+        let idx = MemoryIndex::open_or_create(&db_path, storage, MemoryIndexConfig::default(), 4)
+            .unwrap();
+        // Install a pinned vector space: fingerprint hash + schema version,
+        // mirroring what the rebuild state machine writes on install.
+        idx.db()
+            .execute(
+                "INSERT OR REPLACE INTO meta(key, value) VALUES (?1, ?2), (?3, ?4)",
+                rusqlite::params![
+                    META_VECTOR_FINGERPRINT_HASH,
+                    FP,
+                    META_VECTOR_SCHEMA_VERSION,
+                    "1"
+                ],
+            )
+            .unwrap();
+        idx
+    }
+
+    fn seed_chunk(idx: &mut MemoryIndex, tmp: &TempDir, name: &str, text: &str) -> String {
+        let path = tmp.path().join(name);
+        std::fs::write(&path, format!("# T\n\n{text}")).unwrap();
+        idx.reindex_file(&path, "workspace").unwrap();
+        format!("{}:0", path.to_string_lossy())
+    }
+
+    fn ready_handle(mirror: Arc<FakeMirror>, row_count: u64) -> MirrorHandle {
+        let handle = MirrorHandle::new(mirror, "grok_mem_deadbeefdeadbeef");
+        handle.update(MirrorSnapshot {
+            state: MirrorState::Ready,
+            fingerprint_hash: Some(FP.to_owned()),
+            dimensions: Some(4),
+            row_count: Some(row_count),
+        });
+        handle
+    }
+
+    #[tokio::test]
+    async fn mirror_serves_knn_when_ready_and_filters_orphan_hits() {
+        let tmp = TempDir::new().unwrap();
+        let mut idx = mirror_index(&tmp);
+        let live_id = seed_chunk(&mut idx, &tmp, "live.md", "Rust ownership rules ok");
+        idx.upsert_embedding(&live_id, &[0.5, 0.5, 0.5, 0.5])
+            .unwrap();
+        let sqlite_row_count = idx.vec_row_count().max(0) as u64;
+        assert_eq!(sqlite_row_count, 1);
+
+        // Mirror returns one live hit (true euclidean L2 distance for a
+        // 0.92-similarity geometry: sqrt(2*0.08) = 0.4) and one orphan hit
+        // whose chunk id no longer exists in `chunks`.
+        let mirror = Arc::new(FakeMirror::serving(vec![
+            (live_id.clone(), 0.4),
+            ("ghost-chunk-id".to_owned(), 0.1),
+        ]));
+        let handle = Arc::new(ready_handle(mirror.clone(), sqlite_row_count));
+
+        let query = [0.5f32, 0.5, 0.5, 0.5];
+        let config = MemorySearchConfig {
+            max_results: 10,
+            min_score: 0.0,
+            ..Default::default()
+        };
+        let fts = idx.search_fts("rust", 10).unwrap();
+        let vec_results = mirror_first_vec_results(&idx, Some(&handle), Some(&query), 30).await;
+        assert_eq!(mirror.knn_call_count(), 1, "mirror must be consulted first");
+        // The raw mirror hits still carry the orphan; the local join drops it.
+        assert_eq!(vec_results.len(), 2);
+        // Orphan filtered by the local join; the live hit survives with the
+        // converted distance untouched.
+        let (results, _) =
+            build_local_candidates_from_vec(&idx, fts, vec_results, &config).unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].chunk_id, live_id);
+    }
+
+    #[tokio::test]
+    async fn mirror_error_falls_back_to_sqlite_vec_results() {
+        let tmp = TempDir::new().unwrap();
+        let mut idx = mirror_index(&tmp);
+        let live_id = seed_chunk(&mut idx, &tmp, "live.md", "Rust ownership rules ok");
+        // Give the chunk a real embedding so the SQLite path can serve it.
+        idx.upsert_embedding(&live_id, &[0.5, 0.5, 0.5, 0.5])
+            .unwrap();
+        let sqlite_row_count = idx.vec_row_count().max(0) as u64;
+
+        let mirror = Arc::new(FakeMirror::failing());
+        let handle = Arc::new(ready_handle(mirror.clone(), sqlite_row_count));
+
+        let query = [0.5f32, 0.5, 0.5, 0.5];
+        let vec_results = mirror_first_vec_results(&idx, Some(&handle), Some(&query), 30).await;
+        // Mirror failed → identical results to a direct sqlite-vec read.
+        assert_eq!(
+            vec_results,
+            idx.vector_search(&query, 30).unwrap_or_default(),
+            "fallback must equal the sqlite-vec path"
+        );
+        // Failure marks the mirror unavailable so later reads skip it.
+        assert_eq!(handle.snapshot().state, MirrorState::Unavailable);
+    }
+
+    #[tokio::test]
+    async fn unready_mirror_skips_knn_and_uses_sqlite() {
+        let tmp = TempDir::new().unwrap();
+        let mut idx = mirror_index(&tmp);
+        let live_id = seed_chunk(&mut idx, &tmp, "live.md", "Rust ownership rules ok");
+        idx.upsert_embedding(&live_id, &[0.5, 0.5, 0.5, 0.5])
+            .unwrap();
+
+        let mirror = Arc::new(FakeMirror::serving(vec![("wrong".to_owned(), 0.0)]));
+        // Syncing state: not ready → SQLite without touching the mirror.
+        let handle = Arc::new(MirrorHandle::new(
+            mirror.clone(),
+            "grok_mem_deadbeefdeadbeef",
+        ));
+        handle.mark_syncing();
+
+        let query = [0.5f32, 0.5, 0.5, 0.5];
+        let vec_results = mirror_first_vec_results(&idx, Some(&handle), Some(&query), 30).await;
+        assert_eq!(
+            mirror.knn_call_count(),
+            0,
+            "unready mirror must not be consulted"
+        );
+        assert_eq!(
+            vec_results,
+            idx.vector_search(&query, 30).unwrap_or_default()
+        );
+    }
+
+    #[test]
+    fn mirror_hits_with_wrong_fingerprint_or_count_fail_the_gate() {
+        let mirror = Arc::new(FakeMirror::serving(vec![]));
+        let handle = ready_handle(mirror, 7);
+        assert!(handle.is_ready_for_count(FP, 4, 7));
+        assert!(!handle.is_ready_for_count("other-fp", 4, 7));
+        assert!(!handle.is_ready_for_count(FP, 8, 7));
+        assert!(!handle.is_ready_for_count(FP, 4, 6));
+    }
+
+    #[tokio::test]
+    async fn milvus_search_hard_remote_unready_returns_empty() {
+        let mirror = Arc::new(crate::mirror::InMemoryVectorMirror::new());
+        let handle = Arc::new(MirrorHandle::new(mirror, "grok_mem_test"));
+        // Handle is not ready
+        let config = MemorySearchConfig::default();
+        let results = milvus_search(&handle, None, "test query", FP, 4, &config).await.unwrap();
+        assert!(results.is_empty(), "unready milvus search must return empty results (no local fallback)");
+    }
+
+    #[tokio::test]
+    async fn milvus_search_combines_bm25_and_knn_with_scoring_pipeline() {
+        let mirror = Arc::new(crate::mirror::InMemoryVectorMirror::new());
+        let handle = Arc::new(MirrorHandle::new(mirror.clone(), "grok_mem_test"));
+
+        mirror.ensure_collection_v2("grok_mem_test", 4, FP).await.unwrap();
+
+        let row1 = crate::mirror::MemoryRow {
+            id: "row_1".to_string(),
+            text: "Rust memory management and ownership patterns".to_string(),
+            vector: vec![1.0, 0.0, 0.0, 0.0],
+            fingerprint_hash: FP.to_string(),
+            hash: "h1".to_string(),
+            source: "workspace".to_string(),
+            path: "memory/notes.md".to_string(),
+            created_at: 1000,
+        };
+        let row2 = crate::mirror::MemoryRow {
+            id: "row_2".to_string(),
+            text: "Python asyncio event loop and tasks".to_string(),
+            vector: vec![0.0, 1.0, 0.0, 0.0],
+            fingerprint_hash: FP.to_string(),
+            hash: "h2".to_string(),
+            source: "workspace".to_string(),
+            path: "memory/py.md".to_string(),
+            created_at: 1000,
+        };
+        mirror.upsert_rows_v2("grok_mem_test", &[row1, row2]).await.unwrap();
+        handle.mark_ready(FP, 4, 2);
+
+        struct FixedProvider([f32; 4]);
+        #[async_trait]
+        impl EmbeddingProvider for FixedProvider {
+            async fn embed_batch(&self, _texts: &[&str]) -> Result<Vec<Vec<f32>>, Box<dyn std::error::Error>> {
+                Ok(vec![self.0.to_vec()])
+            }
+            fn model_name(&self) -> &str { "fixed" }
+            fn dimensions(&self) -> usize { 4 }
+        }
+
+        let provider = FixedProvider([1.0, 0.0, 0.0, 0.0]);
+        let config = MemorySearchConfig {
+            max_results: 5,
+            min_score: 0.1,
+            ..Default::default()
+        };
+
+        let results = milvus_search(&handle, Some(&provider), "Rust memory", FP, 4, &config).await.unwrap();
+        assert!(!results.is_empty(), "milvus search must return hits");
+        assert_eq!(results[0].chunk_id, "row_1");
+        assert!(results[0].snippet.contains("Rust memory management"));
+        assert!(results[0].score > 0.5);
     }
 }

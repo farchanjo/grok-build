@@ -331,6 +331,12 @@ impl Default for AgentPrimeConfig {
 pub struct PrimeConfig {
     pub skills: SkillPrimeConfig,
     pub agents: AgentPrimeConfig,
+    /// Optional named `[vector_stores.*]` entry the prime metadata index
+    /// mirrors to (shared by the skills and callable_agents collections).
+    /// The bearer token never lives here — it resolves from the vault
+    /// (`milvus::<store-id>::token`) or `MILVUS_TOKEN_FOR_<ID>` at runtime.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vector_store: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -352,6 +358,12 @@ pub struct RetrievalGraphConfig {
     /// when this is absent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub memory_retrieval_profile: Option<String>,
+    /// Optional memory mode (`[memory] mode`). Default "local".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory_mode: Option<crate::MemoryMode>,
+    /// Optional memory vector store (`[memory] vector_store`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory_vector_store: Option<String>,
 }
 
 // ---------------------------------------------------------------------------

@@ -534,6 +534,17 @@ impl ContextInfoBlock {
             lines.push(Line::from(""));
         }
 
+        // ── Memory accounting ──
+        if let Some(mem) = &snapshot.memory {
+            lines.push(Line::from(Span::styled("Memory", primary)));
+            let headline = format!(
+                "  mode: {} · backend: {} · status: {}",
+                mem.mode, mem.backend, mem.status
+            );
+            lines.push(Line::from(Span::styled(headline, muted)));
+            lines.push(Line::from(""));
+        }
+
         // Auto-compact estimate: tokens until we hit the auto-compact
         // threshold. Uses the *live* value from the session snapshot
         // (routed from xai-grok-shell's model config resolution). This makes
@@ -748,6 +759,7 @@ mod tests {
             auto_compact_threshold_percent: 85,
             usage_categories: vec![],
             prime: None,
+            memory: None,
         }
     }
 
@@ -1138,6 +1150,7 @@ mod tests {
             auto_compact_threshold_percent: 65,
             usage_categories: vec![],
             prime: None,
+            memory: None,
         };
         let block = ContextInfoBlock::new(snap, "grok-build");
         let theme = test_theme();

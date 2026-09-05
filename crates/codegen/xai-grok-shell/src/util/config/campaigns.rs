@@ -256,6 +256,60 @@ pub(crate) fn load_project_language_layer_from(cwd: &Path) -> toml::Value {
     toml::Value::Table(table)
 }
 
+/// `[memory]` keys that switch where memory content is indexed/retrieved.
+/// Pointing memory at a remote store (or a named retrieval route) is data
+/// egress, so project-scope overrides for these keys are folder-trust
+/// gated — mirroring the remote-patch fail-closed rule for
+/// `memory.retrieval_profile` / `memory.vector_store`
+/// ([`xai_grok_config::config_override::strip_memory_retrieval_route`]).
+const PROJECT_MEMORY_ROUTE_KEYS: &[&str] = &["mode", "vector_store", "retrieval_profile"];
+
+/// Deep-merge `[memory]` tables from project `.grok/config.toml` files
+/// (repo root toward cwd; nearer files overwrite) onto the global memory
+/// table before typed parsing — the per-workspace memory-mode seam.
+///
+/// Route-bearing keys ([`PROJECT_MEMORY_ROUTE_KEYS`]) are honored only when
+/// the project scope is folder-trusted; from untrusted scopes they are
+/// stripped with a per-file warn. Ordinary tuning keys (`search`, `index`,
+/// `watcher`, …) merge regardless, like the `[language]` layer.
+pub fn merge_project_memory_layer(memory: &mut toml::Value) {
+    let Ok(cwd) = std::env::current_dir() else {
+        return;
+    };
+    merge_project_memory_layer_from(memory, &cwd);
+}
+
+pub(crate) fn merge_project_memory_layer_from(memory: &mut toml::Value, cwd: &Path) {
+    let project_trusted = crate::agent::folder_trust::project_scope_allowed(cwd);
+    let mut merged = toml::Value::Table(toml::map::Map::new());
+    for path in crate::config::find_project_configs(cwd) {
+        let Ok(root) = crate::config::load_config_file(&path) else {
+            continue;
+        };
+        let Some(mem) = root.get("memory") else {
+            continue;
+        };
+        let mut mem = mem.clone();
+        if !project_trusted
+            && let Some(table) = mem.as_table_mut()
+        {
+            for key in PROJECT_MEMORY_ROUTE_KEYS {
+                if table.remove(*key).is_some() {
+                    tracing::warn!(
+                        path = %path.display(),
+                        key,
+                        "untrusted project config: [memory].{key} ignored (folder not trusted)"
+                    );
+                }
+            }
+        }
+        xai_grok_config::deep_merge_toml(&mut merged, &mem);
+    }
+    if merged.as_table().is_some_and(|t| !t.is_empty()) {
+        xai_grok_config::deep_merge_toml(memory, &merged);
+    }
+}
+
 /// Effective config with **disk campaigns only** — no remote cache, no
 /// `GROK_CAMPAIGNS_OVERRIDE`. For one-shot CLI entrypoints that never fetch
 /// remote settings: calling [`load_effective_config`] there would silently
@@ -771,5 +825,102 @@ mod tests {
         assert_eq!(cfg.models.pre_campaign_default, None);
         // The field *value* is left as loaded; reset only clears the metadata.
         assert_eq!(cfg.models.default.as_deref(), Some("campaign-model"));
+    }
+
+    // ---------------------------------------------------------------
+    // project `[memory]` layer (per-workspace memory-mode seam)
+    // ---------------------------------------------------------------
+
+    fn write_project_config(dir: &Path, body: &str) {
+        let grok_dir = dir.join(".grok");
+        std::fs::create_dir_all(&grok_dir).unwrap();
+        std::fs::write(grok_dir.join("config.toml"), body).unwrap();
+    }
+
+    fn global_memory_table() -> toml::Value {
+        let root: toml::Value = toml::from_str(
+            "[memory]\nenabled = true\nvector_store = \"trusted\"\n[memory.search]\nmax_results = 9\n",
+        )
+        .unwrap();
+        root.get("memory").cloned().unwrap()
+    }
+
+    /// Dev builds are folder-trust inert (auto-trust), so the project layer
+    /// merges in full — route keys included.
+    #[test]
+    #[serial]
+    fn project_memory_merges_in_full_on_local_build() {
+        let tmp = tempdir().unwrap();
+        git2::Repository::init(tmp.path()).unwrap();
+        write_project_config(
+            tmp.path(),
+            "[memory]\nmode = \"milvus\"\nvector_store = \"vm\"\n[memory.search]\nmax_results = 3\n",
+        );
+        let mut memory = global_memory_table();
+        merge_project_memory_layer_from(&mut memory, tmp.path());
+        assert_eq!(memory["mode"].as_str(), Some("milvus"));
+        assert_eq!(memory["vector_store"].as_str(), Some("vm"));
+        assert_eq!(memory["search"]["max_results"].as_integer(), Some(3));
+        // Non-overridden global keys survive the merge.
+        assert_eq!(memory["enabled"].as_bool(), Some(true));
+    }
+
+    /// On a trust-gated (release-simulated) build, an untrusted project
+    /// scope loses the route-bearing keys but keeps ordinary tuning keys.
+    #[test]
+    #[serial]
+    fn project_memory_route_keys_stripped_when_untrusted() {
+        let tmp = tempdir().unwrap();
+        git2::Repository::init(tmp.path()).unwrap();
+        // Give the repo a code-exec marker so folder-trust treats it as gating-eligible.
+        std::fs::create_dir_all(tmp.path().join(".grok").join("hooks")).unwrap();
+        let home = tempdir().unwrap();
+        let _home = EnvGuard::set("GROK_HOME", home.path());
+        let _flag = EnvGuard::unset("GROK_FOLDER_TRUST");
+        let _sim = EnvGuard::set(
+            xai_grok_version::TEST_VERSION_ENV,
+            "0.0.0-sim",
+        );
+        write_project_config(
+            tmp.path(),
+            "[memory]\nmode = \"milvus\"\nvector_store = \"evil\"\nretrieval_profile = \"evil-profile\"\n[memory.search]\nmax_results = 3\n",
+        );
+        let mut memory = global_memory_table();
+        merge_project_memory_layer_from(&mut memory, tmp.path());
+        // Route keys cannot come from an untrusted project scope.
+        assert!(memory.get("mode").is_none());
+        assert_eq!(memory["vector_store"].as_str(), Some("trusted"));
+        assert!(memory.get("retrieval_profile").is_none());
+        // Ordinary keys still merge.
+        assert_eq!(memory["search"]["max_results"].as_integer(), Some(3));
+    }
+
+    /// Trusted project scope: route keys honored (this is the per-workspace
+    /// `mode = "milvus"` path) and nearer files overwrite farther ones.
+    #[test]
+    #[serial]
+    fn project_memory_route_keys_honored_when_trusted() {
+        let tmp = tempdir().unwrap();
+        git2::Repository::init(tmp.path()).unwrap();
+        let home = tempdir().unwrap();
+        let _home = EnvGuard::set("GROK_HOME", home.path());
+        let _flag = EnvGuard::unset("GROK_FOLDER_TRUST");
+        let _sim = EnvGuard::set(
+            xai_grok_version::TEST_VERSION_ENV,
+            "0.0.0-sim",
+        );
+        crate::agent::folder_trust::grant_folder_trust(tmp.path());
+        write_project_config(
+            tmp.path(),
+            "[memory]\nmode = \"milvus\"\nvector_store = \"vm\"\nretrieval_profile = \"proj\"\n",
+        );
+        let mut memory = global_memory_table();
+        merge_project_memory_layer_from(&mut memory, tmp.path());
+        assert_eq!(memory["mode"].as_str(), Some("milvus"));
+        assert_eq!(memory["vector_store"].as_str(), Some("vm"));
+        assert_eq!(memory["retrieval_profile"].as_str(), Some("proj"));
+        // Non-overridden global keys survive the merge.
+        assert_eq!(memory["enabled"].as_bool(), Some(true));
+        assert_eq!(memory["search"]["max_results"].as_integer(), Some(9));
     }
 }

@@ -1291,7 +1291,7 @@ mod tests {
         .await;
         assert!(matches!(out, VectorReadiness::Ready), "{out:?}");
         // Incremental: embed every chunk into the (adopted) space directly.
-        let mut idx = open_index(db_path, storage.clone(), dims);
+        let idx = open_index(db_path, storage.clone(), dims);
         let chunks = idx.chunks_without_embeddings().unwrap();
         let mock = Arc::new(MockEmbeddingProvider { dimensions: dims });
         for (cid, text) in &chunks {

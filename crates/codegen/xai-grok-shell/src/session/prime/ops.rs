@@ -417,6 +417,7 @@ fn map_index_error(err: PrimeIndexError) -> String {
         PrimeIndexError::SpaceMismatch => "space_mismatch",
         PrimeIndexError::StaleGeneration => "stale",
         PrimeIndexError::EmbedFailed => "embed_failed",
+        PrimeIndexError::StagingIncomplete => "staging_incomplete",
         PrimeIndexError::InvalidItem => "invalid_item",
         PrimeIndexError::Unavailable => "unavailable",
     })
