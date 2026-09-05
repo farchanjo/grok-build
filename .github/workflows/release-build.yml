@@ -14,14 +14,16 @@
 #                                     -f sha=$(git rev-list -n1 vX.Y.Z-fcustom)
 #   - workflow_dispatch        -> manual build (artifact only, no release).
 #
-# Produces two release-dist binaries (see `[profile.release-dist]` in the
+# Produces three release-dist binaries (see `[profile.release-dist]` in the
 # root Cargo.toml):
 #   - aarch64-apple-darwin (macOS arm64, unsigned)
 #   - x86_64-unknown-linux-gnu (Linux glibc, like the /opt/grok-custom deploy)
+#   - x86_64-pc-windows-msvc (static CRT per .cargo/config.toml)
 #
 # `protoc` resolution is handled by `xai-proto-build` (see
-# `crates/build/xai-proto-build/src/find_protoc.rs`): GitHub-hosted runners
-# ship both DotSlash (for `bin/protoc`) and a system `protoc` on PATH.
+# `crates/build/xai-proto-build/src/find_protoc.rs`): GitHub-hosted Linux and
+# macOS runners use the DotSlash wrapper or a system `protoc`; Windows has no
+# DotSlash platform entry, so the job puts a matching `protoc` on PATH.
 
 name: Release build
 
@@ -49,8 +51,13 @@ jobs:
         include:
           - os: macos-15
             target: aarch64-apple-darwin
+            ext: ''
           - os: ubuntu-24.04
             target: x86_64-unknown-linux-gnu
+            ext: ''
+          - os: windows-2025
+            target: x86_64-pc-windows-msvc
+            ext: .exe
     runs-on: ${{ matrix.os }}
     env:
       # .cargo/config.toml sets sccache as the rustc wrapper; GitHub runners
@@ -81,6 +88,21 @@ jobs:
         if: runner.os == 'macOS'
         run: brew install protobuf
 
+      - name: Install protobuf compiler (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          # Same protoc the DotSlash wrapper pins (bin/protoc has no Windows
+          # platform entry, and find_protoc falls through to PATH when the
+          # wrapper is not executable).
+          $zip = Join-Path $env:RUNNER_TEMP 'protoc.zip'
+          Invoke-WebRequest `
+            -Uri 'https://github.com/protocolbuffers/protobuf/releases/download/v29.3/protoc-29.3-win64.zip' `
+            -OutFile $zip
+          Expand-Archive -Path $zip -DestinationPath (Join-Path $env:RUNNER_TEMP 'protoc')
+          "$((Join-Path $env:RUNNER_TEMP 'protoc')\bin)" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          & (Join-Path $env:RUNNER_TEMP 'protoc\bin\protoc.exe') --version
+
       - name: Build release-dist
         run: cargo build -p xai-grok-pager-bin --profile release-dist --locked
 
@@ -88,17 +110,23 @@ jobs:
         shell: bash
         run: |
           mkdir -p dist
-          cp "target/release-dist/xai-grok-pager" "dist/grok-${{ matrix.target }}"
+          # The shipped binary keeps its real name: `grok` (`.exe` on
+          # Windows), matching the deployed /opt/grok-custom/grok, never a
+          # fork-variant name.
+          cp "target/release-dist/xai-grok-pager${{ matrix.ext }}" "dist/grok${{ matrix.ext }}"
           if command -v sha256sum >/dev/null 2>&1; then
-            (cd dist && sha256sum "grok-${{ matrix.target }}" > "grok-${{ matrix.target }}.sha256")
+            (cd dist && sha256sum "grok${{ matrix.ext }}" > "grok${{ matrix.ext }}.sha256")
           else
-            (cd dist && shasum -a 256 "grok-${{ matrix.target }}" > "grok-${{ matrix.target }}.sha256")
+            (cd dist && shasum -a 256 "grok${{ matrix.ext }}" > "grok${{ matrix.ext }}.sha256")
           fi
           ls -la dist/
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
+          # Artifact (run-scoped) names keep the target to avoid collisions;
+          # the files inside are always `grok` + `grok.sha256`. The release
+          # job renames them to `<artifact-name>` when publishing assets.
           name: grok-${{ matrix.target }}
           path: dist/*
           if-no-files-found: error
@@ -118,11 +146,22 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/download-artifact@v4
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
         with:
           pattern: 'grok-*'
-          path: dist
-          merge-multiple: true
+          path: blobs
+
+      - name: Stage release assets
+        shell: bash
+        run: |
+          mkdir -p dist
+          for dir in blobs/grok-*; do
+            name="$(basename "$dir")"          # grok-<target>
+            cp "$dir/grok" "dist/${name}"       # one asset per platform
+            cp "$dir/grok.sha256" "dist/${name}.sha256" 2>/dev/null || true
+          done
+          ls -la dist/
 
       - name: Create or refresh GitHub Release
         env:
@@ -137,10 +176,11 @@ jobs:
           else
             # Every fcustom tag carries the -fcustom marker by convention
             # (vX.Y.Z-fcustom); that is the fork identity, not a pre-release
-            # stage, so releases are always created as plain releases.
+            # stage, so releases are always created as plain releases and
+            # the assets keep the real shipped binary name (`grok`).
             gh release create "$TAG" dist/* \
               --repo "$GITHUB_REPOSITORY" \
-              --title "Grok Build fcustom $TAG" \
+              --title "Grok Build $TAG" \
               --generate-notes
           fi
           gh release view "$TAG" --repo "$GITHUB_REPOSITORY"
