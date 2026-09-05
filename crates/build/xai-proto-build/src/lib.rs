@@ -1,9 +1,9 @@
 pub mod find_protoc;
 
 use anyhow::Context;
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::{fs, iter};
 
 /// Find the protoc well-known types include directory.
 ///
@@ -113,11 +113,22 @@ impl XaiProtoBuilder {
         }
 
         // Can only process one input file when using --dependency_out=FILE.
+        // The dependency list goes to a temporary file instead of the
+        // Unix-only /dev/stdout pseudo-device: native Windows protoc cannot
+        // open it. The dependency target name is the --descriptor_set_out
+        // path, so that points at another file inside the same temp dir.
+        let dep_dir = tempfile::TempDir::new().context("failed to create protoc dependency dir")?;
+        let dep_out_arg = format!(
+            "--dependency_out={}",
+            dep_dir.path().join("deps.d").display()
+        );
+        let descriptor_out_arg = format!(
+            "--descriptor_set_out={}",
+            dep_dir.path().join("descriptor.pbbin").display()
+        );
         for proto in protos {
             let mut command = Command::new(protoc.unwrap_or(Path::new("protoc")));
-            command
-                .arg("--dependency_out=/dev/stdout")
-                .arg("--descriptor_set_out=/dev/null");
+            command.arg(&dep_out_arg).arg(&descriptor_out_arg);
 
             // Add protoc's well-known types include directory first (if found).
             // This is needed for Bazel sandboxed builds where protoc and its
@@ -143,22 +154,37 @@ impl XaiProtoBuilder {
                 return Err(anyhow::anyhow!("protoc command failed"));
             }
 
-            let output =
-                String::from_utf8(output.stdout).context("protoc command output not UTF-8")?;
+            let output = fs::read_to_string(dep_dir.path().join("deps.d"))
+                .context("failed to read protoc dependency output")?;
 
             let mut lines = output.lines();
-            let first_line = lines.next().context("protoc command output is empty")?;
-            let prefix = "/dev/null:";
-            let rem = first_line.strip_prefix(prefix).with_context(|| {
-                format!("protoc command output must start with /dev/null: {output:?}")
-            })?;
-            for line in iter::once(rem).chain(lines) {
+            // The first line starts with the "<descriptor.pbbin>: " target;
+            // strip it, then handle makefile-style backslash continuations
+            // (protoc writes one escaped newline between dependency paths,
+            // and on Windows paths themselves contain backslashes).
+            let first_line = lines.next().context("protoc dependency output is empty")?;
+            let rem = first_line
+                .split_once(": ")
+                .with_context(|| {
+                    format!("protoc dependency output must start with a target: {first_line:?}")
+                })?
+                .1;
+            let joined = rem.to_owned();
+            let joined = joined.strip_suffix('\\').unwrap_or(joined.as_str());
+            let mut joined = joined.to_owned();
+            for line in lines {
+                let line = line.strip_suffix('\\').unwrap_or(line);
+                joined.push(' ');
+                joined.push_str(line);
+            }
+            for line in joined.split_whitespace() {
                 let line = line.trim();
-                let line = line.strip_suffix("\\").unwrap_or(line);
                 // Depending on absolute paths like
                 // /Users/user/homebrew/Cellar/protobuf/29.1/include/google/protobuf/timestamp.proto
                 // is valid, but we want to have output more deterministic.
-                if line.contains("/include/google/protobuf/") {
+                if line.contains("/include/google/protobuf/")
+                    || line.contains("\\include\\google\\protobuf\\")
+                {
                     continue;
                 }
 
