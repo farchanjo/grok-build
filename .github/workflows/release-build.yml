@@ -1,7 +1,18 @@
-# Manual release build for the fcustom distribution targets.
+# Release build for the fcustom distribution targets.
 #
-# Trigger with:
-#   gh workflow run release-build.yml --ref fcustom
+# Triggers:
+#   - push to `fcustom`        -> build + smoke, artifacts DISCARDED (short
+#                                 retention), no GitHub Release published.
+#   - push/create of tag `v*`  -> build, then create/refresh the GitHub
+#                                 Release for that tag with the binaries as
+#                                 assets. Tags cannot be `git push`ed to this
+#                                 remote (server hook allows only
+#                                 fcustom -> fcustom); create the remote tag
+#                                 via the API instead:
+#                                   gh api repos/farchanjo/grok-build/git/refs \
+#                                     -f ref=refs/tags/vX.Y.Z-fcustom \
+#                                     -f sha=$(git rev-list -n1 vX.Y.Z-fcustom)
+#   - workflow_dispatch        -> manual build (artifact only, no release).
 #
 # Produces two release-dist binaries (see `[profile.release-dist]` in the
 # root Cargo.toml):
@@ -15,10 +26,19 @@
 name: Release build
 
 on:
+  push:
+    branches:
+      - fcustom
+    tags:
+      - 'v*'
   workflow_dispatch:
 
 permissions:
   contents: read
+
+concurrency:
+  group: release-build-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
   build:
@@ -83,3 +103,44 @@ jobs:
           path: dist/*
           if-no-files-found: error
           compression-level: 0
+          # Branch/dispatch builds are transient proof-of-build binaries:
+          # auto-discard after 1 day. Tag releases are copied into the
+          # persistent GitHub Release assets by the `release` job below.
+          retention-days: ${{ startsWith(github.ref, 'refs/tags/') && 5 || 1 }}
+
+  release:
+    # Publish a GitHub Release only for tag builds; branch and manual runs
+    # stop at the artifact above (build happens, binaries get discarded).
+    name: Publish release ${{ github.ref_name }}
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: 'grok-*'
+          path: dist
+          merge-multiple: true
+
+      - name: Create or refresh GitHub Release
+        env:
+          GH_TOKEN: "${{ secrets.GITHUB_TOKEN }}"
+          TAG: "${{ github.ref_name }}"
+        shell: bash
+        run: |
+          ls -la dist/
+          # Re-runs on the same tag must not fail: refresh assets instead.
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$TAG" dist/* --clobber --repo "$GITHUB_REPOSITORY"
+          else
+            # Every fcustom tag carries the -fcustom marker by convention
+            # (vX.Y.Z-fcustom); that is the fork identity, not a pre-release
+            # stage, so releases are always created as plain releases.
+            gh release create "$TAG" dist/* \
+              --repo "$GITHUB_REPOSITORY" \
+              --title "Grok Build fcustom $TAG" \
+              --generate-notes
+          fi
+          gh release view "$TAG" --repo "$GITHUB_REPOSITORY"
