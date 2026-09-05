@@ -23,8 +23,12 @@
 # them.
 #
 # rustflags are NOT additive: setting RUSTFLAGS replaces the .cargo/config.toml
-# per-target list, so each variant repeats its target's base flags verbatim
+# per-target list, so each variant starts from its target's base flags verbatim
 # (linker, unwind tables, -ObjC, crt-static) and only appends -C target-cpu.
+# The build passes --target explicitly: without it, RUSTFLAGS also applies to
+# build scripts and proc macros running on the runner at build time, and a
+# znver4 (AVX-512) build script SIGILLs on the runner CPU. With --target,
+# host artifacts stay runner-native while target artifacts get the tuning.
 #
 # `protoc` resolution is handled by `xai-proto-build` (see
 # `crates/build/xai-proto-build/src/find_protoc.rs`): GitHub-hosted Linux and
@@ -146,11 +150,16 @@ jobs:
           & (Join-Path $root 'bin\protoc.exe') --version
 
       - name: Build release-dist
-        # Replaces (not extends) the .cargo/config.toml target rustflags;
+        # --target is what keeps CPU tuning safe: RUSTFLAGS then applies only
+        # to target artifacts, while host artifacts (build scripts, proc
+        # macros — they execute on the runner during the build) compile with
+        # the runner-native CPU. Without it a znver4/alderlake build script
+        # SIGILLs on the runner CPU (observed on proc-macro2). RUSTFLAGS
+        # replaces (does not extend) the .cargo/config.toml target rustflags;
         # matrix.rustflags already repeats those base flags per target.
         env:
           RUSTFLAGS: ${{ matrix.rustflags }}
-        run: cargo build -p xai-grok-pager-bin --profile release-dist --locked
+        run: cargo build --target ${{ matrix.target }} -p xai-grok-pager-bin --profile release-dist --locked
 
       - name: Stage artifact
         shell: bash
@@ -160,7 +169,7 @@ jobs:
           # Windows), matching the deployed /opt/grok-custom/grok, never a
           # fork-variant name. The CPU variant lives in the artifact/asset
           # name, not in the binary name.
-          cp "target/release-dist/xai-grok-pager${{ matrix.ext }}" "dist/grok${{ matrix.ext }}"
+          cp "target/${{ matrix.target }}/release-dist/xai-grok-pager${{ matrix.ext }}" "dist/grok${{ matrix.ext }}"
           if command -v sha256sum >/dev/null 2>&1; then
             (cd dist && sha256sum "grok${{ matrix.ext }}" > "grok${{ matrix.ext }}.sha256")
           else
