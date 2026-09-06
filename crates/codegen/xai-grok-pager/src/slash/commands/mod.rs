@@ -58,6 +58,7 @@ pub mod scroll_debug;
 pub mod session_info;
 pub mod settings_cmd;
 pub mod share;
+pub mod subagents_cmd;
 pub mod tasks;
 pub mod tersify_cmd;
 pub mod theme;
@@ -107,6 +108,7 @@ pub fn builtin_commands() -> Vec<Arc<dyn SlashCommand>> {
         Arc::new(compact_mode::CompactModeCommand),
         Arc::new(vim_mode::VimModeCommand),
         Arc::new(tersify_cmd::TersifyCommand),
+        Arc::new(subagents_cmd::SubagentsCommand),
         Arc::new(plugin::HooksCommand),
         Arc::new(plugin::PluginsCommand),
         Arc::new(plugin::MarketplaceCommand),
@@ -325,6 +327,7 @@ mod tests {
             "share",
             "show-plan",
             "skills",
+            "subagents",
             "summarize",
             "tasks",
             "terminal-check",
@@ -688,6 +691,14 @@ mod tests {
             reg.get("tasks").is_some(),
             "/tasks should be registered in builtins"
         );
+    }
+    #[test]
+    fn subagents_registered_in_builtin_commands() {
+        let reg = CommandRegistry::new(builtin_commands());
+        let cmd = reg
+            .get("subagents")
+            .expect("/subagents should be registered in builtins");
+        assert_eq!(cmd.usage(), "/subagents [model <slug>|none]");
     }
     #[test]
     fn cost_aliases_usage() {

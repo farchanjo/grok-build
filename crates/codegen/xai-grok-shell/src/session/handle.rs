@@ -169,6 +169,11 @@ pub struct SessionHandle {
     /// handle so scheduled tasks survive the subagent's exit.
     pub scheduler_handle:
         Option<xai_grok_tools::implementations::grok_build::scheduler::types::SchedulerHandle>,
+    /// Session-stamped subagent model override (`PromptRequest._meta.subagentModel`,
+    /// set by the pager). Shared with the session actor and read synchronously by
+    /// `MvpAgent::try_build_subagent_spawn_context` so a TUI-selectable fixed
+    /// subagent model wins over `[subagents.models]` pins. `None` = no stamp.
+    pub subagent_model_meta: std::sync::Arc<parking_lot::Mutex<Option<String>>>,
 }
 impl SessionHandle {
     /// Last assistant `model_id` / `model_fingerprint` in conversation (global, not turn-scoped).

@@ -1663,12 +1663,20 @@ plan = false                         # disable plan subagent
 
 [subagents.models]
 explore = "grok-build"              # route explore to a lighter model
+
+[subagents]
+default_model = "grok-lite"         # optional global fallback for all subagents
 ```
 
-By default a subagent inherits the parent session's model. Only an explicit
-per-agent pin overrides that: `[subagents.models].<agent>` (highest priority),
-then the agent definition's `model`. Both pins apply unconditionally,
-regardless of which model the parent is on.
+By default a subagent inherits the parent session's model. The full
+precedence, highest first: an explicit `model=` argument on the spawn tool,
+the session stamp carried on `PromptRequest._meta.subagentModel` (set by the
+pager's `/subagents model` command), the per-agent pin
+`[subagents.models].<agent>`, the global `[subagents].default_model`
+fallback, then the agent definition's `model`. All pins apply
+unconditionally, regardless of which model the parent is on; an id that does
+not resolve to a tool-capable catalog model warns and falls through to the
+next level.
 
 ### Roles and Personas
 

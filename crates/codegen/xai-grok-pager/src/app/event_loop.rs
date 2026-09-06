@@ -4045,6 +4045,15 @@ fn process_effects(
                 .and_then(|a| a.session_tersify_level_override.clone()),
             _ => None,
         },
+        // /subagents model pin rides on every prompt so mid-session pin
+        // switches apply from the very next turn.
+        subagent_model_override: match app.active_view {
+            ActiveView::Agent(id) => app
+                .agents
+                .get(&id)
+                .and_then(|a| a.session_subagent_model_override.clone()),
+            _ => None,
+        },
     };
     for eff in effs {
         // Lazy startup: while the background shell connect is still running,

@@ -114,6 +114,21 @@ Set reasoning effort on the **current** model without reselecting it. Levels are
 /effort high
 ```
 
+### `/subagents [model <slug>|none]`
+
+Show the effective model used for `spawn_subagent`, or pin a fixed one for
+this session:
+
+```
+/subagents
+/subagents model openrouter:z-ai/glm-5.2
+/subagents model none
+```
+
+Without a pin, subagents inherit the session model. The pin is session-only —
+it rides on the next prompt's `_meta.subagentModel` and is never written to
+disk. See [Subagents](16-subagents.md).
+
 ### `/always-approve` and `/auto`
 
 Both are real toggles for the permission mode: they stay in the menu, and running the mode you're already in turns it back off.

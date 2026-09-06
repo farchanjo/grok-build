@@ -297,6 +297,15 @@ impl xai_tool_runtime::Tool for TaskTool {
             }
         }
 
+        // allow_tools / deny_tools are mutually exclusive — reject eagerly
+        // before the fire-and-forget background spawn.
+        if input.allow_tools.is_some() && input.deny_tools.is_some() {
+            return Err(xai_tool_runtime::ToolError::invalid_arguments(
+                "allow_tools and deny_tools are mutually exclusive. \
+                 Use one or the other, not both.",
+            ));
+        }
+
         // 3. Build the subagent request
         let id = input
             .task_id
@@ -319,18 +328,35 @@ impl xai_tool_runtime::Tool for TaskTool {
                 model,
                 model_override_provenance: ModelOverrideProvenance::Tool,
                 reasoning_effort,
-                persona: None,
+                persona: xai_tool_types::sanitize_optional_arg(input.persona),
                 capability_mode: input.capability_mode,
                 isolation: input.isolation,
                 // Model-issued `task` spawns never override the harness; the
                 // parent agent decides the flavor (the `/goal` harness override
                 // is set only by the harness-internal role spawners).
                 harness_agent_type: None,
-                completion_output_cap: None,
+                completion_output_cap: input
+                    .max_output_chars
+                    .and_then(|chars| usize::try_from(chars).ok()),
                 spawn_depth: None,
-                output_token_budget: None,
+                output_token_budget: input.max_output_tokens,
                 output_schema: None,
                 loop_task_id: None,
+                env: xai_tool_types::sanitize_env_overlay(input.env)
+                    .map(|map| map.into_iter().collect()),
+                wait_ms: input.wait_ms.map(|ms| ms.min(SUBAGENT_WAIT_CAP_MS)),
+                timeout_ms: input.timeout_ms,
+                skills_hint: xai_tool_types::sanitize_string_list(input.skills_hint),
+                attachments: xai_tool_types::sanitize_string_list(input.attachments),
+                allow_tools: {
+                    let tools = xai_tool_types::sanitize_string_list(input.allow_tools);
+                    (!tools.is_empty()).then_some(tools)
+                },
+                deny_tools: {
+                    let tools = xai_tool_types::sanitize_string_list(input.deny_tools);
+                    (!tools.is_empty()).then_some(tools)
+                },
+                memory_enabled: input.memory,
             },
             run_in_background: input.run_in_background,
             // Model-spawned subagents must still appear in the idle reminder.
@@ -541,6 +567,7 @@ mod tests {
                 model: None,
                 reasoning_effort: None,
                 task_id: None,
+                ..Default::default()
             },
         )
         .await;
@@ -574,6 +601,7 @@ mod tests {
                 model: None,
                 reasoning_effort: None,
                 task_id: None,
+                ..Default::default()
             },
         )
         .await;
@@ -606,6 +634,7 @@ mod tests {
                 model: None,
                 reasoning_effort: None,
                 task_id: None,
+                ..Default::default()
             },
         )
         .await;
@@ -666,6 +695,7 @@ mod tests {
                 model: None,
                 reasoning_effort: None,
                 task_id: None,
+                ..Default::default()
             },
         )
         .await
@@ -724,6 +754,7 @@ mod tests {
                 model: None,
                 reasoning_effort: None,
                 task_id: None,
+                ..Default::default()
             },
         )
         .await;
@@ -768,6 +799,7 @@ mod tests {
                 model: None,
                 reasoning_effort: None,
                 task_id: None,
+                ..Default::default()
             },
         )
         .await;
@@ -853,6 +885,7 @@ mod tests {
             model: None,
             reasoning_effort: None,
             task_id: None,
+            ..Default::default()
         }
     }
 
@@ -1212,6 +1245,189 @@ mod tests {
         assert!(overrides.reasoning_effort.is_none());
         assert!(overrides.persona.is_none());
         assert!(overrides.capability_mode.is_none());
+        assert!(overrides.env.is_none());
+        assert!(overrides.wait_ms.is_none());
+        assert!(overrides.timeout_ms.is_none());
+        assert!(overrides.skills_hint.is_empty());
+        assert!(overrides.attachments.is_empty());
+        assert!(overrides.allow_tools.is_none());
+        assert!(overrides.deny_tools.is_none());
+        assert!(overrides.memory_enabled.is_none());
+    }
+
+    #[test]
+    fn default_wait_cap_is_ten_minutes() {
+        assert_eq!(SUBAGENT_WAIT_CAP_MS, 600_000);
+        let input: TaskToolInput =
+            serde_json::from_str(r#"{"description": "d", "prompt": "p", "wait_ms": 999999999}"#)
+                .unwrap();
+        assert_eq!(input.wait_ms, Some(999_999_999));
+    }
+
+    #[test]
+    fn new_input_fields_parse_from_json() {
+        let input: TaskToolInput = serde_json::from_str(
+            r#"{
+                "description": "d",
+                "prompt": "p",
+                "persona": "concise",
+                "env": {"FOO": "bar", "GROK_HOME": "/tmp/grok"},
+                "allow_tools": ["read_file", "grep"],
+                "timeout_ms": 120000,
+                "wait_ms": 300000,
+                "max_output_tokens": 4000,
+                "max_output_chars": 2000,
+                "skills_hint": ["rust", "git"],
+                "attachments": ["/tmp/a.txt"],
+                "memory": false,
+                "stream": true
+            }"#,
+        )
+        .unwrap();
+        assert_eq!(input.persona.as_deref(), Some("concise"));
+        assert_eq!(input.env.as_ref().map(|m| m.len()), Some(2));
+        assert_eq!(
+            input.allow_tools.as_deref(),
+            Some(&["read_file".to_string(), "grep".to_string()][..])
+        );
+        assert_eq!(input.timeout_ms, Some(120_000));
+        assert_eq!(input.wait_ms, Some(300_000));
+        assert_eq!(input.max_output_tokens, Some(4000));
+        assert_eq!(input.max_output_chars, Some(2000));
+        assert_eq!(
+            input.skills_hint.as_deref(),
+            Some(&["rust".to_string(), "git".to_string()][..])
+        );
+        assert_eq!(
+            input.attachments.as_deref(),
+            Some(&["/tmp/a.txt".to_string()][..])
+        );
+        assert_eq!(input.memory, Some(false));
+        assert_eq!(input.stream, Some(true));
+        // Absent fields default to None (empty lists parse as None via sanitize).
+        assert!(input.deny_tools.is_none());
+    }
+
+    #[test]
+    fn absent_new_fields_default_to_none() {
+        let input: TaskToolInput =
+            serde_json::from_str(r#"{"description": "d", "prompt": "p"}"#).unwrap();
+        assert!(input.persona.is_none());
+        assert!(input.env.is_none());
+        assert!(input.allow_tools.is_none());
+        assert!(input.deny_tools.is_none());
+        assert!(input.timeout_ms.is_none());
+        assert!(input.wait_ms.is_none());
+        assert!(input.max_output_tokens.is_none());
+        assert!(input.max_output_chars.is_none());
+        assert!(input.skills_hint.is_none());
+        assert!(input.attachments.is_none());
+        assert!(input.memory.is_none());
+        assert!(input.stream.is_none());
+    }
+
+    #[tokio::test]
+    async fn allow_and_deny_tools_mutually_exclusive_rejected() {
+        let (backend, mut rx) = make_backend();
+        let mut resources = Resources::new();
+        resources.insert(backend);
+        resources.insert(SubagentDepthCounter(0));
+        resources.insert(SessionIdResource("parent".to_string()));
+        resources.insert(CurrentPromptIdResource("prompt-1".to_string()));
+        resources.insert(TaskModelValidator::new(|_| None));
+
+        let mut input = task_input("general-purpose", true);
+        input.allow_tools = Some(vec!["read_file".to_string()]);
+        input.deny_tools = Some(vec!["bash".to_string()]);
+
+        let result =
+            xai_tool_runtime::Tool::run(&TaskTool, test_ctx(resources.into_shared()), input).await;
+        let msg = result
+            .expect_err("both set must reject before spawn")
+            .to_string();
+        assert!(msg.contains("mutually exclusive"), "error: {msg}");
+        assert!(
+            rx.try_recv().is_err(),
+            "spawn must not reach the coordinator"
+        );
+    }
+
+    #[tokio::test]
+    async fn thread_new_fields_into_runtime_overrides() {
+        let (backend, mut rx) = make_backend();
+        let mut resources = Resources::new();
+        resources.insert(backend);
+        resources.insert(SubagentDepthCounter(0));
+        resources.insert(SessionIdResource("parent".to_string()));
+        resources.insert(CurrentPromptIdResource("prompt-1".to_string()));
+        resources.insert(TaskModelValidator::new(|_| None));
+
+        let shared = resources.into_shared();
+        let handle = tokio::spawn(async move {
+            let request = unwrap_spawn(rx.recv().await.unwrap());
+            let o = &request.runtime_overrides;
+            assert_eq!(o.persona.as_deref(), Some("concise"));
+            assert_eq!(
+                o.wait_ms,
+                Some(600_000),
+                "wait_ms must be clamped to the cap"
+            );
+            assert_eq!(o.timeout_ms, Some(30_000));
+            assert_eq!(o.output_token_budget, Some(4096));
+            assert_eq!(o.completion_output_cap, Some(2048));
+            assert_eq!(o.skills_hint, vec!["rust".to_string()]);
+            assert_eq!(o.attachments, vec!["/tmp/a.txt".to_string()]);
+            assert!(o.memory_enabled == Some(false));
+            assert_eq!(
+                o.allow_tools.as_deref(),
+                Some(&["read_file".to_string()][..])
+            );
+            assert!(o.deny_tools.is_none());
+            let env = o
+                .env
+                .as_ref()
+                .expect("env overlay must survive sanitization");
+            assert_eq!(env.get("FOO").map(String::as_str), Some("bar"));
+            assert!(
+                !env.contains_key("GROK_HOME"),
+                "GROK_* keys must be stripped before the request"
+            );
+            assert!(
+                !env.contains_key("NPM_TOKEN"),
+                "*_TOKEN keys must be stripped before the request"
+            );
+            request
+                .result_tx
+                .send(SubagentResult {
+                    success: true,
+                    output: "ok".into(),
+                    subagent_id: request.id.clone(),
+                    child_session_id: request.id.clone(),
+                    ..Default::default()
+                })
+                .unwrap();
+        });
+
+        let mut input = task_input("general-purpose", true);
+        input.persona = Some("  concise  ".into());
+        let mut env = std::collections::BTreeMap::new();
+        env.insert("FOO".to_string(), "bar".to_string());
+        env.insert("GROK_HOME".to_string(), "/tmp/grok".to_string());
+        env.insert("NPM_TOKEN".to_string(), "npm-1".to_string());
+        input.env = Some(env);
+        input.allow_tools = Some(vec!["read_file".to_string()]);
+        input.timeout_ms = Some(30_000);
+        input.wait_ms = Some(999_999_999); // clamps to 600_000
+        input.max_output_tokens = Some(4096);
+        input.max_output_chars = Some(2048);
+        input.skills_hint = Some(vec!["rust".to_string()]);
+        input.attachments = Some(vec!["/tmp/a.txt".to_string()]);
+        input.memory = Some(false);
+
+        let _ = xai_tool_runtime::Tool::run(&TaskTool, test_ctx(shared), input)
+            .await
+            .expect("spawn should succeed");
+        handle.await.unwrap();
     }
 
     #[test]
@@ -1228,6 +1444,7 @@ mod tests {
             model: Some("test-model".into()),
             reasoning_effort: None,
             task_id: Some("task-123".into()),
+            ..Default::default()
         };
         let json = serde_json::to_string(&input).unwrap();
         let parsed: TaskToolInput = serde_json::from_str(&json).unwrap();
@@ -1519,6 +1736,7 @@ mod tests {
             model: None,
             reasoning_effort: None,
             task_id: None,
+            ..Default::default()
         })
         .unwrap();
         assert!(
@@ -1570,6 +1788,7 @@ mod tests {
                 model: None,
                 reasoning_effort: None,
                 task_id: None,
+                ..Default::default()
             },
         )
         .await
@@ -1607,6 +1826,7 @@ mod tests {
             model: None,
             reasoning_effort: None,
             task_id: None,
+            ..Default::default()
         };
         let json = serde_json::to_string(&input).unwrap();
         assert!(
@@ -1655,6 +1875,7 @@ mod tests {
                 model: None,
                 reasoning_effort: None,
                 task_id: None,
+                ..Default::default()
             },
         )
         .await
@@ -1723,6 +1944,7 @@ mod tests {
                     model: None,
                     reasoning_effort: None,
                     task_id: None,
+                    ..Default::default()
                 },
             )
             .await
@@ -1770,6 +1992,7 @@ mod tests {
             model: None,
             reasoning_effort: None,
             task_id: None,
+            ..Default::default()
         };
         let json = serde_json::to_string(&input).unwrap();
         assert!(!json.contains("cwd"), "None cwd should be skipped: {json}");
@@ -1799,6 +2022,7 @@ mod tests {
                 model: None,
                 reasoning_effort: None,
                 task_id: None,
+                ..Default::default()
             },
         )
         .await;
@@ -1855,6 +2079,7 @@ mod tests {
                 model: None,
                 reasoning_effort: None,
                 task_id: None,
+                ..Default::default()
             },
         )
         .await;
@@ -1907,6 +2132,7 @@ mod tests {
                 model: None,
                 reasoning_effort: None,
                 task_id: None,
+                ..Default::default()
             },
         )
         .await;
@@ -1959,6 +2185,7 @@ mod tests {
                 model: None,
                 reasoning_effort: None,
                 task_id: None,
+                ..Default::default()
             },
         )
         .await;
@@ -2014,6 +2241,7 @@ mod tests {
                 model: None,
                 reasoning_effort: None,
                 task_id: None,
+                ..Default::default()
             },
         )
         .await;
@@ -2049,6 +2277,7 @@ mod tests {
                 model: None,
                 reasoning_effort: None,
                 task_id: None,
+                ..Default::default()
             },
         )
         .await;
@@ -2106,6 +2335,7 @@ mod tests {
                     model: None,
                     reasoning_effort: None,
                     task_id: None,
+                    ..Default::default()
                 },
             )
             .await
@@ -2161,6 +2391,7 @@ mod tests {
                 model: None,
                 reasoning_effort: None,
                 task_id: None,
+                ..Default::default()
             },
         )
         .await
@@ -2220,6 +2451,7 @@ mod tests {
                 model: None,
                 reasoning_effort: None,
                 task_id: None,
+                ..Default::default()
             },
         )
         .await
@@ -2274,6 +2506,7 @@ mod tests {
                 model: None,
                 reasoning_effort: None,
                 task_id: None,
+                ..Default::default()
             },
         )
         .await;
@@ -2324,6 +2557,7 @@ mod tests {
                 model: None,
                 reasoning_effort: None,
                 task_id: None,
+                ..Default::default()
             },
         )
         .await

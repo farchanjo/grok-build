@@ -257,6 +257,11 @@ pub(crate) struct SessionFlags {
     /// Stamped as `tersifyLevel` into every `PromptRequest._meta` so the
     /// shell's style assembly reads it per turn.
     pub tersify_level_override: Option<String>,
+    /// Session-scoped fixed model for `spawn_subagent` (`/subagents model <slug>`),
+    /// or `None` when subagents inherit the session model. Stamped as
+    /// `subagentModel` into every `PromptRequest._meta` so the shell's
+    /// spawn_subagent routing reads it per turn.
+    pub subagent_model_override: Option<String>,
     /// Effective screen mode label (`ScreenMode::meta_label`), stamped into
     /// every `PromptRequest._meta.screenMode` for minimal-vs-regular usage
     /// telemetry. `None` (key omitted) only under `Default` in tests; real

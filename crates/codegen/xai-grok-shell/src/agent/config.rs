@@ -1759,6 +1759,11 @@ pub struct Config {
     /// from `SubagentsConfig::resolve()`.
     #[serde(skip)]
     pub subagent_model_overrides: std::collections::HashMap<String, String>,
+    /// Global fallback model from `[subagents].default_model` in config.toml.
+    /// Resolved after the per-agent `[subagents.models]` pin and before
+    /// `AgentDefinition.model`.
+    #[serde(skip)]
+    pub subagent_default_model: Option<String>,
     /// Per-subagent enable/disable toggles from `[subagents.toggle]` in config.toml.
     /// Keys are agent names, values are booleans. Omitted agents default to enabled.
     #[serde(skip)]
@@ -2090,6 +2095,7 @@ impl Default for Config {
             cli_agent_overrides: CliAgentOverrides::default(),
             subagents_enabled: true,
             subagent_model_overrides: std::collections::HashMap::new(),
+            subagent_default_model: None,
             subagent_toggle: std::collections::HashMap::new(),
             subagent_roles: std::collections::HashMap::new(),
             subagent_personas: std::collections::HashMap::new(),
@@ -2413,6 +2419,7 @@ impl Config {
         let sa = crate::config::SubagentsConfig::resolve(cli_flag, raw_config);
         self.subagents_enabled = sa.enabled;
         self.subagent_model_overrides = sa.models;
+        self.subagent_default_model = sa.default_model;
         self.subagent_toggle = sa.toggle;
         self.subagent_roles = sa.roles;
         self.subagent_personas = sa.personas;
@@ -2420,7 +2427,7 @@ impl Config {
     /// Resolve all `#[serde(skip)]` runtime fields that have resolver functions.
     ///
     /// Call immediately after `new_from_toml_cfg()`. Fields resolved:
-    /// - subagents base layers (6 fields) via `SubagentsConfig::resolve`
+    /// - subagents base layers (7 fields) via `SubagentsConfig::resolve`
     /// - respect_gitignore via `ToolsConfig::resolve`
     /// - disable_zdr_incompatible_tools via `ToolsConfig::resolve`
     /// - managed_mcps_enabled via `ManagedMcpsConfig::resolve`
@@ -3882,7 +3889,9 @@ pub fn resolve_model_list(
         // check only fires for values the user actually wrote.
         warn_budget_above_ceiling(
             key,
-            cfg.config_models.get(key).and_then(|m| m.max_completion_tokens),
+            cfg.config_models
+                .get(key)
+                .and_then(|m| m.max_completion_tokens),
             model_override.max_output_ceiling,
         );
         let session_bearer_unsafe = !crate::util::is_xai_api_bearer_url(&entry.info.base_url)

@@ -289,6 +289,14 @@ pub(crate) struct SubagentSpawnContext {
     pub available_models: indexmap::IndexMap<String, crate::agent::config::ModelEntry>,
     /// Per-subagent model ID overrides from config.toml `[subagents.models]`.
     pub subagent_model_overrides: std::collections::HashMap<String, String>,
+    /// Global fallback model from config.toml `[subagents].default_model`.
+    /// Resolved after the per-agent `[subagents.models]` pin and before
+    /// `AgentDefinition.model`.
+    pub subagent_default_model: Option<String>,
+    /// Session-stamped subagent model override (`PromptRequest._meta.subagentModel`,
+    /// set by the pager). Wins over config pins but loses to an explicit tool
+    /// `model=` runtime override.
+    pub subagent_session_model: Option<String>,
     /// Per-subagent enable/disable toggles from config.toml `[subagents.toggle]`.
     /// Omitted agents default to enabled (`true`).
     pub subagent_toggle: std::collections::HashMap<String, bool>,
@@ -860,25 +868,30 @@ use xai_grok_subagent_resolution::resolve_effective_overrides;
 /// Resolve the sampling config and model ID for a subagent.
 ///
 /// Subagents inherit the parent session's model by default. Only an
-/// EXPLICIT per-agent pin can override that inheritance; there is no global
-/// default model and no parent-model gate. Precedence (highest to lowest):
+/// EXPLICIT per-agent pin or the global fallback can override that
+/// inheritance. Precedence (highest to lowest):
 ///
 ///   1. `config.toml [subagents.models].{agent_name}` override, if it
 ///      resolves to a known model. Applies unconditionally.
 ///
-///   2. `AgentDefinition.model = Override(id)`, if it resolves to a known
+///   2. `config.toml [subagents].default_model` (global fallback), if it
+///      resolves to a known model. Used when the agent has no per-agent pin
+///      (a per-agent pin wins over the global fallback).
+///
+///   3. `AgentDefinition.model = Override(id)`, if it resolves to a known
 ///      model. Applies unconditionally.
 ///
-///   3. Inherit the parent session's actual live sampling config (from
+///   4. Inherit the parent session's actual live sampling config (from
 ///      `ChatStateHandle`).
 ///
-/// Both explicit pins apply regardless of which model the parent is on. If a
+/// All explicit pins apply regardless of which model the parent is on. If a
 /// pin references an unknown model it is ignored (with a `tracing::warn!`)
 /// and resolution falls through to the next priority.
 ///
-/// NOTE: the persona/role/runtime override (`effective_runtime.model`) is
-/// applied by the caller (`handle_subagent_request`) BEFORE this function
-/// runs, so it is not handled here.
+/// NOTE: the persona/role/runtime override (`effective_runtime.model`) and
+/// the session-stamped override (`_meta.subagentModel`) are applied by the
+/// caller (`resolve_effective_model_config`) BEFORE this function runs, so
+/// they are not handled here.
 ///
 /// NOTE: `agent_type` and `use_concise` on the resolved model are
 /// intentionally ignored. Subagent prompt/toolset is always determined by
@@ -918,6 +931,15 @@ async fn resolve_subagent_inference_config(
     {
         return resolved;
     }
+    if let Some(model_id) = ctx.subagent_default_model.as_deref()
+        && let Some(resolved) = try_pin(
+            model_id,
+            "default_model",
+            "Subagent default_model references unknown model, falling through to inherit",
+        )
+    {
+        return resolved;
+    }
     if let ModelOverride::Override(model_id) = agent_model
         && let Some(resolved) = try_pin(
             model_id,
@@ -939,13 +961,24 @@ async fn resolve_subagent_inference_config(
 /// Resolve a subagent's effective sampling config + model id, honoring the
 /// model-resolution precedence (Key Decision #16).
 ///
-/// An explicit `runtime_override_model` — the goal role model or a persona
-/// override carried on `effective_runtime.model` — is resolved HERE, BEFORE
+/// An explicit `runtime_override_model` — the tool `model=` argument, the
+/// goal role model, or a persona override carried on
+/// `effective_runtime.model` — is resolved HERE, BEFORE
 /// [`resolve_subagent_inference_config`] (where the user `[subagents.models]`
-/// pin and `AgentDefinition.model` apply). So a goal/persona override WINS
-/// over a user per-agent pin. An override that does not resolve to a known
-/// model warns and falls through to the pin path; `None` (inherit) hands
-/// precedence back to the pin path entirely (pin > agent-def > inherit).
+/// pin, `[subagents].default_model`, and `AgentDefinition.model` apply). So
+/// a goal/persona override WINS over a user per-agent pin. An override that
+/// does not resolve to a known model warns and falls through to the pin
+/// path; `None` (inherit) hands precedence back to the pin path entirely
+/// (tool model > session stamp > pin > default_model > agent-def >
+/// inherit).
+///
+/// The session-stamped override (`PromptRequest._meta.subagentModel`,
+/// carried on `ctx.subagent_session_model`) sits between the tool `model=`
+/// override and the config pins: a TUI-selectable fixed model must win over
+/// per-agent pins, but an explicit tool-model argument — which only appears
+/// when the user directly requests a model — wins over the TUI selection.
+/// An unresolvable session stamp warns and falls through; `None` skips the
+/// level.
 ///
 /// Extracted from `handle_subagent_request` so the precedence is unit-testable
 /// without spawning a child session.
@@ -962,6 +995,15 @@ async fn resolve_effective_model_config(
         tracing::warn!(
             model_id,
             "Runtime model override references unknown model, falling through"
+        );
+    }
+    if let Some(model_id) = ctx.subagent_session_model.as_deref() {
+        if let Some(resolved) = resolve_model_override_to_config(model_id, ctx) {
+            return resolved;
+        }
+        tracing::warn!(
+            model_id,
+            "Session subagent model override references unknown model, falling through"
         );
     }
     resolve_subagent_inference_config(subagent_type, definition_model, ctx).await

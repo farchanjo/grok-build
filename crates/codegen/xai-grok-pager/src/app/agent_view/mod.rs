@@ -812,6 +812,11 @@ pub struct AgentView {
     /// when `/tersify off` cleared it. Ephemeral: rides on the next prompt's
     /// session meta (`tersifyLevel`) and never persists to `[hints]`.
     pub session_tersify_level_override: Option<String>,
+    /// `/subagents model <slug>` session pin: fixed model for `spawn_subagent`
+    /// (`Some(slug)`), or `None` when subagents inherit the session model.
+    /// Ephemeral: rides on the next prompt's session meta (`subagentModel`)
+    /// and never persists to disk.
+    pub session_subagent_model_override: Option<String>,
     /// Vim-mode scrollback keybindings. When `false` (default), bare-letter
     /// and Shift+letter scrollback bindings (j/k, h/l, g/G, y/Y, o/O, r,
     /// x, e/E, L/H, plus the `i` FocusPrompt alt) are suppressed and the

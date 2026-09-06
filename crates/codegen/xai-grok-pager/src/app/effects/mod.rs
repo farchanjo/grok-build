@@ -1199,6 +1199,8 @@ pub(crate) fn execute(
             let is_api_key_auth = session_flags.is_api_key_auth;
             let tersify_level_override =
                 session_flags.tersify_level_override.clone();
+            let subagent_model_override =
+                session_flags.subagent_model_override.clone();
             tasks
                 .spawn(async move {
                     ulog::info(
@@ -1216,7 +1218,12 @@ pub(crate) fn execute(
                     let prompt = vec![plain_prompt_content_block(text, &skill_token_ranges)];
                     let req = acp::PromptRequest::new(session_id.clone(), prompt)
                         .meta(
-                            prompt_request_meta(&prompt_id, screen_mode, tersify_level_override.as_deref())
+                            prompt_request_meta(
+                                &prompt_id,
+                                screen_mode,
+                                tersify_level_override.as_deref(),
+                                subagent_model_override.as_deref(),
+                            )
                                 .as_object()
                                 .cloned(),
                         );
@@ -1256,6 +1263,8 @@ pub(crate) fn execute(
             let is_api_key_auth = session_flags.is_api_key_auth;
             let tersify_level_override =
                 session_flags.tersify_level_override.clone();
+            let subagent_model_override =
+                session_flags.subagent_model_override.clone();
             tasks
                 .spawn(async move {
                     ulog::info(
@@ -1271,7 +1280,12 @@ pub(crate) fn execute(
                         ),
                     );
                     let send_start = std::time::Instant::now();
-                    let mut meta = prompt_request_meta(&prompt_id, screen_mode, tersify_level_override.as_deref());
+                    let mut meta = prompt_request_meta(
+                        &prompt_id,
+                        screen_mode,
+                        tersify_level_override.as_deref(),
+                        subagent_model_override.as_deref(),
+                    );
                     stamp_prompt_origin_meta(&mut meta, prompt_origin);
                     if send_now && let Some(map) = meta.as_object_mut() {
                         map.insert("sendNow".into(), serde_json::Value::Bool(true));
@@ -1321,6 +1335,8 @@ pub(crate) fn execute(
             let screen_mode = session_flags.screen_mode_label;
             let tersify_level_override =
                 session_flags.tersify_level_override.clone();
+            let subagent_model_override =
+                session_flags.subagent_model_override.clone();
             tasks
                 .spawn(async move {
                     use xai_grok_shell::extensions::prompt_meta::PromptBlockMeta;
@@ -1347,7 +1363,12 @@ pub(crate) fn execute(
                 )];
                     let req = acp::PromptRequest::new(session_id.clone(), prompt)
                         .meta(
-                            prompt_request_meta(&prompt_id, screen_mode, tersify_level_override.as_deref())
+                            prompt_request_meta(
+                                &prompt_id,
+                                screen_mode,
+                                tersify_level_override.as_deref(),
+                                subagent_model_override.as_deref(),
+                            )
                                 .as_object()
                                 .cloned(),
                         );
@@ -1614,6 +1635,8 @@ pub(crate) fn execute(
             let is_api_key_auth = session_flags.is_api_key_auth;
             let tersify_level_override =
                 session_flags.tersify_level_override.clone();
+            let subagent_model_override =
+                session_flags.subagent_model_override.clone();
             tasks
                 .spawn(async move {
                     let mode_req = acp::SetSessionModeRequest::new(
@@ -1631,7 +1654,12 @@ pub(crate) fn execute(
                     let prompt = vec![plain_prompt_content_block(text, &skill_token_ranges)];
                     let req = acp::PromptRequest::new(session_id.clone(), prompt)
                         .meta(
-                            prompt_request_meta(&prompt_id, screen_mode, tersify_level_override.as_deref())
+                            prompt_request_meta(
+                                &prompt_id,
+                                screen_mode,
+                                tersify_level_override.as_deref(),
+                                subagent_model_override.as_deref(),
+                            )
                                 .as_object()
                                 .cloned(),
                         );
@@ -5133,6 +5161,7 @@ fn prompt_request_meta(
     prompt_id: &str,
     screen_mode: Option<&'static str>,
     tersify_level_override: Option<&str>,
+    subagent_model_override: Option<&str>,
 ) -> serde_json::Value {
     let mut map = serde_json::Map::new();
     map.insert("promptId".into(), serde_json::Value::String(prompt_id.into()));
@@ -5141,6 +5170,12 @@ fn prompt_request_meta(
     }
     if let Some(level) = tersify_level_override {
         map.insert("tersifyLevel".into(), serde_json::Value::String(level.into()));
+    }
+    if let Some(model) = subagent_model_override {
+        map.insert(
+            "subagentModel".into(),
+            serde_json::Value::String(model.into()),
+        );
     }
     serde_json::Value::Object(map)
 }

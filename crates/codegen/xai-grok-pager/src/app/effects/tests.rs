@@ -83,7 +83,7 @@ fn plain_prompt_block_no_meta_when_ranges_empty() {
 /// (the shell threads the latter into `prompt_submitted.screen_mode`).
 #[test]
 fn prompt_request_meta_stamps_screen_mode() {
-    let meta = prompt_request_meta("p-1", Some("minimal"), None);
+    let meta = prompt_request_meta("p-1", Some("minimal"), None, None);
     assert_eq!(
             meta,
             serde_json::json!({ "promptId": "p-1", "screenMode": "minimal" })
@@ -93,13 +93,43 @@ fn prompt_request_meta_stamps_screen_mode() {
 /// omitted — the legacy `{"promptId": …}` wire shape stays byte-identical.
 #[test]
 fn prompt_request_meta_omits_screen_mode_when_unset() {
-    let meta = prompt_request_meta("p-2", None, None);
+    let meta = prompt_request_meta("p-2", None, None, None);
     assert_eq!(meta, serde_json::json!({ "promptId": "p-2" }));
+}
+/// With a session pin, `_meta` carries `subagentModel` so the shell routes
+/// `spawn_subagent` to the pinned catalog id.
+#[test]
+fn prompt_request_meta_stamps_subagent_model_when_set() {
+    let meta = prompt_request_meta(
+        "p-4",
+        None,
+        None,
+        Some("openrouter:z-ai/glm-5.2"),
+    );
+    assert_eq!(
+        meta,
+        serde_json::json!({
+            "promptId": "p-4",
+            "subagentModel": "openrouter:z-ai/glm-5.2"
+        })
+    );
+}
+/// Without a pin (`/subagents model none` cleared it), the key is omitted —
+/// the shell falls back to inherit-the-session-model.
+#[test]
+fn prompt_request_meta_omits_subagent_model_when_unset() {
+    let meta = prompt_request_meta("p-5", None, None, None);
+    let obj = meta.as_object().unwrap();
+    assert!(
+        !obj.contains_key("subagentModel"),
+        "subagentModel key must be absent when None"
+    );
+    assert_eq!(obj.len(), 1, "only promptId on the legacy shape");
 }
 
 #[test]
 fn stamp_prompt_origin_meta_writes_scheduler_tag() {
-    let mut meta = prompt_request_meta("p-3", None, None);
+    let mut meta = prompt_request_meta("p-3", None, None, None);
     stamp_prompt_origin_meta(
         &mut meta,
         Some(crate::app::actions::PromptOriginTag::SchedulerFired),

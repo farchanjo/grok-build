@@ -90,9 +90,9 @@ use super::settings::setters::{
     set_media_video_model, set_multiline_mode, set_page_flip_on_send, set_prompt_suggestions,
     set_remember_tool_approvals, set_render_mermaid, set_repetition_guard,
     set_respect_manual_folds, set_screen_mode, set_scroll_lines, set_scroll_mode, set_scroll_speed,
-    set_session_tersify_level, set_show_thinking_blocks, set_show_tips, set_simple_mode,
-    set_tersify_level, set_tersify_scope, set_theme, set_timeline, set_timestamps, set_vim_mode,
-    set_voice_capture_mode, set_voice_stt_language,
+    set_session_subagent_model, set_session_tersify_level, set_show_thinking_blocks, set_show_tips,
+    set_simple_mode, set_tersify_level, set_tersify_scope, set_theme, set_timeline, set_timestamps,
+    set_vim_mode, set_voice_capture_mode, set_voice_stt_language,
 };
 use super::settings::ui::{
     dispatch_confirm_reset_setting, dispatch_open_command_palette, dispatch_open_howto_guides,
@@ -1173,6 +1173,7 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
         Action::SetContextualHintSshWrap(v) => set_contextual_hint_ssh_wrap(app, v),
         Action::SetTheme(v) => set_theme(app, v),
         Action::SetSessionTersifyLevel(v) => set_session_tersify_level(app, v),
+        Action::SetSessionSubagentModel(v) => set_session_subagent_model(app, v),
         Action::SetTersifyScope(v) => set_tersify_scope(app, v),
         Action::SetRepetitionGuard(v) => set_repetition_guard(app, v),
         Action::SetTersifyLevel(v) => set_tersify_level(app, v),

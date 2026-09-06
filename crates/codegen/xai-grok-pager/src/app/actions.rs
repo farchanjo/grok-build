@@ -601,6 +601,11 @@ pub enum Action {
     /// when assembling the next turn's system prompt. `off` clears the
     /// override so the persisted `[hints] tersify_*` applies again.
     SetSessionTersifyLevel(String),
+    /// Set THIS session's fixed model for `spawn_subagent` (`Some(slug)`), or
+    /// clear the override so subagents inherit the session model (`None`).
+    /// Never persisted; the shell reads it from session meta (`subagentModel`)
+    /// when routing the next turn's `spawn_subagent` calls.
+    SetSessionSubagentModel(Option<String>),
     /// Commit `[hints] repetition_guard` (on/off). Default on; applies to
     /// new sessions (the guard state is built at session spawn).
     SetRepetitionGuard(bool),

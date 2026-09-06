@@ -8,9 +8,7 @@ mod types;
 
 pub use ext::Extensions;
 pub use schema_utils::parse_arguments_from_schema_lossy;
-pub use search_models::{
-    ModelCatalogQuery, SearchModelsHit, SearchModelsResult,
-};
+pub use search_models::{ModelCatalogQuery, SearchModelsHit, SearchModelsResult};
 pub use serde_lenient::{
     deserialize_lenient_bool, deserialize_lenient_option_bool, lenient_bool_from_json,
 };
@@ -23,9 +21,9 @@ pub use task::{
     TaskOutputToolNaming, TaskToolInput, TaskToolNaming, WaitMode, WaitTasksToolInput,
     WaitTasksToolNaming, build_kill_task_description, build_task_description,
     build_task_output_description, build_wait_tasks_description, builtin_subagent_by_name,
-    default_subagent_type, format_resume_footer, format_subagent_completed,
-    format_subagent_started_background, is_not_sentinel, resolve_task_ids, sanitize_optional_arg,
-    task_output_waits, task_output_waits_from_json,
+    default_subagent_type, env_key_allowed, format_resume_footer, format_subagent_completed,
+    format_subagent_started_background, is_not_sentinel, resolve_task_ids, sanitize_env_overlay,
+    sanitize_optional_arg, sanitize_string_list, task_output_waits, task_output_waits_from_json,
 };
 pub use types::{
     ArgumentType, SchemaType, ToolArgument, ToolDescription, ValidationError, ValidationErrors,

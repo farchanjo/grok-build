@@ -644,6 +644,10 @@ pub struct PagerLocalSnapshot {
     pub tersify_scope: String,
     /// `[hints] tersify_level` mirror, resolved fail-closed at snapshot time.
     pub tersify_level: String,
+    /// `/subagents model <slug>` session pin for `spawn_subagent`, or `None`
+    /// when subagents inherit the session model. Built at command-build time
+    /// so the `/subagents` status command can report the effective override.
+    pub subagent_model_override: Option<String>,
     /// `[hints] repetition_guard` mirror, fail-closed default true.
     pub repetition_guard_enabled: bool,
     /// `[language].artifact` BCP-47 tag (default `en-US`).
@@ -708,6 +712,7 @@ impl Default for PagerLocalSnapshot {
             language_conversation: "off".to_string(),
             tersify_scope: "main_only".to_string(),
             tersify_level: "full".to_string(),
+            subagent_model_override: None,
             repetition_guard_enabled: true,
             language_artifact: "en-US".to_string(),
             language_artifact_locked: false,

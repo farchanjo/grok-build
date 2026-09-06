@@ -1793,6 +1793,8 @@ pub(crate) async fn spawn_session_actor(
     let resolved_tool_overrides: std::sync::Arc<
         arc_swap::ArcSwapOption<xai_grok_inference_types::ToolOverrides>,
     > = std::sync::Arc::new(arc_swap::ArcSwapOption::empty());
+    let subagent_model_meta: std::sync::Arc<parking_lot::Mutex<Option<String>>> =
+        std::sync::Arc::new(parking_lot::Mutex::new(None));
     let compaction_cancel = super::compaction_config::CompactCancelGate::default();
     let session = Arc::new_cyclic(|weak: &std::sync::Weak<SessionActor>| SessionActor {
         session_info: session_info.clone(),
@@ -2445,6 +2447,7 @@ pub(crate) async fn spawn_session_actor(
             terminal_backend: Some(terminal_backend.clone()),
             tools_notification_handle: Some(tools_notification_handle.clone()),
             scheduler_handle: scheduler_handle_for_handle,
+            subagent_model_meta,
         },
         permission_events_rx,
         system_prompt,

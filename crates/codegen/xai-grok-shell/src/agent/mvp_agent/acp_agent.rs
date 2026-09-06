@@ -2827,6 +2827,21 @@ impl acp::Agent for MvpAgent {
             .and_then(|m| m.get("tersifyLevel"))
             .and_then(|v| v.as_str())
             .map(|s| s.to_string());
+        // TUI-selectable fixed subagent model: pager stamps
+        // `_meta.subagentModel` on the prompt request. Record it on the
+        // session so `build_subagent_spawn_context` reads it at spawn time
+        // (mirrors the tersifyLevel meta pattern, but the consumer lives
+        // outside the session actor).
+        let prompt_subagent_model = arguments
+            .meta
+            .as_ref()
+            .and_then(|m| m.get("subagentModel"))
+            .and_then(|v| v.as_str())
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
+        if let Some(model) = &prompt_subagent_model {
+            *handle.subagent_model_meta.lock() = Some(model.clone());
+        }
         let origin = classify_acp_prompt_origin(arguments.meta.as_ref(), &prompt_id);
         let json_schema = arguments
             .meta

@@ -1205,6 +1205,7 @@ fn make_test_handle_with_channels(
         terminal_backend: None,
         tools_notification_handle: None,
         scheduler_handle: None,
+        subagent_model_meta: std::sync::Arc::new(parking_lot::Mutex::new(None)),
     }
 }
 /// lookup_session_model returns the per-session model for each session.

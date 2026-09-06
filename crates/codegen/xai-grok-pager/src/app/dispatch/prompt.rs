@@ -580,6 +580,9 @@ pub(super) fn dispatch_send_prompt_inner(
                     yolo_mode: agent.session.is_yolo(),
                     auto_mode: agent.session.is_auto(),
                     current_model_name: agent.session.models.current_model_name(),
+                    // Session-scoped `/subagents model` pin, read by the
+                    // status command; drives the `_meta.subagentModel` stamp.
+                    subagent_model_override: agent.session_subagent_model_override.clone(),
                     available_models: agent
                         .session
                         .models

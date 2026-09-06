@@ -3105,6 +3105,166 @@ async fn fork_context_pins_parent_model_over_overrides() {
         );
     assert_eq!(model_id.0.as_ref(), "pinned-model");
 }
+/// The session-stamped override (`_meta.subagentModel` ⭢
+/// `ctx.subagent_session_model`) must win over a `[subagents.models]` pin in
+/// the REAL precedence path (`resolve_effective_model_config`), and a tool
+/// `model=` runtime override must still win over the session stamp.
+#[tokio::test]
+async fn session_override_wins_over_subagents_models_pin_in_precedence_path() {
+    use xai_grok_agent::config::ModelOverride;
+    let build_ctx = || {
+        let mut models = indexmap::IndexMap::new();
+        models.insert("session-model".to_string(), test_model_entry("session-model"));
+        models.insert("pinned-model".to_string(), test_model_entry("pinned-model"));
+        let mut ctx = ctx_with_toggle(HashMap::new());
+        ctx.available_models = models;
+        ctx.subagent_model_overrides =
+            HashMap::from([("explore".to_string(), "pinned-model".to_string())]);
+        ctx.subagent_session_model = Some("session-model".to_string());
+        ctx
+    };
+    let ctx = build_ctx();
+    let (config, model_id) = resolve_effective_model_config(
+            None,
+            "explore",
+            &ModelOverride::Inherit,
+            &ctx,
+        )
+        .await;
+    assert_eq!(
+        config.model, "session-model",
+        "the session-stamped override must win over the `[subagents.models]` pin",
+    );
+    assert_eq!(model_id.0.as_ref(), "session-model");
+    // A tool-facing `model=` runtime override still wins over the session stamp.
+    let mut ctx = build_ctx();
+    ctx.available_models
+        .insert("tool-model".to_string(), test_model_entry("tool-model"));
+    let (config, model_id) = resolve_effective_model_config(
+            Some("tool-model"),
+            "explore",
+            &ModelOverride::Inherit,
+            &ctx,
+        )
+        .await;
+    assert_eq!(
+        config.model, "tool-model",
+        "the tool model= runtime override must beat the session stamp",
+    );
+    assert_eq!(model_id.0.as_ref(), "tool-model");
+}
+/// A session stamp applies even without a config pin (`token →
+/// effective path`); an unresolvable stamp falls through to the pin.
+#[tokio::test]
+async fn session_override_used_without_pin_and_unknown_falls_through_to_pin() {
+    use xai_grok_agent::config::ModelOverride;
+    let mut models = indexmap::IndexMap::new();
+    models.insert("session-model".to_string(), test_model_entry("session-model"));
+    models.insert("pinned-model".to_string(), test_model_entry("pinned-model"));
+    let mut ctx = ctx_with_toggle(HashMap::new());
+    ctx.available_models = models;
+    ctx.subagent_session_model = Some("session-model".to_string());
+    let (config, model_id) =
+        resolve_effective_model_config(None, "explore", &ModelOverride::Inherit, &ctx).await;
+    assert_eq!(config.model, "session-model");
+    assert_eq!(model_id.0.as_ref(), "session-model");
+    // Unknown session stamp falls through to the pin below it.
+    let mut ctx = ctx_with_toggle(HashMap::new());
+    let mut models = indexmap::IndexMap::new();
+    models.insert("pinned-model".to_string(), test_model_entry("pinned-model"));
+    ctx.available_models = models;
+    ctx.subagent_session_model = Some("does-not-exist".to_string());
+    ctx.subagent_model_overrides =
+        HashMap::from([("explore".to_string(), "pinned-model".to_string())]);
+    let (config, model_id) =
+        resolve_effective_model_config(None, "explore", &ModelOverride::Inherit, &ctx).await;
+    assert_eq!(
+        config.model, "pinned-model",
+        "an unknown session stamp must fall through to the config pin"
+    );
+    assert_eq!(model_id.0.as_ref(), "pinned-model");
+}
+/// `[subagents].default_model` (global fallback) is used when the agent has
+/// no per-agent pin; the per-agent pin wins over the fallback; the fallback
+/// wins over `AgentDefinition.model`; an unknown fallback falls through.
+#[tokio::test]
+async fn default_model_precedence_levels() {
+    use xai_grok_agent::config::ModelOverride;
+    // No pin, no agent-def override → default_model applies.
+    let mut models = indexmap::IndexMap::new();
+    models.insert("default-model".to_string(), test_model_entry("default-model"));
+    let mut ctx = ctx_with_toggle(HashMap::new());
+    ctx.available_models = models;
+    ctx.subagent_default_model = Some("default-model".to_string());
+    let (config, model_id) =
+        resolve_subagent_inference_config("explore", &ModelOverride::Inherit, &ctx).await;
+    assert_eq!(config.model, "default-model");
+    assert_eq!(model_id.0.as_ref(), "default-model");
+    // Per-agent pin beats default_model.
+    let mut ctx = ctx_with_toggle(HashMap::new());
+    let mut models = indexmap::IndexMap::new();
+    models.insert("default-model".to_string(), test_model_entry("default-model"));
+    models.insert("pinned-model".to_string(), test_model_entry("pinned-model"));
+    ctx.available_models = models;
+    ctx.subagent_default_model = Some("default-model".to_string());
+    ctx.subagent_model_overrides =
+        HashMap::from([("explore".to_string(), "pinned-model".to_string())]);
+    let (config, model_id) =
+        resolve_subagent_inference_config("explore", &ModelOverride::Inherit, &ctx).await;
+    assert_eq!(config.model, "pinned-model");
+    assert_eq!(model_id.0.as_ref(), "pinned-model");
+    // default_model beats AgentDefinition.model.
+    let mut ctx = ctx_with_toggle(HashMap::new());
+    let mut models = indexmap::IndexMap::new();
+    models.insert("default-model".to_string(), test_model_entry("default-model"));
+    models.insert("agentdef-model".to_string(), test_model_entry("agentdef-model"));
+    ctx.available_models = models;
+    ctx.subagent_default_model = Some("default-model".to_string());
+    let agent_model = ModelOverride::Override("agentdef-model".to_string());
+    let (config, model_id) =
+        resolve_subagent_inference_config("explore", &agent_model, &ctx).await;
+    assert_eq!(config.model, "default-model");
+    assert_eq!(model_id.0.as_ref(), "default-model");
+    // Unknown default_model falls through to AgentDefinition.model.
+    let mut ctx = ctx_with_toggle(HashMap::new());
+    let mut models = indexmap::IndexMap::new();
+    models.insert("agentdef-model".to_string(), test_model_entry("agentdef-model"));
+    ctx.available_models = models;
+    ctx.subagent_default_model = Some("does-not-exist".to_string());
+    let agent_model = ModelOverride::Override("agentdef-model".to_string());
+    let (config, model_id) =
+        resolve_subagent_inference_config("explore", &agent_model, &ctx).await;
+    assert_eq!(config.model, "agentdef-model");
+    assert_eq!(model_id.0.as_ref(), "agentdef-model");
+    // Unknown default_model with no other pins inherits the parent.
+    let mut ctx = ctx_with_toggle(HashMap::new());
+    ctx.inference_config.model = "grok-4.5".to_string();
+    ctx.model_id = acp::ModelId::new("grok-4.5");
+    ctx.subagent_default_model = Some("does-not-exist".to_string());
+    let (config, model_id) =
+        resolve_subagent_inference_config("explore", &ModelOverride::Inherit, &ctx).await;
+    assert_eq!(config.model, "grok-4.5");
+    assert_eq!(model_id.0.as_ref(), "grok-4.5");
+}
+/// `SubagentsConfig::default_model` deserializes from `[subagents].default_model`.
+#[test]
+fn subagents_config_parses_default_model() {
+    // The string below is the CONTENT of the `[subagents]` table (the shell
+    // resolves `config.get("subagents")` and deserializes that value).
+    let cfg: crate::config::SubagentsConfig = toml::from_str(
+        r#"
+        enabled = true
+        default_model = "grok-3"
+        [models]
+        explore = "grok-3-fast"
+        "#,
+    )
+    .unwrap();
+    assert_eq!(cfg.default_model.as_deref(), Some("grok-3"));
+    assert_eq!(cfg.models.get("explore").map(String::as_str), Some("grok-3-fast"));
+    let empty: crate::config::SubagentsConfig = toml::from_str("").unwrap();
+    assert_eq!(empty.default_model, None);
+}
 /// With no explicit pin, the subagent inherits the parent model for any
 /// parent model, with no special-casing (a "heavy"/custom parent
 /// is treated identically to any other).

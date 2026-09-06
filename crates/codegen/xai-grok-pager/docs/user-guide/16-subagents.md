@@ -162,6 +162,47 @@ The main agent calls the `spawn_subagent` tool. Its parameters:
 | `resume_from`     | Continue a completed subagent's conversation. Pass its subagent ID. |
 | `cwd`             | Working directory for the subagent. Mutually exclusive with `isolation: worktree`; ignored when `resume_from` is set (the resumed child inherits its source's directory). |
 
+### Advanced options
+
+`spawn_subagent` also accepts an advanced parameter group. All of them are
+optional; omit them for the normal spawn path.
+
+| Parameter           | Description |
+| ------------------- | ----------- |
+| `persona`           | Persona name layered onto the child prompt (same catalog as `[subagents.personas]`); an unknown name fails the spawn. |
+| `env`               | Environment overlay for the child, as key/value pairs. Keys containing `GROK_`, or ending in `_TOKEN`/`_KEY`, are stripped; everything else passes through. |
+| `allow_tools`       | Explicit allowlist of tool names for the child. Mutually exclusive with `deny_tools` — passing both rejects the spawn before the child starts. |
+| `deny_tools`        | Explicit denylist of tool names removed from the child's toolset. |
+| `timeout_ms`        | Hard wall-clock limit for the child; on expiry the subagent is cancelled with a timeout result. |
+| `wait_ms`           | Max foreground wait before the child is auto-backgrounded (the child keeps running). Capped at 600000 ms (10 min). |
+| `max_output_tokens` | Sampling `max_tokens` cap for the child's turns. |
+| `max_output_chars`  | Cap on the characters retained from the child's final output. |
+| `skills_hint`       | Skill names to prioritize in the child's inherited skills list. Known names are moved to the front; unknown names are ignored; the list never prunes skills. |
+| `attachments`       | File paths to reference for the child. Each path is validated and summarized with its size — the content is never inlined. |
+| `memory`            | Enable (`true`, the default) or disable (`false`) the child's persistent memory surface. |
+| `stream`            | Stream the child's live transcript into the parent's tool-call view (defaults to the session's streaming policy). |
+
+With a foreground spawn, a small `wait_ms` lets the parent block briefly for a
+fast child and still auto-background a slow one instead of blocking the whole
+turn.
+
+### Model resolution precedence
+
+The model a subagent actually runs on is resolved in this order (first match
+wins):
+
+1. The `model=` argument on the `spawn_subagent` call.
+2. The session-level pin set with `/subagents model <slug>` (see
+   [Session-level pin](#session-level-pin-subagents)).
+3. The per-type pin `[subagents.models].<agent>` in `config.toml`.
+4. The global fallback `[subagents].default_model` in `config.toml`.
+5. The `model` declared by the agent type definition (or role/persona).
+6. Inherit the parent session's model.
+
+At every level except inheritance, the id must resolve to a catalog model that
+advertises tool support; an unresolvable id warns and falls through to the next
+level.
+
 When you run a subagent in the background, retrieve its result later with `get_command_or_subagent_output`.
 
 ---
@@ -216,6 +257,22 @@ explore = "openrouter:anthropic/claude-sonnet-4.6"
 ```
 
 As with an explicit `model` argument, the pinned id must advertise tool support or the spawn fails closed. Without a pin, the type inherits the parent model.
+
+### Session-level pin (`/subagents`)
+
+Pin a fixed model for `spawn_subagent` at the session level so you don't have
+to repeat the slug every time you delegate:
+
+```
+/subagents                # show the effective model (session pin or "inherit")
+/subagents model openrouter:z-ai/glm-5.2   # pin a fixed model this session
+/subagents model none     # clear the pin; subagents inherit the session model
+```
+
+The pin is session-only: it rides on the next prompt's `_meta.subagentModel`
+and is never written to disk. It applies to `spawn_subagent` calls only — the
+parent's own model and the `[subagents.models]` per-type pins keep their
+normal precedence (an explicit `model` argument on the tool call still wins).
 
 ---
 
@@ -307,9 +364,16 @@ plan = false                         # disable the plan subagent
 
 [subagents.models]
 explore = "grok-build"               # route explore to a specific model
+
+[subagents]
+default_model = "grok-lite"          # optional global fallback for all subagents
 ```
 
-Per-type model overrides apply for any parent. Without an override, a subagent inherits the parent's model.
+Per-type model overrides apply for any parent. `default_model` is the global
+fallback: it applies to any subagent type that has no per-type pin, but it
+still loses to an explicit `model=` argument, a `/subagents model` session
+pin, and a per-type `[subagents.models]` pin. Without any override, a subagent
+inherits the parent's model.
 
 ### Custom Roles and Personas
 

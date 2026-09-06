@@ -3005,6 +3005,43 @@ pub(in crate::app::dispatch) fn set_session_tersify_level(
     vec![]
 }
 
+/// Set THIS session's fixed model for `spawn_subagent` (`/subagents model
+/// <slug>`), or clear it (`/subagents model none`).
+///
+/// SESSION-EPHEMERAL by design: the value rides on the next prompt's session
+/// meta (`subagentModel`), which the shell routes into `spawn_subagent` calls
+/// for this session. Nothing is persisted; `None` clears the override so
+/// subagents inherit the session model again.
+///
+/// Requires an active agent session: on the welcome screen there is nothing
+/// to override, so the command no-ops with a toast (same shape as
+/// `set_session_tersify_level`'s no-agent arm).
+pub(in crate::app::dispatch) fn set_session_subagent_model(
+    app: &mut AppView,
+    model: Option<String>,
+) -> Vec<Effect> {
+    let ActiveView::Agent(id) = app.active_view else {
+        app.show_toast("Subagents: open a session first (/subagents model <slug>)");
+        return vec![];
+    };
+    let Some(agent) = app.agents.get_mut(&id) else {
+        return vec![];
+    };
+    let label = model.clone().unwrap_or_else(|| "inherit".to_string());
+    agent.session_subagent_model_override = model;
+    tracing::info!(
+        target = "settings",
+        key = "subagent_model",
+        value = %label,
+        surface = "session",
+        "setting changed",
+    );
+    app.show_toast(&format!(
+        "\u{2713} Subagent model: {label} — next turn, this session only"
+    ));
+    vec![]
+}
+
 /// Commit `[hints] repetition_guard` (on/off) and persist it.
 ///
 /// Default-on streaming guard: aborts a turn when the model degenerates into

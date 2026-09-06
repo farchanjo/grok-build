@@ -22,6 +22,7 @@ use crate::upload::trace::{
 use crate::upload::turn::{PromptTraceContext, complete_prompt_trace};
 use xai_acp_lib::AcpAgentGatewaySender as GatewaySender;
 use xai_grok_tools::implementations::grok_build::task::types::*;
+use xai_grok_tools::implementations::skills::types::SkillInfo;
 use xai_grok_workspace::file_system::AsyncFileSystem;
 use xai_hunk_tracker::HunkTrackerHandle;
 use super::*;
@@ -47,6 +48,143 @@ pub(super) fn strip_task_tools_at_max_depth(
 pub(super) fn canonical_total_tokens(totals: &xai_chat_state::UsageTotals) -> u64 {
     totals.total_tokens()
 }
+
+/// A validated attachment: resolved absolute path and byte size. Content is
+/// NEVER carried — only the path/size pair is rendered into the child context.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct ResolvedAttachment {
+    pub path: String,
+    pub size_bytes: u64,
+}
+
+/// Resolve and validate `task.attachments` paths against the shared
+/// filesystem: each must exist and be a regular file; the byte size is
+/// captured for the child context block. Relative paths resolve against the
+/// parent session cwd. The first invalid path aborts with a spawn error.
+pub(super) async fn resolve_attachments(
+    attachments: &[String],
+    fs: &Arc<dyn AsyncFileSystem>,
+    parent_cwd: &Path,
+) -> Result<Vec<ResolvedAttachment>, String> {
+    let mut resolved = Vec::with_capacity(attachments.len());
+    for raw in attachments {
+        let abs = if Path::new(raw).is_absolute() {
+            PathBuf::from(raw)
+        } else {
+            parent_cwd.join(raw)
+        };
+        if !fs
+            .exists(&abs)
+            .await
+            .map_err(|e| format!("attachment \"{raw}\": {e}"))?
+        {
+            return Err(format!("attachment \"{raw}\" does not exist"));
+        }
+        // Local metadata is authoritative for local sessions; remote (ACP)
+        // filesystems fall back to a read of the file to determine
+        // file-ness + size. The content is discarded — never inlined.
+        let (is_file, size_bytes) = match tokio::fs::metadata(&abs).await {
+            Ok(metadata) => (metadata.is_file(), metadata.len()),
+            Err(_) => {
+                let bytes = fs
+                    .read_file(&abs)
+                    .await
+                    .map_err(|e| format!("attachment \"{raw}\": cannot stat: {e}"))?;
+                (true, bytes.len() as u64)
+            }
+        };
+        if !is_file {
+            return Err(format!("attachment \"{raw}\" is not a file"));
+        }
+        resolved.push(ResolvedAttachment {
+            path: abs.to_string_lossy().into_owned(),
+            size_bytes,
+        });
+    }
+    Ok(resolved)
+}
+
+/// Render the model-facing `<attachments>` context block appended to the
+/// child's task prompt. Paths + sizes only — no content.
+pub(super) fn render_attachments_context(attachments: &[ResolvedAttachment]) -> String {
+    let mut out = String::from(
+        "\n\n<attachments>\nThe following files are attached to this task:\n",
+    );
+    for a in attachments {
+        out.push_str(&format!("- {} ({})\n", a.path, format_bytes(a.size_bytes)));
+    }
+    out.push_str(
+        "Use your file tools to read them as needed. Do not modify them unless the task requires it.\n</attachments>",
+    );
+    out
+}
+
+/// Human-readable byte size for the attachments context block.
+pub(super) fn format_bytes(size: u64) -> String {
+    if size >= 1024 * 1024 {
+        format!("{:.1} MiB", size as f64 / (1024.0 * 1024.0))
+    } else if size >= 1024 {
+        format!("{:.1} KiB", size as f64 / 1024.0)
+    } else {
+        format!("{size} bytes")
+    }
+}
+
+/// Apply the model-facing `task.allow_tools` / `deny_tools` overrides to the
+/// child toolset. Names match the unqualified tool id, the fully qualified
+/// id, or the client-facing tool name. Unknown names are ignored. Both set is
+/// rejected by the tool layer; a deny wins defensively here.
+pub(super) fn apply_tool_allow_deny(
+    config: &mut xai_grok_tools::registry::types::ToolServerConfig,
+    allow: Option<&[String]>,
+    deny: Option<&[String]>,
+) {
+    if let Some(allow) = allow {
+        let names: Vec<&str> = allow.iter().map(String::as_str).collect();
+        config
+            .tools
+            .retain(|tool| tool_matches_any(tool, &names));
+    } else if let Some(deny) = deny {
+        let names: Vec<&str> = deny.iter().map(String::as_str).collect();
+        config
+            .tools
+            .retain(|tool| !tool_matches_any(tool, &names));
+    } else {
+        return;
+    }
+    // An allow/deny list that removed every task-spawning tool orphans the
+    // background-task lifecycle tools — prune them like capability modes do.
+    prune_orphaned_background_task_tools(config);
+}
+
+pub(super) fn tool_matches_any(
+    tool: &xai_grok_tools::registry::types::ToolConfig,
+    names: &[&str],
+) -> bool {
+    let unqualified = tool.id.rsplit(':').next().unwrap_or(tool.id.as_str());
+    let client = tool.resolve_client_name(unqualified);
+    names.iter().any(|name| {
+        *name == tool.id.as_str() || *name == unqualified || *name == client.as_str()
+    })
+}
+
+/// Reorder inherited skills so hinted names that exist come first (in hint
+/// order); unknown names are ignored and no skills are pruned.
+pub(super) fn prioritize_skills(skills: &mut Vec<SkillInfo>, hint: &[String]) {
+    if hint.is_empty() {
+        return;
+    }
+    let mut hinted: Vec<SkillInfo> = Vec::new();
+    for name in hint {
+        let Some(pos) = skills.iter().position(|s| s.name == *name) else {
+            continue;
+        };
+        hinted.push(skills.remove(pos));
+    }
+    hinted.extend(std::mem::take(skills));
+    *skills = hinted;
+}
+
 pub(super) fn usage_is_incomplete(
     ledger_incomplete: bool,
     cancellation_may_hide_usage: bool,
@@ -222,6 +360,17 @@ pub(crate) async fn handle_assigned_subagent_request(
     let run_in_background = request.run_in_background
         || definition.background.unwrap_or(false);
     let cancel_token = request.cancel_token.clone();
+    // Hard subagent timeout (`task.timeout_ms`): fire the shared cancel token
+    // when it elapses. `0` / omitted = no timeout.
+    if let Some(timeout_ms) = request.runtime_overrides.timeout_ms
+        && timeout_ms > 0
+    {
+        let timeout_cancel = cancel_token.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(timeout_ms)).await;
+            timeout_cancel.cancel();
+        });
+    }
     let inserted_pending = coordinator
         .borrow_mut()
         .insert_pending(PendingSubagent {
@@ -584,6 +733,31 @@ pub(crate) async fn handle_assigned_subagent_request(
             None => request.cwd = None,
         }
     }
+    // Attachments (`task.attachments`): paths-only. Validate exists +
+    // regular-file + size against the shared filesystem; NEVER inline the
+    // content. The resulting path/size list is appended to the child's
+    // prompt context below.
+    let resolved_attachments: Vec<ResolvedAttachment> =
+        if request.runtime_overrides.attachments.is_empty() {
+            Vec::new()
+        } else {
+            match resolve_attachments(
+                &request.runtime_overrides.attachments,
+                &ctx.fs,
+                &ctx.parent_cwd,
+            )
+            .await
+            {
+                Ok(attachments) => attachments,
+                Err(message) => {
+                    pending_guard.set_error(message.clone());
+                    send_failure(request, &message);
+                    return;
+                }
+            }
+        };
+    let attachment_context_block = (!resolved_attachments.is_empty())
+        .then(|| render_attachments_context(&resolved_attachments));
     if effective_runtime.reasoning_effort.is_some()
         || effective_runtime.capability_mode.is_some()
     {
@@ -607,6 +781,11 @@ pub(crate) async fn handle_assigned_subagent_request(
             "Applied capability mode filter to agent tool config"
         );
     }
+    apply_tool_allow_deny(
+        &mut definition.tool_config,
+        request.runtime_overrides.allow_tools.as_deref(),
+        request.runtime_overrides.deny_tools.as_deref(),
+    );
     let child_depth = request
         .runtime_overrides
         .spawn_depth
@@ -652,7 +831,15 @@ pub(crate) async fn handle_assigned_subagent_request(
     }
     let agent_memory_scope = definition.memory;
     let agent_name_for_memory = definition.name.clone();
-    if let Some(scope) = agent_memory_scope {
+    // `task.memory` (default true): the child's memory is on unless the model
+    // explicitly requested `memory: false`.
+    let memory_enabled = request
+        .runtime_overrides
+        .memory_enabled
+        .unwrap_or(true);
+    if memory_enabled
+        && let Some(scope) = agent_memory_scope
+    {
         use xai_grok_tools::implementations::grok_build;
         use xai_grok_tools::implementations::opencode;
         let memory_tools: Vec<xai_grok_tools::registry::types::ToolConfig> = vec![
@@ -877,7 +1064,10 @@ pub(crate) async fn handle_assigned_subagent_request(
     };
     let verbatim_mirror_fork = context_source == InitialContextSource::Forked
         && context_verbatim_fork;
-    let task_prompt_text = prompt.clone();
+    let mut task_prompt_text = prompt.clone();
+    if let Some(block) = &attachment_context_block {
+        task_prompt_text.push_str(block);
+    }
     let (mut forked_conversation, mut inherited_prefix_len) = (
         forked_conversation,
         inherited_prefix_len.unwrap_or(0),
@@ -1140,6 +1330,12 @@ pub(crate) async fn handle_assigned_subagent_request(
             xai_grok_paths::AbsPathBuf::new(std::env::current_dir().unwrap_or_default())
                 .expect("current_dir should be absolute")
         });
+    // Child env = inherited session env + `task.env` overlay (already
+    // sanitized by the tool layer: `GROK_*`, `*_TOKEN`, `*_KEY` stripped).
+    let mut child_session_env = (*ctx.session_env).clone();
+    if let Some(env) = &request.runtime_overrides.env {
+        child_session_env.extend(env.iter().map(|(k, v)| (k.clone(), v.clone())));
+    }
     let mut tool_ctx = ToolContext::with_preloaded_env(
             child_cwd_abs,
             Some(gateway.clone()),
@@ -1147,7 +1343,7 @@ pub(crate) async fn handle_assigned_subagent_request(
             ctx.fs.clone(),
             ctx.terminal.clone(),
             ctx.hunk_tracker_handle.clone(),
-            (*ctx.session_env).clone(),
+            child_session_env,
         )
         .with_hunk_tracking_enabled(ctx.hunk_tracking_enabled);
     tool_ctx.subagent_event_tx = Some(ctx.subagent_event_tx.clone());
@@ -1363,6 +1559,14 @@ pub(crate) async fn handle_assigned_subagent_request(
             "Subagent inherited skills from parent"
         );
     }
+    // `task.skills_hint`: hinted skill names that exist are moved to the
+    // front of the inherited list; unknown names are ignored; nothing is
+    // pruned.
+    if inherit_skills
+        && let Some(skills) = ctx.parent_skills.as_mut()
+    {
+        prioritize_skills(skills, &request.runtime_overrides.skills_hint);
+    }
     let mcp_owned_count = agent_mcp_servers.len() as u32;
     xai_grok_telemetry::session_ctx::log_event(xai_grok_telemetry::events::SubagentLaunched {
         subagent_id: request.id.clone(),
@@ -1472,13 +1676,25 @@ pub(crate) async fn handle_assigned_subagent_request(
                         let mut c = mc.clone();
                         let resolved = scope
                             .resolve_dir(&agent_name_for_memory, &ctx.parent_cwd);
-                        c.enabled = true;
+                        c.enabled = memory_enabled;
                         c.root_dir_override = Some(resolved.path);
                         c.flat_memory_root = resolved.is_project_scoped;
                         c
                     })
             } else {
-                ctx.memory_config.clone()
+                // `task.memory=false` forces the inherited memory config off;
+                // the default (`Some(true)` / omitted) keeps it enabled.
+                ctx.memory_config
+                    .as_ref()
+                    .map(|mc| {
+                        if memory_enabled {
+                            mc.clone()
+                        } else {
+                            let mut c = mc.clone();
+                            c.enabled = false;
+                            c
+                        }
+                    })
             },
             false,
             Default::default(),
@@ -1731,7 +1947,17 @@ pub(crate) async fn handle_assigned_subagent_request(
                     if request.await_to_completion {
                         std::future::pending::<()>().await
                     } else {
-                        tokio::time::sleep(subagent_await_budget()).await
+                        // `task.wait_ms` overrides the default await budget
+                        // (clamped to 10 min by the tool layer; re-clamp
+                        // defensively here).
+                        let wait = request
+                            .runtime_overrides
+                            .wait_ms
+                            .map(|ms| {
+                                std::time::Duration::from_millis(ms.min(SUBAGENT_WAIT_CAP_MS))
+                            })
+                            .unwrap_or_else(subagent_await_budget);
+                        tokio::time::sleep(wait).await
                     }
                 };
                 tokio::select! {

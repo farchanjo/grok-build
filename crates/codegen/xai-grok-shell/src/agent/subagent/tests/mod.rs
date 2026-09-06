@@ -3,11 +3,15 @@ use super::*;
 use super::exact_route::ExactRoute;
 use super::handle_request::{
     assigned_platform_error, assigned_route_matches_final, assigned_unknown_model_error,
-    canonical_total_tokens, resolve_final_exact_route, usage_is_incomplete,
+    apply_tool_allow_deny, canonical_total_tokens, format_bytes, prioritize_skills,
+    render_attachments_context, resolve_attachments, resolve_final_exact_route,
+    usage_is_incomplete,
 };
 use crate::test_support::lsp_runtime::{
     DummyLspDispatch, ctx_with_toggle, make_request, test_gateway,
 };
+use xai_grok_tools::implementations::skills::types::SkillInfo;
+use xai_grok_workspace::file_system::AsyncFileSystem;
 #[test]
 fn canonical_total_tokens_does_not_double_count_reasoning() {
     let totals = xai_chat_state::UsageTotals {
@@ -1714,6 +1718,7 @@ fn dummy_tracker(
         terminal_backend: None,
         tools_notification_handle: None,
         scheduler_handle: None,
+        subagent_model_meta: Arc::new(parking_lot::Mutex::new(None)),
     };
     SubagentTracker {
         subagent_id: subagent_id.into(),
@@ -4389,5 +4394,157 @@ fn spawn_test_parent_chat_state(model_slug: &str) -> xai_chat_state::ChatStateHa
         event_tx,
         token,
     )
+}
+
+// ── Phase B: skills_hint / allow_tools / deny_tools / attachments ──
+
+/// Minimal `SkillInfo` for pure-ordering tests (serde defaults fill the rest).
+fn skill_info(name: &str) -> SkillInfo {
+    serde_json::from_value(serde_json::json!({
+        "name": name,
+        "description": "",
+        "path": format!("{name}.md"),
+        "scope": "bundled",
+    }))
+    .expect("minimal skill info must deserialize")
+}
+
+#[test]
+fn skills_hint_prioritizes_existing_ignores_unknown_never_prunes() {
+    let mut skills = vec![skill_info("rust"), skill_info("web"), skill_info("git")];
+    let hint = vec!["git".to_string(), "nope".to_string(), "rust".to_string()];
+    prioritize_skills(&mut skills, &hint);
+    let names: Vec<&str> = skills.iter().map(|s| s.name.as_str()).collect();
+    assert_eq!(
+        names,
+        vec!["git", "rust", "web"],
+        "hinted existing skills come first in hint order; unknown names ignored; nothing pruned"
+    );
+    // Empty hint is a no-op.
+    let mut skills = vec![skill_info("a"), skill_info("b")];
+    prioritize_skills(&mut skills, &[]);
+    assert_eq!(skills.len(), 2);
+}
+
+#[test]
+fn skills_hint_duplicate_names_do_not_duplicate_entries() {
+    let mut skills = vec![skill_info("dup"), skill_info("dup")];
+    prioritize_skills(&mut skills, &["dup".to_string(), "dup".to_string()]);
+    assert_eq!(skills.len(), 2, "hints must not duplicate entries");
+}
+
+#[test]
+fn allow_deny_tools_filter_matches_ids_and_client_names() {
+    use xai_grok_tools::registry::types::{ToolConfig, ToolServerConfig};
+    use xai_grok_tools::types::tool::ToolKind;
+    let mut tc = |id: &str, kind: ToolKind| {
+        let mut c = ToolConfig::from_id(id);
+        c.kind = Some(kind);
+        c
+    };
+    let mut config = ToolServerConfig {
+        tools: vec![
+            tc("GrokBuild:read_file", ToolKind::Read),
+            tc("GrokBuild:grep", ToolKind::Search),
+            tc("GrokBuild:bash", ToolKind::Execute),
+            tc("GrokBuild:get_task_output", ToolKind::BackgroundTaskAction),
+            tc("GrokBuild:kill_task", ToolKind::KillTaskAction),
+        ],
+        behavior_preset: None,
+    };
+    // allow by client name (unqualified id) — lifecycle tools not listed are dropped.
+    apply_tool_allow_deny(
+        &mut config,
+        Some(&["read_file".to_string(), "grep".to_string()]),
+        None,
+    );
+    let ids: Vec<&str> = config.tools.iter().map(|t| t.id.as_str()).collect();
+    assert_eq!(ids, vec!["GrokBuild:read_file", "GrokBuild:grep"]);
+
+    // deny by unqualified + client name.
+    let mut config = ToolServerConfig {
+        tools: vec![
+            tc("GrokBuild:read_file", ToolKind::Read),
+            tc("GrokBuild:grep", ToolKind::Search),
+            tc("GrokBuild:bash", ToolKind::Execute),
+        ],
+        behavior_preset: None,
+    };
+    apply_tool_allow_deny(
+        &mut config,
+        None,
+        Some(&["bash".to_string(), "read_file".to_string()]),
+    );
+    let ids: Vec<&str> = config.tools.iter().map(|t| t.id.as_str()).collect();
+    assert_eq!(ids, vec!["GrokBuild:grep"]);
+
+    // Unknown names are ignored.
+    let mut config = ToolServerConfig {
+        tools: vec![tc("GrokBuild:read_file", ToolKind::Read)],
+        behavior_preset: None,
+    };
+    apply_tool_allow_deny(
+        &mut config,
+        None,
+        Some(&["not-a-tool".to_string()]),
+    );
+    assert_eq!(config.tools.len(), 1);
+}
+
+#[tokio::test]
+async fn resolve_attachments_validates_exists_file_and_size() {
+    use xai_grok_workspace::file_system::LocalFs;
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("note.txt"), b"hello world").unwrap();
+    std::fs::create_dir(dir.path().join("subdir")).unwrap();
+    let fs: Arc<dyn AsyncFileSystem> =
+        Arc::new(LocalFs::new(dir.path().to_path_buf()));
+
+    let resolved = resolve_attachments(
+        &[
+            "note.txt".to_string(),
+            dir.path().join("note.txt").to_string_lossy().into_owned(),
+        ],
+        &fs,
+        dir.path(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(resolved.len(), 2);
+    assert_eq!(resolved[0].size_bytes, 11);
+    assert!(resolved[0].path.ends_with("note.txt"));
+    assert_eq!(format_bytes(resolved[0].size_bytes), "11 bytes");
+
+    let err = resolve_attachments(&["missing.txt".to_string()], &fs, dir.path())
+        .await
+        .unwrap_err();
+    assert!(err.contains("does not exist"), "error: {err}");
+
+    let err = resolve_attachments(&["subdir".to_string()], &fs, dir.path())
+        .await
+        .unwrap_err();
+    assert!(err.contains("is not a file"), "error: {err}");
+}
+
+#[test]
+fn attachment_context_block_lists_paths_and_sizes_only() {
+    let block = render_attachments_context(&[
+        crate::agent::subagent::handle_request::ResolvedAttachment {
+            path: "/tmp/a.txt".to_string(),
+            size_bytes: 42,
+        },
+        crate::agent::subagent::handle_request::ResolvedAttachment {
+            path: "/tmp/b.bin".to_string(),
+            size_bytes: 2 * 1024 * 1024,
+        },
+    ]);
+    assert!(block.contains("<attachments>"));
+    assert!(block.contains("- /tmp/a.txt (42 bytes)"));
+    assert!(block.contains("- /tmp/b.bin (2.0 MiB)"));
+    assert!(
+        !block.contains("hello content"),
+        "content must never be inlined"
+    );
+    assert!(block.contains("Use your file tools to read them"));
 }
 mod rest;

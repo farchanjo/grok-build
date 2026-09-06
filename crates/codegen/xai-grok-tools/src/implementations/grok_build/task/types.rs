@@ -142,7 +142,32 @@ pub struct SubagentRuntimeOverrides {
     pub output_token_budget: Option<u64>,
     pub output_schema: Option<serde_json::Value>,
     pub loop_task_id: Option<String>,
+    /// Overlay environment variables for the child session (already
+    /// sanitized by the tool layer: `GROK_*`, `*_TOKEN`, `*_KEY` stripped).
+    pub env: Option<std::collections::HashMap<String, String>>,
+    /// Max foreground wait before the subagent is auto-backgrounded, in ms
+    /// (already capped at [`SUBAGENT_WAIT_CAP_MS`]).
+    pub wait_ms: Option<u64>,
+    /// Hard timeout for the subagent run, in ms. `0` / `None` = no timeout.
+    pub timeout_ms: Option<u64>,
+    /// Skill names to prioritize in the child's inherited skills list.
+    /// Existing skills are moved to the front; unknown names are ignored;
+    /// no skills are pruned.
+    pub skills_hint: Vec<String>,
+    /// Attachment file paths. Paths-only (never inline content); validated
+    /// at spawn time (exists, regular file, size) by the coordinator.
+    pub attachments: Vec<String>,
+    /// Allow-list of tool names for the child toolset.
+    pub allow_tools: Option<Vec<String>>,
+    /// Deny-list of tool names for the child toolset.
+    pub deny_tools: Option<Vec<String>>,
+    /// Whether the child's memory is enabled. `None` inherits the default
+    /// (enabled).
+    pub memory_enabled: Option<bool>,
 }
+
+/// Cap for the model-facing `task.wait_ms` parameter (10 minutes).
+pub const SUBAGENT_WAIT_CAP_MS: u64 = 600_000;
 
 /// Re-export of [`xai_tool_types::is_not_sentinel`] for existing call sites.
 pub use xai_tool_types::is_not_sentinel;

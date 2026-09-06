@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 
 /// Input for the `task` tool — launches a subagent to handle a task
 /// autonomously.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
 pub struct TaskToolInput {
     /// The full task prompt for the subagent to execute.
     #[schemars(description = "The full task prompt for the subagent to execute.")]
@@ -118,6 +118,122 @@ pub struct TaskToolInput {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning_effort: Option<String>,
 
+    /// Named persona / SOUL template to apply to the subagent. The persona
+    /// must be declared under `[subagents.personas]`; its instructions are
+    /// injected into the child's context. Soft-ignored on `resume_from`.
+    #[schemars(
+        description = "Optional persona name to apply (e.g. \"researcher\", \"concise\"). \
+            Persona instructions are injected into the subagent's context. Ignored when \
+            resume_from is set."
+    )]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub persona: Option<String>,
+
+    /// Extra environment variables for the child session. Values are merged
+    /// into the inherited session environment. Keys matching a sensitive
+    /// pattern (`GROK_*`, `*_TOKEN`, `*_KEY`) are stripped — secrets are
+    /// never forwarded.
+    #[schemars(
+        description = "Optional environment variables for the subagent session. Values are \
+            merged into the inherited session environment. Keys matching GROK_* or ending \
+            with _TOKEN or _KEY are ignored (secrets are never forwarded)."
+    )]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub env: Option<std::collections::BTreeMap<String, String>>,
+
+    /// Allow-list of tool names the subagent may use. Matched against the
+    /// child toolset's client-facing tool names (and tool ids). Mutually
+    /// exclusive with `deny_tools`. Unknown names are ignored.
+    #[schemars(
+        description = "Optional allow-list of tool names the subagent may use. Mutually \
+            exclusive with deny_tools. Unknown names are ignored."
+    )]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allow_tools: Option<Vec<String>>,
+
+    /// Deny-list of tool names the subagent may not use. Matched against the
+    /// child toolset's client-facing tool names (and tool ids). Mutually
+    /// exclusive with `allow_tools`. Unknown names are ignored.
+    #[schemars(
+        description = "Optional deny-list of tool names the subagent may not use. Mutually \
+            exclusive with allow_tools. Unknown names are ignored."
+    )]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deny_tools: Option<Vec<String>>,
+
+    /// Hard timeout for the subagent run, in milliseconds. When set and
+    /// positive, the subagent is cancelled once the timeout elapses. `0`
+    /// or omitted means no timeout.
+    #[schemars(
+        description = "Optional hard timeout for the subagent in milliseconds. The subagent \
+            is cancelled when the timeout elapses. 0 or omitted means no timeout."
+    )]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout_ms: Option<u64>,
+
+    /// Max time a blocking (foreground) subagent may hold the turn before it
+    /// is auto-backgrounded, in milliseconds. Capped at 600_000 (10 min).
+    /// The child keeps running; poll it via the task output tool.
+    #[schemars(
+        description = "Optional max wait in milliseconds before a foreground subagent is \
+            auto-backgrounded (the child keeps running). Capped at 600000 (10 minutes)."
+    )]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wait_ms: Option<u64>,
+
+    /// Cap on the output tokens the subagent's final response may use.
+    #[schemars(description = "Optional cap on output tokens for the subagent's final response.")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_output_tokens: Option<u64>,
+
+    /// Cap on the characters retained from the subagent's final output.
+    #[schemars(
+        description = "Optional cap on the characters retained from the subagent's final output."
+    )]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_output_chars: Option<u64>,
+
+    /// Skill names the subagent should prioritize. Existing skills are listed
+    /// first in the child's inherited skills list; unknown names are ignored;
+    /// no skills are removed.
+    #[schemars(
+        description = "Optional list of skill names the subagent should prioritize. Existing \
+            skills are listed first; unknown names are ignored; no skills are removed."
+    )]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skills_hint: Option<Vec<String>>,
+
+    /// File paths to make available to the subagent. Paths and sizes are
+    /// listed in the child context; file contents are never inlined. Paths
+    /// must exist as regular files at spawn time (relative paths resolve
+    /// against the parent session cwd).
+    #[schemars(
+        description = "Optional list of file paths to make available to the subagent. Paths and \
+            sizes are listed in the child context; file contents are never inlined. Paths must \
+            exist as regular files at spawn time; relative paths resolve against the parent \
+            session cwd."
+    )]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attachments: Option<Vec<String>>,
+
+    /// Whether the subagent's memory is enabled. Omitted or `true` enables
+    /// memory; `false` disables it. Default `true`.
+    #[schemars(
+        description = "Whether the subagent's memory is enabled. Omitted or true enables it; \
+            false disables it. Default true."
+    )]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory: Option<bool>,
+
+    /// Reserved streaming flag. Omitted, `true`, or `false` are all accepted;
+    /// the flag currently has no effect (subagent progress events already
+    /// stream).
+    #[schemars(
+        description = "Reserved. Accepted for forward compatibility; currently has no effect."
+    )]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stream: Option<bool>,
+
     /// Server-injected before execution. Becomes the subagent's session ID.
     #[schemars(skip)]
     #[serde(default)]
@@ -153,6 +269,59 @@ pub fn sanitize_optional_arg(value: Option<String>) -> Option<String> {
             Some(trimmed.to_string())
         }
     })
+}
+
+/// Trim, drop empties/sentinels, and de-duplicate (first-seen order) an
+/// optional string list. Model-emitted lists often contain `""`, `"null"`,
+/// or whitespace-only entries.
+pub fn sanitize_string_list(values: Option<Vec<String>>) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    if let Some(values) = values {
+        for value in values {
+            let trimmed = value.trim();
+            if trimmed.is_empty() || !is_not_sentinel(trimmed) {
+                continue;
+            }
+            if seen.insert(trimmed.to_string()) {
+                out.push(trimmed.to_string());
+            }
+        }
+    }
+    out
+}
+
+/// Environment keys the model may forward even when they match the
+/// sensitive-pattern deny list. Keep minimal; extend only after review.
+const ENV_ALLOW_LIST: &[&str] = &[];
+
+/// Whether a `task.env` key may be forwarded to a child session.
+///
+/// Keys are stripped when they match a sensitive pattern (`GROK_*`,
+/// `*_TOKEN`, `*_KEY`) unless allow-listed. Non-matching keys pass through;
+/// values are never inspected.
+pub fn env_key_allowed(key: &str) -> bool {
+    let trimmed = key.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+    if ENV_ALLOW_LIST.contains(&trimmed) {
+        return true;
+    }
+    !(trimmed.starts_with("GROK_") || trimmed.ends_with("_TOKEN") || trimmed.ends_with("_KEY"))
+}
+
+/// Sanitize a `task.env` overlay: drop empty keys and keys matching the
+/// sensitive-pattern deny list. Returns `None` when nothing survives.
+pub fn sanitize_env_overlay(
+    values: Option<std::collections::BTreeMap<String, String>>,
+) -> Option<std::collections::BTreeMap<String, String>> {
+    let values = values?;
+    let sanitized: std::collections::BTreeMap<String, String> = values
+        .into_iter()
+        .filter(|(key, _)| env_key_allowed(key))
+        .collect();
+    (!sanitized.is_empty()).then_some(sanitized)
 }
 
 fn default_true() -> bool {
@@ -886,7 +1055,19 @@ pub fn build_task_description(subagents: &[SubagentDescriptor], naming: &TaskToo
          - Use {resume_from_param} to continue a previously completed subagent's conversation. Pass the subagent_id returned by a prior {task_tool} call. A resumed agent keeps its full transcript and tool state, so you only need to describe what changed since the last run — don't re-explain the original task.\n\
          - The resumed agent must use the same subagent_type as the source.\n\n\
          Isolation mode:\n\
-         - Use {isolation_param} to control the child's execution environment. With \"worktree\", the child runs in an isolated git worktree whose edits don't affect the parent workspace; the worktree is preserved after completion and its path is returned in the output."
+         - Use {isolation_param} to control the child's execution environment. With \"worktree\", the child runs in an isolated git worktree whose edits don't affect the parent workspace; the worktree is preserved after completion and its path is returned in the output.\n\n\
+         ## Advanced options\n\
+         - persona: Apply a named persona (declared in [subagents.personas]) to the subagent. Instructions are injected into the child context.\n\
+         - env: Map of extra environment variables for the child session. Keys matching GROK_*, *_TOKEN, or *_KEY are ignored (secrets are never forwarded).\n\
+         - allow_tools / deny_tools: Restrict the child's toolset by client-facing tool name (mutually exclusive; prefer deny_tools for blocking a specific tool).\n\
+         - timeout_ms: Hard timeout in milliseconds; the subagent is cancelled when it elapses. 0 or omitted = no timeout.\n\
+         - wait_ms: Max foreground wait before the subagent is auto-backgrounded (child keeps running); capped at 600000 ms (10 min).\n\
+         - max_output_tokens: Cap on output tokens for the subagent's final response.\n\
+         - max_output_chars: Cap on the characters retained from the subagent's final output.\n\
+         - skills_hint: Skill names to prioritize in the child's inherited skills list (existing skills first; unknown names ignored; never prunes skills).\n\
+         - attachments: File paths to make available to the subagent. Paths and sizes are listed in the child context; contents are never inlined. Paths must exist as regular files at spawn.\n\
+         - memory: Set false to disable the child's memory. Omitted or true keeps it enabled (default).\n\
+         - stream: Reserved; accepted for forward compatibility and currently has no effect."
     );
 
     out
@@ -1168,6 +1349,7 @@ mod tests {
             model: None,
             reasoning_effort: None,
             task_id: None,
+            ..Default::default()
         };
         let value = serde_json::to_value(&input).unwrap();
         assert!(value.get("model").is_none());
@@ -1186,6 +1368,74 @@ mod tests {
         assert!(sanitize_optional_arg(Some("null".into())).is_none());
         assert!(sanitize_optional_arg(Some("  NULL  ".into())).is_none());
         assert!(sanitize_optional_arg(None).is_none());
+    }
+
+    #[test]
+    fn sanitize_string_list_trims_drops_sentinels_and_dedupes() {
+        let values = Some(vec![
+            " rust ".to_string(),
+            "".to_string(),
+            "null".to_string(),
+            "rust".to_string(),
+            "  web  ".to_string(),
+        ]);
+        assert_eq!(
+            sanitize_string_list(values),
+            vec!["rust".to_string(), "web".to_string()]
+        );
+        assert!(sanitize_string_list(None).is_empty());
+        assert!(sanitize_string_list(Some(vec!["".to_string(), " ".to_string()])).is_empty());
+    }
+
+    #[test]
+    fn sanitize_env_overlay_strips_sensitive_keys() {
+        let mut values = std::collections::BTreeMap::new();
+        values.insert("FOO".to_string(), "bar".to_string());
+        values.insert("GROK_HOME".to_string(), "/tmp/grok".to_string());
+        values.insert("OPENAI_API_KEY".to_string(), "sk-1".to_string());
+        values.insert("NPM_TOKEN".to_string(), "npm-1".to_string());
+        values.insert("CI".to_string(), "true".to_string());
+        let sanitized = sanitize_env_overlay(Some(values)).expect("non-sensitive keys survive");
+        assert_eq!(sanitized.get("FOO").map(String::as_str), Some("bar"));
+        assert_eq!(sanitized.get("CI").map(String::as_str), Some("true"));
+        assert!(!sanitized.contains_key("GROK_HOME"));
+        assert!(!sanitized.contains_key("OPENAI_API_KEY"));
+        assert!(!sanitized.contains_key("NPM_TOKEN"));
+    }
+
+    #[test]
+    fn sanitize_env_overlay_all_sensitive_returns_none() {
+        let mut values = std::collections::BTreeMap::new();
+        values.insert("GROK_HOME".to_string(), "/tmp/grok".to_string());
+        values.insert("API_KEY".to_string(), "k".to_string());
+        assert!(sanitize_env_overlay(Some(values)).is_none());
+        assert!(sanitize_env_overlay(None).is_none());
+    }
+
+    #[test]
+    fn env_key_allowed_rejects_sensitive_patterns() {
+        assert!(!env_key_allowed("GROK_HOME"));
+        assert!(!env_key_allowed("GROK_DEPLOYMENT_KEY"));
+        assert!(!env_key_allowed("NPM_TOKEN"));
+        assert!(!env_key_allowed("OPENAI_API_KEY"));
+        assert!(!env_key_allowed(""));
+        assert!(!env_key_allowed("   "));
+        assert!(env_key_allowed("FOO"));
+        assert!(env_key_allowed("PATH"));
+    }
+
+    #[test]
+    fn memory_defaults_to_none_so_runtime_default_true_applies() {
+        let input: TaskToolInput =
+            serde_json::from_str(r#"{"description": "d", "prompt": "p", "memory": false}"#)
+                .unwrap();
+        assert_eq!(input.memory, Some(false));
+        let input: TaskToolInput =
+            serde_json::from_str(r#"{"description": "d", "prompt": "p"}"#).unwrap();
+        assert_eq!(
+            input.memory, None,
+            "absent memory must stay None so the spawn default (enabled) applies"
+        );
     }
 
     #[test]
@@ -1235,6 +1485,36 @@ mod tests {
         );
         assert!(desc.contains("Isolation mode:"));
         assert!(desc.contains("Use isolation to control the child's execution environment."));
+    }
+
+    #[test]
+    fn build_task_description_includes_advanced_options() {
+        let subagents = vec![SubagentDescriptor {
+            name: "explore".into(),
+            description: "Explore.".into(),
+            tools: None,
+        }];
+
+        let desc = build_task_description(&subagents, &literal_naming());
+        assert!(desc.contains("## Advanced options"));
+        for bullet in [
+            "- persona:",
+            "- env:",
+            "- allow_tools / deny_tools:",
+            "- timeout_ms:",
+            "- wait_ms:",
+            "- max_output_tokens:",
+            "- max_output_chars:",
+            "- skills_hint:",
+            "- attachments:",
+            "- memory:",
+            "- stream:",
+        ] {
+            assert!(
+                desc.contains(bullet),
+                "missing bullet {bullet:?} in:\n{desc}"
+            );
+        }
     }
 
     #[test]

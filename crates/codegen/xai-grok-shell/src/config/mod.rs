@@ -285,6 +285,18 @@ pub struct SubagentsConfig {
     /// ```
     #[serde(default)]
     pub models: std::collections::HashMap<String, String>,
+    /// Global fallback model ID for subagents whose agent has no
+    /// `[subagents.models]` pin and no `AgentDefinition.model`. Parsed from
+    /// `[subagents].default_model` in config.toml. Must resolve to a known
+    /// model; unknown values are ignored with a warn and resolution falls
+    /// through to the parent model.
+    ///
+    /// ```toml
+    /// [subagents]
+    /// default_model = "grok-3"
+    /// ```
+    #[serde(default)]
+    pub default_model: Option<String>,
     /// Per-subagent enable/disable toggles.
     /// Keys are agent names, values are booleans.
     /// Omitted agents default to enabled (`true`).
