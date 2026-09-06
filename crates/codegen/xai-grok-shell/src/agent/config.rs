@@ -3883,9 +3883,10 @@ pub fn resolve_model_list(
         let effective = with_provider.as_ref().unwrap_or(model_override);
         let mut entry = effective.apply(key, base, &cfg.endpoints);
         // Guardrail: a user-set request budget above a known output ceiling
-        // for that model is not an error (the sampler clamps the request to
-        // the ceiling anyway) but is almost certainly a config mistake — make
-        // it visible. `cfg.config_models` is the pre-merge user map, so the
+        // for that model is not an error (`build_inference_config_for_model`
+        // clamps the budget to the ceiling, and the sampler re-clamps per
+        // request) but is almost certainly a config mistake — make it
+        // visible. `cfg.config_models` is the pre-merge user map, so the
         // check only fires for values the user actually wrote.
         warn_budget_above_ceiling(
             key,
@@ -6252,13 +6253,22 @@ fn build_inference_config_for_model(
     // Request budget: user/model override first, then the provider-level
     // value (explicit TOML or the 16384 OpenRouter API default). The catalog
     // capability ceiling never becomes the budget — it lives separately on
-    // `max_output_ceiling` and the sampler only clamps against it.
-    let max_completion_tokens = info.max_completion_tokens.or_else(|| {
-        model
-            .model_provider
-            .as_ref()
-            .and_then(|p| p.request_max_completion_tokens())
-    });
+    // `max_output_ceiling` and the sampler only clamps against it. The budget
+    // itself is clamped HERE to the ceiling: entries rebuilt per turn from
+    // chat-state settings would otherwise re-send an over-ceiling budget the
+    // provider rejects (400), making the config guard-rail above a no-op.
+    let max_completion_tokens = info
+        .max_completion_tokens
+        .or_else(|| {
+            model
+                .model_provider
+                .as_ref()
+                .and_then(|p| p.request_max_completion_tokens())
+        })
+        .map(|budget| match info.max_output_ceiling {
+            Some(ceiling) => budget.min(ceiling),
+            None => budget,
+        });
     let max_output_ceiling = info.max_output_ceiling;
     let temperature = info.temperature;
     let top_p = info.top_p;
@@ -8626,6 +8636,46 @@ reasoning_effort = "low"
         assert!(!budget_exceeds_ceiling(Some(200_000), None));
         assert!(!budget_exceeds_ceiling(None, None));
     }
+    /// Phase C: the request budget itself is clamped to the known ceiling at
+    /// `InferenceConfig` construction, so per-turn reconstructions from chat
+    /// state (which do not re-read the catalog) never re-send an over-ceiling
+    /// budget the provider rejects with a 400.
+    #[test]
+    fn inference_config_clamps_budget_to_output_ceiling() {
+        let mut entry = test_model_entry(
+            "test/clamped",
+            "https://example.test",
+            Some("k"),
+            None,
+            None,
+        );
+        entry.info.max_completion_tokens = Some(200_000);
+        entry.info.max_output_ceiling = Some(98_304);
+        let credentials = resolve_credentials_enforced(&entry, None, true);
+        let cfg = inference_config_for_model(&entry, credentials, None, None, None, None);
+        assert_eq!(cfg.max_completion_tokens, Some(98_304));
+        assert_eq!(cfg.max_output_ceiling, Some(98_304));
+
+        // A budget at or below the ceiling passes through untouched, and a
+        // ceiling with no budget stays None (never copied onto the wire).
+        let mut entry =
+            test_model_entry("test/under", "https://example.test", Some("k"), None, None);
+        entry.info.max_completion_tokens = Some(4_096);
+        entry.info.max_output_ceiling = Some(98_304);
+        let credentials = resolve_credentials_enforced(&entry, None, true);
+        let cfg = inference_config_for_model(&entry, credentials, None, None, None, None);
+        assert_eq!(cfg.max_completion_tokens, Some(4_096));
+
+        let mut entry =
+            test_model_entry("test/none", "https://example.test", Some("k"), None, None);
+        entry.info.max_output_ceiling = Some(98_304);
+        let credentials = resolve_credentials_enforced(&entry, None, true);
+        let cfg = inference_config_for_model(&entry, credentials, None, None, None, None);
+        assert_eq!(
+            cfg.max_completion_tokens, None,
+            "a ceiling must never become a request default"
+        );
+    }
     /// H4 wire shaping: `None` (unknown, e.g. hand-written TOML with no
     /// `supports_reasoning_effort`) must honor an explicit `reasoning_effort`
     /// as before — an explicit user setting is an explicit statement.
@@ -9198,7 +9248,11 @@ reasoning_effort = "low"
             !config.include_message_model_id,
             "OpenRouter must not send messages[].model_id"
         );
-        assert_eq!(config.max_completion_tokens, Some(32_000));
+        assert_eq!(
+            config.max_completion_tokens,
+            Some(8_192),
+            "the request budget is clamped to the ceiling at construction"
+        );
         assert_eq!(config.max_output_ceiling, Some(8_192));
         assert_eq!(
             config
