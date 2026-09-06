@@ -482,7 +482,9 @@ pub(crate) fn classify_transport_error(
     }
 
     let lower = rendered.to_ascii_lowercase();
-    let error_type = if lower.contains("rate_limit") {
+    // Match both spellings: JSON payloads and SDKs use `rate_limit_error`,
+    // while plain-text gateway/proxy messages say `Rate limit exceeded`.
+    let error_type = if lower.contains("rate_limit") || lower.contains("rate limit") {
         Some("rate_limit_error")
     } else if lower.contains("overloaded") {
         Some("overloaded_error")
