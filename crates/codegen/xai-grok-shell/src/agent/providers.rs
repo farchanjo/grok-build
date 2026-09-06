@@ -4556,8 +4556,7 @@ mod tests {
             .unwrap();
         // Zero TTL disables the stale-while-revalidate background refresh, so
         // this test never attempts a live catalog fetch.
-        let _openrouter_ttl =
-            EnvGuard::set(OPENROUTER_CATALOG_TTL_ENV, "0");
+        let _openrouter_ttl = EnvGuard::set(OPENROUTER_CATALOG_TTL_ENV, "0");
         let _anthropic_ttl = EnvGuard::set(ANTHROPIC_CATALOG_TTL_ENV, "0");
 
         let mut model_providers = indexmap::IndexMap::new();

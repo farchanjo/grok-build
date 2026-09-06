@@ -9,9 +9,7 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-pub use xai_tool_types::search_models::{
-    ModelCatalogQuery, SearchModelsHit, SearchModelsResult,
-};
+pub use xai_tool_types::search_models::{ModelCatalogQuery, SearchModelsHit, SearchModelsResult};
 
 /// Input for the `search_models` tool.
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]

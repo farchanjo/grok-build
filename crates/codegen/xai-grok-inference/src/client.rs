@@ -15,11 +15,11 @@
 use eventsource_stream::Eventsource;
 use futures_util::StreamExt;
 use futures_util::stream::BoxStream;
-use std::sync::Arc;
 use reqwest::header::{
     ACCEPT, AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderName, HeaderValue, USER_AGENT,
 };
 use serde::Serialize;
+use std::sync::Arc;
 
 use xai_grok_inference_types::error::{
     parse_error_code, parse_rate_limit_reset, try_parse_stream_error,
@@ -1537,31 +1537,26 @@ impl InferenceClient {
         let resend_http = self.http.clone();
         let resend_url = self.endpoint("chat/completions");
         let resend_body = request_body;
-        let byte_stream = sse_bytes_stream_with_reconnect(
-            response,
-            reconnect,
-            move || {
-                let http = resend_http.clone();
-                let url = resend_url.clone();
-                let headers = resend_headers.clone();
-                let body = resend_body.clone();
-                Box::pin(async move {
-                    http.post(&url)
-                        .headers(headers)
-                        .body(body)
-                        .send()
-                        .await
-                        .map_err(InferenceError::from)
-                })
-            },
-        )
+        let byte_stream = sse_bytes_stream_with_reconnect(response, reconnect, move || {
+            let http = resend_http.clone();
+            let url = resend_url.clone();
+            let headers = resend_headers.clone();
+            let body = resend_body.clone();
+            Box::pin(async move {
+                http.post(&url)
+                    .headers(headers)
+                    .body(body)
+                    .send()
+                    .await
+                    .map_err(InferenceError::from)
+            })
+        })
         .map(move |result| {
             if let Ok(bytes) = &result {
                 let mut guard = stream_preamble_map.lock().unwrap();
                 if guard.len() < crate::shared_http::STREAM_PREAMBLE_CAPTURE_LIMIT {
-                    let take =
-                        (crate::shared_http::STREAM_PREAMBLE_CAPTURE_LIMIT - guard.len())
-                            .min(bytes.len());
+                    let take = (crate::shared_http::STREAM_PREAMBLE_CAPTURE_LIMIT - guard.len())
+                        .min(bytes.len());
                     guard.extend_from_slice(&bytes[..take]);
                 }
             }
@@ -2751,7 +2746,9 @@ fn classify_mid_stream_transport_error(rendered: &str) -> InferenceError {
     let candidates = [
         rendered,
         rendered.strip_prefix("Parse error: ").unwrap_or(rendered),
-        rendered.strip_prefix("Transport error: ").unwrap_or(rendered),
+        rendered
+            .strip_prefix("Transport error: ")
+            .unwrap_or(rendered),
     ];
     for candidate in candidates {
         if let Some(err) = try_parse_stream_error(candidate) {
@@ -2763,10 +2760,7 @@ fn classify_mid_stream_transport_error(rendered: &str) -> InferenceError {
     // Provider messages spell these keywords with spaces ("rate limit",
     // "max tokens"), while codes use underscores ("rate_limit"). Normalize
     // by dropping `_`, `-`, and spaces so one check matches all spellings.
-    let normalized = lower
-        .replace('_', "")
-        .replace('-', "")
-        .replace(' ', "");
+    let normalized = lower.replace('_', "").replace('-', "").replace(' ', "");
     let (error_type, message) = if normalized.contains("ratelimit") {
         ("rate_limit_error", rendered)
     } else if normalized.contains("overloaded") {

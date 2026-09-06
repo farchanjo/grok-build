@@ -1047,7 +1047,10 @@ fn number_after_marker(tail: &str) -> Option<u32> {
         .chars()
         .take_while(|c| c.is_ascii_digit() || *c == ',')
         .collect::<String>();
-    let digits = run.chars().filter(|c| c.is_ascii_digit()).collect::<String>();
+    let digits = run
+        .chars()
+        .filter(|c| c.is_ascii_digit())
+        .collect::<String>();
     digits.parse::<u32>().ok().filter(|n| *n > 0)
 }
 
@@ -1129,12 +1132,10 @@ mod tests {
     fn max_tokens_cap_error_matches_provider_variants() {
         // OpenRouter typed code wins regardless of wording.
         assert!(
-            api_400("some future wording", Some("max_tokens_exceeded"))
-                .is_max_tokens_cap_error()
+            api_400("some future wording", Some("max_tokens_exceeded")).is_max_tokens_cap_error()
         );
         assert!(
-            api_400("some future wording", Some("token_limit_exceeded"))
-                .is_max_tokens_cap_error()
+            api_400("some future wording", Some("token_limit_exceeded")).is_max_tokens_cap_error()
         );
         // OpenAI Platform envelope: requested value vs allowed maximum.
         assert!(api_400(
@@ -1143,39 +1144,46 @@ mod tests {
         )
         .is_max_tokens_cap_error());
         // Anthropic-style message.
-        assert!(api_400(
-            "max_tokens: 100000 exceeds the model's maximum of 65536 tokens",
-            None,
-        )
-        .is_max_tokens_cap_error());
+        assert!(
+            api_400(
+                "max_tokens: 100000 exceeds the model's maximum of 65536 tokens",
+                None,
+            )
+            .is_max_tokens_cap_error()
+        );
         // Z.ai / OpenAI-compatible 400.
-        assert!(api_400(
-            "max_tokens must be less than or equal to 8192",
-            None,
-        )
-        .is_max_tokens_cap_error());
+        assert!(
+            api_400("max_tokens must be less than or equal to 8192", None,)
+                .is_max_tokens_cap_error()
+        );
         // Context-length overflows are NOT budget errors (compaction owns them).
-        assert!(!api_400(
-            "This model's maximum context length is 200000 tokens; the prompt is too long",
-            None,
-        )
-        .is_max_tokens_cap_error());
-        assert!(!api_400(
-            "invalid_request_error: prompt is too long: 300000 tokens > 200000 maximum",
-            Some("invalid_request_error"),
-        )
-        .is_max_tokens_cap_error());
+        assert!(
+            !api_400(
+                "This model's maximum context length is 200000 tokens; the prompt is too long",
+                None,
+            )
+            .is_max_tokens_cap_error()
+        );
+        assert!(
+            !api_400(
+                "invalid_request_error: prompt is too long: 300000 tokens > 200000 maximum",
+                Some("invalid_request_error"),
+            )
+            .is_max_tokens_cap_error()
+        );
         // 500 with the code is not the 400/422 budget family.
-        assert!(!InferenceError::Api {
-            status: StatusCode::INTERNAL_SERVER_ERROR,
-            message: "max_tokens_exceeded".into(),
-            model_metadata: None,
-            retry_after_secs: None,
-            should_retry: None,
-            diagnostics: None,
-            error_code: Some(ApiErrorCode::parse("max_tokens_exceeded")),
-        }
-        .is_max_tokens_cap_error());
+        assert!(
+            !InferenceError::Api {
+                status: StatusCode::INTERNAL_SERVER_ERROR,
+                message: "max_tokens_exceeded".into(),
+                model_metadata: None,
+                retry_after_secs: None,
+                should_retry: None,
+                diagnostics: None,
+                error_code: Some(ApiErrorCode::parse("max_tokens_exceeded")),
+            }
+            .is_max_tokens_cap_error()
+        );
         // Unrelated 400s never trigger.
         assert!(!api_400("unknown option 'foo'", None).is_max_tokens_cap_error());
         // MaxTokensTruncation (finish_reason) is a distinct variant.
@@ -1192,7 +1200,9 @@ mod tests {
             Some(100_000)
         );
         assert_eq!(
-            extract_max_tokens_limit("max_tokens: 100000 exceeds the model's maximum of 65536 tokens"),
+            extract_max_tokens_limit(
+                "max_tokens: 100000 exceeds the model's maximum of 65536 tokens"
+            ),
             Some(65_536)
         );
         // must-be-less-than phrasing (OpenRouter upstream text).

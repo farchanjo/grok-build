@@ -133,9 +133,8 @@ impl xai_tool_runtime::Tool for SearchModelsTool {
         let resources = shared_resources(&ctx)?;
 
         let content = |result: &SearchModelsResult| -> String {
-            serde_json::to_string_pretty(result).unwrap_or_else(|_| {
-                format!("results={}", result.results.len())
-            })
+            serde_json::to_string_pretty(result)
+                .unwrap_or_else(|_| format!("results={}", result.results.len()))
         };
 
         let Some(catalog) = resources.lock().await.get::<ModelCatalogSearch>().cloned() else {
@@ -316,7 +315,10 @@ mod tests {
         let json = serde_json::to_value(&payload).unwrap();
         let reparsed: SearchModelsOutput = serde_json::from_value(json).unwrap();
         assert_eq!(reparsed.results.len(), 1);
-        assert_eq!(reparsed.results[0].upstream_model_id.as_deref(), Some("z-ai/glm-5.2"));
+        assert_eq!(
+            reparsed.results[0].upstream_model_id.as_deref(),
+            Some("z-ai/glm-5.2")
+        );
         assert_eq!(reparsed.results[0].supports_zdr, Some(true));
     }
 

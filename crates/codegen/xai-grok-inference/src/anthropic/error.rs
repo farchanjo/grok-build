@@ -468,7 +468,9 @@ pub(crate) fn classify_transport_error(
     for candidate in [
         rendered,
         rendered.strip_prefix("Parse error: ").unwrap_or(rendered),
-        rendered.strip_prefix("Transport error: ").unwrap_or(rendered),
+        rendered
+            .strip_prefix("Transport error: ")
+            .unwrap_or(rendered),
     ] {
         if let Some(parsed) = AnthropicErrorBody::try_parse(candidate.as_bytes()) {
             return AnthropicClientError::stream_error(
@@ -491,9 +493,7 @@ pub(crate) fn classify_transport_error(
     };
 
     match error_type {
-        Some(error_type) => {
-            AnthropicClientError::stream_error(error_type, rendered, meta.clone())
-        }
+        Some(error_type) => AnthropicClientError::stream_error(error_type, rendered, meta.clone()),
         None => AnthropicClientError::Transport(rendered.to_string()),
     }
 }
@@ -569,9 +569,7 @@ mod tests {
         );
         match rate {
             AnthropicClientError::Stream {
-                error_type,
-                class,
-                ..
+                error_type, class, ..
             } => {
                 assert_eq!(error_type, "rate_limit_error");
                 assert_eq!(class, ErrorClass::RetryableRateLimit);
@@ -598,9 +596,7 @@ mod tests {
             .expect("must classify");
         match err {
             AnthropicClientError::Stream {
-                error_type,
-                class,
-                ..
+                error_type, class, ..
             } => {
                 assert_eq!(error_type, "rate_limit_error");
                 assert_eq!(class, ErrorClass::RetryableRateLimit);
@@ -617,11 +613,16 @@ mod tests {
 
     #[test]
     fn captured_preamble_ignores_plain_sse_fragments() {
-        assert!(classify_captured_preamble(b"event: ping", &AnthropicResponseMeta::default()).is_none());
+        assert!(
+            classify_captured_preamble(b"event: ping", &AnthropicResponseMeta::default()).is_none()
+        );
         assert!(classify_captured_preamble(b"", &AnthropicResponseMeta::default()).is_none());
         assert!(
-            classify_captured_preamble(b"partial \xff\xfe bytes", &AnthropicResponseMeta::default())
-                .is_none()
+            classify_captured_preamble(
+                b"partial \xff\xfe bytes",
+                &AnthropicResponseMeta::default()
+            )
+            .is_none()
         );
     }
 

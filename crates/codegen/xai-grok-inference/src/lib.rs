@@ -45,6 +45,7 @@ pub mod types;
 
 // Public re-exports — the API surface consumers see.
 pub use actor::InferenceActor;
+pub use actor::request_task::http1_fallback_rebuilds;
 pub use anthropic::{
     ANTHROPIC_VERSION, AnthropicBeta, AnthropicBetaSet, AnthropicClient, AnthropicClientConfig,
     AnthropicClientError, AnthropicErrorBody, AnthropicMessagesOutcome, AnthropicPage,
@@ -77,7 +78,6 @@ pub use events::{
 pub use handle::InferenceHandle;
 pub use inference_log::AuthInfo;
 pub use metrics::{InferenceLatencyStats, compute_percentiles};
-pub use actor::request_task::http1_fallback_rebuilds;
 pub use openai_platform::{
     OPERATION_BINDINGS, OpenAiAdminClient, OpenAiClient, OpenRouterClient, PlatformClientConfig,
     PlatformError, PlatformResult, PlatformTransport, TOTAL_BINDING_COUNT, TransportPolicy,

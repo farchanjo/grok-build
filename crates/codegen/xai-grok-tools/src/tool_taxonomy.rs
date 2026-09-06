@@ -251,12 +251,8 @@ pub fn tool_meta_json_schema_str() -> &'static str {
 /// aliased/renamed variants) a `oneOf` whose first entry carries the `enum`
 /// array. Uses `get_mut` so a missing key is never inserted into the document.
 #[cfg(test)]
-fn namespace_enum_array_mut(
-    schema: &mut serde_json::Value,
-) -> Option<&mut Vec<serde_json::Value>> {
-    let def = schema
-        .get_mut("definitions")?
-        .get_mut("ToolNamespace")?;
+fn namespace_enum_array_mut(schema: &mut serde_json::Value) -> Option<&mut Vec<serde_json::Value>> {
+    let def = schema.get_mut("definitions")?.get_mut("ToolNamespace")?;
     // Probe immutably so a missing `enum` key is never inserted into the doc.
     if def.get("enum").is_some() {
         def.get_mut("enum").and_then(|e| e.as_array_mut())
