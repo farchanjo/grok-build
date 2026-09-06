@@ -15,6 +15,7 @@
 use eventsource_stream::Eventsource;
 use futures_util::StreamExt;
 use futures_util::stream::BoxStream;
+use std::sync::Arc;
 use reqwest::header::{
     ACCEPT, AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderName, HeaderValue, USER_AGENT,
 };
@@ -1414,10 +1415,19 @@ impl InferenceClient {
             sent_credential,
             sent_bearer_tail,
         } = self.post(self.endpoint("chat/completions"));
+        // Serialize once so the single-flight stream reconnect can re-issue
+        // the identical payload by cheaply cloning the ref-counted body.
+        let request_body = tokio_util::bytes::Bytes::from(
+            serde_json::to_vec(&streaming_request).map_err(|e| {
+                tracing::error!(error = %e, "Failed to serialize streaming request");
+                InferenceError::Serialization(e)
+            })?,
+        );
         let http_request = grok_headers
             .apply(builder)
             .header(ACCEPT, HeaderValue::from_static("text/event-stream"))
-            .json(&streaming_request);
+            .header(CONTENT_TYPE, HeaderValue::from_static("application/json"))
+            .body(request_body.clone());
 
         let built_request = http_request.build().map_err(|e| {
             tracing::error!("Failed to build HTTP request: {}", e);
@@ -1430,6 +1440,9 @@ impl InferenceClient {
             "Sending chat/completions request"
         );
         Self::log_request_headers(&built_request, "chat/completions");
+        // Kept for the single-flight stream reconnect: the exact wire headers
+        // (auth, x-grok-*, ACCEPT, content-type) are replayed verbatim.
+        let resend_headers = built_request.headers().clone();
 
         let response = self.http.execute(built_request).await.map_err(|e| {
             tracing::debug!("HTTP request failed: {}", e);
@@ -1509,7 +1522,49 @@ impl InferenceClient {
         // Strip UTF-8 BOM if present: eventsource-stream 0.2.3 incorrectly slices BOM at byte 1 instead of 3.
         const UTF8_BOM: &[u8] = &[0xEF, 0xBB, 0xBF];
         let mut is_first = true;
-        let byte_stream = response.bytes_stream().map(move |result| {
+        // Bounded preamble kept for silent-end classification: the SSE parser
+        // drops non-SSE frames (a JSON `{"error": …}` body has no recognized
+        // `field:` names), so the raw bytes are observable here only.
+        let stream_preamble = Arc::new(std::sync::Mutex::new(Vec::<u8>::with_capacity(
+            crate::shared_http::STREAM_PREAMBLE_CAPTURE_LIMIT,
+        )));
+        let stream_preamble_map = Arc::clone(&stream_preamble);
+
+        // Single-flight stream reconnect: when the connection drops before any
+        // SSE data was received and GROK_HTTP_STREAM_RECONNECT is truthy, the
+        // request is re-issued once with the same payload. Off by default.
+        let reconnect = crate::shared_http::stream_reconnect_enabled();
+        let resend_http = self.http.clone();
+        let resend_url = self.endpoint("chat/completions");
+        let resend_body = request_body;
+        let byte_stream = sse_bytes_stream_with_reconnect(
+            response,
+            reconnect,
+            move || {
+                let http = resend_http.clone();
+                let url = resend_url.clone();
+                let headers = resend_headers.clone();
+                let body = resend_body.clone();
+                Box::pin(async move {
+                    http.post(&url)
+                        .headers(headers)
+                        .body(body)
+                        .send()
+                        .await
+                        .map_err(InferenceError::from)
+                })
+            },
+        )
+        .map(move |result| {
+            if let Ok(bytes) = &result {
+                let mut guard = stream_preamble_map.lock().unwrap();
+                if guard.len() < crate::shared_http::STREAM_PREAMBLE_CAPTURE_LIMIT {
+                    let take =
+                        (crate::shared_http::STREAM_PREAMBLE_CAPTURE_LIMIT - guard.len())
+                            .min(bytes.len());
+                    guard.extend_from_slice(&bytes[..take]);
+                }
+            }
             result.map(|bytes| {
                 if is_first {
                     is_first = false;
@@ -1525,20 +1580,24 @@ impl InferenceClient {
         let event_stream = byte_stream.eventsource();
 
         // Map SSE events into ChatCompletionChunk.
-        // Uses `scan` so that `[DONE]` and transport errors both terminate the
-        // stream (`None`). The first transport error is emitted to the consumer,
-        // then subsequent polls return `None` -- preventing an infinite busy-loop
-        // when the HTTP/2 connection drops and h2 keeps producing errors.
-        let chunks = event_stream
-            .scan(false, |had_transport_error, event_res| {
-                if *had_transport_error {
-                    return std::future::ready(None);
-                }
-                let item = match event_res {
+        // Uses a `while let` + `match` loop so that `[DONE]` and transport
+        // errors both terminate the stream (`None`). The first transport error
+        // is emitted to the consumer, then the stream ends -- preventing an
+        // infinite busy-loop when the HTTP/2 connection drops and h2 keeps
+        // producing errors. Mid-stream provider error payloads (JSON `error`
+        // bodies written without SSE framing) are decoded from the captured
+        // preamble and surfaced as structured `StreamError`s.
+        let chunks = async_stream::stream! {
+            tokio::pin!(event_stream);
+            let mut had_transport_error = false;
+            let mut event_count = 0usize;
+            while let Some(event_res) = event_stream.next().await {
+                match event_res {
                     Ok(event) => {
+                        event_count += 1;
                         let data = &event.data;
                         if data == "[DONE]" {
-                            return std::future::ready(None);
+                            break;
                         }
 
                         tracing::info!(
@@ -1549,28 +1608,44 @@ impl InferenceClient {
                         );
 
                         if let Some(stream_error) = try_parse_stream_error(data) {
-                            Some(Err(stream_error))
+                            yield Err(stream_error);
                         } else {
-                            Some(
-                                serde_json::from_str::<ChatCompletionChunk>(data).map_err(|e| {
+                            match serde_json::from_str::<ChatCompletionChunk>(data) {
+                                Ok(chunk) => yield Ok(chunk),
+                                Err(e) => {
                                     tracing::error!(
                                         error = %e,
                                         raw_data = %data,
                                         "Failed to deserialize ChatCompletionChunk from stream"
                                     );
-                                    InferenceError::Serialization(e)
-                                }),
-                            )
+                                    yield Err(InferenceError::Serialization(e));
+                                }
+                            }
                         }
                     }
                     Err(e) => {
-                        *had_transport_error = true;
-                        Some(Err(InferenceError::EventStreamError(e.to_string())))
+                        had_transport_error = true;
+                        yield Err(classify_mid_stream_transport_error(&e.to_string()));
+                        break;
                     }
+                }
+            }
+            // Silent end with zero SSE events: the provider may have written a
+            // JSON error payload that the SSE parser dropped as unknown
+            // fields. Runs only when no event was seen and no transport error
+            // was already surfaced (the same single-shot end-of-stream check
+            // the previous `scan` state machine performed).
+            if !had_transport_error && event_count == 0 {
+                let captured = {
+                    let guard = stream_preamble.lock().unwrap();
+                    guard.clone()
                 };
-                std::future::ready(item)
-            })
-            .boxed();
+                if let Some(err) = provider_error_from_captured(&captured) {
+                    yield Err(err);
+                }
+            }
+        }
+        .boxed();
 
         Ok((chunks, model_metadata))
     }
@@ -2659,6 +2734,140 @@ impl InferenceClient {
                 diagnostics: info.diagnostics,
                 error_code: info.error_code,
             })
+    }
+}
+
+/// Classify a mid-stream transport error: when the rendered error carries a
+/// decoded provider error payload (a `{"error": …}` JSON body embedded in the
+/// eventsource parse/transport text) or names a known transient condition
+/// (`max_tokens` / `rate_limit` / `overloaded`), surface a structured
+/// [`InferenceError::StreamError`] instead of the generic
+/// [`InferenceError::EventStreamError`]. Reuses [`try_parse_stream_error`],
+/// which is the established decoder for SSE error frames.
+fn classify_mid_stream_transport_error(rendered: &str) -> InferenceError {
+    // eventsource-stream wraps its errors: `Parse error: {input}` carries the
+    // offending line and `Transport error: {cause}` the reqwest cause, so try
+    // the raw text first, then the unwrapped payload.
+    let candidates = [
+        rendered,
+        rendered.strip_prefix("Parse error: ").unwrap_or(rendered),
+        rendered.strip_prefix("Transport error: ").unwrap_or(rendered),
+    ];
+    for candidate in candidates {
+        if let Some(err) = try_parse_stream_error(candidate) {
+            return err;
+        }
+    }
+
+    let lower = rendered.to_ascii_lowercase();
+    // Provider messages spell these keywords with spaces ("rate limit",
+    // "max tokens"), while codes use underscores ("rate_limit"). Normalize
+    // by dropping `_`, `-`, and spaces so one check matches all spellings.
+    let normalized = lower
+        .replace('_', "")
+        .replace('-', "")
+        .replace(' ', "");
+    let (error_type, message) = if normalized.contains("ratelimit") {
+        ("rate_limit_error", rendered)
+    } else if normalized.contains("overloaded") {
+        ("overloaded_error", rendered)
+    } else if normalized.contains("maxtokens") {
+        ("max_tokens_exceeded", rendered)
+    } else {
+        return InferenceError::EventStreamError(rendered.to_string());
+    };
+
+    InferenceError::StreamError {
+        error_type: error_type.to_string(),
+        message: message.to_string(),
+        code: None,
+    }
+}
+
+/// Decode a provider error payload from the captured stream preamble.
+///
+/// eventsource-stream folds lines with unknown field names into ignored
+/// events, so a JSON `{"error": …}` body yields zero SSE events and the stream
+/// ends silently. Returns `None` unless the preamble actually looks like a
+/// provider error payload — ordinary SSE fragments stay silent (backward
+/// compatible).
+fn provider_error_from_captured(captured: &[u8]) -> Option<InferenceError> {
+    if captured.is_empty() {
+        return None;
+    }
+    let text = std::str::from_utf8(captured).ok()?;
+    let text = text.strip_prefix('\u{feff}').unwrap_or(text);
+    let normalized = text
+        .to_ascii_lowercase()
+        .replace('_', "")
+        .replace('-', "")
+        .replace(' ', "");
+    let looks_like_error = text.contains("\"error\"") || text.contains("\"message\"");
+    if !(looks_like_error
+        || normalized.contains("ratelimit")
+        || normalized.contains("overloaded")
+        || normalized.contains("maxtokens"))
+    {
+        return None;
+    }
+    Some(classify_mid_stream_transport_error(text))
+}
+
+/// Byte-stream wrapper implementing the single-flight SSE reconnect.
+///
+/// When `reconnect` is enabled and the transport drops *before* any bytes
+/// were received, the request is re-issued once via `resend`; if the retried
+/// response is not a 2xx the original error is surfaced instead. When
+/// disabled (the default) every item passes through unchanged and the stream
+/// ends on the first error.
+fn sse_bytes_stream_with_reconnect(
+    first: reqwest::Response,
+    reconnect: bool,
+    mut resend: impl FnMut() -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<reqwest::Response>> + Send>,
+    >,
+) -> impl futures_util::Stream<Item = Result<tokio_util::bytes::Bytes>> {
+    async_stream::stream! {
+        let mut response = first;
+        let mut saw_data = false;
+        'responses: loop {
+            let mut byte_stream = response.bytes_stream();
+            loop {
+                match byte_stream.next().await {
+                    Some(Ok(bytes)) => {
+                        saw_data = true;
+                        yield Ok(bytes);
+                    }
+                    Some(Err(err)) => {
+                        let err = InferenceError::from(err);
+                        if reconnect && !saw_data {
+                            match resend().await {
+                                Ok(next) if next.status().is_success() => {
+                                    response = next;
+                                    continue 'responses;
+                                }
+                                Ok(next) => {
+                                    tracing::warn!(
+                                        status = %next.status(),
+                                        "SSE stream reconnect received non-success status"
+                                    );
+                                    yield Err(err);
+                                    return;
+                                }
+                                Err(second) => {
+                                    yield Err(second);
+                                    return;
+                                }
+                            }
+                        } else {
+                            yield Err(err);
+                            return;
+                        }
+                    }
+                    None => return,
+                }
+            }
+        }
     }
 }
 
@@ -4737,5 +4946,89 @@ mod tests {
         });
         client.apply_message_defaults(&mut oversized).unwrap();
         assert_eq!(oversized.inner.max_tokens, 4_096);
+    }
+
+    #[test]
+    fn mid_stream_transport_error_keeps_generic_when_unclassified() {
+        let err = classify_mid_stream_transport_error("Transport error: connection reset");
+        match err {
+            InferenceError::EventStreamError(text) => {
+                assert!(text.contains("connection reset"))
+            }
+            other => panic!("expected EventStreamError, got {other}"),
+        }
+    }
+
+    #[test]
+    fn mid_stream_transport_error_decodes_json_envelope() {
+        let err = classify_mid_stream_transport_error(
+            r#"{"error":{"message":"overloaded upstream","type":"server_error"}}"#,
+        );
+        match err {
+            InferenceError::StreamError {
+                error_type,
+                message,
+                ..
+            } => {
+                assert_eq!(error_type, "server_error");
+                assert_eq!(message, "overloaded upstream");
+            }
+            other => panic!("expected StreamError, got {other}"),
+        }
+    }
+
+    #[test]
+    fn mid_stream_transport_error_classifies_known_keywords() {
+        let rate = classify_mid_stream_transport_error("Parse error: rate limit exceeded");
+        match rate {
+            InferenceError::StreamError { error_type, .. } => {
+                assert_eq!(error_type, "rate_limit_error")
+            }
+            other => panic!("expected rate_limit StreamError, got {other}"),
+        }
+        let overloaded =
+            classify_mid_stream_transport_error("Transport error: upstream overloaded");
+        match overloaded {
+            InferenceError::StreamError { error_type, .. } => {
+                assert_eq!(error_type, "overloaded_error")
+            }
+            other => panic!("expected overloaded StreamError, got {other}"),
+        }
+        let max_tokens = classify_mid_stream_transport_error("max_tokens exceeds the model cap");
+        match max_tokens {
+            InferenceError::StreamError { error_type, .. } => {
+                assert_eq!(error_type, "max_tokens_exceeded")
+            }
+            other => panic!("expected max_tokens StreamError, got {other}"),
+        }
+    }
+
+    #[test]
+    fn captured_preamble_surfaces_non_framed_error_payload() {
+        let captured = br#"{"error":{"message":"rate limit exceeded","type":"server_error"}}"#;
+        let err = provider_error_from_captured(captured).expect("must classify");
+        match err {
+            InferenceError::StreamError { error_type, .. } => {
+                assert_eq!(error_type, "server_error")
+            }
+            other => panic!("expected StreamError, got {other}"),
+        }
+
+        // BOM-prefixed bodies must decode too.
+        let bom = b"\xef\xbb\xbf{\"error\":{\"message\":\"overloaded\",\"type\":\"api_error\"}}";
+        let err = provider_error_from_captured(bom).expect("must classify after BOM strip");
+        match err {
+            InferenceError::StreamError { error_type, .. } => {
+                assert_eq!(error_type, "api_error")
+            }
+            other => panic!("expected StreamError, got {other}"),
+        }
+    }
+
+    #[test]
+    fn captured_preamble_ignores_plain_sse_fragments() {
+        assert!(provider_error_from_captured(b"data: hello").is_none());
+        assert!(provider_error_from_captured(b"").is_none());
+        assert!(provider_error_from_captured(b"partial \xff\xfe bytes").is_none());
     }
 }

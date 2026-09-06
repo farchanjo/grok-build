@@ -16,7 +16,9 @@ use xai_grok_inference_types::anthropic::{
 use xai_grok_inference_types::error::try_parse_stream_error;
 use xai_grok_inference_types::messages::{MessageStreamEvent, MessagesRequest, MessagesResponse};
 
-use super::error::{AnthropicClientError, AnthropicResult};
+use super::error::{
+    AnthropicClientError, AnthropicResult, classify_captured_preamble, classify_transport_error,
+};
 use super::headers::{AnthropicResponseMeta, build_request_headers};
 
 /// Default Anthropic API origin (paths are `/v1/...`).
@@ -327,11 +329,32 @@ impl AnthropicClient {
         headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
         headers.insert(ACCEPT, HeaderValue::from_static("text/event-stream"));
 
+        // Zero-copy wrapper so the single-flight reconnect can re-issue the
+        // identical payload by cheaply cloning the ref-counted body.
+        let body: tokio_util::bytes::Bytes = tokio_util::bytes::Bytes::from(body);
         let builder = self
             .http
             .post(self.url("/v1/messages"))
-            .headers(headers)
-            .body(body);
+            .headers(headers.clone())
+            .body(body.clone());
+
+        // Single-flight stream reconnect: when the connection drops before any
+        // SSE data was received and GROK_HTTP_STREAM_RECONNECT is truthy, the
+        // request is re-issued once with the same payload. Off by default.
+        let reconnect = crate::shared_http::stream_reconnect_enabled();
+        let resend = {
+            let resend_http = self.http.clone();
+            let resend_url = self.url("/v1/messages");
+            let resend_headers = headers;
+            let resend_body = body;
+            move || {
+                let http = resend_http.clone();
+                let url = resend_url.clone();
+                let headers = resend_headers.clone();
+                let body = resend_body.clone();
+                Box::pin(async move { http.post(&url).headers(headers).body(body).send().await })
+            }
+        };
 
         let response = tokio::select! {
             _ = self.cancel.cancelled() => return Err(AnthropicClientError::Cancelled),
@@ -358,65 +381,137 @@ impl AnthropicClient {
 
         let meta_for_stream = meta.clone();
         let cancel = self.cancel.clone();
-        let byte_stream = response.bytes_stream();
-        let event_stream = byte_stream.eventsource();
-
         let events = async_stream::stream! {
-            tokio::pin!(event_stream);
-            loop {
-                if cancel.is_cancelled() {
-                    yield Err(AnthropicClientError::Cancelled);
-                    break;
-                }
-                let next = tokio::select! {
-                    _ = cancel.cancelled() => {
-                        yield Err(AnthropicClientError::Cancelled);
-                        break;
-                    }
-                    item = event_stream.next() => item,
-                };
-                let Some(event_res) = next else { break };
-                match event_res {
-                    Ok(event) => {
-                        let data = event.data;
-                        if data == "[DONE]" {
-                            break;
+            let mut response = response;
+            let mut saw_data = false;
+            'responses: loop {
+                // Bounded preamble: the SSE parser drops non-SSE frames, so a
+                // JSON error body written without `data:` framing yields zero
+                // events but must still surface as a structured stream error.
+                let stream_preamble = std::sync::Arc::new(std::sync::Mutex::new(
+                    Vec::<u8>::with_capacity(crate::shared_http::STREAM_PREAMBLE_CAPTURE_LIMIT),
+                ));
+                let stream_preamble_map = std::sync::Arc::clone(&stream_preamble);
+                let byte_stream = response.bytes_stream().map(move |result| {
+                    if let Ok(bytes) = &result {
+                        let mut guard = stream_preamble_map.lock().unwrap();
+                        if guard.len() < crate::shared_http::STREAM_PREAMBLE_CAPTURE_LIMIT {
+                            let take =
+                                (crate::shared_http::STREAM_PREAMBLE_CAPTURE_LIMIT - guard.len())
+                                    .min(bytes.len());
+                            guard.extend_from_slice(&bytes[..take]);
                         }
-                        if let Some(stream_err) = try_parse_stream_error(&data) {
-                            let (error_type, message) = match stream_err {
-                                xai_grok_inference_types::InferenceError::StreamError {
+                    }
+                    result
+                });
+                let event_stream = byte_stream.eventsource();
+                tokio::pin!(event_stream);
+                loop {
+                    if cancel.is_cancelled() {
+                        yield Err(AnthropicClientError::Cancelled);
+                        break 'responses;
+                    }
+                    let next = tokio::select! {
+                        _ = cancel.cancelled() => {
+                            yield Err(AnthropicClientError::Cancelled);
+                            break 'responses;
+                        }
+                        item = event_stream.next() => item,
+                    };
+                    let Some(event_res) = next else {
+                        // Silent end with no SSE data: check the preamble for
+                        // a non-framed provider error payload.
+                        if !saw_data {
+                            let captured = {
+                                let guard = stream_preamble.lock().unwrap();
+                                guard.clone()
+                            };
+                            if let Some(err) =
+                                classify_captured_preamble(&captured, &meta_for_stream)
+                            {
+                                yield Err(err);
+                            }
+                        }
+                        break 'responses;
+                    };
+                    match event_res {
+                        Ok(event) => {
+                            saw_data = true;
+                            let data = event.data;
+                            if data == "[DONE]" {
+                                break 'responses;
+                            }
+                            if let Some(stream_err) = try_parse_stream_error(&data) {
+                                let (error_type, message) = match stream_err {
+                                    xai_grok_inference_types::InferenceError::StreamError {
+                                        error_type,
+                                        message,
+                                        ..
+                                    } => (error_type, message),
+                                    other => ("stream_error".into(), other.to_string()),
+                                };
+                                yield Err(AnthropicClientError::stream_error(
                                     error_type,
                                     message,
-                                    ..
-                                } => (error_type, message),
-                                other => ("stream_error".into(), other.to_string()),
-                            };
-                            yield Err(AnthropicClientError::stream_error(
-                                error_type,
-                                message,
-                                meta_for_stream.clone(),
-                            ));
-                            break;
-                        }
-                        match serde_json::from_str::<MessageStreamEvent>(&data) {
-                            Ok(MessageStreamEvent::Error { error }) => {
-                                yield Err(AnthropicClientError::stream_error(
-                                    error.r#type,
-                                    error.message,
                                     meta_for_stream.clone(),
                                 ));
-                                break;
+                                break 'responses;
                             }
-                            Ok(ev) => yield Ok(ev),
-                            Err(e) => {
-                                yield Err(AnthropicClientError::Decode(e.to_string()));
-                                break;
+                            match serde_json::from_str::<MessageStreamEvent>(&data) {
+                                Ok(MessageStreamEvent::Error { error }) => {
+                                    yield Err(AnthropicClientError::stream_error(
+                                        error.r#type,
+                                        error.message,
+                                        meta_for_stream.clone(),
+                                    ));
+                                    break 'responses;
+                                }
+                                Ok(ev) => yield Ok(ev),
+                                Err(e) => {
+                                    yield Err(AnthropicClientError::Decode(e.to_string()));
+                                    break 'responses;
+                                }
                             }
                         }
-                    }
-                    Err(e) => {
-                        yield Err(AnthropicClientError::Transport(e.to_string()));
-                        break;
+                        Err(e) => {
+                            let rendered = e.to_string();
+                            if reconnect && !saw_data {
+                                let resent = tokio::select! {
+                                    _ = cancel.cancelled() => {
+                                        yield Err(AnthropicClientError::Cancelled);
+                                        break 'responses;
+                                    }
+                                    result = resend() => result,
+                                };
+                                match resent {
+                                    Ok(next) if next.status().is_success() => {
+                                        response = next;
+                                        continue 'responses;
+                                    }
+                                    Ok(next) => {
+                                        tracing::warn!(
+                                            status = %next.status(),
+                                            "Anthropic stream reconnect received non-success status"
+                                        );
+                                        yield Err(classify_transport_error(
+                                            &rendered,
+                                            &meta_for_stream,
+                                        ));
+                                        break 'responses;
+                                    }
+                                    Err(second) => {
+                                        yield Err(classify_transport_error(
+                                            &second.to_string(),
+                                            &meta_for_stream,
+                                        ));
+                                        break 'responses;
+                                    }
+                                }
+                            } else {
+                                yield Err(classify_transport_error(&rendered, &meta_for_stream));
+                                break 'responses;
+                            }
+                        }
                     }
                 }
             }

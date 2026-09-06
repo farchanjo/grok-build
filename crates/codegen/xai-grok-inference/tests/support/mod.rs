@@ -16,10 +16,10 @@ pub fn test_config(base_url: &str, api_key: &str) -> InferenceConfig {
     }
 }
 
-/// Drive one POST through the client; the canned `{}` body is not a valid
+/// Canned conversation request for wire-level tests; the body is not a valid
 /// completion, but only the wire-level request matters here.
-pub async fn send_one(client: &InferenceClient) {
-    let request = ConversationRequest {
+pub fn conversation_request() -> ConversationRequest {
+    ConversationRequest {
         items: vec![ConversationItem::User(UserItem {
             content: vec![ContentPart::Text {
                 text: Arc::<str>::from("hi"),
@@ -27,6 +27,11 @@ pub async fn send_one(client: &InferenceClient) {
             ..Default::default()
         })],
         ..Default::default()
-    };
-    let _ = client.conversation(request).await;
+    }
+}
+
+/// Drive one POST through the client; the canned `{}` body is not a valid
+/// completion, but only the wire-level request matters here.
+pub async fn send_one(client: &InferenceClient) {
+    let _ = client.conversation(conversation_request()).await;
 }

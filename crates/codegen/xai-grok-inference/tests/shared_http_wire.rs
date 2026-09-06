@@ -16,7 +16,11 @@ use xai_grok_test_support::spawn_counting_server;
 
 /// Pin the env these assertions depend on before any client is built, so
 /// ambient shell exports (`GROK_SAMPLER_SHARED_CLIENT=0`,
-/// `GROK_POOL_MAX_IDLE=0`) cannot flip the expected pooling behavior.
+/// `GROK_POOL_MAX_IDLE=0`) cannot flip the expected pooling behavior. The
+/// sampling pool knobs are REMOVED so the assertions exercise the Phase D1
+/// defaults: `GROK_POOL_MAX_IDLE` defaults to 8 (parallel background
+/// subagents stream concurrently; admission allows 32) and the idle timeout
+/// to 90s.
 fn pin_env() {
     static PIN: Once = Once::new();
     PIN.call_once(|| {
@@ -25,8 +29,8 @@ fn pin_env() {
         // switch and pool knobs only at first client construction.
         unsafe {
             std::env::remove_var("GROK_SAMPLER_SHARED_CLIENT");
-            std::env::set_var("GROK_POOL_MAX_IDLE", "2");
-            std::env::set_var("GROK_POOL_IDLE_TIMEOUT_SECS", "90");
+            std::env::remove_var("GROK_POOL_MAX_IDLE");
+            std::env::remove_var("GROK_POOL_IDLE_TIMEOUT_SECS");
         }
     });
 }
@@ -34,6 +38,9 @@ fn pin_env() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn two_sampling_clients_share_one_connection() {
     pin_env();
+    // Phase D1: the default pool keeps 8 idle slots per host, so two
+    // sequential sampling requests against one host must reuse a single
+    // connection (the old default of 2 reused too; this pins the default).
     let (base_url, accepts, _heads) = spawn_counting_server().await;
     let a = InferenceClient::new(test_config(&base_url, "token-a")).unwrap();
     let b = InferenceClient::new(test_config(&base_url, "token-b")).unwrap();

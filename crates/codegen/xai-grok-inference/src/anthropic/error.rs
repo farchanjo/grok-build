@@ -450,10 +450,180 @@ pub(crate) fn classify_stream_error_type(error_type: &str) -> ErrorClass {
     }
 }
 
+/// Classify a mid-stream transport error into the Anthropic error vocabulary.
+///
+/// When the rendered error carries a decoded provider error payload (a
+/// `{"error": …}` JSON body embedded in the eventsource parse/transport
+/// text) or names a known transient condition (`max_tokens` / `rate_limit`
+/// / `overloaded`), surface a structured [`AnthropicClientError::Stream`]
+/// whose class feeds the retry policy; otherwise keep the generic
+/// [`AnthropicClientError::Transport`].
+pub(crate) fn classify_transport_error(
+    rendered: &str,
+    meta: &AnthropicResponseMeta,
+) -> AnthropicClientError {
+    // eventsource-stream wraps its errors: `Parse error: {input}` carries the
+    // offending line and `Transport error: {cause}` the reqwest cause, so try
+    // the raw text first, then the unwrapped payload.
+    for candidate in [
+        rendered,
+        rendered.strip_prefix("Parse error: ").unwrap_or(rendered),
+        rendered.strip_prefix("Transport error: ").unwrap_or(rendered),
+    ] {
+        if let Some(parsed) = AnthropicErrorBody::try_parse(candidate.as_bytes()) {
+            return AnthropicClientError::stream_error(
+                parsed.error.r#type.as_str(),
+                parsed.error.message,
+                meta.clone(),
+            );
+        }
+    }
+
+    let lower = rendered.to_ascii_lowercase();
+    let error_type = if lower.contains("rate_limit") {
+        Some("rate_limit_error")
+    } else if lower.contains("overloaded") {
+        Some("overloaded_error")
+    } else if lower.contains("max_tokens") {
+        Some("max_tokens_exceeded")
+    } else {
+        None
+    };
+
+    match error_type {
+        Some(error_type) => {
+            AnthropicClientError::stream_error(error_type, rendered, meta.clone())
+        }
+        None => AnthropicClientError::Transport(rendered.to_string()),
+    }
+}
+
+/// Decode a provider error payload from the captured stream preamble.
+///
+/// eventsource-stream folds lines with unknown field names into ignored
+/// events, so a JSON `{"type":"error","error":…}` body yields zero SSE events
+/// and the stream ends silently. Returns `None` unless the preamble actually
+/// looks like a provider error payload — ordinary SSE fragments stay silent
+/// (backward compatible).
+pub(crate) fn classify_captured_preamble(
+    captured: &[u8],
+    meta: &AnthropicResponseMeta,
+) -> Option<AnthropicClientError> {
+    if captured.is_empty() {
+        return None;
+    }
+    let text = std::str::from_utf8(captured).ok()?;
+    let text = text.strip_prefix('\u{feff}').unwrap_or(text);
+    let lower = text.to_ascii_lowercase();
+    let looks_like_error = text.contains("\"error\"");
+    if !(looks_like_error
+        || lower.contains("rate_limit")
+        || lower.contains("overloaded")
+        || lower.contains("max_tokens"))
+    {
+        return None;
+    }
+    Some(classify_transport_error(text, meta))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::retry::{RATE_LIMIT_RETRY_THRESHOLD, RetryDecision, classify_error};
+
+    #[test]
+    fn classify_transport_error_keeps_generic_when_unclassified() {
+        let err = classify_transport_error(
+            "Transport error: connection reset",
+            &AnthropicResponseMeta::default(),
+        );
+        assert!(matches!(err, AnthropicClientError::Transport(_)));
+        assert_eq!(err.class(), ErrorClass::Transient);
+    }
+
+    #[test]
+    fn classify_transport_error_decodes_non_framed_json_envelope() {
+        let rendered =
+            r#"{"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}"#;
+        let err = classify_transport_error(rendered, &AnthropicResponseMeta::default());
+        match err {
+            AnthropicClientError::Stream {
+                error_type,
+                message,
+                class,
+                ..
+            } => {
+                assert_eq!(error_type, "overloaded_error");
+                assert_eq!(message, "Overloaded");
+                assert_eq!(class, ErrorClass::RetryableOverload);
+            }
+            other => panic!("expected Stream, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn classify_transport_error_classifies_known_keywords() {
+        let rate = classify_transport_error(
+            "Parse error: rate limit exceeded",
+            &AnthropicResponseMeta::default(),
+        );
+        match rate {
+            AnthropicClientError::Stream {
+                error_type,
+                class,
+                ..
+            } => {
+                assert_eq!(error_type, "rate_limit_error");
+                assert_eq!(class, ErrorClass::RetryableRateLimit);
+            }
+            other => panic!("expected rate-limit Stream, got {other:?}"),
+        }
+        let max_tokens = classify_transport_error(
+            "Transport error: max_tokens exceeds cap",
+            &AnthropicResponseMeta::default(),
+        );
+        match max_tokens {
+            AnthropicClientError::Stream { error_type, .. } => {
+                assert_eq!(error_type, "max_tokens_exceeded")
+            }
+            other => panic!("expected max_tokens Stream, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn captured_preamble_surfaces_non_framed_error_payload() {
+        let captured =
+            br#"{"type":"error","error":{"type":"rate_limit_error","message":"Rate limited"}}"#;
+        let err = classify_captured_preamble(captured, &AnthropicResponseMeta::default())
+            .expect("must classify");
+        match err {
+            AnthropicClientError::Stream {
+                error_type,
+                class,
+                ..
+            } => {
+                assert_eq!(error_type, "rate_limit_error");
+                assert_eq!(class, ErrorClass::RetryableRateLimit);
+            }
+            other => panic!("expected Stream, got {other:?}"),
+        }
+        // BOM-prefixed bodies must decode too.
+        let bom =
+            b"\xef\xbb\xbf{\"type\":\"error\",\"error\":{\"type\":\"overloaded_error\",\"message\":\"x\"}}";
+        let err = classify_captured_preamble(bom, &AnthropicResponseMeta::default())
+            .expect("must classify after BOM strip");
+        assert!(matches!(err, AnthropicClientError::Stream { .. }));
+    }
+
+    #[test]
+    fn captured_preamble_ignores_plain_sse_fragments() {
+        assert!(classify_captured_preamble(b"event: ping", &AnthropicResponseMeta::default()).is_none());
+        assert!(classify_captured_preamble(b"", &AnthropicResponseMeta::default()).is_none());
+        assert!(
+            classify_captured_preamble(b"partial \xff\xfe bytes", &AnthropicResponseMeta::default())
+                .is_none()
+        );
+    }
 
     #[test]
     fn debug_and_display_omit_obvious_secrets() {

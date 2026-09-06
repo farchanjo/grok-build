@@ -256,7 +256,7 @@ fn provider_clients() -> &'static ArcSwap<HashMap<ProviderPoolKey, reqwest::Clie
 
 /// Registry defaults. Platform/retrieval calls are short and bursty
 /// (embedding batches, rerank turns), so keep more idle slots than the
-/// sampling client's conservative default of 2.
+/// sampling client's default of 8.
 const PROVIDER_POOL_DEFAULT_MAX_IDLE: usize = 8;
 const PROVIDER_POOL_DEFAULT_IDLE_TIMEOUT_SECS: u64 = 90;
 
@@ -337,11 +337,98 @@ pub(crate) fn provider_pool_names() -> Vec<String> {
         .collect()
 }
 
+/// Truthy environment knob: `1`, `true`, or `yes` (any case).
+fn env_truthy(name: &str) -> bool {
+    std::env::var(name)
+        .ok()
+        .is_some_and(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes"))
+}
+
+/// `GROK_HTTP2_ADAPTIVE_WINDOW` truthy (`1` / `true` / `yes`) enables the
+/// reqwest HTTP/2 adaptive-window flow-control knob.
+fn http2_adaptive_window_enabled() -> bool {
+    env_truthy("GROK_HTTP2_ADAPTIVE_WINDOW")
+}
+
+/// `GROK_HTTP2_INITIAL_STREAM_WINDOW_SIZE` parsed as a positive `u32`.
+/// The HTTP/2 spec caps this at 2^31-1; a zero or unparseable value leaves
+/// the reqwest default untouched.
+fn http2_initial_stream_window() -> Option<u32> {
+    std::env::var("GROK_HTTP2_INITIAL_STREAM_WINDOW_SIZE")
+        .ok()
+        .and_then(|v| v.parse::<u32>().ok())
+        .filter(|&n| n > 0)
+}
+
+/// Sampling client pool max idle: `GROK_POOL_MAX_IDLE` override, default 8.
+///
+/// Parallel background subagents stream concurrently (admission allows 32),
+/// so the sampler keeps 8 idle slots per host instead of the old
+/// conservative 2: two sampling streams per slot keep every retry and
+/// concurrent request on a warm connection instead of paying a fresh
+/// TCP+TLS handshake.
+fn sampling_pool_max_idle() -> usize {
+    parse_sampling_pool_max_idle(std::env::var("GROK_POOL_MAX_IDLE").ok().as_deref())
+}
+
+/// Pure parse of the sampling pool max-idle knob, for tests and diagnostics.
+fn parse_sampling_pool_max_idle(raw: Option<&str>) -> usize {
+    raw.and_then(|v| v.parse().ok()).unwrap_or(8)
+}
+
+/// Single-flight SSE stream reconnect gate: `GROK_HTTP_STREAM_RECONNECT`
+/// truthy (`1` / `true` / `yes`). Off by default.
+pub(crate) fn stream_reconnect_enabled() -> bool {
+    env_truthy("GROK_HTTP_STREAM_RECONNECT")
+}
+
+/// Bounded per-stream preamble capture for mid-stream error classification.
+/// Large enough for a provider error envelope; small enough to never be a
+/// memory concern per in-flight stream.
+pub(crate) const STREAM_PREAMBLE_CAPTURE_LIMIT: usize = 16 * 1024;
+
+/// Fields logged by the post-build `http_client_built` event.
+struct HttpClientBuiltFields {
+    pool_max_idle: usize,
+    idle_timeout_secs: u64,
+    connect_timeout_secs: u64,
+    http2_adaptive_window: bool,
+    initial_stream_window: Option<u32>,
+}
+
+/// Emit the post-build observability event (see Phase D3). The
+/// `initial_stream_window` field is present only when the knob applied.
+fn emit_http_client_built(fields: HttpClientBuiltFields) {
+    match fields.initial_stream_window {
+        Some(window) => tracing::info!(
+            target: crate::inference_log::TARGET,
+            event = "http_client_built",
+            pool_max_idle = fields.pool_max_idle,
+            idle_timeout_secs = fields.idle_timeout_secs,
+            connect_timeout_secs = fields.connect_timeout_secs,
+            http2_adaptive_window = fields.http2_adaptive_window,
+            initial_stream_window = window,
+            "HTTP client built"
+        ),
+        None => tracing::info!(
+            target: crate::inference_log::TARGET,
+            event = "http_client_built",
+            pool_max_idle = fields.pool_max_idle,
+            idle_timeout_secs = fields.idle_timeout_secs,
+            connect_timeout_secs = fields.connect_timeout_secs,
+            http2_adaptive_window = fields.http2_adaptive_window,
+            "HTTP client built"
+        ),
+    }
+}
+
 fn build_provider_client(
     key: &ProviderPoolKey,
     configure: impl FnOnce(reqwest::ClientBuilder) -> reqwest::ClientBuilder,
 ) -> Result<reqwest::Client, reqwest::Error> {
     let (pool_max_idle, idle_timeout_secs) = resolve_pool_knobs(key);
+    let http2_adaptive_window = http2_adaptive_window_enabled();
+    let initial_stream_window = http2_initial_stream_window();
     let builder = crate::extra_ca::with_extra_root_certificates(reqwest::Client::builder())
         .pool_max_idle_per_host(pool_max_idle)
         .pool_idle_timeout(Duration::from_secs(idle_timeout_secs))
@@ -352,10 +439,30 @@ fn build_provider_client(
     } else {
         // Keep sockets warm between bursts: ping while idle so a pooled
         // connection survives long gaps between retrieval turns.
-        builder
+        let mut builder = builder
             .http2_keep_alive_interval(Duration::from_secs(15))
             .http2_keep_alive_timeout(Duration::from_secs(5))
-            .http2_keep_alive_while_idle(true)
+            .http2_keep_alive_while_idle(true);
+        if http2_adaptive_window {
+            builder = builder.http2_adaptive_window(true);
+            tracing::debug!(
+                target: crate::inference_log::TARGET,
+                event = "http2_multiplex_knob",
+                knob = "adaptive_window",
+                "provider pool client: HTTP/2 adaptive window enabled via GROK_HTTP2_ADAPTIVE_WINDOW"
+            );
+        }
+        if let Some(window) = initial_stream_window {
+            builder = builder.http2_initial_stream_window_size(window);
+            tracing::debug!(
+                target: crate::inference_log::TARGET,
+                event = "http2_multiplex_knob",
+                knob = "initial_stream_window",
+                window,
+                "provider pool client: HTTP/2 initial stream window set via GROK_HTTP2_INITIAL_STREAM_WINDOW_SIZE"
+            );
+        }
+        builder
     };
     tracing::info!(
         target: crate::inference_log::TARGET,
@@ -367,16 +474,29 @@ fn build_provider_client(
         http1_only = key.http1_only,
         "building persistent per-provider HTTP pool"
     );
-    configure(builder).build()
+    let built = configure(builder).build();
+    if let Ok(_) = &built {
+        emit_http_client_built(HttpClientBuiltFields {
+            pool_max_idle,
+            idle_timeout_secs,
+            connect_timeout_secs: key.connect_timeout_secs,
+            // HTTP/1.1-only pools never apply the HTTP/2 knobs; report what
+            // was actually configured, not what the env asked for.
+            http2_adaptive_window: !key.http1_only && http2_adaptive_window,
+            initial_stream_window: if key.http1_only {
+                None
+            } else {
+                initial_stream_window
+            },
+        });
+    }
+    built
 }
 
 /// Build a `reqwest::Client` for sampling with HTTP/2 + connection pooling.
 /// Env knobs are read once, when the shared client is first built.
 fn build_http_client() -> Result<reqwest::Client, reqwest::Error> {
-    let pool_max_idle: usize = std::env::var("GROK_POOL_MAX_IDLE")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(2);
+    let pool_max_idle: usize = sampling_pool_max_idle();
     let pool_idle_timeout_secs: u64 = std::env::var("GROK_POOL_IDLE_TIMEOUT_SECS")
         .ok()
         .and_then(|v| v.parse().ok())
@@ -385,8 +505,10 @@ fn build_http_client() -> Result<reqwest::Client, reqwest::Error> {
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(10);
+    let http2_adaptive_window = http2_adaptive_window_enabled();
+    let initial_stream_window = http2_initial_stream_window();
 
-    crate::extra_ca::with_extra_root_certificates(reqwest::Client::builder())
+    let mut builder = crate::extra_ca::with_extra_root_certificates(reqwest::Client::builder())
         .pool_max_idle_per_host(pool_max_idle)
         .pool_idle_timeout(Duration::from_secs(pool_idle_timeout_secs))
         .connect_timeout(Duration::from_secs(connect_timeout_secs))
@@ -394,8 +516,38 @@ fn build_http_client() -> Result<reqwest::Client, reqwest::Error> {
         // HTTP/2 keep-alive: ping every 15s, timeout after 5s.
         .http2_keep_alive_interval(Duration::from_secs(15))
         .http2_keep_alive_timeout(Duration::from_secs(5))
-        .http2_keep_alive_while_idle(true)
-        .build()
+        .http2_keep_alive_while_idle(true);
+    if http2_adaptive_window {
+        builder = builder.http2_adaptive_window(true);
+        tracing::debug!(
+            target: crate::inference_log::TARGET,
+            event = "http2_multiplex_knob",
+            knob = "adaptive_window",
+            "sampling client: HTTP/2 adaptive window enabled via GROK_HTTP2_ADAPTIVE_WINDOW"
+        );
+    }
+    if let Some(window) = initial_stream_window {
+        builder = builder.http2_initial_stream_window_size(window);
+        tracing::debug!(
+            target: crate::inference_log::TARGET,
+            event = "http2_multiplex_knob",
+            knob = "initial_stream_window",
+            window,
+            "sampling client: HTTP/2 initial stream window set via GROK_HTTP2_INITIAL_STREAM_WINDOW_SIZE"
+        );
+    }
+
+    let built = builder.build();
+    if let Ok(_) = &built {
+        emit_http_client_built(HttpClientBuiltFields {
+            pool_max_idle,
+            idle_timeout_secs: pool_idle_timeout_secs,
+            connect_timeout_secs,
+            http2_adaptive_window,
+            initial_stream_window,
+        });
+    }
+    built
 }
 
 /// Build a `reqwest::Client` constrained to HTTP/1.1 with pooling disabled.
@@ -544,5 +696,112 @@ mod tests {
             pool_count, 1,
             "concurrent first-builds must not lose updates or duplicate entries"
         );
+    }
+
+    /// Serialize env-touching tests in this module: the mutex is process-local
+    /// to the lib test binary, and only these tests mutate the knobs below,
+    /// so `unsafe set_var`/`remove_var` is sound while the lock is held.
+    static ENV_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// RAII guard restoring a single env var on drop (Phase D knob tests).
+    struct EnvVarGuard {
+        key: &'static str,
+        prior: Option<std::ffi::OsString>,
+    }
+
+    impl EnvVarGuard {
+        fn set(key: &'static str, value: &str) -> Self {
+            let prior = std::env::var_os(key);
+            // SAFETY: held under ENV_TEST_LOCK; no other test in this binary
+            // mutates these knobs concurrently.
+            unsafe { std::env::set_var(key, value) };
+            Self { key, prior }
+        }
+
+        fn unset(key: &'static str) -> Self {
+            let prior = std::env::var_os(key);
+            // SAFETY: see [`EnvVarGuard::set`].
+            unsafe { std::env::remove_var(key) };
+            Self { key, prior }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            // SAFETY: see [`EnvVarGuard::set`].
+            match self.prior.take() {
+                Some(v) => unsafe { std::env::set_var(self.key, v) },
+                None => unsafe { std::env::remove_var(self.key) },
+            }
+        }
+    }
+
+    #[test]
+    fn sampling_pool_max_idle_defaults_to_eight() {
+        assert_eq!(super::parse_sampling_pool_max_idle(None), 8);
+        assert_eq!(super::parse_sampling_pool_max_idle(Some("0")), 0);
+        assert_eq!(super::parse_sampling_pool_max_idle(Some("12")), 12);
+        assert_eq!(super::parse_sampling_pool_max_idle(Some("not-a-number")), 8);
+    }
+
+    #[test]
+    fn http2_multiplex_knobs_parse_from_env() {
+        let _lock = ENV_TEST_LOCK.lock().unwrap();
+
+        let adaptive_on = EnvVarGuard::set("GROK_HTTP2_ADAPTIVE_WINDOW", "1");
+        assert!(super::http2_adaptive_window_enabled());
+        drop(adaptive_on);
+
+        let adaptive_true = EnvVarGuard::set("GROK_HTTP2_ADAPTIVE_WINDOW", "true");
+        assert!(super::http2_adaptive_window_enabled());
+        drop(adaptive_true);
+
+        let adaptive_yes = EnvVarGuard::set("GROK_HTTP2_ADAPTIVE_WINDOW", "yes");
+        assert!(super::http2_adaptive_window_enabled());
+        drop(adaptive_yes);
+
+        let adaptive_off = EnvVarGuard::set("GROK_HTTP2_ADAPTIVE_WINDOW", "0");
+        assert!(!super::http2_adaptive_window_enabled());
+        drop(adaptive_off);
+
+        let adaptive_absent = EnvVarGuard::unset("GROK_HTTP2_ADAPTIVE_WINDOW");
+        assert!(!super::http2_adaptive_window_enabled());
+        drop(adaptive_absent);
+
+        let window = EnvVarGuard::set("GROK_HTTP2_INITIAL_STREAM_WINDOW_SIZE", "1048576");
+        assert_eq!(super::http2_initial_stream_window(), Some(1_048_576));
+        drop(window);
+
+        let window_zero = EnvVarGuard::set("GROK_HTTP2_INITIAL_STREAM_WINDOW_SIZE", "0");
+        assert_eq!(super::http2_initial_stream_window(), None);
+        drop(window_zero);
+
+        let window_bad = EnvVarGuard::set("GROK_HTTP2_INITIAL_STREAM_WINDOW_SIZE", "abc");
+        assert_eq!(super::http2_initial_stream_window(), None);
+        drop(window_bad);
+
+        let window_absent = EnvVarGuard::unset("GROK_HTTP2_INITIAL_STREAM_WINDOW_SIZE");
+        assert_eq!(super::http2_initial_stream_window(), None);
+    }
+
+    #[test]
+    fn build_http_client_honors_http2_multiplex_knobs() {
+        let _lock = ENV_TEST_LOCK.lock().unwrap();
+        let _adaptive = EnvVarGuard::set("GROK_HTTP2_ADAPTIVE_WINDOW", "1");
+        let _window = EnvVarGuard::set("GROK_HTTP2_INITIAL_STREAM_WINDOW_SIZE", "1048576");
+        let client = super::build_http_client()
+            .expect("knob-bearing client must build offline (no network)");
+        drop(client);
+    }
+
+    #[test]
+    fn stream_reconnect_is_off_by_default() {
+        let _lock = ENV_TEST_LOCK.lock().unwrap();
+        let _absent = EnvVarGuard::unset("GROK_HTTP_STREAM_RECONNECT");
+        assert!(!super::stream_reconnect_enabled());
+        drop(_absent);
+
+        let _on = EnvVarGuard::set("GROK_HTTP_STREAM_RECONNECT", "1");
+        assert!(super::stream_reconnect_enabled());
     }
 }

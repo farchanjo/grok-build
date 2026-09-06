@@ -7,7 +7,7 @@
 use std::pin::pin;
 use std::sync::{
     Arc,
-    atomic::{AtomicBool, Ordering},
+    atomic::{AtomicBool, AtomicU64, Ordering},
 };
 use std::time::Duration;
 
@@ -36,6 +36,26 @@ use crate::stream::{stream_chat_completions, stream_messages};
 use crate::types::RequestId;
 
 use super::pacing::InferencePacer;
+
+/// Total HTTP/1.1 fallback client rebuilds (the poisoned HTTP/2 pool escape
+/// hatch). Process-wide counter, exposed for metrics wiring.
+static HTTP1_FALLBACK_REBUILDS_TOTAL: AtomicU64 = AtomicU64::new(0);
+
+/// Process-wide count of HTTP/1.1 fallback client rebuilds.
+pub fn http1_fallback_rebuilds() -> u64 {
+    HTTP1_FALLBACK_REBUILDS_TOTAL.load(Ordering::Relaxed)
+}
+
+/// Record one HTTP/1.1 fallback rebuild and emit the info line on increment.
+pub fn record_http1_fallback_rebuild() {
+    let total = HTTP1_FALLBACK_REBUILDS_TOTAL.fetch_add(1, Ordering::Relaxed) + 1;
+    tracing::info!(
+        target: crate::inference_log::TARGET,
+        event = "http1_fallback_rebuild",
+        total,
+        "rebuilt sampling client with HTTP/1.1 fallback for retry"
+    );
+}
 
 /// Default per-chunk idle timeout when neither config nor caller
 /// supplies one. Matches the shell's session-level default
@@ -598,7 +618,7 @@ async fn apply_retry_decision(
             match InferenceClient::new(http1_config) {
                 Ok(fresh) => {
                     *client = fresh;
-                    tracing::info!("rebuilt sampling client with HTTP/1.1 fallback for retry");
+                    record_http1_fallback_rebuild();
                 }
                 Err(rebuild_err) => {
                     tracing::warn!(
@@ -1115,6 +1135,17 @@ fn send_completion(
 mod tests {
     use super::*;
     use futures_util::stream;
+
+    #[test]
+    fn http1_fallback_rebuild_counter_increments() {
+        let before = http1_fallback_rebuilds();
+        record_http1_fallback_rebuild();
+        assert_eq!(
+            http1_fallback_rebuilds(),
+            before + 1,
+            "each recorded rebuild must bump the process-wide counter"
+        );
+    }
 
     #[test]
     fn synthesize_idle_timeout_extracts_elapsed_secs() {
