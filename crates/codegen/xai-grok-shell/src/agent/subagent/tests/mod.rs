@@ -4,8 +4,8 @@ use super::exact_route::ExactRoute;
 use super::handle_request::{
     assigned_platform_error, assigned_route_matches_final, assigned_unknown_model_error,
     apply_tool_allow_deny, canonical_total_tokens, format_bytes, prioritize_skills,
-    render_attachments_context, resolve_attachments, resolve_final_exact_route,
-    usage_is_incomplete,
+    record_tool_gating_on_definition, render_attachments_context, resolve_attachments,
+    resolve_final_exact_route, usage_is_incomplete,
 };
 use crate::test_support::lsp_runtime::{
     DummyLspDispatch, ctx_with_toggle, make_request, test_gateway,
@@ -4489,6 +4489,42 @@ fn allow_deny_tools_filter_matches_ids_and_client_names() {
         Some(&["not-a-tool".to_string()]),
     );
     assert_eq!(config.tools.len(), 1);
+}
+
+/// `record_tool_gating_on_definition` is the builder-honored path: the child
+/// builder re-injects product-default tools after the config prune, so the
+/// deny must also land in `disallowed_tools` and the allow in the session
+/// allowlist clamp.
+#[test]
+fn record_tool_gating_writes_disallowed_and_session_allowlist() {
+    let mut def = xai_grok_agent::config::AgentDefinition::general_purpose();
+    record_tool_gating_on_definition(
+        &mut def,
+        None,
+        Some(&["search_models".to_string(), "web_search".to_string()]),
+    );
+    assert!(def.disallowed_tools.iter().any(|d| d == "search_models"));
+    assert!(def.disallowed_tools.iter().any(|d| d == "web_search"));
+    assert!(def.session_tools_allowlist.is_none());
+
+    // An existing session allowlist is intersected, never replaced.
+    let mut def = xai_grok_agent::config::AgentDefinition::general_purpose();
+    def.session_tools_allowlist = Some(vec!["read_file".into(), "grep".into()]);
+    record_tool_gating_on_definition(
+        &mut def,
+        Some(&["read_file".to_string(), "bash".to_string()]),
+        None,
+    );
+    assert_eq!(
+        def.session_tools_allowlist.as_deref(),
+        Some(&["read_file".to_string()][..])
+    );
+
+    // Deny entries are not duplicated when already present.
+    let mut def = xai_grok_agent::config::AgentDefinition::general_purpose();
+    def.disallowed_tools = vec!["write".into()];
+    record_tool_gating_on_definition(&mut def, None, Some(&["write".to_string()]));
+    assert_eq!(def.disallowed_tools, vec!["write".to_string()]);
 }
 
 #[tokio::test]

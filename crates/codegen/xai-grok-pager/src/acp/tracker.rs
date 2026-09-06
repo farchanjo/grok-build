@@ -1946,8 +1946,15 @@ fn tool_call_to_block(tc: &acp::ToolCall, session_cwd: Option<&Path>) -> RenderB
             }
             RenderBlock::ToolCall(ToolCallBlock::IntegrationSearch(block))
         }
-        _ if extract_raw_field(tc, "variant").as_deref() == Some("SearchModels") => {
-            let mut block = OtherToolCallBlock::new(tool_call_title(tc), String::new());
+        _ if extract_raw_field(tc, "variant").as_deref() == Some("SearchModels")
+            || canonical_tool_kind(tc).as_deref() == Some("search_models") =>
+        {
+            // Out-of-tree packs deliver their input as ToolInput::Dynamic, for
+            // which the shell's generic title is "Dynamic tool call". Prefer
+            // the canonical `x.ai/tool` label ("Search Model") when stamped.
+            let title =
+                canonical_tool_label(tc).unwrap_or_else(|| tool_call_title(tc).into_owned());
+            let mut block = OtherToolCallBlock::new(title, String::new());
             if let Some(ref raw) = tc.raw_output
                 && let Ok(ToolOutput::SearchModels(out)) =
                     serde_json::from_value::<ToolOutput>(raw.clone())
@@ -2093,6 +2100,27 @@ fn tool_call_title(tc: &acp::ToolCall) -> Cow<'_, str> {
     } else {
         Cow::Borrowed(&tc.title)
     }
+}
+/// The canonical `x.ai/tool` label stamped by the shell (`label` field), used
+/// to title out-of-tree tool calls whose input arrives as `ToolInput::Dynamic`
+/// and therefore carries only the shell's generic placeholder title.
+fn canonical_tool_label(tc: &acp::ToolCall) -> Option<String> {
+    canonical_tool_meta_field(tc, "label")
+}
+/// The canonical `x.ai/tool` kind wire name (`kind` field, snake_case), used
+/// to route out-of-tree tool calls whose `raw_input.variant` is the generic
+/// `Dynamic` tag rather than a typed variant name.
+fn canonical_tool_kind(tc: &acp::ToolCall) -> Option<String> {
+    canonical_tool_meta_field(tc, "kind")
+}
+fn canonical_tool_meta_field(tc: &acp::ToolCall, field: &str) -> Option<String> {
+    tc.meta
+        .as_ref()
+        .and_then(|m| m.get(xai_grok_tools::tool_taxonomy::TOOL_META_KEY))
+        .and_then(|t| t.get(field))
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
 }
 /// Build the media block from the typed `raw_output` path.
 fn media_gen_block(tc: &acp::ToolCall, success: bool) -> RenderBlock {
@@ -2789,6 +2817,36 @@ mod tests {
         acp::SessionUpdate::AgentThoughtChunk(acp::ContentChunk::new(acp::ContentBlock::Text(
             acp::TextContent::new(text.to_string()),
         )))
+    }
+    fn tc_with_meta(meta: Option<serde_json::Value>) -> acp::ToolCall {
+        acp::ToolCall::new(
+            acp::ToolCallId::new(Arc::from("t1")),
+            "Dynamic tool call".to_string(),
+        )
+        .kind(acp::ToolKind::Other)
+        .status(acp::ToolCallStatus::Pending)
+        .raw_input(Some(
+            serde_json::json!({ "variant": "Dynamic", "query": "kimi" }),
+        ))
+        .meta(meta.and_then(|v| v.as_object().cloned()))
+    }
+    #[test]
+    fn canonical_tool_meta_reads_search_models_label_and_kind() {
+        let tc = tc_with_meta(Some(serde_json::json!({
+            "x.ai/tool": {
+                "version": 1, "name": "search_models", "kind": "search_models",
+                "namespace": "archanjo", "label": "Search Model", "read_only": true
+            }
+        })));
+        assert_eq!(canonical_tool_label(&tc).as_deref(), Some("Search Model"));
+        assert_eq!(canonical_tool_kind(&tc).as_deref(), Some("search_models"));
+    }
+    #[test]
+    fn canonical_tool_meta_absent_returns_none() {
+        assert!(canonical_tool_label(&tc_with_meta(None)).is_none());
+        assert!(canonical_tool_kind(&tc_with_meta(None)).is_none());
+        let empty = tc_with_meta(Some(serde_json::json!({ "other": true })));
+        assert!(canonical_tool_label(&empty).is_none());
     }
     #[test]
     fn workflow_suppression_keeps_authoring_calls_visible() {

@@ -168,6 +168,40 @@ pub(super) fn tool_matches_any(
     })
 }
 
+/// Record the model-facing allow/deny on the definition itself. The child
+/// session's `AgentBuilder` re-injects product-default tools (e.g. Archanjo
+/// `search_models`, gated memory tools) AFTER [`apply_tool_allow_deny`] has
+/// pruned the tool config, so a config-only prune can be resurrected. The
+/// definition-level clamps are the supported removal path the builder honors
+/// after its re-injection: `disallowed_tools` prunes any re-added tool, and
+/// the session allowlist clamp keeps only allow-listed tools. An existing
+/// session allowlist (from the parent's `--tools` flag) is intersected, never
+/// replaced.
+pub(super) fn record_tool_gating_on_definition(
+    definition: &mut xai_grok_agent::config::AgentDefinition,
+    allow: Option<&[String]>,
+    deny: Option<&[String]>,
+) {
+    if let Some(deny) = deny {
+        for name in deny {
+            if !definition.disallowed_tools.iter().any(|d| d == name) {
+                definition.disallowed_tools.push(name.clone());
+            }
+        }
+    }
+    if let Some(allow) = allow {
+        let list: Vec<String> = match definition.session_tools_allowlist.take() {
+            Some(existing) => allow
+                .iter()
+                .filter(|n| existing.iter().any(|e| e == *n))
+                .cloned()
+                .collect(),
+            None => allow.to_vec(),
+        };
+        definition.session_tools_allowlist = Some(list);
+    }
+}
+
 /// Reorder inherited skills so hinted names that exist come first (in hint
 /// order); unknown names are ignored and no skills are pruned.
 pub(super) fn prioritize_skills(skills: &mut Vec<SkillInfo>, hint: &[String]) {
@@ -783,6 +817,11 @@ pub(crate) async fn handle_assigned_subagent_request(
     }
     apply_tool_allow_deny(
         &mut definition.tool_config,
+        request.runtime_overrides.allow_tools.as_deref(),
+        request.runtime_overrides.deny_tools.as_deref(),
+    );
+    record_tool_gating_on_definition(
+        &mut definition,
         request.runtime_overrides.allow_tools.as_deref(),
         request.runtime_overrides.deny_tools.as_deref(),
     );
