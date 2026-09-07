@@ -63,27 +63,18 @@ pub async fn spawn_grok_shell(
         )),
     );
 
-    // Provider discovery must complete before bootstrap freezes the model
-    // catalog. This is the normal in-process TUI/headless path, so refreshing
-    // only the stdio/leader entrypoints leaves the first `/model` picker with
-    // stale presets until the next process start.
-    let t_provider_catalog = std::time::Instant::now();
-    xai_grok_shell::agent::providers::ProviderManager::default()
-        .refresh_configured_catalogs()
-        .await;
-    crate::unified_log::info(
-        "startup.provider_catalog_refresh",
-        None,
-        Some(xai_grok_telemetry::startup_timing::phase_ctx(
-            &t_provider_catalog,
-        )),
-    );
+    // Provider catalog contract: boot serves the disk catalog caches written
+    // by previous launches (bootstrap reads them synchronously). The network
+    // refresh runs post-connect on the agent thread (see the spawn_local task
+    // below) and hot-updates clients via the generation-gated models/update
+    // lane, so it never blocks first paint or shell connect.
 
     // Run the full bootstrap sequence: config resolution, process-level
     // singletons, and model catalog construction.
     let (agent_config, models_manager) =
         xai_grok_shell::agent::init::bootstrap(&agent_config, &auth_manager, None)
             .map_err(|e| anyhow::anyhow!(e))?;
+    let models_bg = models_manager.clone();
     let t_model_catalog_refresh = std::time::Instant::now();
     models_manager
         .list_models(RefreshStrategy::OnlineIfUncached)
@@ -114,6 +105,30 @@ pub async fn spawn_grok_shell(
             if let Some(mc) = memory_config {
                 agent.set_memory_config(mc);
             }
+
+            // Off the critical path: refresh the configured provider catalogs
+            // now that the agent (and its ACP gateway) exists. This runs on
+            // the agent thread's LocalSet, so it dies with the agent on pager
+            // exit. Semantics are unchanged from the old blocking call site:
+            // unconfigured providers are skipped and disk caches survive
+            // failures. Afterwards, one apply_config re-reads the refreshed
+            // caches, bumps catalog_generation, and pushes x.ai/models/update
+            // to the pager (no-op-safe when content is unchanged).
+            tokio::task::spawn_local(async move {
+                let t_provider_catalog = std::time::Instant::now();
+                xai_grok_shell::agent::providers::ProviderManager::default()
+                    .refresh_configured_catalogs()
+                    .await;
+                models_bg.apply_config(models_bg.config_snapshot());
+                crate::unified_log::info(
+                    "startup.provider_catalog_background_refresh",
+                    None,
+                    Some(xai_grok_telemetry::startup_timing::phase_ctx(
+                        &t_provider_catalog,
+                    )),
+                );
+            });
+
             Ok(Rc::new(agent))
         })
     };

@@ -1329,26 +1329,30 @@ impl ProviderManagementService {
         let Ok((entries, _)) = self.load_entries() else {
             return;
         };
-        for (id, cfg) in entries {
-            if matches!(id.as_str(), "openai" | "openrouter" | "anthropic" | "xai")
-                || id.starts_with("grok_build_")
-            {
-                continue;
-            }
-            if !cfg.enabled || !cfg.catalog_enabled {
-                continue;
-            }
-            let snap = self.refresh_catalog(&id).await;
-            if let Some(error) = snap.error.as_deref() {
-                tracing::warn!(provider_id = %id, %error, "additional provider catalog refresh failed");
-            } else {
-                tracing::info!(
-                    provider_id = %id,
-                    model_count = ?snap.model_count,
-                    "additional provider catalog refreshed"
-                );
-            }
-        }
+        // Refresh each surviving instance concurrently: every refresh is an
+        // independent network round-trip, and awaiting them one by one stacks
+        // their latencies (each bounded by the connect timeout) on the caller.
+        let refreshes = entries
+            .into_iter()
+            .filter(|(id, cfg)| {
+                !matches!(id.as_str(), "openai" | "openrouter" | "anthropic" | "xai")
+                    && !id.starts_with("grok_build_")
+                    && cfg.enabled
+                    && cfg.catalog_enabled
+            })
+            .map(|(id, _cfg)| async move {
+                let snap = self.refresh_catalog(&id).await;
+                if let Some(error) = snap.error.as_deref() {
+                    tracing::warn!(provider_id = %id, %error, "additional provider catalog refresh failed");
+                } else {
+                    tracing::info!(
+                        provider_id = %id,
+                        model_count = ?snap.model_count,
+                        "additional provider catalog refreshed"
+                    );
+                }
+            });
+        futures::future::join_all(refreshes).await;
     }
 
     /// Catalog status + optional refresh using PR8/production paths.

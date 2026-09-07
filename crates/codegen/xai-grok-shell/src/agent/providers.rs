@@ -4400,8 +4400,11 @@ mod tests {
             ProviderConnectionState::Configured
         );
         let auth = std::fs::read_to_string(home.path().join("auth.json")).unwrap();
-        assert!(auth.contains("openrouter::api_key"));
-        assert!(!auth.contains("anthropic::api_key"));
+        // Match the exact JSON entry keys: removal leaves a deliberate
+        // `anthropic::api_key::meta` generation tombstone, so a bare
+        // substring check on the scope would also match that tombstone key.
+        assert!(auth.contains("\"openrouter::api_key\":"));
+        assert!(!auth.contains("\"anthropic::api_key\":"));
         assert!(!auth.contains("sk-ant-test"));
     }
 
