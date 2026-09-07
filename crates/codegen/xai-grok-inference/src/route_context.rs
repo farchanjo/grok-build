@@ -309,13 +309,14 @@ impl ProviderRouteContext {
 
     /// Legacy host-derived context: HostFallback authority only.
     pub fn legacy_from_config(config: &crate::config::InferenceConfig) -> Self {
-        let kind = match config.provider_identity {
-            crate::config::ProviderIdentity::Xai => RouteProviderKind::Xai,
-            crate::config::ProviderIdentity::OpenAi => RouteProviderKind::OpenAi,
-            crate::config::ProviderIdentity::OpenRouter => RouteProviderKind::OpenRouter,
-            crate::config::ProviderIdentity::Anthropic => RouteProviderKind::Anthropic,
-            crate::config::ProviderIdentity::Custom => RouteProviderKind::Custom,
-        };
+        // Derive the route partition from the adapter-plane kind so the
+        // identity → kind mapping lives in one place (`provider`), not
+        // duplicated here. The inverse mapping preserves the legacy
+        // `Custom` route partition (unlike the fold-up
+        // `From<RouteProviderKind> for ProviderKind`).
+        let kind = RouteProviderKind::from(crate::provider::ProviderKind::from(
+            config.provider_identity,
+        ));
         let (api_surface, credential_route) = default_surface_and_route(kind);
         let authority = if matches!(kind, RouteProviderKind::Custom) {
             RouteAuthority::HostFallback
@@ -744,6 +745,25 @@ mod tests {
             ProviderIdentity::Custom,
         ));
         assert_eq!(custom.authority(), RouteAuthority::HostFallback);
+    }
+
+    /// Z.ai keeps a real identity (not collapsed into `Custom`), maps to the
+    /// Zai route kind, and carries `Unverified` authority — it never falls
+    /// back to `HostFallback` and never inherits non-OpenRouter defaults.
+    #[test]
+    fn legacy_from_config_zai_is_unverified_and_not_custom() {
+        let zai = ProviderRouteContext::legacy_from_config(&cfg(
+            "https://api.z.ai/api/paas/v4",
+            "m",
+            ProviderIdentity::Zai,
+        ));
+        assert_eq!(zai.provider_kind(), RouteProviderKind::Zai);
+        assert_eq!(zai.authority(), RouteAuthority::Unverified);
+        assert_ne!(zai.authority(), RouteAuthority::HostFallback);
+        assert_ne!(zai.provider_kind(), RouteProviderKind::Custom);
+        // Zai uses the OpenAI-compatible subset surface with an API-key route.
+        assert_eq!(zai.api_surface(), RouteApiSurface::OpenAiCompatibleSubset);
+        assert_eq!(zai.credential_route(), RouteCredentialRoute::ApiKey);
     }
 
     #[test]

@@ -34,6 +34,13 @@ pub mod metrics;
 /// Reusable OpenAI / OpenRouter platform client (Changes 7–13).
 pub mod openai_platform;
 pub mod openrouter_baseline;
+/// Provider adapter factory — one interface per provider kind (Phase 1).
+///
+/// Self-contained: defines the object-safe [`provider::ProviderAdapter`]
+/// port, the provider data types, six adapter implementations, and a
+/// factory. Nothing in the sampler consumes it yet, so it cannot change
+/// existing behavior.
+pub mod provider;
 /// Provider-scoped typed embedding and reranker adapters (PR16).
 pub mod retrieval;
 pub mod retry;
@@ -110,6 +117,7 @@ pub use route_context::{
 };
 pub use shared_http::{
     ProviderPoolTuning, configure_provider_pool_tuning, effective_provider_connect_timeout,
+    sampling_pool_names,
 };
 pub use stream::{collect_response, stream_chat_completions, stream_messages, stream_responses};
 pub use types::RequestId;

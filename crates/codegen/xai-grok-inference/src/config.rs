@@ -13,6 +13,7 @@ use xai_grok_inference_types::{
 };
 
 use crate::attribution::SharedAttributionCallback;
+use crate::provider::WireDialect;
 use crate::retry::{DEFAULT_MAX_RETRIES, RATE_LIMIT_RETRY_THRESHOLD};
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -49,6 +50,15 @@ pub enum ProviderIdentity {
     /// Never first-party xAI and never OpenRouter routing/diagnostics.
     #[serde(rename = "anthropic")]
     Anthropic,
+    /// First-class Z.ai Model API profile (`https://api.z.ai/api/paas/v4`).
+    ///
+    /// Distinct from `Custom` OpenAI-compatible backends. Z.ai behaves like an
+    /// OpenAI-compatible wire for request shaping but has its own identity so
+    /// it stops inheriting non-OpenRouter defaults (auth, authority, pacing).
+    /// Authority stays `Unverified` and it never paces (conservative, like
+    /// every non-OpenRouter third-party identity).
+    #[serde(rename = "zai")]
+    Zai,
 }
 
 /// OpenRouter routing `sort`: string shorthand (`"latency"`) or object form
@@ -259,6 +269,7 @@ impl ProviderIdentity {
             ProviderIdentity::OpenAi => "OpenAI",
             ProviderIdentity::OpenRouter => "OpenRouter",
             ProviderIdentity::Anthropic => "Anthropic",
+            ProviderIdentity::Zai => "Z.ai",
             ProviderIdentity::Custom => "the model provider",
         }
     }
@@ -347,6 +358,13 @@ pub struct InferenceConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub zai_thinking: Option<serde_json::Value>,
     pub api_backend: ApiBackend,
+    /// Optional OpenAI-compatible wire dialect (vLLM, SGLang). This tunes
+    /// request-side reasoning keys, the reasoning echo policy, and per-delta
+    /// shaping. `None` (default) selects the standard OpenAI-compatible wire;
+    /// an unknown dialect string is rejected at the config boundary (fail
+    /// closed), never silently downgraded to `Standard`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wire_dialect: Option<WireDialect>,
     /// Whether Chat Completions history may include xAI's non-standard
     /// `messages[].model_id` metadata. OpenAI-compatible third-party
     /// providers such as OpenRouter reject that field with HTTP 400.
@@ -482,6 +500,7 @@ impl std::fmt::Debug for InferenceConfig {
             .field("zai_tool_stream", &self.zai_tool_stream)
             .field("zai_thinking", &self.zai_thinking)
             .field("api_backend", &self.api_backend)
+            .field("wire_dialect", &self.wire_dialect)
             .field("include_message_model_id", &self.include_message_model_id)
             .field("auth_scheme", &self.auth_scheme)
             .field("provider_identity", &self.provider_identity)
@@ -541,6 +560,7 @@ impl Default for InferenceConfig {
             zai_tool_stream: false,
             zai_thinking: None,
             api_backend: ApiBackend::default(),
+            wire_dialect: None,
             include_message_model_id: true,
             auth_scheme: AuthScheme::default(),
             provider_identity: ProviderIdentity::default(),
@@ -698,6 +718,7 @@ mod tests {
             ProviderIdentity::OpenAi,
             ProviderIdentity::OpenRouter,
             ProviderIdentity::Anthropic,
+            ProviderIdentity::Zai,
         ] {
             let cfg = InferenceConfig {
                 provider_identity: identity,
@@ -716,6 +737,7 @@ mod tests {
         assert!(!ProviderIdentity::OpenAi.is_first_party());
         assert!(!ProviderIdentity::OpenRouter.is_first_party());
         assert!(!ProviderIdentity::Anthropic.is_first_party());
+        assert!(!ProviderIdentity::Zai.is_first_party());
         assert!(!ProviderIdentity::Custom.is_first_party());
     }
 
@@ -726,6 +748,7 @@ mod tests {
         assert!(!ProviderIdentity::Xai.is_openrouter());
         assert!(!ProviderIdentity::OpenAi.is_openrouter());
         assert!(!ProviderIdentity::Anthropic.is_openrouter());
+        assert!(!ProviderIdentity::Zai.is_openrouter());
         assert!(!ProviderIdentity::Custom.is_openrouter());
     }
 
@@ -736,7 +759,44 @@ mod tests {
         assert!(!ProviderIdentity::Xai.is_anthropic());
         assert!(!ProviderIdentity::OpenAi.is_anthropic());
         assert!(!ProviderIdentity::OpenRouter.is_anthropic());
+        assert!(!ProviderIdentity::Zai.is_anthropic());
         assert!(!ProviderIdentity::Custom.is_anthropic());
+    }
+
+    /// `wire_dialect` defaults to `None` (standard wire), round-trips known
+    /// values through serde, and rejects unknown strings fail-closed.
+    #[test]
+    fn wire_dialect_defaults_none_and_rejects_unknown() {
+        // Default is None.
+        assert_eq!(InferenceConfig::default().wire_dialect, None);
+
+        // A config missing the field deserializes to None.
+        let mut stripped = serde_json::to_value(InferenceConfig::default()).unwrap();
+        stripped.as_object_mut().unwrap().remove("wire_dialect");
+        let config: InferenceConfig = serde_json::from_value(stripped).unwrap();
+        assert_eq!(config.wire_dialect, None);
+
+        // Known values round-trip.
+        for dialect in [
+            WireDialect::Standard,
+            WireDialect::Vllm,
+            WireDialect::Sglang,
+        ] {
+            let cfg = InferenceConfig {
+                wire_dialect: Some(dialect),
+                ..Default::default()
+            };
+            let round_tripped: InferenceConfig =
+                serde_json::from_value(serde_json::to_value(&cfg).unwrap()).unwrap();
+            assert_eq!(round_tripped.wire_dialect, Some(dialect));
+        }
+
+        // An unknown dialect value fails closed at deserialization.
+        let mut bad = serde_json::to_value(InferenceConfig::default()).unwrap();
+        bad.as_object_mut()
+            .unwrap()
+            .insert("wire_dialect".into(), serde_json::json!("vlllm"));
+        assert!(serde_json::from_value::<InferenceConfig>(bad).is_err());
     }
 
     /// Credentials must never appear in Debug or serde serialization for any
