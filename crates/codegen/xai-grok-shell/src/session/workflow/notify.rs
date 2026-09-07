@@ -102,11 +102,22 @@ pub(crate) fn build_workflow_updated(
     let last = state.history.last();
 
     let run_complete = state.status == super::tracker::WorkflowRunStatus::Complete;
-    let current_idx = state
-        .current_phase
-        .as_deref()
-        .and_then(|cur| state.phases.iter().position(|p| p.title == cur));
-    let phases = state
+    let current = state.current_phase.as_deref();
+    let current_idx = current.and_then(|cur| state.phases.iter().position(|p| p.title == cur));
+    // Titles the script actually entered, in entry order (history is capped
+    // upstream). A script may transition to titles it never declared in
+    // meta.phases; those rows are appended below instead of silently replacing
+    // the declared rail, so each phase's agents stay reachable in the UI.
+    let mut entered: Vec<&str> = Vec::new();
+    for event in &state.history {
+        if event.event == "phase_entered"
+            && let Some(title) = event.detail.as_deref()
+            && !entered.contains(&title)
+        {
+            entered.push(title);
+        }
+    }
+    let mut phases: Vec<WorkflowPhaseInfo> = state
         .phases
         .iter()
         .enumerate()
@@ -116,11 +127,29 @@ pub(crate) fn build_workflow_updated(
                 Some(cur) if idx < cur => "done",
                 Some(cur) if idx == cur && run_complete => "done",
                 Some(cur) if idx == cur => "active",
+                // Current phase is undeclared: an already-run declared phase
+                // is done, a never-run one stays pending.
+                _ if entered.contains(&p.title.as_str()) => "done",
                 _ => "pending",
             }
             .to_string(),
         })
         .collect();
+    phases.extend(
+        entered
+            .iter()
+            .copied()
+            .filter(|title| !state.phases.iter().any(|p| p.title == *title))
+            .map(|title| WorkflowPhaseInfo {
+                title: title.to_string(),
+                state: if run_complete || Some(title) != current {
+                    "done"
+                } else {
+                    "active"
+                }
+                .to_string(),
+            }),
+    );
 
     let agents: Vec<WorkflowAgentInfo> = state
         .agents
@@ -218,6 +247,47 @@ mod tests {
                         ("Plan".to_string(), "done".to_string()),
                         ("Execute".to_string(), "active".to_string()),
                         ("Verify".to_string(), "pending".to_string()),
+                    ]
+                );
+            }
+            _ => panic!("expected WorkflowUpdated"),
+        }
+    }
+
+    #[test]
+    fn entered_undeclared_phases_are_appended_with_states() {
+        let mut t = WorkflowTracker::default();
+        t.start_run(
+            "wf_3".into(),
+            "demo".into(),
+            "obj".into(),
+            vec![
+                xai_workflow::PhaseMeta {
+                    title: "Plan".into(),
+                    detail: None,
+                },
+                xai_workflow::PhaseMeta {
+                    title: "Verify".into(),
+                    detail: None,
+                },
+            ],
+            None,
+            None,
+        );
+        t.set_phase("wf_3", "run-1");
+        t.set_phase("wf_3", "run-2");
+        let state = t.get("wf_3").unwrap();
+        match build_workflow_updated(&state, 0, 0) {
+            XaiSessionUpdate::WorkflowUpdated { phases, .. } => {
+                let states: Vec<(String, String)> =
+                    phases.into_iter().map(|p| (p.title, p.state)).collect();
+                assert_eq!(
+                    states,
+                    vec![
+                        ("Plan".to_string(), "pending".to_string()),
+                        ("Verify".to_string(), "pending".to_string()),
+                        ("run-1".to_string(), "done".to_string()),
+                        ("run-2".to_string(), "active".to_string()),
                     ]
                 );
             }

@@ -299,9 +299,23 @@ impl WorkflowTracker {
     pub fn set_phase(&mut self, run_id: &str, title: &str) -> Option<WorkflowRunState> {
         let run = self.run_mut(run_id)?;
         if run.state.current_phase.as_deref() != Some(title) {
+            let declared = run.state.phases.iter().any(|phase| phase.title == title);
             run.state.current_phase = Some(title.to_string());
             run.state
                 .record_event("phase_entered", Some(title.to_string()));
+            // A script that declares meta.phases but transitions to a title that
+            // matches none of them freezes the declared rail (states derive from
+            // an exact-title lookup). Record the mismatch so it is diagnosable
+            // from the persisted run state instead of silently degrading the UI.
+            if !run.state.phases.is_empty() && !declared {
+                run.state
+                    .record_event("phase_undeclared", Some(title.to_string()));
+                tracing::warn!(
+                    run_id = %run.state.run_id,
+                    phase = %title,
+                    "workflow entered an undeclared phase title"
+                );
+            }
         }
         Some(run.state.clone())
     }
@@ -1102,6 +1116,46 @@ mod tests {
             .filter(|e| e.event == "phase_entered")
             .count();
         assert_eq!(phase_events, 1);
+    }
+
+    #[test]
+    fn undeclared_phase_title_records_mismatch_event() {
+        let mut t = WorkflowTracker::default();
+        let state = t.start_run(
+            "wf_declared".into(),
+            "goal".into(),
+            "ship it".into(),
+            vec![PhaseMeta {
+                title: "Declared".into(),
+                detail: None,
+            }],
+            None,
+            None,
+        );
+        let id = state.run_id.clone();
+        t.set_phase(&id, "undeclared-slug");
+        let run = t.get(&id).unwrap();
+        assert!(run.history.iter().any(|e| {
+            e.event == "phase_undeclared" && e.detail.as_deref() == Some("undeclared-slug")
+        }));
+        t.set_phase(&id, "Declared");
+        let run = t.get(&id).unwrap();
+        assert!(
+            !run.history
+                .iter()
+                .any(|e| e.event == "phase_undeclared" && e.detail.as_deref() == Some("Declared"))
+        );
+        // Runs that declare no phases at all must not emit mismatch events.
+        let (mut plain, plain_id) = tracker_with_run();
+        plain.set_phase(&plain_id, "anything");
+        assert!(
+            !plain
+                .get(&plain_id)
+                .unwrap()
+                .history
+                .iter()
+                .any(|e| e.event == "phase_undeclared")
+        );
     }
 
     #[test]
