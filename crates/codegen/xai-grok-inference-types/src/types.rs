@@ -687,12 +687,219 @@ pub struct ToolCallFunctionDelta {
     pub arguments: Option<String>,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, Default)]
+/// Field identifiers recognized by the manual [`ChatChunkDelta`] map visitor.
+///
+/// Unknown keys map to [`ChatChunkDeltaKey::Other`] and are skipped, matching
+/// the default (non-`deny_unknown_fields`) behavior every other wire type in
+/// this crate gets from `#[derive(Deserialize)]`.
+#[derive(Clone, Copy)]
+enum ChatChunkDeltaKey {
+    Role,
+    Content,
+    /// Canonical `reasoning_content` plus the vLLM `reasoning` alias.
+    Reasoning,
+    ToolCalls,
+    ToolCallId,
+    ReasoningDetails,
+    Other,
+}
+
+impl ChatChunkDeltaKey {
+    fn from_name(name: &str) -> Self {
+        match name {
+            "role" => Self::Role,
+            "content" => Self::Content,
+            "reasoning_content" | "reasoning" => Self::Reasoning,
+            "tool_calls" => Self::ToolCalls,
+            "tool_call_id" => Self::ToolCallId,
+            "reasoning_details" => Self::ReasoningDetails,
+            _ => Self::Other,
+        }
+    }
+}
+
+/// Identifier visitor for [`ChatChunkDeltaKey`]; never fails, so an unknown
+/// provider extension key is skipped instead of aborting the chunk.
+struct ChatChunkDeltaKeyVisitor;
+
+impl serde::de::Visitor<'_> for ChatChunkDeltaKeyVisitor {
+    type Value = ChatChunkDeltaKey;
+
+    fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("a chat completion delta field name")
+    }
+
+    fn visit_str<E>(self, v: &str) -> Result<Self::Value, E>
+    where
+        E: serde::de::Error,
+    {
+        Ok(ChatChunkDeltaKey::from_name(v))
+    }
+
+    fn visit_bytes<E>(self, v: &[u8]) -> Result<Self::Value, E>
+    where
+        E: serde::de::Error,
+    {
+        Ok(match std::str::from_utf8(v) {
+            Ok(name) => ChatChunkDeltaKey::from_name(name),
+            Err(_) => ChatChunkDeltaKey::Other,
+        })
+    }
+}
+
+impl<'de> Deserialize<'de> for ChatChunkDeltaKey {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        deserializer.deserialize_identifier(ChatChunkDeltaKeyVisitor)
+    }
+}
+
+/// `DeserializeSeed` routing a map value through
+/// [`crate::serde_helpers::lenient_reasoning_delta`], so the manual
+/// [`ChatChunkDelta`] impl below reuses that never-error leniency.
+struct ReasoningDeltaSeed;
+
+impl<'de> serde::de::DeserializeSeed<'de> for ReasoningDeltaSeed {
+    type Value = Option<String>;
+
+    fn deserialize<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        crate::serde_helpers::lenient_reasoning_delta(deserializer)
+    }
+}
+
+/// `DeserializeSeed` for `tool_calls`, reusing [`deserialize_null_default`] so
+/// a `null` payload still becomes an empty vec.
+struct ToolCallsSeed;
+
+impl<'de> serde::de::DeserializeSeed<'de> for ToolCallsSeed {
+    type Value = Vec<ToolCallDelta>;
+
+    fn deserialize<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        deserialize_null_default(deserializer)
+    }
+}
+
+/// Map visitor mirroring the serde derive codegen for [`ChatChunkDelta`]:
+/// absent keys fall back to `Default`, unknown keys are ignored, and
+/// `tool_calls: null` becomes an empty vec.
+///
+/// The two deliberate differences from the derive are both about leniency: the
+/// canonical `reasoning_content` key and the vLLM `reasoning` alias share a
+/// single field, and there is no duplicate-key guard on any field, so a delta
+/// object carrying both reasoning keys (or a repeated key) keeps the last value
+/// seen instead of failing the whole chunk. See the manual `Deserialize for
+/// ChatChunkDelta` impl below for why this cannot be a derived impl.
+struct ChatChunkDeltaVisitor;
+
+impl<'de> serde::de::Visitor<'de> for ChatChunkDeltaVisitor {
+    type Value = ChatChunkDelta;
+
+    fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("a chat completion delta object")
+    }
+
+    fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+    where
+        A: serde::de::MapAccess<'de>,
+    {
+        let mut role: Option<Role> = None;
+        let mut content: Option<String> = None;
+        let mut reasoning_content: Option<String> = None;
+        let mut tool_calls: Vec<ToolCallDelta> = Vec::new();
+        let mut tool_call_id: Option<String> = None;
+        let mut reasoning_details: Vec<Value> = Vec::new();
+
+        while let Some(key) = map.next_key::<ChatChunkDeltaKey>()? {
+            match key {
+                // Canonical key and the vLLM alias both land here, and a
+                // repeated key simply overwrites the value read before it.
+                // The lenient seed accepts any value shape, so this arm only
+                // fails on structurally broken (non-value) input.
+                ChatChunkDeltaKey::Reasoning => {
+                    reasoning_content = map.next_value_seed(ReasoningDeltaSeed)?;
+                }
+                ChatChunkDeltaKey::Role => role = map.next_value()?,
+                ChatChunkDeltaKey::Content => content = map.next_value()?,
+                ChatChunkDeltaKey::ToolCalls => tool_calls = map.next_value_seed(ToolCallsSeed)?,
+                ChatChunkDeltaKey::ToolCallId => tool_call_id = map.next_value()?,
+                ChatChunkDeltaKey::ReasoningDetails => reasoning_details = map.next_value()?,
+                ChatChunkDeltaKey::Other => {
+                    map.next_value::<serde::de::IgnoredAny>()?;
+                }
+            }
+        }
+
+        Ok(ChatChunkDelta {
+            role,
+            content,
+            reasoning_content,
+            tool_calls,
+            tool_call_id,
+            reasoning_details,
+        })
+    }
+}
+
+impl<'de> Deserialize<'de> for ChatChunkDelta {
+    /// Hand-written instead of derived: `#[derive(Deserialize)]` with
+    /// `alias = "reasoning"` plus `deserialize_with` cannot express the
+    /// lenient-reasoning contract. Serde's derive rejects any second
+    /// occurrence of a field matched by name *or* alias (`duplicate field`,
+    /// serde#2380), so a provider that sends both `reasoning` and
+    /// `reasoning_content` in one delta object would turn a benign wire quirk
+    /// into a stream-aborting chunk error. This impl accepts both keys, lets
+    /// the last one win, and routes the value through
+    /// [`crate::serde_helpers::lenient_reasoning_delta`] so any value shape
+    /// (string/null/object/array/bool/number) deserializes.
+    ///
+    /// Serialization still comes from `#[derive(Serialize)]` and always emits
+    /// the canonical `reasoning_content` key, never the alias. The field-level
+    /// `#[serde(...)]` attributes below keep documenting the intended wire
+    /// behavior that this visitor implements.
+    ///
+    /// Maintenance parity: when adding a field here, add a matching branch to
+    /// [`ChatChunkDeltaVisitor::visit_map`] with the same lenient-absent-key
+    /// semantics as the field's attributes. Re-adding `Deserialize` to the
+    /// derive list is a compile error, so the two cannot silently diverge.
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        const FIELDS: &[&str] = &[
+            "role",
+            "content",
+            "reasoning_content",
+            "reasoning",
+            "tool_calls",
+            "tool_call_id",
+            "reasoning_details",
+        ];
+        deserializer.deserialize_struct("ChatChunkDelta", FIELDS, ChatChunkDeltaVisitor)
+    }
+}
+
+#[derive(Debug, Serialize, Clone, Default)]
 pub struct ChatChunkDelta {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub role: Option<Role>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub content: Option<String>,
+    /// Reasoning/thinking delta. Providers disagree on the wire key:
+    /// OpenRouter and xAI-style backends use `reasoning_content`, while
+    /// vLLM's reasoning parser emits `reasoning`. The hand-written
+    /// `Deserialize` impl accepts both keys (last key seen wins) and runs the
+    /// value through [`crate::serde_helpers::lenient_reasoning_delta`], which
+    /// drops empty strings and non-string shapes (`null`, objects, arrays,
+    /// bools, numbers) instead of failing the whole chunk. Serialization always
+    /// uses the canonical `reasoning_content` name.
     pub reasoning_content: Option<String>,
     /// Tool call deltas. Handles `null` in JSON as empty vec.
     #[serde(
@@ -1648,6 +1855,199 @@ impl From<crate::messages::MessagesRequest> for MessagesRequestWrapper {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// One `(case name, wire delta, expected reasoning_content)` row.
+    type ReasoningWireCase = (&'static str, serde_json::Value, Option<&'static str>);
+
+    /// Wire shapes for `ChatChunkDelta.reasoning_content`, each paired with the
+    /// field value the lenient deserializer must produce. Covers both keys
+    /// (`reasoning_content` canonical, `reasoning` vLLM alias), the absent and
+    /// `null` cases, and the non-string shapes that must be dropped rather than
+    /// failing the chunk.
+    fn reasoning_delta_wire_cases() -> Vec<ReasoningWireCase> {
+        vec![
+            // Canonical key with a string delta.
+            (
+                "canonical key string",
+                json!({"role": "assistant", "reasoning_content": "We need"}),
+                Some("We need"),
+            ),
+            // vLLM's reasoning parser streams thinking under `delta.reasoning`.
+            (
+                "alias key string",
+                json!({"role": "assistant", "reasoning": "We need"}),
+                Some("We need"),
+            ),
+            // An empty delta carries no text, so it normalizes to None.
+            (
+                "canonical key empty string",
+                json!({"role": "assistant", "reasoning_content": ""}),
+                None,
+            ),
+            (
+                "alias key empty string",
+                json!({"role": "assistant", "reasoning": ""}),
+                None,
+            ),
+            // Explicit null is a no-delta marker, never a type error.
+            (
+                "canonical key null",
+                json!({"role": "assistant", "reasoning_content": null}),
+                None,
+            ),
+            (
+                "alias key null",
+                json!({"role": "assistant", "reasoning": null}),
+                None,
+            ),
+            // Key absent: the visitor leaves the field at its default None.
+            (
+                "both keys absent",
+                json!({"role": "assistant", "content": "hi"}),
+                None,
+            ),
+            // Object-shaped value (reasoning-parser metadata) is ignored.
+            (
+                "object-shaped value",
+                json!({"role": "assistant", "reasoning": {"type": "reasoning.text"}}),
+                None,
+            ),
+            // Array-shaped value (reasoning detail blocks) is ignored.
+            (
+                "array-shaped value",
+                json!({"role": "assistant", "reasoning": ["step 1", "step 2"]}),
+                None,
+            ),
+            // Bool and number shapes are ignored too.
+            (
+                "bool-shaped value",
+                json!({"role": "assistant", "reasoning": true}),
+                None,
+            ),
+            (
+                "number-shaped value",
+                json!({"role": "assistant", "reasoning": 42}),
+                None,
+            ),
+        ]
+    }
+
+    #[test]
+    fn chat_chunk_delta_reasoning_alias_matches_vllm_wire() {
+        // vLLM's reasoning parser streams thinking under `delta.reasoning`;
+        // OpenRouter and xAI-style backends use `delta.reasoning_content`.
+        // Both must deserialize into the same field.
+        let vllm: ChatChunkDelta = serde_json::from_value(json!({
+            "role": "assistant", "reasoning": "We need"
+        }))
+        .unwrap();
+        assert_eq!(vllm.reasoning_content.as_deref(), Some("We need"));
+
+        let canonical: ChatChunkDelta = serde_json::from_value(json!({
+            "role": "assistant", "reasoning_content": "We need"
+        }))
+        .unwrap();
+        assert_eq!(canonical.reasoning_content.as_deref(), Some("We need"));
+
+        // Serialization always uses the canonical name, never the alias.
+        let wire = serde_json::to_string(&canonical).unwrap();
+        assert!(wire.contains("\"reasoning_content\""));
+        assert!(!wire.contains("\"reasoning\":"));
+    }
+
+    #[test]
+    fn chat_chunk_delta_lenient_reasoning_wire_table() {
+        for (name, wire, expected) in reasoning_delta_wire_cases() {
+            let parsed = serde_json::from_value::<ChatChunkDelta>(wire.clone());
+            let delta = match parsed {
+                Ok(delta) => delta,
+                Err(err) => panic!("{name}: lenient delta must never error, got {err}"),
+            };
+            assert_eq!(
+                delta.reasoning_content.as_deref(),
+                expected,
+                "{name}: wire {wire}"
+            );
+        }
+    }
+
+    #[test]
+    fn chat_chunk_delta_lenient_reasoning_keeps_siblings_on_shaped_value() {
+        // A malformed reasoning value must not cost us the rest of the delta:
+        // the tool-call and content siblings still deserialize.
+        let delta: ChatChunkDelta = serde_json::from_value(json!({
+            "role": "assistant",
+            "content": "answer",
+            "reasoning": {"nested": ["shape", "drift"]},
+            "reasoning_details": [{"type": "reasoning.encrypted", "data": "abc"}],
+        }))
+        .unwrap();
+        assert_eq!(delta.reasoning_content, None);
+        assert_eq!(delta.content.as_deref(), Some("answer"));
+        assert_eq!(delta.role, Some(Role::Assistant));
+        assert_eq!(delta.reasoning_details.len(), 1);
+    }
+
+    #[test]
+    fn chat_chunk_delta_lenient_reasoning_both_keys_gives_canonical_last_wins() {
+        // serde's alias matching is order-sensitive: the last key seen fills
+        // the field. With the canonical key last, it wins.
+        let delta: ChatChunkDelta = serde_json::from_value(json!({
+            "reasoning": "from alias",
+            "reasoning_content": "from canonical",
+        }))
+        .unwrap();
+        assert_eq!(delta.reasoning_content.as_deref(), Some("from canonical"));
+    }
+
+    #[test]
+    fn chat_chunk_delta_lenient_reasoning_both_keys_gives_alias_last_wins() {
+        // ...and the alias wins when it arrives last. There is deliberately no
+        // duplicate-key guard (unlike serde's derive, which would fail the
+        // chunk with `duplicate field`): pin both orderings so a future
+        // refactor cannot silently change which key wins.
+        let delta: ChatChunkDelta = serde_json::from_value(json!({
+            "reasoning_content": "from canonical",
+            "reasoning": "from alias",
+        }))
+        .unwrap();
+        assert_eq!(delta.reasoning_content.as_deref(), Some("from alias"));
+    }
+
+    #[test]
+    fn chat_chunk_delta_lenient_reasoning_serializes_canonical_name_only() {
+        // Round-trip proof that the alias never leaks into the wire format,
+        // checked over the parsed encoding rather than a substring heuristic.
+        for (name, wire, expected) in reasoning_delta_wire_cases() {
+            let delta: ChatChunkDelta = serde_json::from_value(wire.clone()).unwrap();
+            assert_eq!(
+                delta.reasoning_content.as_deref(),
+                expected,
+                "{name}: wire {wire}"
+            );
+
+            let encoded = serde_json::to_value(&delta).unwrap();
+            let obj = encoded
+                .as_object()
+                .unwrap_or_else(|| panic!("{name}: delta must serialize as an object"));
+            // Serialization semantics are unchanged by this phase: the field
+            // always carries the canonical key (absent-able Option, no
+            // skip_serializing_if), and never the alias.
+            assert!(
+                obj.contains_key("reasoning_content"),
+                "{name}: canonical key must always serialize, got {encoded}"
+            );
+            assert_eq!(
+                obj["reasoning_content"].as_str(),
+                expected,
+                "{name}: canonical value must round-trip, got {encoded}"
+            );
+            assert!(
+                !obj.contains_key("reasoning"),
+                "{name}: alias key must never be serialized, got {encoded}"
+            );
+        }
+    }
 
     #[test]
     fn reasoning_effort_serde_lowercase_round_trip() {
