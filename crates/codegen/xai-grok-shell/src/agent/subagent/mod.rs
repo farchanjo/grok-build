@@ -1163,6 +1163,7 @@ async fn read_parent_inference_config(
                     zai_tool_stream: ctx.inference_config.zai_tool_stream,
                     zai_thinking: ctx.inference_config.zai_thinking.clone(),
                     api_backend: cfg.api_backend,
+                    wire_dialect: ctx.inference_config.wire_dialect,
                     include_message_model_id: ctx.inference_config.include_message_model_id,
                     auth_scheme,
                     extra_headers,

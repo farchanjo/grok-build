@@ -742,6 +742,11 @@ impl SessionActor {
             zai_tool_stream: is_zai,
             zai_thinking,
             api_backend: cfg.api_backend,
+            wire_dialect: resolved_entry.and_then(|e| {
+                e.model_provider
+                    .as_ref()
+                    .and_then(|provider| provider.dialect)
+            }),
             include_message_model_id: model_facts.include_message_model_id,
             auth_scheme,
             provider_identity,
@@ -1731,6 +1736,7 @@ impl SessionActor {
             ProviderIdentity::OpenAi => "openai",
             ProviderIdentity::Anthropic => "anthropic",
             ProviderIdentity::Xai => return None,
+            ProviderIdentity::Zai => "zai",
             ProviderIdentity::Custom => {
                 provider_id.as_ref()?;
                 "custom"

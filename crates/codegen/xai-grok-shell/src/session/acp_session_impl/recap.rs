@@ -594,11 +594,7 @@ impl SessionActor {
                     request_id,
                     idle_timeout,
                     Some(sampling_client.model()),
-                    if sampling_client.is_openrouter() {
-                        xai_grok_inference::config::ProviderIdentity::OpenRouter
-                    } else {
-                        xai_grok_inference::config::ProviderIdentity::Custom
-                    },
+                    sampling_client.provider_adapter(),
                 );
                 xai_grok_inference::collect_response(events).await
             }

@@ -4415,6 +4415,7 @@ mod tests {
                 openrouter_plugins: Vec::new(),
                 openrouter_pacing: false,
                 max_completion_tokens: None,
+                dialect: None,
                 command: Vec::new(),
             }),
             api_key: None,
@@ -4589,6 +4590,7 @@ mod tests {
                 openrouter_plugins: vec![],
                 openrouter_pacing: false,
                 max_completion_tokens: None,
+                dialect: None,
                 command: vec![],
             });
             entry.api_key = Some("test-key".into());
@@ -4778,6 +4780,7 @@ mod tests {
                 openrouter_plugins: vec![],
                 openrouter_pacing: false,
                 max_completion_tokens: None,
+                dialect: None,
                 command: vec![],
             });
             entry
@@ -4849,6 +4852,7 @@ mod tests {
                 openrouter_plugins: Vec::new(),
                 openrouter_pacing: false,
                 max_completion_tokens: None,
+                dialect: None,
                 command: Vec::new(),
             }),
             api_key: Some("configured-for-test".to_owned()),

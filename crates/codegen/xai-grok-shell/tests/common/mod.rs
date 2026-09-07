@@ -337,6 +337,7 @@ pub fn test_inference_config(
         zai_tool_stream: false,
         zai_thinking: None,
         api_backend,
+        wire_dialect: None,
         include_message_model_id: true,
         auth_scheme: Default::default(),
         extra_headers: extra_headers

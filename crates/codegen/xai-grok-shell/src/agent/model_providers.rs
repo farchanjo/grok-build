@@ -181,6 +181,10 @@ pub struct ResolvedModelProvider {
     /// `ModelInfo.max_completion_tokens`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_completion_tokens: Option<u32>,
+    /// Provider-wide wire dialect (OpenAI-compatible vLLM/SGLang). Fail-closed
+    /// at the config boundary; absent means the standard wire.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dialect: Option<xai_grok_inference::provider::WireDialect>,
     /// Unused; retained for forward-compatible TOML round-trips only.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub command: Vec<String>,
@@ -224,6 +228,12 @@ pub struct ModelProviderConfig {
     pub admin_env_key: Option<String>,
     pub api_key: Option<String>,
     pub api_backend: Option<ApiBackend>,
+    /// Optional OpenAI-compatible wire dialect (`standard` / `vllm` /
+    /// `sglang`). Fail-closed: an unknown value is rejected at the config
+    /// boundary; absent means the standard OpenAI-compatible wire. Only
+    /// meaningful for OpenAI-compatible family kinds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dialect: Option<xai_grok_inference::provider::WireDialect>,
     /// Discover models via authenticated `GET …/models` for this provider.
     pub catalog_enabled: bool,
     /// Capability discovery mode: `auto`, `manual`, or `off`.
@@ -292,6 +302,7 @@ impl Default for ModelProviderConfig {
             admin_env_key: None,
             api_key: None,
             api_backend: None,
+            dialect: None,
             catalog_enabled: true,
             capability_mode: None,
             catalog_ttl_secs: None,
@@ -349,6 +360,7 @@ impl ModelProviderConfig {
             // OpenRouter request extensions.
             openrouter_pacing,
             max_completion_tokens: self.max_completion_tokens.filter(|&n| n > 0),
+            dialect: self.dialect,
             command: self.command.clone(),
         }
     }
@@ -656,6 +668,7 @@ impl ConfigModelOverride {
             admin_env_key: _,
             api_key,
             api_backend,
+            dialect: _,
             catalog_enabled: _,
             capability_mode: _,
             catalog_ttl_secs: _,

@@ -970,6 +970,7 @@ mod tests {
                 openrouter_plugins: vec![],
                 openrouter_pacing: false,
                 max_completion_tokens: None,
+                dialect: None,
                 command: vec![],
             }),
             api_key: key.map(str::to_owned),

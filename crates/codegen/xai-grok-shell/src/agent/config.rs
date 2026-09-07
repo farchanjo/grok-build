@@ -14,6 +14,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use xai_grok_agent::prompt::skills::SkillsConfig;
 use xai_grok_inference::config::ProviderIdentity;
+use xai_grok_inference::provider::{ProviderFactory, ProviderKind, RequestContext};
 use xai_grok_inference::{AuthScheme, InferenceConfig};
 use xai_grok_inference_types::{
     CompactionAtTokens, CompactionsRemaining, REASONING_EFFORT_META_KEY,
@@ -6151,9 +6152,8 @@ pub fn provider_identity_for_model(model: &ModelEntry) -> ProviderIdentity {
         Some(ModelProviderKind::OpenAi) => ProviderIdentity::OpenAi,
         Some(ModelProviderKind::OpenRouter) => ProviderIdentity::OpenRouter,
         Some(ModelProviderKind::Anthropic) => ProviderIdentity::Anthropic,
-        Some(ModelProviderKind::OpenAiCompatible) | Some(ModelProviderKind::Zai) => {
-            ProviderIdentity::Custom
-        }
+        Some(ModelProviderKind::Zai) => ProviderIdentity::Zai,
+        Some(ModelProviderKind::OpenAiCompatible) => ProviderIdentity::Custom,
     }
 }
 
@@ -6272,12 +6272,31 @@ fn build_inference_config_for_model(
     let max_output_ceiling = info.max_output_ceiling;
     let temperature = info.temperature;
     let top_p = info.top_p;
-    let mut extra_headers = info.extra_headers.clone();
-    if model
+    // Phase 3b: the per-kind decision of which request-body/header extensions
+    // apply now lives in the provider adapter's `request_extensions`, not in
+    // inline `provider.kind == OpenRouter` branches. The shell still owns the
+    // identity + dialect decision (which adapter to build); every extension
+    // contribution flows through the adapter so body/headers stay
+    // byte-identical across kinds.
+    let provider_identity = provider_identity_for_model(model);
+    let wire_dialect = model
         .model_provider
         .as_ref()
-        .is_some_and(|provider| provider.kind == ModelProviderKind::OpenRouter)
-    {
+        .and_then(|provider| provider.dialect);
+    let adapter = ProviderFactory::build(
+        ProviderKind::from(provider_identity),
+        wire_dialect.unwrap_or_default(),
+    );
+    let request_context = RequestContext {
+        model: model_name.clone(),
+        base_url: credentials.base_url.clone(),
+        provider_identity,
+        ..RequestContext::default()
+    };
+    let extensions = adapter.request_extensions(&request_context);
+
+    let mut extra_headers = info.extra_headers.clone();
+    if extensions.openrouter_metadata_header {
         // OpenRouter returns upstream provider diagnostics in error metadata
         // only when explicitly requested. Keep this decision at the provider
         // boundary; the sampler remains URL-agnostic.
@@ -6286,10 +6305,7 @@ fn build_inference_config_for_model(
             .or_insert_with(|| "enabled".to_string());
     }
     // ChatGPT subscription OAuth: Codex/OpenAI wire headers (not Grok-branded).
-    if credentials
-        .base_url
-        .contains("chatgpt.com/backend-api/codex")
-    {
+    if extensions.chatgpt_oauth_headers {
         let account_id = crate::agent::providers::stored_openai_oauth_account_id();
         for (key, value) in crate::auth::chatgpt_oauth::oauth_extra_headers(account_id.as_deref()) {
             extra_headers.entry(key).or_insert(value);
@@ -6301,23 +6317,32 @@ fn build_inference_config_for_model(
         &credentials.base_url,
     );
     let api_backend = info.api_backend.clone();
-    let openrouter_fallback_models = model
-        .model_provider
-        .as_ref()
-        .filter(|provider| provider.kind == ModelProviderKind::OpenRouter)
-        .map(|provider| provider.openrouter_fallback_models.clone())
-        .unwrap_or_default();
-    let openrouter_provider_preferences = model
-        .model_provider
-        .as_ref()
-        .filter(|provider| provider.kind == ModelProviderKind::OpenRouter)
-        .and_then(|provider| provider.openrouter_provider_preferences.clone());
-    let openrouter_plugins = model
-        .model_provider
-        .as_ref()
-        .filter(|provider| provider.kind == ModelProviderKind::OpenRouter)
-        .map(|provider| provider.openrouter_plugins.clone())
-        .unwrap_or_default();
+    let openrouter_fallback_models = if extensions.openrouter_body {
+        model
+            .model_provider
+            .as_ref()
+            .map(|provider| provider.openrouter_fallback_models.clone())
+            .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+    let openrouter_provider_preferences = if extensions.openrouter_body {
+        model
+            .model_provider
+            .as_ref()
+            .and_then(|provider| provider.openrouter_provider_preferences.clone())
+    } else {
+        None
+    };
+    let openrouter_plugins = if extensions.openrouter_body {
+        model
+            .model_provider
+            .as_ref()
+            .map(|provider| provider.openrouter_plugins.clone())
+            .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
     // Pacing opt-in is not identity-gated: proxies with a non-openrouter kind
     // still propagate an explicit `openrouter_pacing = true` from the provider
     // or model override. Native OpenRouter identity paces even when false.
@@ -6335,7 +6360,6 @@ fn build_inference_config_for_model(
     } else {
         None
     };
-    let provider_identity = provider_identity_for_model(model);
     // Validate the catalog/default effort against the normalized model-bound
     // selector before it can reach any wire backend. Unknown keeps explicit
     // canonical tokens compatible; Unsupported and stale Exact/Legacy values
@@ -6394,6 +6418,7 @@ fn build_inference_config_for_model(
         zai_tool_stream,
         zai_thinking,
         api_backend,
+        wire_dialect,
         include_message_model_id: !model
             .model_provider
             .as_ref()
@@ -8780,6 +8805,7 @@ reasoning_effort = "low"
             openrouter_plugins: Vec::new(),
             openrouter_pacing: false,
             max_completion_tokens: None,
+            dialect: None,
             command: Vec::new(),
         });
         assert!(!openrouter.has_own_credentials());
@@ -8798,6 +8824,7 @@ reasoning_effort = "low"
             openrouter_plugins: Vec::new(),
             openrouter_pacing: false,
             max_completion_tokens: None,
+            dialect: None,
             command: Vec::new(),
         });
         assert!(openai.is_provider_scoped_byok());
@@ -8815,6 +8842,7 @@ reasoning_effort = "low"
             openrouter_plugins: Vec::new(),
             openrouter_pacing: false,
             max_completion_tokens: None,
+            dialect: None,
             command: Vec::new(),
         });
         assert!(custom.is_provider_scoped_byok());
@@ -8845,6 +8873,7 @@ reasoning_effort = "low"
             openrouter_plugins: Vec::new(),
             openrouter_pacing: false,
             max_completion_tokens: None,
+            dialect: None,
             command: Vec::new(),
         });
         assert!(!or.has_own_credentials());
@@ -8864,6 +8893,7 @@ reasoning_effort = "low"
             openrouter_plugins: Vec::new(),
             openrouter_pacing: false,
             max_completion_tokens: None,
+            dialect: None,
             command: Vec::new(),
         });
         assert!(!oai.has_own_credentials());
@@ -8885,6 +8915,7 @@ reasoning_effort = "low"
             openrouter_plugins: Vec::new(),
             openrouter_pacing: false,
             max_completion_tokens: None,
+            dialect: None,
             command: Vec::new(),
         });
         chatgpt.auth_provider = Some(crate::auth::AuthProviderRef::unresolved(
@@ -8908,6 +8939,7 @@ reasoning_effort = "low"
             openrouter_plugins: Vec::new(),
             openrouter_pacing: false,
             max_completion_tokens: None,
+            dialect: None,
             command: Vec::new(),
         });
         assert!(custom.is_provider_scoped_byok());
@@ -9233,6 +9265,7 @@ reasoning_effort = "low"
             openrouter_plugins: vec![],
             openrouter_pacing: false,
             max_completion_tokens: None,
+            dialect: None,
             command: vec![],
         });
         let config = inference_config_for_model(
@@ -9282,6 +9315,7 @@ reasoning_effort = "low"
             openrouter_plugins: vec![],
             openrouter_pacing: true,
             max_completion_tokens: None,
+            dialect: None,
             command: vec![],
         });
         let compatible_cfg = inference_config_for_model(
@@ -9305,6 +9339,49 @@ reasoning_effort = "low"
             "pacing opt-in may still propagate without OpenRouter identity"
         );
     }
+
+    /// Z.ai keeps a real 1:1 provider identity (not collapsed into Custom),
+    /// and its dialect propagates through to `wire_dialect` when set.
+    #[test]
+    fn zai_identity_round_trips_and_dialect_plumbs_to_wire() {
+        use crate::agent::model_providers::ResolvedModelProvider;
+        use xai_grok_inference::provider::WireDialect;
+
+        let mut model = test_model_entry(
+            "zai:glm-5.2",
+            "https://api.z.ai/api/paas/v4",
+            Some("zai-key"),
+            None,
+            None,
+        );
+        model.model_provider = Some(ResolvedModelProvider {
+            id: "zai".into(),
+            kind: ModelProviderKind::Zai,
+            openrouter_fallback_models: vec![],
+            openrouter_provider_preferences: None,
+            openrouter_plugins: vec![],
+            openrouter_pacing: false,
+            max_completion_tokens: None,
+            dialect: Some(WireDialect::Standard),
+            command: vec![],
+        });
+        assert_eq!(
+            provider_identity_for_model(&model),
+            ProviderIdentity::Zai,
+            "Zai must map to its real identity, not Custom"
+        );
+        let config = inference_config_for_model(
+            &model,
+            resolve_credentials(&model, None),
+            None,
+            None,
+            None,
+            None,
+        );
+        assert_eq!(config.provider_identity, ProviderIdentity::Zai);
+        assert_eq!(config.wire_dialect, Some(WireDialect::Standard));
+    }
+
     #[test]
     fn parses_model_api_backend_responses() {
         let raw_config: toml::Value = toml::from_str(
@@ -9486,6 +9563,7 @@ reasoning_effort = "low"
             openrouter_plugins: Vec::new(),
             openrouter_pacing: false,
             max_completion_tokens: None,
+            dialect: None,
             command: Vec::new(),
         });
         let applied = override_entry.apply(
@@ -9826,6 +9904,7 @@ reasoning_effort = "low"
             openrouter_plugins: vec![],
             openrouter_pacing: false,
             max_completion_tokens: None,
+            dialect: None,
             command: vec![],
         });
         models.insert("openai:gpt-4o".to_string(), home);
@@ -9847,6 +9926,7 @@ reasoning_effort = "low"
             openrouter_plugins: vec![],
             openrouter_pacing: false,
             max_completion_tokens: None,
+            dialect: None,
             command: vec![],
         });
         models.insert("openai_work:gpt-4o".to_string(), work);
@@ -9939,6 +10019,7 @@ reasoning_effort = "low"
             openrouter_plugins: vec![],
             openrouter_pacing: false,
             max_completion_tokens: None,
+            dialect: None,
             command: vec![],
         });
         models.insert("openrouter-work:z-ai/glm-5.3-flash".to_string(), entry);
@@ -10003,6 +10084,7 @@ reasoning_effort = "low"
                 openrouter_plugins: vec![],
                 openrouter_pacing: false,
                 max_completion_tokens: None,
+                dialect: None,
                 command: vec![],
             });
             entry
@@ -10068,6 +10150,7 @@ reasoning_effort = "low"
             openrouter_plugins: vec![],
             openrouter_pacing: false,
             max_completion_tokens: None,
+            dialect: None,
             command: vec![],
         });
         models.insert("openrouter:z-ai/glm-5.3-flash".to_string(), entry);
@@ -10111,6 +10194,7 @@ reasoning_effort = "low"
                 openrouter_plugins: vec![],
                 openrouter_pacing: false,
                 max_completion_tokens: None,
+                dialect: None,
                 command: vec![],
             });
             entry

@@ -385,6 +385,7 @@ fn discovered_to_model_entry(model: &DiscoveredModel) -> ModelEntry {
             openrouter_plugins: Vec::new(),
             openrouter_pacing: false,
             max_completion_tokens: None,
+            dialect: None,
             command: Vec::new(),
         }),
         api_key: None,

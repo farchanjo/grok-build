@@ -4274,6 +4274,7 @@ mod tests {
             openrouter_plugins: Vec::new(),
             openrouter_pacing: true,
             max_completion_tokens: None,
+            dialect: None,
             command: Vec::new(),
         };
         assert_eq!(
@@ -5077,6 +5078,7 @@ mod tests {
                 openrouter_plugins: Vec::new(),
                 openrouter_pacing: false,
                 max_completion_tokens: None,
+                dialect: None,
                 command: Vec::new(),
             }),
             api_key: None,
@@ -6071,6 +6073,7 @@ mod tests {
                 openrouter_plugins: Vec::new(),
                 openrouter_pacing: false,
                 max_completion_tokens: None,
+                dialect: None,
                 command: Vec::new(),
             }),
             api_key: None,

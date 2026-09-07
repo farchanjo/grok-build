@@ -143,6 +143,7 @@ fn pool_tuning_overrides(
                     max_idle: cfg.pool_max_idle,
                     idle_timeout_secs: cfg.pool_idle_timeout_secs,
                     connect_timeout_secs: cfg.pool_connect_timeout_secs,
+                    http1_only: None,
                 },
             )
         })

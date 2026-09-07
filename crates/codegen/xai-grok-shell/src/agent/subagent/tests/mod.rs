@@ -4051,6 +4051,7 @@ fn openrouter_model_entry(model_id: &str) -> crate::agent::config::ModelEntry {
             openrouter_plugins: Vec::new(),
             openrouter_pacing: false,
             max_completion_tokens: None,
+            dialect: None,
             command: Vec::new(),
         }),
         ..test_model_entry(model_id)
@@ -4067,6 +4068,7 @@ fn openai_provider_model_entry(model_id: &str) -> crate::agent::config::ModelEnt
             openrouter_plugins: Vec::new(),
             openrouter_pacing: false,
             max_completion_tokens: None,
+            dialect: None,
             command: Vec::new(),
         }),
         ..test_model_entry(model_id)

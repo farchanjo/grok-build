@@ -660,6 +660,7 @@ mod tests {
             openrouter_plugins: vec![],
             openrouter_pacing: kind == ModelProviderKind::OpenRouter,
             max_completion_tokens: None,
+            dialect: None,
             command: vec![],
         }
     }

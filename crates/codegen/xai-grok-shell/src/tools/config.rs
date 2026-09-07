@@ -225,6 +225,7 @@ impl ShellToolsetConfig {
             zai_tool_stream: false,
             zai_thinking: None,
             api_backend: Default::default(),
+            wire_dialect: None,
             include_message_model_id: true,
             auth_scheme: Default::default(),
             extra_headers: indexmap::IndexMap::new(),
