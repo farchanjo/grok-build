@@ -190,11 +190,18 @@ impl ProviderPoolKey {
 /// `idle_timeout_secs` size the reqwest connection pool; `connect_timeout_secs`
 /// overrides the connect timeout used when opening that provider's pool
 /// clients (it becomes part of the pool key).
+///
+/// `http1_only` pins a provider's pools to HTTP/1.1 (no HTTP/2 keepalive
+/// window). It is part of the pool key, so a provider that pins HTTP/1.1
+/// gets a distinct pool from one whose h2 transport is healthy. `None`
+/// (the default) lets the pool family / env decide.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ProviderPoolTuning {
     pub max_idle: Option<u32>,
     pub idle_timeout_secs: Option<u64>,
     pub connect_timeout_secs: Option<u64>,
+    /// Pin this provider's pools to HTTP/1.1 (`None` = family default).
+    pub http1_only: Option<bool>,
 }
 
 impl ProviderPoolTuning {
@@ -240,6 +247,15 @@ pub fn effective_provider_connect_timeout(
         return Duration::from_secs(secs);
     }
     policy_connect_timeout
+}
+
+/// Whether `provider_hint` has a configured per-provider pool override.
+///
+/// A provider with registered tuning routes sampling through its own
+/// `ProviderPoolKey` (custom pool sizing / connect timeout / HTTP/1.1-only)
+/// rather than the process-wide shared sampling client.
+pub(crate) fn provider_pool_has_tuning(provider_hint: &str) -> bool {
+    provider_pool_tuning().load().contains_key(provider_hint)
 }
 
 /// Uppercased pool-family name used in `GROK_POOL_<FAMILY>_*` env knobs.
@@ -337,6 +353,19 @@ pub(crate) fn provider_pool_names() -> Vec<String> {
         .collect()
 }
 
+/// Names of live `sampling`-family provider pools, as `"sampling/<provider>"`.
+///
+/// Diagnostics and tests only: observes which providers routed sampling
+/// through their own per-provider pool (vs. the process-wide shared client).
+pub fn sampling_pool_names() -> Vec<String> {
+    provider_clients()
+        .load()
+        .iter()
+        .filter(|(key, _)| key.pool == "sampling")
+        .map(|(key, _)| format!("sampling/{}", key.provider))
+        .collect()
+}
+
 /// Truthy environment knob: `1`, `true`, or `yes` (any case).
 fn env_truthy(name: &str) -> bool {
     std::env::var(name)
@@ -369,6 +398,17 @@ fn http2_initial_stream_window() -> Option<u32> {
 /// TCP+TLS handshake.
 fn sampling_pool_max_idle() -> usize {
     parse_sampling_pool_max_idle(std::env::var("GROK_POOL_MAX_IDLE").ok().as_deref())
+}
+
+/// Sampling connect timeout, matching the shared client's policy default:
+/// `GROK_CONNECT_TIMEOUT_SECS` override, else 10 s.
+pub(crate) fn sampling_connect_timeout() -> Duration {
+    Duration::from_secs(
+        std::env::var("GROK_CONNECT_TIMEOUT_SECS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(10),
+    )
 }
 
 /// Pure parse of the sampling pool max-idle knob, for tests and diagnostics.

@@ -49,25 +49,28 @@ pub const RATE_LIMIT_RETRY_THRESHOLD: u32 = 2;
 /// the `GROK_OPENROUTER_RATE_LIMIT_RETRIES` environment variable.
 pub const OPENROUTER_RATE_LIMIT_RETRY_THRESHOLD: u32 = 3;
 
-/// Resolve the per-provider 429 retry cap.
+/// Resolve the per-provider 429 retry cap through the provider adapter.
 ///
 /// OpenRouter honours `GROK_OPENROUTER_RATE_LIMIT_RETRIES` (default
 /// [`OPENROUTER_RATE_LIMIT_RETRY_THRESHOLD`]); every other provider keeps
 /// the generic [`RATE_LIMIT_RETRY_THRESHOLD`]. A non-positive parsed env
 /// value falls back to the default so a misconfiguration can't silently
 /// disable all 429 retries.
+///
+/// Phase 3a: the per-provider logic now lives in the adapter's
+/// [`crate::provider::ProviderAdapter::rate_limit_threshold`]; this
+/// resolver builds the matching adapter and delegates to it so callers keep
+/// a single identity-keyed entry point.
 pub fn resolve_rate_limit_threshold(
     provider_identity: crate::config::ProviderIdentity,
     env_override: Option<&str>,
 ) -> u32 {
-    use crate::config::ProviderIdentity;
-    match provider_identity {
-        ProviderIdentity::OpenRouter => env_override
-            .and_then(|value| value.parse::<u32>().ok())
-            .filter(|value| *value > 0)
-            .unwrap_or(OPENROUTER_RATE_LIMIT_RETRY_THRESHOLD),
-        _ => RATE_LIMIT_RETRY_THRESHOLD,
-    }
+    use crate::provider::{ProviderFactory, ProviderKind, WireDialect};
+    let adapter = ProviderFactory::build(
+        ProviderKind::from(provider_identity),
+        WireDialect::default(),
+    );
+    adapter.rate_limit_threshold(env_override)
 }
 
 /// Default max retries when no env or model override is set.
@@ -827,6 +830,8 @@ mod tests {
             crate::config::ProviderIdentity::Custom,
             crate::config::ProviderIdentity::Xai,
             crate::config::ProviderIdentity::OpenAi,
+            crate::config::ProviderIdentity::Anthropic,
+            crate::config::ProviderIdentity::Zai,
         ] {
             assert_eq!(
                 resolve_rate_limit_threshold(identity, None),

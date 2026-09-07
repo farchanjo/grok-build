@@ -19,6 +19,7 @@ use xai_grok_inference_types::{
 use crate::events::{InferenceChannel, InferenceErrorInfo, InferenceEvent};
 use crate::metrics::InferenceLatencyStats;
 use crate::types::RequestId;
+use super::WireCodec;
 
 /// Returns whether a Messages API event reflects real model progress
 /// rather than a liveness-only heartbeat (Ping) or an unknown event type.
@@ -66,19 +67,43 @@ enum BlockType {
     PayloadOnly,
 }
 
-/// Transform a raw Anthropic Messages API stream into a stream of
-/// [`InferenceEvent`]s.
+/// The Anthropic Messages wire codec.
 ///
-/// Yields exactly one terminal event ([`InferenceEvent::Completed`] or
-/// [`InferenceEvent::Failed`]) per request. Server-side `Error` events
-/// translate to `InferenceError::Api { status: 500, .. }` so the actor's
-/// retry loop treats them as retryable transport-level errors.
-pub fn stream_messages<'a>(
-    raw_stream: BoxStream<'a, Result<MessageStreamEvent, InferenceError>>,
-    model_metadata: Option<ResponseModelMetadata>,
-    request_id: RequestId,
-    idle_timeout: Duration,
-) -> impl Stream<Item = InferenceEvent> + Send + 'a {
+/// Lives inside the repository-owned Anthropic client path
+/// ([`crate::anthropic::client`]); the Anthropic adapter supplies
+/// auth/extensions/preference only, so there is no dead polymorphism. Owns
+/// the Messages SSE semantics: the `[DONE]` sentinel (`message_stop` is the
+/// wire terminal, but the SSE transport still ends with `[DONE]`) and the
+/// single typed [`decode_frame`](WireCodec::decode_frame) parse.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct MessagesCodec;
+
+impl WireCodec for MessagesCodec {
+    type Chunk = MessageStreamEvent;
+
+    fn decode_frame(&self, data: &str) -> Result<Option<Self::Chunk>, InferenceError> {
+        match serde_json::from_str::<MessageStreamEvent>(data) {
+            Ok(event) => Ok(Some(event)),
+            Err(e) => Err(InferenceError::Serialization(e)),
+        }
+    }
+}
+
+impl MessagesCodec {
+    /// Transform a raw Anthropic Messages API stream into a stream of
+    /// [`InferenceEvent`]s.
+    ///
+    /// Yields exactly one terminal event ([`InferenceEvent::Completed`] or
+    /// [`InferenceEvent::Failed`]) per request. Server-side `Error` events
+    /// translate to `InferenceError::Api { status: 500, .. }` so the actor's
+    /// retry loop treats them as retryable transport-level errors.
+    pub fn stream<'a>(
+        &self,
+        raw_stream: BoxStream<'a, Result<MessageStreamEvent, InferenceError>>,
+        model_metadata: Option<ResponseModelMetadata>,
+        request_id: RequestId,
+        idle_timeout: Duration,
+    ) -> impl Stream<Item = InferenceEvent> + Send + 'a {
     async_stream::stream! {
         use messages::{ContentBlock, StreamDelta};
 
@@ -673,6 +698,20 @@ pub fn stream_messages<'a>(
             metrics,
         };
     }
+}
+}
+
+/// Transform a raw Anthropic Messages API stream into a stream of
+/// [`InferenceEvent`]s.
+///
+/// Thin wrapper over [`MessagesCodec::stream`].
+pub fn stream_messages<'a>(
+    raw_stream: BoxStream<'a, Result<MessageStreamEvent, InferenceError>>,
+    model_metadata: Option<ResponseModelMetadata>,
+    request_id: RequestId,
+    idle_timeout: Duration,
+) -> impl Stream<Item = InferenceEvent> + Send + 'a {
+    MessagesCodec.stream(raw_stream, model_metadata, request_id, idle_timeout)
 }
 
 #[cfg(test)]

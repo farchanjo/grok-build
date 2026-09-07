@@ -70,8 +70,19 @@ impl RouteState {
 /// mutex's critical section).
 pub(crate) struct InferencePacer {
     routes: ArcSwap<HashMap<RouteKey, RouteState>>,
-    minimum_interval: Duration,
-    recovery_requests: u32,
+    /// Fallback pacing default used when the config's provider adapter
+    /// exposes no concrete pacing default (e.g. `openrouter_pacing` opt-in
+    /// proxies that keep a non-OpenRouter identity). This is the
+    /// env-independent base; env overrides live in
+    /// [`Self::env_minimum_interval_ms`] / [`Self::env_recovery_requests`].
+    fallback_minimum_interval: Duration,
+    fallback_recovery_requests: u32,
+    /// `GROK_OPENROUTER_MIN_REQUEST_INTERVAL_MS` override; wins over the
+    /// adapter-derived default when set.
+    env_minimum_interval_ms: Option<u64>,
+    /// `GROK_OPENROUTER_RATE_LIMIT_RECOVERY_REQUESTS` override; wins over
+    /// the adapter-derived default when set.
+    env_recovery_requests: Option<u32>,
 }
 
 impl Default for InferencePacer {
@@ -87,24 +98,61 @@ impl InferencePacer {
     }
 
     pub(crate) fn from_env() -> Self {
-        Self::new(
-            duration_from_env(
-                "GROK_OPENROUTER_MIN_REQUEST_INTERVAL_MS",
-                DEFAULT_MIN_INTERVAL_MS,
-            ),
-            u32_from_env(
-                "GROK_OPENROUTER_RATE_LIMIT_RECOVERY_REQUESTS",
-                DEFAULT_RECOVERY_REQUESTS,
-            ),
-        )
+        let mut pacer = Self::new(
+            Duration::from_millis(DEFAULT_MIN_INTERVAL_MS),
+            DEFAULT_RECOVERY_REQUESTS,
+        );
+        if let Some(value) = env_u64("GROK_OPENROUTER_MIN_REQUEST_INTERVAL_MS") {
+            pacer.env_minimum_interval_ms = Some(value);
+        }
+        if let Some(value) = env_u32("GROK_OPENROUTER_RATE_LIMIT_RECOVERY_REQUESTS") {
+            pacer.env_recovery_requests = Some(value);
+        }
+        pacer
     }
 
     fn new(minimum_interval: Duration, recovery_requests: u32) -> Self {
         Self {
             routes: ArcSwap::from_pointee(HashMap::new()),
-            minimum_interval,
-            recovery_requests,
+            fallback_minimum_interval: minimum_interval,
+            fallback_recovery_requests: recovery_requests,
+            env_minimum_interval_ms: None,
+            env_recovery_requests: None,
         }
+    }
+
+    /// Resolve the effective pacing defaults for a config.
+    ///
+    /// Phase 3b: source the per-provider default from the adapter's
+    /// [`crate::provider::ProviderAdapter::policy`] (`pacing_default`) so a
+    /// provider kind's spacing tuning lives with its adapter, while the
+    /// historical env overrides (`GROK_OPENROUTER_*`) and the fallback base
+    /// (the [`Self::new`] arguments) remain the precedence fallbacks.
+    /// `PacingDefault::None` providers (the openrouter-pacing opt-in proxies)
+    /// keep the fallback base rather than the hard-coded constants.
+    fn defaults_for(&self, config: &InferenceConfig) -> (Duration, u32) {
+        let adapter = crate::provider::ProviderFactory::build(
+            crate::provider::ProviderKind::from(config.provider_identity),
+            config.wire_dialect.unwrap_or_default(),
+        );
+        let (base_ms, base_recovery) = match adapter.policy().pacing_default {
+            crate::provider::PacingDefault::OpenRouter {
+                min_interval_ms,
+                recovery_requests,
+            } => (min_interval_ms, recovery_requests),
+            crate::provider::PacingDefault::None => (
+                self.fallback_minimum_interval.as_millis() as u64,
+                self.fallback_recovery_requests,
+            ),
+        };
+        let minimum = self
+            .env_minimum_interval_ms
+            .map(Duration::from_millis)
+            .unwrap_or_else(|| Duration::from_millis(base_ms));
+        let recovery = self
+            .env_recovery_requests
+            .unwrap_or(base_recovery);
+        (minimum, recovery)
     }
 
     /// Wait until this OpenRouter model route owns the next request slot.
@@ -120,7 +168,7 @@ impl InferencePacer {
         let Some(key) = route_key(config, route) else {
             return true;
         };
-        let minimum = minimum_interval_for(self.minimum_interval, route);
+        let minimum = minimum_interval_for(self.defaults_for(config).0, route);
 
         loop {
             // Slot claim as an atomic read-modify-write: the `rcu` closure
@@ -187,7 +235,7 @@ impl InferencePacer {
         let cooldown = server_reset.unwrap_or(backoff);
         let recovery_interval = (cooldown / RECOVERY_BACKOFF_SLICES)
             .clamp(MIN_RECOVERY_INTERVAL, MAX_RECOVERY_INTERVAL);
-        let recovery_requests = recovery_requests_for(self.recovery_requests, route);
+        let recovery_requests = recovery_requests_for(self.defaults_for(config).1, route);
         let recovery_interval_ms = if recovery_requests > 0 {
             recovery_interval.as_millis() as u64
         } else {
@@ -240,7 +288,7 @@ impl InferencePacer {
             state.recovery_requests_remaining -= 1;
             if state.recovery_requests_remaining == 0 {
                 state.recovery_interval = None;
-                let minimum = minimum_interval_for(self.minimum_interval, route);
+                let minimum = minimum_interval_for(self.defaults_for(config).0, route);
                 state.next_allowed = state.next_allowed.min(Instant::now() + minimum);
                 tracing::info!(
                     target: crate::inference_log::TARGET,
@@ -329,19 +377,16 @@ fn recovery_requests_for(default: u32, route: Option<&ProviderRouteContext>) -> 
     default
 }
 
-fn duration_from_env(name: &str, default_ms: u64) -> Duration {
-    let milliseconds = std::env::var(name)
+fn env_u64(name: &str) -> Option<u64> {
+    std::env::var(name)
         .ok()
         .and_then(|value| value.parse::<u64>().ok())
-        .unwrap_or(default_ms);
-    Duration::from_millis(milliseconds)
 }
 
-fn u32_from_env(name: &str, default: u32) -> u32 {
+fn env_u32(name: &str) -> Option<u32> {
     std::env::var(name)
         .ok()
         .and_then(|value| value.parse::<u32>().ok())
-        .unwrap_or(default)
 }
 
 #[cfg(test)]
@@ -541,6 +586,46 @@ mod tests {
         assert_eq!(
             Instant::now().duration_since(cooldown_started),
             Duration::from_secs(60)
+        );
+    }
+
+    /// Phase 3b pacing matrix: the per-provider default comes from the
+    /// adapter's `pacing_default` (OpenRouter → 2s/8), the fallback base is
+    /// used for `PacingDefault::None` providers (the opt-in proxies), and a
+    /// `GROK_OPENROUTER_*` env override wins over both.
+    #[test]
+    fn pacing_defaults_follow_adapter_and_env_override() {
+        let pacer = InferencePacer::new(Duration::from_millis(700), 3);
+
+        // OpenRouter identity → adapter pacing_default (2s / 8), not the base.
+        let or = openrouter_identity_config("https://openrouter.ai/api/v1");
+        assert_eq!(
+            pacer.defaults_for(&or),
+            (Duration::from_millis(2_000), 8),
+            "OpenRouter identity must use the adapter pacing_default"
+        );
+
+        // Custom (non-OpenRouter) identity → fallback base (700ms / 3).
+        let custom = config("https://openrouter.ai/api/v1");
+        assert_eq!(
+            pacer.defaults_for(&custom),
+            (Duration::from_millis(700), 3),
+            "PacingDefault::None provider keeps the fallback base"
+        );
+
+        // Env override wins over both the adapter default and the base.
+        let mut env_pacer = InferencePacer::new(Duration::from_millis(700), 3);
+        env_pacer.env_minimum_interval_ms = Some(4_000);
+        env_pacer.env_recovery_requests = Some(5);
+        assert_eq!(
+            env_pacer.defaults_for(&or),
+            (Duration::from_millis(4_000), 5),
+            "env override must win for OpenRouter"
+        );
+        assert_eq!(
+            env_pacer.defaults_for(&custom),
+            (Duration::from_millis(4_000), 5),
+            "env override must win for the opt-in proxy"
         );
     }
 }

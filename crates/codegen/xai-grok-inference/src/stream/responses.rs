@@ -21,6 +21,7 @@ use xai_grok_inference_types::{
 use crate::events::{InferenceChannel, InferenceErrorInfo, InferenceEvent};
 use crate::metrics::InferenceLatencyStats;
 use crate::types::RequestId;
+use super::WireCodec;
 
 /// Returns whether a Responses API event reflects real model progress
 /// rather than a liveness-only heartbeat / status transition.
@@ -107,6 +108,62 @@ pub(crate) fn responses_event_may_have_output(event: &rs::ResponseStreamEvent) -
 /// `InferenceClient::conversation_stream_responses`; any signals the SSE
 /// decoder recorded are drained onto the final `ConversationResponse`.
 /// `None` (check disabled) leaves the response untouched.
+/// The Responses API wire codec.
+///
+/// Owns the Responses SSE semantics: the `[DONE]` sentinel and the single
+/// typed [`decode_frame`](WireCodec::decode_frame) parse. The transport
+/// control frames (keepalives, `response.metadata`) and the doom-loop
+/// checker events are filtered by the client pump *before* [`decode_frame`],
+/// since they are either not representable as [`rs::ResponseStreamEvent`]
+/// or must observe the doom-loop collector.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ResponsesCodec;
+
+impl WireCodec for ResponsesCodec {
+    type Chunk = rs::ResponseStreamEvent;
+
+    fn is_terminal_data(&self, data: &str) -> bool {
+        data == "[DONE]"
+    }
+
+    fn decode_frame(&self, data: &str) -> Result<Option<Self::Chunk>, InferenceError> {
+        match serde_json::from_str::<rs::ResponseStreamEvent>(data) {
+            Ok(event) => Ok(Some(event)),
+            Err(e) => Err(InferenceError::Serialization(e)),
+        }
+    }
+}
+
+impl ResponsesCodec {
+    /// Transform a raw Responses event stream into a stream of
+    /// [`InferenceEvent`]s.
+    ///
+    /// Thin wrapper over [`stream_responses_tracked`] with a fresh
+    /// `output_observed` latch (equivalent to the historical
+    /// [`stream_responses`] entry point).
+    pub fn stream<'a>(
+        &self,
+        raw_stream: BoxStream<'a, Result<rs::ResponseStreamEvent, InferenceError>>,
+        model_metadata: Option<ResponseModelMetadata>,
+        request_id: RequestId,
+        idle_timeout: Duration,
+        doom_loop: Option<crate::doom_loop::DoomLoopSignalCollector>,
+    ) -> impl Stream<Item = InferenceEvent> + Send + 'a {
+        stream_responses_tracked(
+            raw_stream,
+            model_metadata,
+            request_id,
+            idle_timeout,
+            doom_loop,
+            Arc::new(AtomicBool::new(false)),
+        )
+    }
+}
+
+/// Transform a raw Responses API event stream into a stream of
+/// [`InferenceEvent`]s.
+///
+/// Thin wrapper over [`ResponsesCodec::stream`].
 pub fn stream_responses<'a>(
     raw_stream: BoxStream<'a, Result<rs::ResponseStreamEvent, InferenceError>>,
     model_metadata: Option<ResponseModelMetadata>,
@@ -114,13 +171,12 @@ pub fn stream_responses<'a>(
     idle_timeout: Duration,
     doom_loop: Option<crate::doom_loop::DoomLoopSignalCollector>,
 ) -> impl Stream<Item = InferenceEvent> + Send + 'a {
-    stream_responses_tracked(
+    ResponsesCodec.stream(
         raw_stream,
         model_metadata,
         request_id,
         idle_timeout,
         doom_loop,
-        Arc::new(AtomicBool::new(false)),
     )
 }
 

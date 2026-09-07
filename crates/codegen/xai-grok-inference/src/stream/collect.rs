@@ -121,13 +121,17 @@ mod tests {
         let chunks: Vec<Result<ChatCompletionChunk, InferenceError>> =
             vec![Ok(text_chunk("hello")), Ok(final_chunk())];
         let raw = stream::iter(chunks).boxed();
+        let adapter = crate::provider::ProviderFactory::build(
+            crate::provider::ProviderKind::from(crate::config::ProviderIdentity::Custom),
+            crate::provider::WireDialect::default(),
+        );
         let events = stream_chat_completions(
             raw,
             None,
             rid(),
             Duration::from_secs(60),
             None,
-            crate::config::ProviderIdentity::Custom,
+            adapter.as_ref(),
         );
 
         let (response, _metrics) = collect_response(events)
@@ -145,13 +149,17 @@ mod tests {
             Err(InferenceError::EventStreamError("boom".into())),
         ];
         let raw = stream::iter(chunks).boxed();
+        let adapter = crate::provider::ProviderFactory::build(
+            crate::provider::ProviderKind::from(crate::config::ProviderIdentity::Custom),
+            crate::provider::WireDialect::default(),
+        );
         let events = stream_chat_completions(
             raw,
             None,
             rid(),
             Duration::from_secs(60),
             None,
-            crate::config::ProviderIdentity::Custom,
+            adapter.as_ref(),
         );
 
         let err = collect_response(events).await.expect_err("error returned");
@@ -209,13 +217,17 @@ mod tests {
         let chunks: Vec<Result<ChatCompletionChunk, InferenceError>> =
             vec![Ok(chunk), Ok(final_chunk())];
         let raw = stream::iter(chunks).boxed();
+        let adapter = crate::provider::ProviderFactory::build(
+            crate::provider::ProviderKind::from(crate::config::ProviderIdentity::OpenRouter),
+            crate::provider::WireDialect::default(),
+        );
         let events = stream_chat_completions(
             raw,
             None,
             rid(),
             Duration::from_secs(60),
             Some("anthropic/claude-opus-4"),
-            crate::config::ProviderIdentity::OpenRouter,
+            adapter.as_ref(),
         );
         let (response, _metrics) = collect_response(events)
             .await

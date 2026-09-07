@@ -14,37 +14,86 @@ use xai_grok_inference_types::{
     ResponseModelMetadata, StopReason, TokenUsage, ToolCall,
 };
 
-use crate::config::ProviderIdentity;
 use crate::events::{InferenceChannel, InferenceErrorInfo, InferenceEvent};
 use crate::metrics::InferenceLatencyStats;
 use crate::types::RequestId;
+use super::WireCodec;
 
-/// Transform a raw Chat Completions chunk stream into a stream of
-/// [`InferenceEvent`]s.
+/// The Chat Completions wire codec.
 ///
-/// The output stream emits exactly one terminal event per request:
-/// [`InferenceEvent::Completed`] on normal stream end, or
-/// [`InferenceEvent::Failed`] on error / idle timeout. Callers must not
-/// consume past the terminal event (the implementation `return`s after
-/// yielding it).
-///
-/// `idle_timeout` covers two cases:
-/// 1. The transport stops yielding chunks at all (`tokio::time::timeout`).
-/// 2. The transport keeps yielding empty / keepalive chunks but no
-///    meaningful content (separate `last_content_chunk_at` timer).
-///
-/// Both produce `InferenceEvent::Failed { kind: IdleTimeout }`.
-pub fn stream_chat_completions<'a>(
-    raw_stream: BoxStream<'a, Result<ChatCompletionChunk, InferenceError>>,
-    model_metadata: Option<ResponseModelMetadata>,
-    request_id: RequestId,
-    idle_timeout: Duration,
-    requested_model: Option<&'a str>,
-    provider_identity: ProviderIdentity,
-) -> impl Stream<Item = InferenceEvent> + Send + 'a {
+/// Owns the chat-completions SSE semantics: the `[DONE]` sentinel, the
+/// single typed [`decode_frame`](WireCodec::decode_frame) parse, and the
+/// in-band StreamError shapes. The streaming projection
+/// ([`stream`](Self::stream)) additionally runs the adapter's per-delta
+/// [`shape_delta`](crate::provider::ProviderAdapter::shape_delta) hook and
+/// reads its [`reasoning_wire`](crate::provider::ProviderAdapter::reasoning_wire)
+/// once per stream (echo/request-side only).
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ChatCompletionsCodec;
+
+impl WireCodec for ChatCompletionsCodec {
+    type Chunk = ChatCompletionChunk;
+
+    fn is_terminal_data(&self, data: &str) -> bool {
+        data == "[DONE]"
+    }
+
+    fn decode_frame(&self, data: &str) -> Result<Option<Self::Chunk>, InferenceError> {
+        if let Some(err) = xai_grok_inference_types::error::try_parse_stream_error(data) {
+            return Err(err);
+        }
+        match serde_json::from_str::<ChatCompletionChunk>(data) {
+            Ok(chunk) => Ok(Some(chunk)),
+            Err(e) => Err(InferenceError::Serialization(e)),
+        }
+    }
+}
+
+impl ChatCompletionsCodec {
+    /// Transform a raw Chat Completions chunk stream into a stream of
+    /// [`InferenceEvent`]s.
+    ///
+    /// The output stream emits exactly one terminal event per request:
+    /// [`InferenceEvent::Completed`] on normal stream end, or
+    /// [`InferenceEvent::Failed`] on error / idle timeout. Callers must not
+    /// consume past the terminal event (the implementation `return`s after
+    /// yielding it).
+    ///
+    /// `idle_timeout` covers two cases:
+    /// 1. The transport stops yielding chunks at all (`tokio::time::timeout`).
+    /// 2. The transport keeps yielding empty / keepalive chunks but no
+    ///    meaningful content (separate `last_content_chunk_at` timer).
+    ///
+    /// Both produce `InferenceEvent::Failed { kind: IdleTimeout }`.
+    ///
+    /// This is the chat_completions codec's delta processing: after the typed
+    /// single-parse pump produced a [`ChatCompletionChunk`], each delta runs
+    /// through the adapter's [`shape_delta`](crate::provider::ProviderAdapter::shape_delta)
+    /// hook (vLLM hoists reasoning out of `content`, OpenRouter gates
+    /// `reasoning_details`, everyone else clears the OpenRouter-only detail
+    /// blocks). The echo/request-side [`reasoning_wire`](
+    /// crate::provider::ProviderAdapter::reasoning_wire) is read once so
+    /// OpenRouter `reasoning_details` accumulation is gated on the
+    /// [`ReasoningEcho::Details`](crate::provider::ReasoningEcho::Details)
+    /// policy.
+    pub fn stream<'a>(
+        &self,
+        raw_stream: BoxStream<'a, Result<ChatCompletionChunk, InferenceError>>,
+        model_metadata: Option<ResponseModelMetadata>,
+        request_id: RequestId,
+        idle_timeout: Duration,
+        requested_model: Option<&'a str>,
+        provider_adapter: &'a dyn crate::provider::ProviderAdapter,
+    ) -> impl Stream<Item = InferenceEvent> + Send + 'a {
     async_stream::stream! {
         let stream_start = Instant::now();
         let mut chunk_timestamps: Vec<Instant> = Vec::new();
+
+        // Echo/request-side reasoning policy, read once per stream. The codec
+        // uses the echo policy to gate the OpenRouter-only `reasoning_details`
+        // accumulation (kept verbatim only under `ReasoningEcho::Details`);
+        // this deliberately excludes response decoding (`shape_delta`).
+        let reasoning_echo = provider_adapter.reasoning_wire().echo;
 
         // Emit StreamStarted before reading any chunks so subscribers
         // can record TTFB / TTLB baselines.
@@ -163,7 +212,14 @@ pub fn stream_chat_completions<'a>(
                     chunk_has_content = true;
                 }
 
-                let delta = choice.delta;
+                // Per-delta adapter surgery. vLLM hoists reasoning out of
+                // `content` (so the interleaved prose surfaces as a Reasoning
+                // token, not assistant text); OpenRouter gates the structured
+                // `reasoning_details` through; every other provider clears the
+                // OpenRouter-only detail blocks. Borrows the delta; never
+                // allocates and never re-parses a chunk through `Value`.
+                let mut delta = choice.delta;
+                provider_adapter.shape_delta(&mut delta);
 
                 if let Some(text) = delta.content
                     && !text.is_empty()
@@ -245,8 +301,14 @@ pub fn stream_chat_completions<'a>(
                 // Accumulate OpenRouter structured reasoning detail blocks.
                 // These are echoed back verbatim on the next turn; we collect
                 // them as raw JSON values to tolerate shape drift across
-                // providers.
-                if !delta.reasoning_details.is_empty() {
+                // providers. Accumulation is gated on the adapter's echo
+                // policy: only `ReasoningEcho::Details` (OpenRouter) keeps the
+                // blocks — `Echo`/`Strip` never carry them on the wire. This is
+                // the echo/request-side gate; the per-delta `shape_delta` hook
+                // already cleared the detail blocks for non-OpenRouter adapters.
+                if !delta.reasoning_details.is_empty()
+                    && reasoning_echo == crate::provider::ReasoningEcho::Details
+                {
                     chunk_has_content = true;
                     reasoning_details_acc.extend(delta.reasoning_details);
                 }
@@ -326,14 +388,13 @@ pub fn stream_chat_completions<'a>(
         // the model the server actually served (`model`, captured from the
         // first chunk) differs from the model the session requested, OpenRouter
         // silently substituted a fallback from `openrouter_fallback_models`.
-        // Other providers never produce this signal — `provider_identity` gates
-        // it so a transient model-id mismatch on a first-party or custom
-        // endpoint is never misreported as a fallback.
-        let fallback_served_model = if provider_identity.is_openrouter()
-            && first_chunk_seen
+        // The provider adapter owns this decision (`detect_fallback`): every
+        // non-OpenRouter adapter returns `false`, so a transient model-id
+        // mismatch on a first-party or custom endpoint is never misreported
+        // as a fallback.
+        let fallback_served_model = if first_chunk_seen
             && let Some(requested) = requested_model
-            && !requested.is_empty()
-            && model != requested
+            && provider_adapter.detect_fallback(requested, &model)
         {
             Some(model.clone())
         } else {
@@ -366,10 +427,37 @@ pub fn stream_chat_completions<'a>(
         };
     }
 }
+}
+
+/// Transform a raw Chat Completions chunk stream into a stream of
+/// [`InferenceEvent`]s.
+///
+/// Thin wrapper over [`ChatCompletionsCodec::stream`]; the codec routes the
+/// per-delta adapter [`shape_delta`](crate::provider::ProviderAdapter::shape_delta)
+/// hook and reads [`reasoning_wire`](crate::provider::ProviderAdapter::reasoning_wire)
+/// once per stream.
+pub fn stream_chat_completions<'a>(
+    raw_stream: BoxStream<'a, Result<ChatCompletionChunk, InferenceError>>,
+    model_metadata: Option<ResponseModelMetadata>,
+    request_id: RequestId,
+    idle_timeout: Duration,
+    requested_model: Option<&'a str>,
+    provider_adapter: &'a dyn crate::provider::ProviderAdapter,
+) -> impl Stream<Item = InferenceEvent> + Send + 'a {
+    ChatCompletionsCodec.stream(
+        raw_stream,
+        model_metadata,
+        request_id,
+        idle_timeout,
+        requested_model,
+        provider_adapter,
+    )
+}
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::ProviderIdentity;
     use futures_util::stream;
     use std::pin::pin;
     use xai_grok_inference_types::{
@@ -379,6 +467,26 @@ mod tests {
 
     fn rid() -> RequestId {
         RequestId::from("test-req")
+    }
+
+    /// Build the adapter for an identity so the stream transform tests
+    /// exercise the same per-provider policy the sampler resolves at
+    /// construction time (Phase 3b: `detect_fallback` lives on the adapter).
+    fn adapter_for(
+        identity: crate::config::ProviderIdentity,
+    ) -> Box<dyn crate::provider::ProviderAdapter> {
+        crate::provider::ProviderFactory::build(
+            crate::provider::ProviderKind::from(identity),
+            crate::provider::WireDialect::default(),
+        )
+    }
+
+    /// Adapter reference with a `'static` lifetime (the adapters are
+    /// zero-sized and stateless, so leaking the one allocation is harmless
+    /// in tests) for call sites that pass it as the stream transform's
+    /// `&'a dyn ProviderAdapter` argument without a separate binding.
+    fn adapter_ref(identity: crate::config::ProviderIdentity) -> &'static dyn crate::provider::ProviderAdapter {
+        Box::leak(adapter_for(identity))
     }
 
     fn make_chunk(deltas: Vec<ChatChunkDelta>) -> ChatCompletionChunk {
@@ -436,7 +544,7 @@ mod tests {
             rid(),
             Duration::from_secs(60),
             None,
-            crate::config::ProviderIdentity::Custom,
+            adapter_ref(crate::config::ProviderIdentity::Custom),
         ))
         .await;
 
@@ -464,7 +572,7 @@ mod tests {
             rid(),
             Duration::from_secs(60),
             None,
-            crate::config::ProviderIdentity::Custom,
+            adapter_ref(crate::config::ProviderIdentity::Custom),
         ))
         .await;
 
@@ -521,7 +629,7 @@ mod tests {
             rid(),
             Duration::from_secs(60),
             None,
-            crate::config::ProviderIdentity::Custom,
+            adapter_ref(crate::config::ProviderIdentity::Custom),
         ))
         .await;
 
@@ -611,7 +719,7 @@ mod tests {
             rid(),
             Duration::from_secs(60),
             None,
-            crate::config::ProviderIdentity::Custom,
+            adapter_ref(crate::config::ProviderIdentity::Custom),
         ))
         .await;
 
@@ -670,7 +778,7 @@ mod tests {
             rid(),
             Duration::from_secs(60),
             None,
-            crate::config::ProviderIdentity::Custom,
+            adapter_ref(crate::config::ProviderIdentity::Custom),
         ))
         .await;
 
@@ -698,7 +806,7 @@ mod tests {
             rid(),
             Duration::from_millis(100),
             None,
-            crate::config::ProviderIdentity::Custom,
+            adapter_ref(crate::config::ProviderIdentity::Custom),
         ))
         .await;
 
@@ -726,7 +834,7 @@ mod tests {
             rid(),
             Duration::from_secs(60),
             None,
-            crate::config::ProviderIdentity::Custom,
+            adapter_ref(crate::config::ProviderIdentity::Custom),
         ))
         .await;
 
@@ -767,7 +875,7 @@ mod tests {
             rid(),
             Duration::from_secs(60),
             None,
-            crate::config::ProviderIdentity::Custom,
+            adapter_ref(crate::config::ProviderIdentity::Custom),
         ))
         .await;
 
@@ -811,7 +919,7 @@ mod tests {
                 rid(),
                 Duration::from_secs(60),
                 None,
-                crate::config::ProviderIdentity::Custom,
+                adapter_ref(crate::config::ProviderIdentity::Custom),
             ))
             .await;
             match events.last().unwrap() {
@@ -862,7 +970,7 @@ mod tests {
             rid(),
             Duration::from_secs(60),
             None,
-            crate::config::ProviderIdentity::Custom,
+            adapter_ref(crate::config::ProviderIdentity::Custom),
         ))
         .await;
         match events.last().unwrap() {
@@ -897,13 +1005,14 @@ mod tests {
             Ok(final_chunk(FinishReason::Stop)),
         ];
         let raw = stream::iter(chunks).boxed();
+        let adapter = adapter_for(crate::config::ProviderIdentity::OpenRouter);
         let events = collect(stream_chat_completions(
             raw,
             None,
             rid(),
             Duration::from_secs(60),
             None,
-            crate::config::ProviderIdentity::OpenRouter,
+            adapter.as_ref(),
         ))
         .await;
         match events.last().unwrap() {
@@ -936,13 +1045,14 @@ mod tests {
             Ok(final_chunk(FinishReason::Stop)),
         ];
         let raw = stream::iter(chunks).boxed();
+        let adapter = adapter_for(crate::config::ProviderIdentity::Custom);
         let events = collect(stream_chat_completions(
             raw,
             None,
             rid(),
             Duration::from_secs(60),
             None,
-            crate::config::ProviderIdentity::Custom,
+            adapter.as_ref(),
         ))
         .await;
         match events.last().unwrap() {
@@ -976,13 +1086,14 @@ mod tests {
             Ok(final_chunk(FinishReason::Stop)),
         ];
         let raw = stream::iter(chunks).boxed();
+        let adapter = adapter_for(crate::config::ProviderIdentity::OpenRouter);
         let events = collect(stream_chat_completions(
             raw,
             None,
             rid(),
             Duration::from_secs(60),
             Some("anthropic/claude-opus-4"),
-            ProviderIdentity::OpenRouter,
+            adapter.as_ref(),
         ))
         .await;
 
@@ -1003,13 +1114,14 @@ mod tests {
         let chunks: Vec<Result<ChatCompletionChunk, InferenceError>> =
             vec![Ok(text_chunk("hi")), Ok(final_chunk(FinishReason::Stop))];
         let raw = stream::iter(chunks).boxed();
+        let adapter = adapter_for(crate::config::ProviderIdentity::OpenRouter);
         let events = collect(stream_chat_completions(
             raw,
             None,
             rid(),
             Duration::from_secs(60),
             Some("test-model"),
-            ProviderIdentity::OpenRouter,
+            adapter.as_ref(),
         ))
         .await;
 
@@ -1038,13 +1150,14 @@ mod tests {
                 Ok(final_chunk(FinishReason::Stop)),
             ];
             let raw = stream::iter(chunks).boxed();
+            let adapter = adapter_for(identity);
             let events = collect(stream_chat_completions(
                 raw,
                 None,
                 rid(),
                 Duration::from_secs(60),
                 Some("test-model"),
-                identity,
+                adapter.as_ref(),
             ))
             .await;
             match events.last().unwrap() {
@@ -1068,13 +1181,14 @@ mod tests {
             Ok(final_chunk(FinishReason::Stop)),
         ];
         let raw = stream::iter(chunks).boxed();
+        let adapter = adapter_for(crate::config::ProviderIdentity::OpenRouter);
         let events = collect(stream_chat_completions(
             raw,
             None,
             rid(),
             Duration::from_secs(60),
             None,
-            ProviderIdentity::OpenRouter,
+            adapter.as_ref(),
         ))
         .await;
 
@@ -1116,13 +1230,14 @@ mod tests {
             Ok(final_chunk(FinishReason::Stop)),
         ])
         .boxed();
+        let adapter = adapter_for(crate::config::ProviderIdentity::OpenRouter);
         let events = collect(stream_chat_completions(
             raw,
             None,
             rid(),
             Duration::from_secs(60),
             None,
-            ProviderIdentity::OpenRouter,
+            adapter.as_ref(),
         ))
         .await;
 
@@ -1156,13 +1271,14 @@ mod tests {
             Ok(final_chunk(FinishReason::Stop)),
         ])
         .boxed();
+        let adapter = adapter_for(ProviderIdentity::OpenRouter);
         let events = collect(stream_chat_completions(
             raw,
             None,
             rid(),
             Duration::from_secs(60),
             None,
-            ProviderIdentity::OpenRouter,
+            adapter.as_ref(),
         ))
         .await;
 

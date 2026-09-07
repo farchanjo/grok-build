@@ -33,6 +33,7 @@ use xai_grok_inference_types::{
 };
 
 use crate::config::{AuthScheme, InferenceConfig, OriginClientInfo};
+use crate::stream::WireCodec;
 
 // Re-export ApiBackend from the shared types crate for downstream callers.
 pub use xai_grok_inference_types::ApiBackend;
@@ -632,6 +633,13 @@ pub struct InferenceClient {
     /// Exact provider route retained for auxiliary sampling (operation
     /// partition, exact-route 401 attribution). Absent on legacy constructors.
     route_context: Option<crate::route_context::ProviderRouteContext>,
+    /// The provider adapter built from the config at construction time.
+    ///
+    /// Identity, policy, and per-provider knobs flow through this object
+    /// (Phase 3a wires auth/identity/route sites against it). Shared
+    /// lock-free behind an `Arc` so concurrent requests read the policy
+    /// without contention.
+    adapter: Arc<dyn crate::provider::ProviderAdapter>,
 }
 
 impl std::fmt::Debug for InferenceClient {
@@ -835,10 +843,21 @@ impl InferenceClient {
             headers.insert(header_name, header_value);
         }
 
+        // Build the provider adapter from the config (identity + wire
+        // dialect). Identity/policy/rate-limit resolution flow through it
+        // from here on, so the per-provider branches below consult the
+        // adapter rather than re-deriving identity flags.
+        let adapter: Arc<dyn crate::provider::ProviderAdapter> = Arc::from(
+            crate::provider::ProviderFactory::build(
+                crate::provider::ProviderKind::from(config.provider_identity),
+                config.wire_dialect.unwrap_or_default(),
+            ),
+        );
+
         // Default `x-grok-client-*` / deployment / user headers are first-party
         // only. Direct Anthropic (and other third-party identities) must not
         // receive stable Grok client identifiers on the wire.
-        if config.provider_identity.is_first_party() {
+        if adapter.policy().usage_policy.first_party {
             // Add x-grok-client-version header for version gating at the proxy.
             if let Some(client_version) = config.client_version.as_ref()
                 && let Ok(header_value) = HeaderValue::from_str(client_version)
@@ -892,7 +911,45 @@ impl InferenceClient {
             }
         }
 
-        let http = if config.force_http1 {
+        // Phase 6b (R5): per-provider sampling pools. Sampling keeps the
+        // single process-wide shared client as the default (zero behavior
+        // change). It routes through the `ProviderPoolKey` registry (pool =
+        // "sampling") only when the adapter reports non-default pool tuning,
+        // pins HTTP/1.1, or the provider has configured per-provider pool
+        // tuning (via `configure_provider_pool_tuning`). The rcu
+        // first-build-wins registry and its wait-free reads are unchanged;
+        // a routed provider just gets its own connection pool (per-provider
+        // connect timeout + `http1_only`) instead of the shared default.
+        let pool_tuning = adapter.pool_tuning();
+        let provider_id = adapter.id().as_str();
+        let pool_http1_only = pool_tuning.http1_only.unwrap_or(false);
+        let provider_tuned = crate::shared_http::provider_pool_has_tuning(provider_id);
+        let use_sampling_pool = pool_tuning != crate::shared_http::ProviderPoolTuning::default()
+            || pool_http1_only
+            || provider_tuned;
+
+        let http = if use_sampling_pool {
+            tracing::info!(
+                target: crate::inference_log::TARGET,
+                event = "sampling_pool_routed",
+                provider = provider_id,
+                http1_only = pool_http1_only,
+                "routing sampling through per-provider HTTP pool"
+            );
+            crate::shared_http::provider_client(
+                crate::shared_http::ProviderPoolKey::new(
+                    "sampling",
+                    provider_id,
+                    crate::shared_http::effective_provider_connect_timeout(
+                        provider_id,
+                        crate::shared_http::sampling_connect_timeout(),
+                    ),
+                    pool_http1_only,
+                ),
+                |builder| builder,
+            )
+            .map_err(InferenceError::Http)?
+        } else if config.force_http1 {
             tracing::info!("Using HTTP/1.1 for sampling client (force_http1=true)");
             crate::shared_http::client_http1().map_err(InferenceError::Http)?
         } else {
@@ -942,10 +999,11 @@ impl InferenceClient {
             attribution_callback: config.attribution_callback,
             bearer_resolver: config.bearer_resolver,
             header_injector: config.header_injector,
-            first_party: config.provider_identity.is_first_party(),
-            openrouter_metadata_requested: config.provider_identity.is_openrouter(),
+            first_party: adapter.policy().usage_policy.first_party,
+            openrouter_metadata_requested: adapter.policy().usage_policy.openrouter_metadata,
             provider_label: config.provider_identity.label().to_string(),
             route_context,
+            adapter,
         })
     }
 
@@ -969,8 +1027,65 @@ impl InferenceClient {
     /// Whether this client targets OpenRouter. Gates fallback-model
     /// detection so non-OpenRouter providers never produce a fallback
     /// signal even when the served model id differs.
+    ///
+    /// Delegating shim over the adapter's usage policy; the underlying
+    /// `openrouter_metadata_requested` field is adapter-derived at
+    /// construction.
     pub fn is_openrouter(&self) -> bool {
-        self.openrouter_metadata_requested
+        self.adapter.policy().usage_policy.openrouter_metadata
+    }
+
+    /// Whether this client targets the first-party xAI provider. Gates the
+    /// injection of `x-grok-*` identity headers so third-party providers
+    /// never see stable session/conversation identifiers.
+    ///
+    /// Delegating shim over the adapter's usage policy; the underlying
+    /// `first_party` field is adapter-derived at construction.
+    pub fn is_first_party(&self) -> bool {
+        self.adapter.policy().usage_policy.first_party
+    }
+
+    /// The provider adapter built from the config at construction time.
+    ///
+    /// Phase 3b: callers that need per-provider policy beyond the thin
+    /// shims above (for example the Chat Completions stream transform's
+    /// fallback detection) query the adapter directly instead of
+    /// re-deriving identity flags. The `'static` policy bundle is served
+    /// behind the object, so this borrow is cheap and shared lock-free.
+    pub fn provider_adapter(&self) -> &dyn crate::provider::ProviderAdapter {
+        self.adapter.as_ref()
+    }
+
+    /// Resolve the per-provider 429 retry cap through the provider adapter.
+    ///
+    /// OpenRouter honours the `GROK_OPENROUTER_RATE_LIMIT_RETRIES` env
+    /// override (default [`crate::provider::OPENROUTER_RATE_LIMIT_RETRY_THRESHOLD`]);
+    /// every other provider keeps the generic cap.
+    pub fn rate_limit_threshold(&self, env: Option<&str>) -> u32 {
+        self.adapter.rate_limit_threshold(env)
+    }
+
+    /// Apply the provider adapter's reasoning-echo policy to a built
+    /// Chat Completions request (Phase 4b — context-budget protection).
+    ///
+    /// [`crate::provider::ReasoningEcho::Strip`] (the vLLM/SGLang dialect)
+    /// drops `reasoning_content` and the OpenRouter-only `reasoning_details`
+    /// from replayed assistant messages, so reasoning prose does not
+    /// re-inflate the context window on the next turn. [`ReasoningEcho::Echo`]
+    /// and [`ReasoningEcho::Details`] leave the request byte-identical to
+    /// today (the OpenRouter `Details` policy keeps the structured blocks on
+    /// the wire for multi-turn fidelity).
+    pub fn apply_reasoning_echo_policy(&self, request: &mut ChatCompletionRequest) {
+        let echo = self.adapter.reasoning_wire().echo;
+        if echo != crate::provider::ReasoningEcho::Strip {
+            return;
+        }
+        for msg in &mut request.messages {
+            if msg.role == xai_grok_inference_types::Role::Assistant {
+                msg.reasoning_content = None;
+                msg.reasoning_details.clear();
+            }
+        }
     }
 
     /// POST with auth provenance captured from the headers that will be sent.
@@ -1586,12 +1701,17 @@ impl InferenceClient {
             tokio::pin!(event_stream);
             let mut had_transport_error = false;
             let mut event_count = 0usize;
+            // The chat-completions wire codec owns the backend's SSE
+            // semantics: the `[DONE]` sentinel and the single typed parse.
+            // It also surfaces the in-band StreamError shapes, so the pump
+            // never re-parses a chunk through `serde_json::Value`.
+            let codec = crate::stream::ChatCompletionsCodec;
             while let Some(event_res) = event_stream.next().await {
                 match event_res {
                     Ok(event) => {
                         event_count += 1;
                         let data = &event.data;
-                        if data == "[DONE]" {
+                        if codec.is_terminal_data(data) {
                             break;
                         }
 
@@ -1602,19 +1722,16 @@ impl InferenceClient {
                             data = %data,
                         );
 
-                        if let Some(stream_error) = try_parse_stream_error(data) {
-                            yield Err(stream_error);
-                        } else {
-                            match serde_json::from_str::<ChatCompletionChunk>(data) {
-                                Ok(chunk) => yield Ok(chunk),
-                                Err(e) => {
-                                    tracing::error!(
-                                        error = %e,
-                                        raw_data = %data,
-                                        "Failed to deserialize ChatCompletionChunk from stream"
-                                    );
-                                    yield Err(InferenceError::Serialization(e));
-                                }
+                        match codec.decode_frame(data) {
+                            Ok(Some(chunk)) => yield Ok(chunk),
+                            Ok(None) => break, // defensive: terminal frame
+                            Err(e) => {
+                                tracing::error!(
+                                    error = %e,
+                                    raw_data = %data,
+                                    "Failed to decode ChatCompletionChunk from stream"
+                                );
+                                yield Err(e);
                             }
                         }
                     }
@@ -2504,6 +2621,9 @@ impl InferenceClient {
         if let Some(trace) = trace {
             chat_request.trace = Some(trace);
         }
+        // Phase 4b: apply the adapter's reasoning-echo policy (Strip for the
+        // vLLM/SGLang dialect) to replayed assistant messages.
+        self.apply_reasoning_echo_policy(&mut chat_request);
 
         self.chat_completion_stream(chat_request).await
     }
@@ -2522,6 +2642,9 @@ impl InferenceClient {
         if let Some(trace) = trace {
             chat_request.trace = Some(trace);
         }
+        // Phase 4b: apply the adapter's reasoning-echo policy (Strip for the
+        // vLLM/SGLang dialect) to replayed assistant messages.
+        self.apply_reasoning_echo_policy(&mut chat_request);
 
         self.chat_completion(chat_request).await
     }
@@ -2695,11 +2818,7 @@ impl InferenceClient {
                     request_id,
                     idle_timeout,
                     Some(&self.defaults.model),
-                    if self.is_openrouter() {
-                        crate::config::ProviderIdentity::OpenRouter
-                    } else {
-                        crate::config::ProviderIdentity::Custom
-                    },
+                    self.provider_adapter(),
                 );
                 crate::stream::collect_response(events).await
             }
@@ -2888,6 +3007,7 @@ mod tests {
             zai_thinking: None,
 
             api_backend: ApiBackend::ChatCompletions,
+            wire_dialect: None,
             include_message_model_id: true,
             auth_scheme: AuthScheme::Bearer,
             extra_headers: IndexMap::new(),
@@ -4452,6 +4572,95 @@ mod tests {
         );
     }
 
+    // ── Phase 3a: adapter wiring is behavior-preserving ─────────────────
+
+    /// Phase 3a golden test: per identity, the adapter-derived client
+    /// construction must produce byte-identical outgoing default headers and
+    /// the same resolved 429 retry cap as the legacy identity-derived logic,
+    /// so wiring the provider adapter into `InferenceClient` cannot change
+    /// wire output.
+    #[test]
+    fn adapter_wiring_preserves_headers_and_rate_limit_threshold() {
+        use crate::config::{AuthScheme, ProviderIdentity};
+        use crate::retry::resolve_rate_limit_threshold;
+
+        let cases: &[(ProviderIdentity, AuthScheme, ApiBackend, bool, bool)] = &[
+            // (identity, auth, backend, expect_first_party, expect_openrouter)
+            (ProviderIdentity::Xai, AuthScheme::Bearer, ApiBackend::ChatCompletions, true, false),
+            (ProviderIdentity::OpenAi, AuthScheme::Bearer, ApiBackend::ChatCompletions, false, false),
+            (ProviderIdentity::OpenRouter, AuthScheme::Bearer, ApiBackend::ChatCompletions, false, true),
+            (ProviderIdentity::Anthropic, AuthScheme::XApiKey, ApiBackend::Messages, false, false),
+            (ProviderIdentity::Zai, AuthScheme::Bearer, ApiBackend::ChatCompletions, false, false),
+            (ProviderIdentity::Custom, AuthScheme::Bearer, ApiBackend::ChatCompletions, false, false),
+        ];
+
+        for (identity, auth, backend, expect_first_party, expect_openrouter) in cases {
+            let mut cfg = minimal_config();
+            cfg.provider_identity = *identity;
+            cfg.auth_scheme = *auth;
+            cfg.api_backend = backend.clone();
+            // Set first-party identity fields so the adapter-based gate is the
+            // only thing deciding whether `x-grok-*` headers leak.
+            cfg.client_version = Some("1.2.3".into());
+            cfg.client_identifier = Some("test-client".into());
+            cfg.deployment_id = Some("dep-1".into());
+            cfg.user_id = Some("user-1".into());
+
+            let client = InferenceClient::new(cfg).expect("client should build");
+
+            // First-party gate: `x-grok-client-version` is the sentinel; it
+            // must appear only for the xAI identity.
+            let has_x_grok = client
+                .default_headers
+                .get("x-grok-client-version")
+                .is_some();
+            assert_eq!(
+                has_x_grok,
+                *expect_first_party,
+                "x-grok-* header gate for {identity:?}"
+            );
+
+            // Auth scheme maps to exactly one credential header.
+            let has_auth = client.default_headers.get(AUTHORIZATION).is_some();
+            let has_api_key = client.default_headers.get("x-api-key").is_some();
+            match auth {
+                AuthScheme::XApiKey => {
+                    assert!(has_api_key, "{identity:?} must send x-api-key");
+                    assert!(!has_auth, "{identity:?} must not send Authorization");
+                }
+                AuthScheme::Bearer => {
+                    assert!(has_auth, "{identity:?} must send Bearer Authorization");
+                    assert!(!has_api_key, "{identity:?} must not send x-api-key");
+                }
+            }
+
+            // Adapter-derived flags match the legacy identity-derived flags.
+            assert_eq!(
+                client.is_first_party(),
+                *expect_first_party,
+                "{identity:?} is_first_party"
+            );
+            assert_eq!(
+                client.is_openrouter(),
+                *expect_openrouter,
+                "{identity:?} is_openrouter"
+            );
+
+            // Threshold: old (identity-keyed resolver) vs new (adapter via the
+            // client). The adapter path must not shift which providers honour
+            // GROK_OPENROUTER_RATE_LIMIT_RETRIES.
+            for env in [None, Some("5"), Some("0")] {
+                let old_threshold = resolve_rate_limit_threshold(*identity, env);
+                let new_threshold = client.rate_limit_threshold(env);
+                assert_eq!(
+                    new_threshold,
+                    old_threshold,
+                    "threshold mismatch for {identity:?} with env={env:?}"
+                );
+            }
+        }
+    }
+
     // ── Change 2: Chat/Responses conformance ─────────────────────────────
 
     #[test]
@@ -4809,6 +5018,69 @@ mod tests {
                 "{identity:?} must not emit provider.zdr"
             );
         }
+    }
+
+    /// Phase 3b golden table: Z.ai wire extensions (`tool_stream` /
+    /// `thinking`) serialize on the request body when the config carries
+    /// them, and are omitted entirely for a config without them. This pins
+    /// the Z.ai contribution to the request-body extension matrix.
+    #[test]
+    fn zai_thinking_and_tool_stream_serialize_on_wire() {
+        // The Z.ai wire extensions (`tool_stream` / `thinking`) live on the
+        // streaming chat wrapper (not the non-streaming fallback wrapper),
+        // and are omitted when unset. This pins the Z.ai contribution to the
+        // request-body extension matrix.
+        let request = ChatCompletionRequest::new(
+            "z-ai/glm-5.2",
+            vec![ChatRequestMessage::user("hello")],
+        );
+        let thinking = serde_json::json!({
+            "type": "enabled",
+            "clear_thinking": false,
+        });
+        let serialized = serde_json::to_value(&StreamingChatRequest {
+            inner: &request,
+            models: None,
+            provider: None,
+            plugins: None,
+            reasoning: None,
+            tool_stream: true,
+            thinking: Some(&thinking),
+            stream: true,
+            stream_options: StreamOptions {
+                include_usage: true,
+            },
+        })
+        .unwrap();
+        assert_eq!(serialized["tool_stream"], true);
+        assert_eq!(
+            serialized["thinking"],
+            serde_json::json!({"type": "enabled", "clear_thinking": false})
+        );
+
+        // A config without the Z.ai knobs omits both keys entirely.
+        let serialized_plain = serde_json::to_value(&StreamingChatRequest {
+            inner: &request,
+            models: None,
+            provider: None,
+            plugins: None,
+            reasoning: None,
+            tool_stream: false,
+            thinking: None,
+            stream: true,
+            stream_options: StreamOptions {
+                include_usage: true,
+            },
+        })
+        .unwrap();
+        assert!(
+            serialized_plain.get("tool_stream").is_none(),
+            "tool_stream must be omitted when unset"
+        );
+        assert!(
+            serialized_plain.get("thinking").is_none(),
+            "thinking must be omitted when unset"
+        );
     }
 
     #[test]

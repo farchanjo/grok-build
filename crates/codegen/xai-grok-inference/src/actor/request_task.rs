@@ -440,15 +440,15 @@ async fn apply_retry_decision(
     // per-model limits and tool-loop bursts deserve a slightly larger
     // budget than the generic 2-retry cap. A non-OpenRouter provider
     // keeps the policy-configured threshold (which defaults to 2).
+    //
+    // Phase 3a: the per-provider resolution flows through the client's
+    // provider adapter (`adapter.rate_limit_threshold(env)`); the env
+    // override only applies to OpenRouter.
+    let env_override = std::env::var("GROK_OPENROUTER_RATE_LIMIT_RETRIES").ok();
     let rate_limit_threshold = if config.provider_identity.is_openrouter() {
-        retry_mod::resolve_rate_limit_threshold(
-            config.provider_identity,
-            std::env::var("GROK_OPENROUTER_RATE_LIMIT_RETRIES")
-                .ok()
-                .as_deref(),
-        )
+        client.rate_limit_threshold(env_override.as_deref())
     } else if retry_policy.rate_limit_retry_threshold == 0 {
-        retry_mod::RATE_LIMIT_RETRY_THRESHOLD
+        client.rate_limit_threshold(None)
     } else {
         retry_policy.rate_limit_retry_threshold
     };
@@ -717,11 +717,7 @@ async fn run_one_attempt(
                 request_id.clone(),
                 idle_timeout,
                 Some(client.model()),
-                if client.is_openrouter() {
-                    crate::config::ProviderIdentity::OpenRouter
-                } else {
-                    crate::config::ProviderIdentity::Custom
-                },
+                client.provider_adapter(),
             );
             drive_l2(
                 project_response_field(l2, project),
