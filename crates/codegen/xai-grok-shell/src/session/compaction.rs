@@ -1217,6 +1217,23 @@ impl SessionActor {
         let prep_started = std::time::Instant::now();
         let mut stage_mark = prep_started;
         let (cancel_sequence, cancel, _cancel_scope) = self.compaction.cancel.enter_with_sequence();
+        // A manual `/compact` begun within the TTL of an explicit user stop
+        // inherits that stop intent and aborts at entry: this fixes the
+        // observed case where Ctrl+C raced the `/compact` start and the 89 s
+        // summary sample ran anyway. Auto, prefire, and rolling compaction
+        // deliberately do not consume the stamp.
+        if matches!(
+            trigger,
+            xai_grok_telemetry::events::CompactionTrigger::Manual
+        ) && self.compaction.cancel.take_user_stop_stamp()
+        {
+            xai_grok_telemetry::unified_log::info(
+                "shell.compaction.manual_start_suppressed",
+                Some(self.session_info.id.0.as_ref()),
+                Some(serde_json::json!({ "tokens_before_check": true })),
+            );
+            return self.emit_compact_cancelled(false).await;
+        }
         let tokens_before = self.chat_state_handle.get_total_tokens().await;
         tracing::Span::current().record("compaction_tokens_before", tokens_before as i64);
         self.signals_handle().record_compaction(tokens_before);
@@ -3825,6 +3842,94 @@ mod inline_auto_compact_flow_tests {
                 }
                 assert_eq!(cancelled, 1);
                 assert_eq!(failed, 0);
+                server.abort();
+            })
+            .await;
+    }
+
+    /// Ctrl+C racing a manual `/compact` start: the user-stop stamp written by
+    /// `begin_cancel_command` survives the pending-command drop, so the manual
+    /// compaction begun moments later aborts at entry — promptly, with the
+    /// cancelled error, and without ever reaching the inference server.
+    #[tokio::test(flavor = "current_thread")]
+    async fn manual_compact_after_user_stop_aborts_at_entry_without_request() {
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+                let base_url = format!("http://{}", listener.local_addr().unwrap());
+                let request_seen = std::rc::Rc::new(tokio::sync::Notify::new());
+                let notify = request_seen.clone();
+                let server = tokio::task::spawn_local(async move {
+                    let (mut stream, _) = listener.accept().await.unwrap();
+                    use tokio::io::AsyncReadExt;
+                    let mut buffer = [0u8; 4096];
+                    let _ = stream.read(&mut buffer).await;
+                    notify.notify_one();
+                    std::future::pending::<()>().await;
+                });
+
+                let (gateway_tx, _gateway_rx) = mpsc::unbounded_channel();
+                let (persistence_tx, _persistence_rx) = mpsc::unbounded_channel();
+                let actor = Arc::new(
+                    create_test_actor(180_000, 200_000, 85, gateway_tx, persistence_tx).await,
+                );
+                let mut config = actor
+                    .chat_state_handle
+                    .get_inference_settings()
+                    .await
+                    .unwrap();
+                config.base_url = base_url;
+                actor.chat_state_handle.update_inference_settings(config);
+                actor.chat_state_handle.replace_conversation(vec![
+                    ConversationItem::system("sys"),
+                    ConversationItem::user("compact me"),
+                ]);
+
+                // Explicit user stop: stamp the gate, cancel whatever is in
+                // flight, then let the pending marker drain (uncommitted Drop)
+                // exactly like the Ctrl+C teardown path.
+                let pending = actor.compaction.cancel.begin_cancel_command();
+                actor.compaction.cancel.request_cancel();
+                drop(pending);
+
+                // The manual compaction that starts moments later must inherit
+                // the stop intent and abort at entry (Manual trigger, matching
+                // the `run_compact` wrapper's call into `run_compact_inner`).
+                let error = tokio::time::timeout(
+                    std::time::Duration::from_secs(1),
+                    actor.run_compact_inner(
+                        None,
+                        None,
+                        xai_grok_telemetry::events::CompactionTrigger::Manual,
+                    ),
+                )
+                .await
+                .expect("stamp-suppressed manual compaction must return promptly")
+                .expect_err("stamp-suppressed manual compaction must return an error");
+                assert!(
+                    error
+                        .data
+                        .as_ref()
+                        .and_then(|data| data.as_str())
+                        .is_some_and(|data| {
+                            data.contains(
+                                crate::session::helpers::session_compact::COMPACT_CANCELLED_MSG,
+                            )
+                        }),
+                    "expected the compact-cancelled error, got: {error:?}"
+                );
+
+                // The summarizer sample must never have been issued.
+                assert!(
+                    tokio::time::timeout(
+                        std::time::Duration::from_millis(200),
+                        request_seen.notified()
+                    )
+                    .await
+                    .is_err(),
+                    "suppressed manual compaction must not reach the inference server"
+                );
                 server.abort();
             })
             .await;

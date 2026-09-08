@@ -146,10 +146,25 @@ pub struct AsyncCompactionCache {
 /// token so one explicit user stop cancels overlapping operations together,
 /// while a new operation started after that stop does not inherit an old
 /// cancelled token that is still unwinding.
+///
+/// An explicit user stop additionally stamps the gate (see
+/// [`CompactCancelGate::begin_cancel_command`]). A manual `/compact` begun
+/// within [`USER_STOP_STAMP_TTL`] of that stop consumes the stamp and aborts
+/// at entry; this fixes the observed case where Ctrl+C raced the `/compact`
+/// start and the long summary sample ran anyway. Auto, prefire, and rolling
+/// compaction deliberately do **not** consume the stamp — only the manual
+/// start inherits the stop intent.
 #[derive(Clone, Default)]
 pub struct CompactCancelGate {
     inner: Arc<Mutex<CompactCancelState>>,
 }
+
+/// Window during which a manual compaction start inherits an explicit user
+/// stop recorded by [`CompactCancelGate::begin_cancel_command`] (see
+/// [`CompactCancelGate::take_user_stop_stamp`]). Long enough to cover the
+/// seconds between a Ctrl+C and the `/compact` it raced, short enough that an
+/// unrelated manual `/compact` much later is a genuinely new intent.
+const USER_STOP_STAMP_TTL: std::time::Duration = std::time::Duration::from_secs(30);
 
 #[derive(Default)]
 struct CompactCancelState {
@@ -157,6 +172,12 @@ struct CompactCancelState {
     next_scope_id: u64,
     cancel_commands_pending: usize,
     cancel_sequence: u64,
+    /// Set by an explicit user stop and taken by the next manual compaction
+    /// start inside [`USER_STOP_STAMP_TTL`]. Deliberately survives
+    /// [`CompactCancelGate::clear_cancel_command_pending`]: the stamp outlives
+    /// the Cancel command so the manual compaction begun moments later
+    /// inherits the stop intent.
+    stop_stamped_at: Option<std::time::Instant>,
 }
 
 /// Removes one active cancellation token when its operation ends.
@@ -252,10 +273,30 @@ impl CompactCancelGate {
         let mut state = self.inner.lock().expect("compaction cancel gate poisoned");
         state.cancel_commands_pending = state.cancel_commands_pending.saturating_add(1);
         state.cancel_sequence = state.cancel_sequence.wrapping_add(1);
+        // Stamp the user-stop intent. The stamp intentionally survives
+        // `clear_cancel_command_pending` (the PendingCompactCancelCommand Drop
+        // clears only `pending`): a manual compaction that starts moments
+        // after this stop inherits the stop intent and aborts at entry.
+        state.stop_stamped_at = Some(std::time::Instant::now());
         PendingCompactCancelCommand {
             gate: self.clone(),
             committed: false,
         }
+    }
+
+    /// Consume a fresh explicit user-stop stamp (see
+    /// [`CompactCancelGate::begin_cancel_command`]). Returns `true` exactly
+    /// once — for the first manual compaction start within
+    /// [`USER_STOP_STAMP_TTL`] of the stop — and always clears the field.
+    /// A stamp older than the TTL reports `false` (a stale stop from an
+    /// unrelated earlier interruption must not suppress a later `/compact`).
+    /// Auto, prefire, and rolling compaction never call this.
+    pub(crate) fn take_user_stop_stamp(&self) -> bool {
+        let mut state = self.inner.lock().expect("compaction cancel gate poisoned");
+        let Some(stamped_at) = state.stop_stamped_at.take() else {
+            return false;
+        };
+        stamped_at.elapsed() < USER_STOP_STAMP_TTL
     }
 
     pub(crate) fn clear_cancel_command_pending(&self) {
@@ -553,5 +594,90 @@ mod compact_cancel_gate_tests {
         drop(second_scope);
         assert!(!gate.is_cancelled());
         drop(next_scope);
+    }
+
+    #[test]
+    fn begin_cancel_command_stamps_user_stop_consumed_once() {
+        let gate = CompactCancelGate::default();
+        let pending = gate.begin_cancel_command();
+        pending.commit();
+        gate.clear_cancel_command_pending();
+        assert!(
+            gate.take_user_stop_stamp(),
+            "manual start right after a user stop inherits the stop intent"
+        );
+        assert!(
+            !gate.take_user_stop_stamp(),
+            "the stamp is consumed by the first manual start"
+        );
+    }
+
+    #[test]
+    fn take_user_stop_stamp_is_false_without_a_stop() {
+        let gate = CompactCancelGate::default();
+        assert!(
+            !gate.take_user_stop_stamp(),
+            "an untouched gate carries no user-stop intent"
+        );
+    }
+
+    #[test]
+    fn stale_user_stop_stamp_does_not_suppress_manual_start() {
+        let gate = CompactCancelGate::default();
+        let pending = gate.begin_cancel_command();
+        pending.commit();
+        gate.clear_cancel_command_pending();
+        // Backdate the stamp past the TTL (in-module access to the shared state).
+        {
+            let mut state = gate.inner.lock().expect("compaction cancel gate poisoned");
+            state.stop_stamped_at =
+                Some(std::time::Instant::now() - std::time::Duration::from_secs(31));
+        }
+        assert!(
+            !gate.take_user_stop_stamp(),
+            "a stop older than the TTL is an unrelated earlier interruption"
+        );
+        assert!(
+            gate.inner
+                .lock()
+                .expect("compaction cancel gate poisoned")
+                .stop_stamped_at
+                .is_none(),
+            "a stale stamp is cleared on read"
+        );
+    }
+
+    #[test]
+    fn user_stop_stamp_survives_pending_command_drop() {
+        let gate = CompactCancelGate::default();
+        // An uncommitted pending command: its Drop clears only the pending
+        // barrier, never the user-stop stamp.
+        let pending = gate.begin_cancel_command();
+        drop(pending);
+        assert!(!gate.cancel_command_pending());
+        assert!(
+            gate.take_user_stop_stamp(),
+            "the stamp outlives the Cancel command so the manual compaction \
+             that starts moments later inherits the stop intent"
+        );
+    }
+
+    #[test]
+    fn repeated_stops_yield_one_consumable_stamp() {
+        let gate = CompactCancelGate::default();
+        let first = gate.begin_cancel_command();
+        first.commit();
+        gate.clear_cancel_command_pending();
+        let second = gate.begin_cancel_command();
+        second.commit();
+        gate.clear_cancel_command_pending();
+        assert!(
+            gate.take_user_stop_stamp(),
+            "the latest stop is still inside the TTL"
+        );
+        assert!(
+            !gate.take_user_stop_stamp(),
+            "one stamp, one consumption regardless of stop count"
+        );
     }
 }
