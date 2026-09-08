@@ -7994,9 +7994,13 @@ pub(crate) mod tests {
     }
     /// Ctrl+C is the cancel key for a running `/compact` too: the first press
     /// dispatches CancelTurn (the dispatch layer flips the agent to
-    /// `CommandCancelling`), and a second press escalates toward quit — but
-    /// quit always goes through the double-press confirmation, so the second
-    /// press ARMS the pending quit and only the third returns Action(Quit).
+    /// `CommandCancelling` and grants one re-send). A stuck "Cancelling…"
+    /// then gets exactly one re-sent cancel: the second press emits another
+    /// CancelTurn (the dispatch `cancel.retry` path) and keeps the state in
+    /// `CommandCancelling`. Only after that budget is spent does quit
+    /// escalation start — and quit always goes through the double-press
+    /// confirmation, so the third press ARMS the pending quit and the fourth
+    /// returns Action(Quit).
     #[test]
     fn ctrl_c_command_running_cancels_then_escalates() {
         let mut app = test_app_with_agent();
@@ -8015,26 +8019,74 @@ pub(crate) mod tests {
             app.agents[&id].cancel_trigger_hint,
             Some(crate::app::actions::CancelTrigger::CtrlC)
         );
-        // The dispatch handler flips the state; simulate what it did so the
-        // next presses exercise the escalation arm.
-        app.agents.get_mut(&id).unwrap().session.state = AgentState::CommandCancelling {
-            command: super::super::agent::AgentCommand::Compact,
-        };
+        // Run the real dispatch: it flips the state to `CommandCancelling`,
+        // forwards the ctrl_c trigger, and grants the one re-send budget.
+        let effects = crate::app::dispatch::dispatch(Action::CancelTurn, &mut app);
+        assert!(
+            matches!(
+                effects.as_slice(),
+                [crate::app::actions::Effect::CancelTurn {
+                    trigger: Some(crate::app::actions::CancelTrigger::CtrlC),
+                    rewind_if_pristine: false,
+                    ..
+                }]
+            ),
+            "first press must emit the CancelTurn effect, got {effects:?}"
+        );
+        assert!(
+            matches!(
+                app.agents[&id].session.state,
+                AgentState::CommandCancelling { .. }
+            ),
+            "dispatch must flip CommandRunning to CommandCancelling"
+        );
+        assert_eq!(app.agents[&id].command_cancel_retries, 1);
+        // Second press: the re-send budget is spent on one more CancelTurn
+        // (the dispatch `cancel.retry` path) and the state stays
+        // `CommandCancelling` — a stuck cancel is never a dead key.
+        let outcome = app.handle_input(&ctrl_c());
+        assert!(
+            matches!(outcome, InputOutcome::Action(Action::CancelTurn)),
+            "second Ctrl+C while a command cancel is pending re-sends cancel, got {outcome:?}"
+        );
+        assert!(app.pending_action.is_none());
+        let effects = crate::app::dispatch::dispatch(Action::CancelTurn, &mut app);
+        assert!(
+            matches!(
+                effects.as_slice(),
+                [crate::app::actions::Effect::CancelTurn {
+                    trigger: Some(crate::app::actions::CancelTrigger::CtrlC),
+                    rewind_if_pristine: false,
+                    ..
+                }]
+            ),
+            "second press must re-emit the CancelTurn effect via the retry path, got {effects:?}"
+        );
+        assert!(
+            matches!(
+                app.agents[&id].session.state,
+                AgentState::CommandCancelling { .. }
+            ),
+            "the retry keeps the state in CommandCancelling"
+        );
+        assert_eq!(app.agents[&id].command_cancel_retries, 0);
+        // Budget spent: the third press escalates to the quit arm and ARMS
+        // the double-press confirmation.
         let outcome = app.handle_input(&ctrl_c());
         assert!(
             matches!(outcome, InputOutcome::Changed),
-            "second Ctrl+C while a command cancel is pending arms quit (double-press), got {outcome:?}"
+            "third Ctrl+C with a spent re-send budget arms quit (double-press), got {outcome:?}"
         );
         assert!(
             app.pending_action
                 .as_ref()
                 .is_some_and(|p| matches!(p.action, Action::Quit)),
-            "second Ctrl+C must arm the quit double-press"
+            "third Ctrl+C must arm the quit double-press"
         );
         let outcome = app.handle_input(&ctrl_c());
         assert!(
             matches!(outcome, InputOutcome::Action(Action::Quit)),
-            "third Ctrl+C confirms quit, got {outcome:?}"
+            "fourth Ctrl+C confirms quit, got {outcome:?}"
         );
     }
     #[test]

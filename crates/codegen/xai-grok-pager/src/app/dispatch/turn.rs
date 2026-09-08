@@ -106,6 +106,12 @@ pub(super) fn dispatch_cancel_turn(app: &mut AppView) -> Vec<Effect> {
                 return vec![];
             };
             agent.session.cancel_command();
+            // Grant exactly one re-send: while a stuck "Cancelling…" command
+            // still shows, the next Ctrl+C re-enters through the
+            // `is_cancelling()` retry branch below (logs `cancel.retry`)
+            // instead of being consumed as quit-arming; the press after that
+            // escalates to quit.
+            agent.command_cancel_retries = 1;
             crate::unified_log::info(
                 "cancel.command",
                 Some(&session_id.0),

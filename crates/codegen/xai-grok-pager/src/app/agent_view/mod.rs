@@ -1341,6 +1341,13 @@ pub struct AgentView {
     /// Set by the key/mouse handler, consumed by `do_cancel_turn` / the
     /// cancel-retry path so `session/cancel` carries `_meta.cancelTrigger`.
     pub(crate) cancel_trigger_hint: Option<crate::app::actions::CancelTrigger>,
+    /// One re-send budget for a stuck command cancel:
+    /// `dispatch_cancel_turn` grants exactly `1` when a Ctrl+C flips
+    /// `CommandRunning` → `CommandCancelling`. While the budget lasts, the
+    /// next Ctrl+C re-sends CancelTurn (the dispatch `is_cancelling()` retry
+    /// path, logs `cancel.retry`) instead of being consumed as quit-arming;
+    /// once it reaches `0`, Ctrl+C escalates to the quit arm as before.
+    pub(crate) command_cancel_retries: u8,
     pub(crate) rewind_state: Option<crate::views::rewind::RewindState>,
     pub(crate) rewind_points: Option<Vec<crate::views::rewind::RewindPointInfo>>,
     /// In-place edit of a previous user prompt. See `inline_edit.rs`.

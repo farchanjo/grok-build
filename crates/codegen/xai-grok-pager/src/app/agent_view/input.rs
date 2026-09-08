@@ -1254,6 +1254,22 @@ impl AgentView {
                     self.cancel_trigger_hint = Some(crate::app::actions::CancelTrigger::CtrlC);
                     return InputOutcome::Action(Action::CancelTurn);
                 }
+                // A command cancel is already in flight (`CommandCancelling`)
+                // and the dispatch layer granted one re-send: spend the budget
+                // and re-issue CancelTurn — the dispatch `is_cancelling()`
+                // retry branch (logs `cancel.retry`) re-sends the ACP cancel
+                // carrying this Ctrl+C trigger — so a stuck "Cancelling…" is
+                // never a dead key. Once the budget is spent (this arm no
+                // longer fires), the next press falls to the Quit arm below.
+                if matches!(
+                    self.session.state,
+                    crate::app::agent::AgentState::CommandCancelling { .. }
+                ) && self.command_cancel_retries > 0
+                {
+                    self.command_cancel_retries -= 1;
+                    self.cancel_trigger_hint = Some(crate::app::actions::CancelTrigger::CtrlC);
+                    return InputOutcome::Action(Action::CancelTurn);
+                }
                 if self.session.state.is_cancelling() {
                     return InputOutcome::Action(Action::Quit);
                 }
