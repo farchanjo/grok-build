@@ -14,12 +14,11 @@
 //!   gated (kept) for multi-turn echo.
 
 use super::{
-    AuthScheme, ProviderAdapter, ProviderKind, ProviderPolicy, ReasoningEcho,
-    ReasoningWire,
+    AuthScheme, ProviderAdapter, ProviderKind, ProviderPolicy, ReasoningEcho, ReasoningWire,
 };
 use super::{
-    OPENROUTER_DEFAULT_PACING, OPENROUTER_RATE_LIMIT_RETRY_THRESHOLD,
-    RequestContext, RequestExtensions,
+    OPENROUTER_DEFAULT_PACING, OPENROUTER_RATE_LIMIT_RETRY_THRESHOLD, RequestContext,
+    RequestExtensions,
 };
 use crate::route_context::RouteProviderKind;
 use xai_grok_inference_types::ApiBackend;
@@ -89,6 +88,16 @@ impl ProviderAdapter for OpenRouterAdapter {
 
     fn detect_fallback(&self, requested: &str, served: &str) -> bool {
         !requested.is_empty() && !served.is_empty() && requested != served
+    }
+
+    fn max_tokens_policy(&self) -> super::MaxTokensPolicy {
+        // OpenRouter serves one model slug across many dynamic upstream
+        // providers with different advertised caps, so the catalog ceiling
+        // (conservative min of the published values) is the mandatory
+        // default budget; a per-model override still wins, clamped. A
+        // request landing on a smaller-capped upstream recovers through the
+        // actor's bounded 400/422 lane instead of a stale config default.
+        super::MaxTokensPolicy::CatalogDefault
     }
 
     fn shape_delta(&self, _delta: &mut xai_grok_inference_types::ChatChunkDelta) {
@@ -171,6 +180,33 @@ mod tests {
         assert!(!a.detect_fallback("gpt-4", "gpt-4"));
         assert!(!a.detect_fallback("", "gpt-5"));
         assert!(!a.detect_fallback("gpt-4", ""));
+    }
+
+    #[test]
+    fn max_tokens_policy_is_catalog_default_only_for_openrouter() {
+        use crate::provider::{MaxTokensPolicy, ProviderFactory, ProviderKind, WireDialect};
+        let a = OpenRouterAdapter::new();
+        assert_eq!(
+            a.max_tokens_policy(),
+            MaxTokensPolicy::CatalogDefault,
+            "dynamic upstreams make the catalog ceiling the default budget"
+        );
+        // Every other adapter keeps the historic config-first behavior.
+        for kind in [
+            ProviderKind::Custom,
+            ProviderKind::Xai,
+            ProviderKind::OpenAi,
+            ProviderKind::OpenAiCompatible,
+            ProviderKind::Anthropic,
+            ProviderKind::Zai,
+        ] {
+            let adapter = ProviderFactory::build(kind, WireDialect::default());
+            assert_eq!(
+                adapter.max_tokens_policy(),
+                MaxTokensPolicy::ConfigFirst,
+                "{kind:?}: non-dynamic-router providers keep the config-first chain"
+            );
+        }
     }
 
     #[test]

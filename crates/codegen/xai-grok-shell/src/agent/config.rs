@@ -14,7 +14,9 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use xai_grok_agent::prompt::skills::SkillsConfig;
 use xai_grok_inference::config::ProviderIdentity;
-use xai_grok_inference::provider::{ProviderFactory, ProviderKind, RequestContext};
+use xai_grok_inference::provider::{
+    MaxTokensPolicy, ProviderFactory, ProviderKind, RequestContext,
+};
 use xai_grok_inference::{AuthScheme, InferenceConfig};
 use xai_grok_inference_types::{
     CompactionAtTokens, CompactionsRemaining, REASONING_EFFORT_META_KEY,
@@ -6250,43 +6252,61 @@ fn build_inference_config_for_model(
     model_name: String,
 ) -> InferenceConfig {
     let info = model.info();
-    // Request budget: user/model override first, then the provider-level
-    // value (explicit TOML or the 16384 OpenRouter API default). The catalog
-    // capability ceiling never becomes the budget — it lives separately on
-    // `max_output_ceiling` and the sampler only clamps against it. The budget
-    // itself is clamped HERE to the ceiling: entries rebuilt per turn from
-    // chat-state settings would otherwise re-send an over-ceiling budget the
-    // provider rejects (400), making the config guard-rail above a no-op.
-    let max_completion_tokens = info
-        .max_completion_tokens
-        .or_else(|| {
-            model
-                .model_provider
-                .as_ref()
-                .and_then(|p| p.request_max_completion_tokens())
-        })
-        .map(|budget| match info.max_output_ceiling {
-            Some(ceiling) => budget.min(ceiling),
-            None => budget,
-        });
-    let max_output_ceiling = info.max_output_ceiling;
-    let temperature = info.temperature;
-    let top_p = info.top_p;
-    // Phase 3b: the per-kind decision of which request-body/header extensions
-    // apply now lives in the provider adapter's `request_extensions`, not in
-    // inline `provider.kind == OpenRouter` branches. The shell still owns the
-    // identity + dialect decision (which adapter to build); every extension
-    // contribution flows through the adapter so body/headers stay
-    // byte-identical across kinds.
     let provider_identity = provider_identity_for_model(model);
     let wire_dialect = model
         .model_provider
         .as_ref()
         .and_then(|provider| provider.dialect);
+    // Phase 3b: the adapter owns per-kind policy — request extensions and
+    // (now) the max-tokens budget governance — so no inline
+    // `provider.kind == OpenRouter` branches remain in the shell.
     let adapter = ProviderFactory::build(
         ProviderKind::from(provider_identity),
         wire_dialect.unwrap_or_default(),
     );
+    // Request budget, governed by the provider adapter's
+    // `max_tokens_policy` (each provider kind owns its own semantics).
+    //
+    // `CatalogDefault` (OpenRouter): OpenRouter serves one model slug across
+    // many dynamic upstream providers whose advertised caps differ, so the
+    // adapter-published catalog ceiling (`top_provider.max_completion_tokens`
+    // ∩ `per_request_limits.completion_tokens`, refreshed per provider
+    // instance) is the MANDATORY default request budget instead of stale
+    // config defaults, which silently truncate reasoning-heavy generations
+    // (finish_reason=length → fatal `max_tokens_truncation` — e.g. a
+    // provider-level 16384 default truncating a model whose API ceiling is
+    // 384000). An explicit per-model override (static `[model.*]` TOML or a
+    // TUI-written override) remains a deliberate user choice and wins,
+    // clamped to the API ceiling. A request that lands on a smaller-capped
+    // upstream is recovered by the actor's single bounded 400/422 path,
+    // which clamps the re-issue to the limit the provider itself reports.
+    //
+    // `ConfigFirst` (every other adapter): the historic chain applies
+    // (per-model override > provider TOML > provider default) with the
+    // sampler clamping any over-ceiling budget.
+    let max_completion_tokens = match (info.max_output_ceiling, adapter.max_tokens_policy()) {
+        (Some(ceiling), MaxTokensPolicy::CatalogDefault) if ceiling > 0 => {
+            match info.max_completion_tokens {
+                Some(explicit) => Some(explicit.min(ceiling)),
+                None => Some(ceiling),
+            }
+        }
+        _ => info
+            .max_completion_tokens
+            .or_else(|| {
+                model
+                    .model_provider
+                    .as_ref()
+                    .and_then(|p| p.request_max_completion_tokens())
+            })
+            .map(|budget| match info.max_output_ceiling {
+                Some(ceiling) => budget.min(ceiling),
+                None => budget,
+            }),
+    };
+    let max_output_ceiling = info.max_output_ceiling;
+    let temperature = info.temperature;
+    let top_p = info.top_p;
     let request_context = RequestContext {
         model: model_name.clone(),
         base_url: credentials.base_url.clone(),
@@ -8681,8 +8701,11 @@ reasoning_effort = "low"
         assert_eq!(cfg.max_completion_tokens, Some(98_304));
         assert_eq!(cfg.max_output_ceiling, Some(98_304));
 
-        // A budget at or below the ceiling passes through untouched, and a
-        // ceiling with no budget stays None (never copied onto the wire).
+        // An explicit per-model budget at or below the ceiling passes
+        // through untouched (deliberate override, static TOML or TUI). This
+        // entry resolves to a Custom (ConfigFirst) identity, so a ceiling
+        // with no budget stays None (never copied onto the wire) — the
+        // catalog-as-default rule belongs to the OpenRouter adapter.
         let mut entry =
             test_model_entry("test/under", "https://example.test", Some("k"), None, None);
         entry.info.max_completion_tokens = Some(4_096);
@@ -8698,8 +8721,52 @@ reasoning_effort = "low"
         let cfg = inference_config_for_model(&entry, credentials, None, None, None, None);
         assert_eq!(
             cfg.max_completion_tokens, None,
-            "a ceiling must never become a request default"
+            "ConfigFirst adapters keep the ceiling clamp-only (never a default)"
         );
+    }
+    /// The OpenRouter factory bug this guards against: a provider-level
+    /// `max_completion_tokens = 16384` stale default must not truncate a
+    /// model whose adapter-published ceiling is larger (deepseek-v4.1-flash
+    /// advertised 384000 output tokens but ran on a 16384 request budget).
+    /// The catalog ceiling wins as the default budget unless a deliberate
+    /// per-model override (static TOML or TUI) is present.
+    #[test]
+    fn openrouter_catalog_ceiling_replaces_stale_provider_default_budget() {
+        use crate::agent::model_providers::{ModelProviderKind, ResolvedModelProvider};
+        let mut model = test_model_entry(
+            "deepseek/deepseek-v4.1-flash",
+            "https://openrouter.ai/api/v1",
+            Some("or-key"),
+            None,
+            None,
+        );
+        model.info.max_output_ceiling = Some(384_000);
+        model.model_provider = Some(ResolvedModelProvider {
+            id: "dr".into(),
+            kind: ModelProviderKind::OpenRouter,
+            openrouter_fallback_models: vec![],
+            openrouter_provider_preferences: None,
+            openrouter_plugins: vec![],
+            openrouter_pacing: false,
+            max_completion_tokens: Some(16_384),
+            dialect: None,
+            command: vec![],
+        });
+        let credentials = resolve_credentials_enforced(&model, None, true);
+        let cfg = inference_config_for_model(&model, credentials, None, None, None, None);
+        assert_eq!(
+            cfg.max_completion_tokens,
+            Some(384_000),
+            "the stale provider-level 16384 default must not undercut the API ceiling"
+        );
+        assert_eq!(cfg.max_output_ceiling, Some(384_000));
+
+        // An explicit per-model override (static TOML or TUI) remains a
+        // deliberate choice: it wins but stays clamped to the API cap.
+        model.info.max_completion_tokens = Some(16_384);
+        let credentials = resolve_credentials_enforced(&model, None, true);
+        let cfg = inference_config_for_model(&model, credentials, None, None, None, None);
+        assert_eq!(cfg.max_completion_tokens, Some(16_384));
     }
     /// H4 wire shaping: `None` (unknown, e.g. hand-written TOML with no
     /// `supports_reasoning_effort`) must honor an explicit `reasoning_effort`

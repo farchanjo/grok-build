@@ -210,7 +210,11 @@ pub struct UsagePolicy {
 }
 
 impl UsagePolicy {
-    const fn new(include_message_model_id: bool, first_party: bool, openrouter_metadata: bool) -> Self {
+    const fn new(
+        include_message_model_id: bool,
+        first_party: bool,
+        openrouter_metadata: bool,
+    ) -> Self {
         Self {
             include_message_model_id,
             first_party,
@@ -415,6 +419,29 @@ pub const RATE_LIMIT_RETRY_THRESHOLD: u32 = crate::retry::RATE_LIMIT_RETRY_THRES
 pub const OPENROUTER_RATE_LIMIT_RETRY_THRESHOLD: u32 =
     crate::retry::OPENROUTER_RATE_LIMIT_RETRY_THRESHOLD;
 
+/// How a provider adapter governs the request `max_tokens` budget.
+///
+/// Selected by the adapter (`max_tokens_policy`), not by config branches, so
+/// each provider kind owns its own budget semantics.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum MaxTokensPolicy {
+    /// Historic chain: per-model override > provider TOML > provider
+    /// default, with the catalog ceiling applied only as an upper clamp.
+    #[default]
+    ConfigFirst,
+    /// The catalog capability ceiling is the mandatory default budget. Used
+    /// by adapters whose upstreams are dynamic: OpenRouter serves one model
+    /// slug from many rotating providers whose advertised caps differ, so a
+    /// stale provider-level default silently truncates reasoning-heavy
+    /// generations (`finish_reason=length` → fatal `max_tokens_truncation`).
+    /// The catalog holds the conservative min of the published values; a
+    /// request that lands on a smaller-capped upstream recovers through the
+    /// actor's bounded 400/422 lane, which clamps to the limit the routed
+    /// provider itself reports. An explicit per-model override (static TOML
+    /// or TUI) still wins, clamped to the ceiling.
+    CatalogDefault,
+}
+
 /// Jackson `DEFAULT_RECOVERY_REQUESTS` pacing knob for OpenRouter.
 const OPENROUTER_DEFAULT_MIN_INTERVAL_MS: u64 = 2_000;
 const OPENROUTER_DEFAULT_RECOVERY_REQUESTS: u32 = 8;
@@ -476,6 +503,14 @@ pub trait ProviderAdapter: Send + Sync + 'static {
     fn detect_fallback(&self, requested: &str, served: &str) -> bool {
         let _ = (requested, served);
         false
+    }
+
+    /// Governance for the request `max_tokens` budget on this provider.
+    /// Default keeps the historic config-first chain for every kind; the
+    /// OpenRouter adapter overrides it because its upstreams are dynamic
+    /// (see [`MaxTokensPolicy::CatalogDefault`]).
+    fn max_tokens_policy(&self) -> MaxTokensPolicy {
+        MaxTokensPolicy::ConfigFirst
     }
 
     /// Optional typed per-delta hook. Default no-op; called once per delta in
@@ -555,9 +590,7 @@ impl ProviderFactory {
             // the reasoning-echo `Strip` policy actually applies. When the
             // dialect is `Standard` this is byte-identical to the historical
             // "Custom" behavior.
-            ProviderKind::Custom => {
-                Box::new(compatible::OpenAiCompatibleAdapter::new(dialect))
-            }
+            ProviderKind::Custom => Box::new(compatible::OpenAiCompatibleAdapter::new(dialect)),
         }
     }
 
@@ -574,13 +607,28 @@ mod tests {
 
     #[test]
     fn classify_error_by_status_matches_sampler_semantics() {
-        assert_eq!(classify_error_by_status(400), ErrorClass::PermanentActionable);
+        assert_eq!(
+            classify_error_by_status(400),
+            ErrorClass::PermanentActionable
+        );
         assert_eq!(classify_error_by_status(401), ErrorClass::PermanentAuth);
-        assert_eq!(classify_error_by_status(403), ErrorClass::PermanentPermission);
+        assert_eq!(
+            classify_error_by_status(403),
+            ErrorClass::PermanentPermission
+        );
         assert_eq!(classify_error_by_status(404), ErrorClass::NotFound);
-        assert_eq!(classify_error_by_status(413), ErrorClass::PermanentActionable);
-        assert_eq!(classify_error_by_status(422), ErrorClass::PermanentActionable);
-        assert_eq!(classify_error_by_status(429), ErrorClass::RetryableRateLimit);
+        assert_eq!(
+            classify_error_by_status(413),
+            ErrorClass::PermanentActionable
+        );
+        assert_eq!(
+            classify_error_by_status(422),
+            ErrorClass::PermanentActionable
+        );
+        assert_eq!(
+            classify_error_by_status(429),
+            ErrorClass::RetryableRateLimit
+        );
         assert_eq!(classify_error_by_status(500), ErrorClass::Transient);
         assert_eq!(classify_error_by_status(529), ErrorClass::RetryableOverload);
         assert_eq!(classify_error_by_status(200), ErrorClass::Other);
@@ -604,7 +652,10 @@ mod tests {
             ProviderKind::from(RouteProviderKind::Anthropic),
             ProviderKind::Anthropic
         );
-        assert_eq!(ProviderKind::from(RouteProviderKind::Zai), ProviderKind::Zai);
+        assert_eq!(
+            ProviderKind::from(RouteProviderKind::Zai),
+            ProviderKind::Zai
+        );
         // OpenAiCompatible and Custom both fold to the compatible family.
         assert_eq!(
             ProviderKind::from(RouteProviderKind::OpenAiCompatible),
@@ -620,7 +671,11 @@ mod tests {
     fn factory_build_kind_reflected_by_id() {
         let cases: &[(ProviderKind, ProviderKind, WireDialect)] = &[
             (ProviderKind::Xai, ProviderKind::Xai, WireDialect::Standard),
-            (ProviderKind::OpenAi, ProviderKind::OpenAi, WireDialect::Standard),
+            (
+                ProviderKind::OpenAi,
+                ProviderKind::OpenAi,
+                WireDialect::Standard,
+            ),
             (
                 ProviderKind::OpenAiCompatible,
                 ProviderKind::OpenAiCompatible,
@@ -659,10 +714,7 @@ mod tests {
         let adapters = [
             ProviderFactory::build(ProviderKind::Xai, WireDialect::Standard),
             ProviderFactory::build(ProviderKind::OpenAi, WireDialect::Standard),
-            ProviderFactory::build(
-                ProviderKind::OpenAiCompatible,
-                WireDialect::Standard,
-            ),
+            ProviderFactory::build(ProviderKind::OpenAiCompatible, WireDialect::Standard),
             ProviderFactory::build(ProviderKind::OpenAiCompatible, WireDialect::Vllm),
             ProviderFactory::build(ProviderKind::Anthropic, WireDialect::Standard),
             ProviderFactory::build(ProviderKind::OpenRouter, WireDialect::Standard),
@@ -683,10 +735,7 @@ mod tests {
         let adapters = [
             ProviderFactory::build(ProviderKind::Xai, WireDialect::Standard),
             ProviderFactory::build(ProviderKind::OpenAi, WireDialect::Standard),
-            ProviderFactory::build(
-                ProviderKind::OpenAiCompatible,
-                WireDialect::Standard,
-            ),
+            ProviderFactory::build(ProviderKind::OpenAiCompatible, WireDialect::Standard),
             ProviderFactory::build(ProviderKind::OpenAiCompatible, WireDialect::Vllm),
             ProviderFactory::build(ProviderKind::Anthropic, WireDialect::Standard),
             ProviderFactory::build(ProviderKind::OpenRouter, WireDialect::Standard),
