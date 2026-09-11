@@ -306,6 +306,7 @@ fn discovered_to_model_entry(model: &DiscoveredModel) -> ModelEntry {
         ProviderKind::Xai => ModelProviderKind::Xai,
         ProviderKind::Anthropic => ModelProviderKind::Anthropic,
         ProviderKind::Zai => ModelProviderKind::Zai,
+        ProviderKind::DashScope => ModelProviderKind::DashScope,
         ProviderKind::OpenAiCompatible => ModelProviderKind::OpenAiCompatible,
     };
     let mut info = ModelInfo::fallback(&model.upstream_model_id);
@@ -384,6 +385,9 @@ fn discovered_to_model_entry(model: &DiscoveredModel) -> ModelEntry {
             openrouter_provider_preferences: None,
             openrouter_plugins: Vec::new(),
             openrouter_pacing: false,
+            dashscope_enable_thinking: None,
+            dashscope_thinking_budget: None,
+            vllm_chat_template_kwargs: None,
             max_completion_tokens: None,
             dialect: None,
             command: Vec::new(),

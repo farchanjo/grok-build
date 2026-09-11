@@ -239,6 +239,7 @@ pub fn is_reserved_configured_id(id: &str) -> bool {
             | "codex"
             | "openrouter"
             | "anthropic"
+            | "dashscope"
             | "admin"
             | "local"
     )

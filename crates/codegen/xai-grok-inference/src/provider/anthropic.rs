@@ -8,10 +8,8 @@
 //! - Error classification favors Anthropic's error-type vocabulary
 //!   (`anthropic/error.rs`).
 
-use super::{
-    AuthScheme, ProviderAdapter, ProviderKind, ProviderPolicy, ReasoningEcho,
-};
-use super::{ApiError, ErrorClass, RequestContext, RequestExtensions, ReasoningWire};
+use super::{ApiError, ErrorClass, ReasoningWire, RequestContext, RequestExtensions};
+use super::{AuthScheme, ProviderAdapter, ProviderKind, ProviderPolicy, ReasoningEcho};
 use crate::route_context::RouteProviderKind;
 use xai_grok_inference_types::ApiBackend;
 

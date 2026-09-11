@@ -137,6 +137,8 @@ pub enum ProviderKind {
     #[serde(rename = "openai_compatible")]
     OpenAiCompatible,
     Zai,
+    #[serde(rename = "dashscope")]
+    DashScope,
 }
 
 impl ProviderKind {
@@ -148,6 +150,7 @@ impl ProviderKind {
             Self::Anthropic => "anthropic",
             Self::OpenAiCompatible => "openai_compatible",
             Self::Zai => "zai",
+            Self::DashScope => "dashscope",
         }
     }
 
@@ -160,6 +163,7 @@ impl ProviderKind {
             "anthropic" => Some(Self::Anthropic),
             "openai_compatible" | "custom" => Some(Self::OpenAiCompatible),
             "zai" => Some(Self::Zai),
+            "dashscope" => Some(Self::DashScope),
             _ => None,
         }
     }
@@ -172,13 +176,14 @@ impl ProviderKind {
             Self::Anthropic => "Anthropic",
             Self::OpenAiCompatible => "OpenAI Compatible",
             Self::Zai => "Z.ai",
+            Self::DashScope => "Alibaba Model Studio",
         }
     }
 
     pub const fn is_openai_compatible_family(self) -> bool {
         matches!(
             self,
-            Self::OpenAiCompatible | Self::OpenAi | Self::OpenRouter | Self::Zai
+            Self::OpenAiCompatible | Self::OpenAi | Self::OpenRouter | Self::Zai | Self::DashScope
         )
     }
 }
@@ -432,6 +437,7 @@ mod tests {
             (ProviderKind::Anthropic, "anthropic"),
             (ProviderKind::OpenAiCompatible, "openai_compatible"),
             (ProviderKind::Zai, "zai"),
+            (ProviderKind::DashScope, "dashscope"),
         ];
         for (kind, expected) in cases {
             assert_eq!(

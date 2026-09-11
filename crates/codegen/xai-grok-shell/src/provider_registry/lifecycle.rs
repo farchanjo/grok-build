@@ -112,7 +112,7 @@ impl ProviderMetadata {
     pub fn is_openai_compatible_family(&self) -> bool {
         matches!(
             self.kind.as_str(),
-            "openai_compatible" | "custom" | "openai" | "openrouter" | "zai"
+            "openai_compatible" | "custom" | "openai" | "openrouter" | "zai" | "dashscope"
         )
     }
 }

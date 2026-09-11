@@ -832,6 +832,7 @@ mod tests {
             crate::config::ProviderIdentity::OpenAi,
             crate::config::ProviderIdentity::Anthropic,
             crate::config::ProviderIdentity::Zai,
+            crate::config::ProviderIdentity::DashScope,
         ] {
             assert_eq!(
                 resolve_rate_limit_threshold(identity, None),

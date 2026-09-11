@@ -508,6 +508,18 @@ struct StreamingChatRequest<'a> {
     /// Z.ai extension: thinking object.
     #[serde(skip_serializing_if = "Option::is_none")]
     thinking: Option<&'a serde_json::Value>,
+    /// DashScope extension: Qwen3 hybrid-thinking toggle (`enable_thinking`).
+    /// Absent for every non-DashScope identity.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    enable_thinking: Option<&'a bool>,
+    /// DashScope extension: Qwen3 reasoning-phase token cap (`thinking_budget`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    thinking_budget: Option<&'a u32>,
+    /// vLLM/SGLang extension: `chat_template_kwargs` object (e.g. Qwen3
+    /// hybrid-thinking `enable_thinking`). Absent for every non-vLLM-family
+    /// dialect.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    chat_template_kwargs: Option<&'a serde_json::Value>,
     stream: bool,
     stream_options: StreamOptions,
 }
@@ -535,6 +547,18 @@ struct ChatRequestWithFallbacks<'a> {
     /// Z.ai extension: thinking object.
     #[serde(skip_serializing_if = "Option::is_none")]
     thinking: Option<&'a serde_json::Value>,
+    /// DashScope extension: Qwen3 hybrid-thinking toggle (`enable_thinking`).
+    /// Absent for every non-DashScope identity.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    enable_thinking: Option<&'a bool>,
+    /// DashScope extension: Qwen3 reasoning-phase token cap (`thinking_budget`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    thinking_budget: Option<&'a u32>,
+    /// vLLM/SGLang extension: `chat_template_kwargs` object (e.g. Qwen3
+    /// hybrid-thinking `enable_thinking`). Absent for every non-vLLM-family
+    /// dialect.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    chat_template_kwargs: Option<&'a serde_json::Value>,
 }
 
 #[derive(Serialize)]
@@ -696,6 +720,13 @@ struct ClientDefaults {
     openrouter_plugins: Vec<crate::config::OpenRouterPlugin>,
     zai_tool_stream: bool,
     zai_thinking: Option<serde_json::Value>,
+    /// DashScope Qwen3 thinking toggle (`enable_thinking`), tri-state so an
+    /// explicit `false` still reaches the wire.
+    dashscope_enable_thinking: Option<bool>,
+    /// DashScope Qwen3 reasoning-phase token cap (`thinking_budget`).
+    dashscope_thinking_budget: Option<u32>,
+    /// vLLM/SGLang `chat_template_kwargs` object.
+    vllm_chat_template_kwargs: Option<serde_json::Value>,
     api_backend: ApiBackend,
     include_message_model_id: bool,
     auth_scheme: AuthScheme,
@@ -847,12 +878,11 @@ impl InferenceClient {
         // dialect). Identity/policy/rate-limit resolution flow through it
         // from here on, so the per-provider branches below consult the
         // adapter rather than re-deriving identity flags.
-        let adapter: Arc<dyn crate::provider::ProviderAdapter> = Arc::from(
-            crate::provider::ProviderFactory::build(
+        let adapter: Arc<dyn crate::provider::ProviderAdapter> =
+            Arc::from(crate::provider::ProviderFactory::build(
                 crate::provider::ProviderKind::from(config.provider_identity),
                 config.wire_dialect.unwrap_or_default(),
-            ),
-        );
+            ));
 
         // Default `x-grok-client-*` / deployment / user headers are first-party
         // only. Direct Anthropic (and other third-party identities) must not
@@ -984,6 +1014,9 @@ impl InferenceClient {
             openrouter_plugins: config.openrouter_plugins,
             zai_tool_stream: config.zai_tool_stream,
             zai_thinking: config.zai_thinking,
+            dashscope_enable_thinking: config.dashscope_enable_thinking,
+            dashscope_thinking_budget: config.dashscope_thinking_budget,
+            vllm_chat_template_kwargs: config.vllm_chat_template_kwargs,
             api_backend: config.api_backend,
             include_message_model_id: config.include_message_model_id,
             auth_scheme: config.auth_scheme,
@@ -1330,6 +1363,30 @@ impl InferenceClient {
             .then_some(self.defaults.openrouter_plugins.as_slice())
     }
 
+    /// DashScope Qwen3 thinking toggle, gated on the DashScope adapter.
+    /// Non-DashScope identities never see the knob even if the config carries
+    /// it (fail-closed; mirrors the OpenRouter extension gate above).
+    fn dashscope_enable_thinking(&self) -> Option<&bool> {
+        (self.adapter.id() == crate::provider::ProviderKind::DashScope)
+            .then(|| self.defaults.dashscope_enable_thinking.as_ref())
+            .flatten()
+    }
+
+    /// DashScope Qwen3 thinking budget, gated on the DashScope adapter.
+    fn dashscope_thinking_budget(&self) -> Option<&u32> {
+        (self.adapter.id() == crate::provider::ProviderKind::DashScope)
+            .then(|| self.defaults.dashscope_thinking_budget.as_ref())
+            .flatten()
+    }
+
+    /// vLLM/SGLang `chat_template_kwargs`, gated on the adapter serving a
+    /// vLLM-family wire dialect (dialect is adapter config data, so the gate
+    /// consults the adapter rather than re-deriving it from the config).
+    fn vllm_chat_template_kwargs(&self) -> Option<&serde_json::Value> {
+        self.adapter
+            .vllm_chat_template_kwargs(self.defaults.vllm_chat_template_kwargs.as_ref())
+    }
+
     /// Normalized OpenRouter Chat `reasoning` object derived from flat effort.
     /// Identity-gated: non-OpenRouter providers keep only `reasoning_effort`.
     fn openrouter_reasoning_object(
@@ -1452,6 +1509,10 @@ impl InferenceClient {
             sent_credential,
             sent_bearer_tail,
         } = self.post(self.endpoint("chat/completions"));
+        // DashScope Qwen3 thinking extensions are omitted here on purpose:
+        // `enable_thinking` requires `stream: true` on the hybrid-thinking
+        // Qwen3 models, and this is the non-streaming path. The agent and
+        // compaction sampling paths both use chat_completion_stream.
         let http_request = grok_headers.apply(builder).json(&ChatRequestWithFallbacks {
             inner: &payload,
             models: self.openrouter_fallback_models(),
@@ -1460,6 +1521,9 @@ impl InferenceClient {
             reasoning: reasoning.as_ref(),
             tool_stream: self.defaults.zai_tool_stream,
             thinking: self.defaults.zai_thinking.as_ref(),
+            enable_thinking: None,
+            thinking_budget: None,
+            chat_template_kwargs: self.vllm_chat_template_kwargs(),
         });
 
         let response = http_request.send().await.map_err(|e| {
@@ -1508,6 +1572,9 @@ impl InferenceClient {
             reasoning: reasoning.as_ref(),
             tool_stream: self.defaults.zai_tool_stream,
             thinking: self.defaults.zai_thinking.as_ref(),
+            enable_thinking: self.dashscope_enable_thinking(),
+            thinking_budget: self.dashscope_thinking_budget(),
+            chat_template_kwargs: self.vllm_chat_template_kwargs(),
             stream: true,
             stream_options: StreamOptions {
                 include_usage: true,
@@ -3006,6 +3073,12 @@ mod tests {
             zai_tool_stream: false,
             zai_thinking: None,
 
+            dashscope_enable_thinking: None,
+
+            dashscope_thinking_budget: None,
+
+            vllm_chat_template_kwargs: None,
+
             api_backend: ApiBackend::ChatCompletions,
             wire_dialect: None,
             include_message_model_id: true,
@@ -3053,6 +3126,9 @@ mod tests {
             reasoning: reasoning.as_ref(),
             tool_stream: false,
             thinking: None,
+            enable_thinking: client.dashscope_enable_thinking(),
+            thinking_budget: client.dashscope_thinking_budget(),
+            chat_template_kwargs: None,
         })
         .unwrap()
     }
@@ -3112,6 +3188,9 @@ mod tests {
             reasoning: None,
             tool_stream: false,
             thinking: None,
+            enable_thinking: None,
+            thinking_budget: None,
+            chat_template_kwargs: None,
             stream: true,
             stream_options: StreamOptions {
                 include_usage: true,
@@ -3165,6 +3244,9 @@ mod tests {
             reasoning: None,
             tool_stream: false,
             thinking: None,
+            enable_thinking: None,
+            thinking_budget: None,
+            chat_template_kwargs: None,
         })
         .unwrap();
         assert_eq!(
@@ -3182,6 +3264,9 @@ mod tests {
             reasoning: None,
             tool_stream: false,
             thinking: None,
+            enable_thinking: None,
+            thinking_budget: None,
+            chat_template_kwargs: None,
         })
         .unwrap();
         assert!(
@@ -3239,6 +3324,9 @@ mod tests {
             reasoning: None,
             tool_stream: false,
             thinking: None,
+            enable_thinking: None,
+            thinking_budget: None,
+            chat_template_kwargs: None,
         })
         .unwrap();
         let provider = &serialized["provider"];
@@ -3271,6 +3359,9 @@ mod tests {
             reasoning: None,
             tool_stream: false,
             thinking: None,
+            enable_thinking: None,
+            thinking_budget: None,
+            chat_template_kwargs: None,
         })
         .unwrap();
         assert!(
@@ -3303,6 +3394,9 @@ mod tests {
             reasoning: None,
             tool_stream: false,
             thinking: None,
+            enable_thinking: None,
+            thinking_budget: None,
+            chat_template_kwargs: None,
         })
         .unwrap();
         let provider = &serialized["provider"];
@@ -3430,6 +3524,9 @@ mod tests {
             reasoning: None,
             tool_stream: false,
             thinking: None,
+            enable_thinking: None,
+            thinking_budget: None,
+            chat_template_kwargs: None,
         })
         .unwrap();
         let wire = serialized
@@ -4586,12 +4683,55 @@ mod tests {
 
         let cases: &[(ProviderIdentity, AuthScheme, ApiBackend, bool, bool)] = &[
             // (identity, auth, backend, expect_first_party, expect_openrouter)
-            (ProviderIdentity::Xai, AuthScheme::Bearer, ApiBackend::ChatCompletions, true, false),
-            (ProviderIdentity::OpenAi, AuthScheme::Bearer, ApiBackend::ChatCompletions, false, false),
-            (ProviderIdentity::OpenRouter, AuthScheme::Bearer, ApiBackend::ChatCompletions, false, true),
-            (ProviderIdentity::Anthropic, AuthScheme::XApiKey, ApiBackend::Messages, false, false),
-            (ProviderIdentity::Zai, AuthScheme::Bearer, ApiBackend::ChatCompletions, false, false),
-            (ProviderIdentity::Custom, AuthScheme::Bearer, ApiBackend::ChatCompletions, false, false),
+            (
+                ProviderIdentity::Xai,
+                AuthScheme::Bearer,
+                ApiBackend::ChatCompletions,
+                true,
+                false,
+            ),
+            (
+                ProviderIdentity::OpenAi,
+                AuthScheme::Bearer,
+                ApiBackend::ChatCompletions,
+                false,
+                false,
+            ),
+            (
+                ProviderIdentity::OpenRouter,
+                AuthScheme::Bearer,
+                ApiBackend::ChatCompletions,
+                false,
+                true,
+            ),
+            (
+                ProviderIdentity::Anthropic,
+                AuthScheme::XApiKey,
+                ApiBackend::Messages,
+                false,
+                false,
+            ),
+            (
+                ProviderIdentity::Zai,
+                AuthScheme::Bearer,
+                ApiBackend::ChatCompletions,
+                false,
+                false,
+            ),
+            (
+                ProviderIdentity::DashScope,
+                AuthScheme::Bearer,
+                ApiBackend::ChatCompletions,
+                false,
+                false,
+            ),
+            (
+                ProviderIdentity::Custom,
+                AuthScheme::Bearer,
+                ApiBackend::ChatCompletions,
+                false,
+                false,
+            ),
         ];
 
         for (identity, auth, backend, expect_first_party, expect_openrouter) in cases {
@@ -4615,8 +4755,7 @@ mod tests {
                 .get("x-grok-client-version")
                 .is_some();
             assert_eq!(
-                has_x_grok,
-                *expect_first_party,
+                has_x_grok, *expect_first_party,
                 "x-grok-* header gate for {identity:?}"
             );
 
@@ -4653,8 +4792,7 @@ mod tests {
                 let old_threshold = resolve_rate_limit_threshold(*identity, env);
                 let new_threshold = client.rate_limit_threshold(env);
                 assert_eq!(
-                    new_threshold,
-                    old_threshold,
+                    new_threshold, old_threshold,
                     "threshold mismatch for {identity:?} with env={env:?}"
                 );
             }
@@ -4685,6 +4823,9 @@ mod tests {
             reasoning: None,
             tool_stream: false,
             thinking: None,
+            enable_thinking: None,
+            thinking_budget: None,
+            chat_template_kwargs: None,
         })
         .unwrap();
         let provider = &serialized["provider"];
@@ -5030,10 +5171,8 @@ mod tests {
         // streaming chat wrapper (not the non-streaming fallback wrapper),
         // and are omitted when unset. This pins the Z.ai contribution to the
         // request-body extension matrix.
-        let request = ChatCompletionRequest::new(
-            "z-ai/glm-5.2",
-            vec![ChatRequestMessage::user("hello")],
-        );
+        let request =
+            ChatCompletionRequest::new("z-ai/glm-5.2", vec![ChatRequestMessage::user("hello")]);
         let thinking = serde_json::json!({
             "type": "enabled",
             "clear_thinking": false,
@@ -5046,6 +5185,9 @@ mod tests {
             reasoning: None,
             tool_stream: true,
             thinking: Some(&thinking),
+            enable_thinking: None,
+            thinking_budget: None,
+            chat_template_kwargs: None,
             stream: true,
             stream_options: StreamOptions {
                 include_usage: true,
@@ -5067,6 +5209,9 @@ mod tests {
             reasoning: None,
             tool_stream: false,
             thinking: None,
+            enable_thinking: None,
+            thinking_budget: None,
+            chat_template_kwargs: None,
             stream: true,
             stream_options: StreamOptions {
                 include_usage: true,

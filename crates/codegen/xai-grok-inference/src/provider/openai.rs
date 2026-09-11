@@ -9,8 +9,8 @@
 //! - Generic rate-limit threshold (no OpenRouter env override).
 
 use super::{
-    AuthScheme, ProviderAdapter, ProviderKind, ProviderPolicy, RequestContext,
-    RequestExtensions, ReasoningEcho, ReasoningWire,
+    AuthScheme, ProviderAdapter, ProviderKind, ProviderPolicy, ReasoningEcho, ReasoningWire,
+    RequestContext, RequestExtensions,
 };
 use crate::route_context::RouteProviderKind;
 use xai_grok_inference_types::ApiBackend;

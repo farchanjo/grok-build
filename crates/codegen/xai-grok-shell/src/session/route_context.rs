@@ -330,6 +330,7 @@ fn map_kind(kind: ModelProviderKind) -> RouteProviderKind {
         ModelProviderKind::Anthropic => RouteProviderKind::Anthropic,
         ModelProviderKind::OpenAiCompatible => RouteProviderKind::OpenAiCompatible,
         ModelProviderKind::Zai => RouteProviderKind::Zai,
+        ModelProviderKind::DashScope => RouteProviderKind::DashScope,
     }
 }
 
@@ -392,6 +393,7 @@ fn derive_api_surface(
         RouteProviderKind::Anthropic => RouteApiSurface::AnthropicMessages,
         RouteProviderKind::OpenAiCompatible
         | RouteProviderKind::Zai
+        | RouteProviderKind::DashScope
         | RouteProviderKind::Custom => RouteApiSurface::OpenAiCompatibleSubset,
     }
 }
@@ -426,6 +428,7 @@ fn derive_credential_route_from_kind(
         RouteProviderKind::OpenRouter
         | RouteProviderKind::Anthropic
         | RouteProviderKind::Zai
+        | RouteProviderKind::DashScope
         | RouteProviderKind::OpenAiCompatible => RouteCredentialRoute::ApiKey,
         RouteProviderKind::Custom => RouteCredentialRoute::None,
     }
@@ -659,6 +662,9 @@ mod tests {
             openrouter_provider_preferences: None,
             openrouter_plugins: vec![],
             openrouter_pacing: kind == ModelProviderKind::OpenRouter,
+            dashscope_enable_thinking: None,
+            dashscope_thinking_budget: None,
+            vllm_chat_template_kwargs: None,
             max_completion_tokens: None,
             dialect: None,
             command: vec![],

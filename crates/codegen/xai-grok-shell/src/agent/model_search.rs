@@ -80,6 +80,7 @@ fn provider_label(entry: &ModelEntry) -> String {
             ModelProviderKind::Anthropic => "anthropic".to_string(),
             ModelProviderKind::Xai => "xai".to_string(),
             ModelProviderKind::Zai => "zai".to_string(),
+            ModelProviderKind::DashScope => "dashscope".to_string(),
             ModelProviderKind::OpenAiCompatible => {
                 if provider.id.is_empty() {
                     "openai_compatible".to_string()
@@ -416,6 +417,9 @@ mod tests {
                 openrouter_provider_preferences: None,
                 openrouter_plugins: vec![],
                 openrouter_pacing: false,
+                dashscope_enable_thinking: None,
+                dashscope_thinking_budget: None,
+                vllm_chat_template_kwargs: None,
                 max_completion_tokens: None,
                 dialect: None,
                 command: vec![],
@@ -546,6 +550,9 @@ mod tests {
                 openrouter_provider_preferences: None,
                 openrouter_plugins: vec![],
                 openrouter_pacing: false,
+                dashscope_enable_thinking: None,
+                dashscope_thinking_budget: None,
+                vllm_chat_template_kwargs: None,
                 max_completion_tokens: None,
                 dialect: None,
                 command: vec![],

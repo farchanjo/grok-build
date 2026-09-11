@@ -41,6 +41,7 @@ use xai_grok_inference_types::{ApiBackend, ChatChunkDelta};
 
 pub mod anthropic;
 pub mod compatible;
+pub mod dashscope;
 pub mod dialect;
 pub mod negotiation;
 pub mod openai;
@@ -71,6 +72,8 @@ pub enum ProviderKind {
     OpenRouter,
     /// Z.ai Model API.
     Zai,
+    /// Alibaba DashScope / Model Studio (OpenAI-compatible compatible-mode).
+    DashScope,
     /// Unknown/legacy kind. Maps to the openai-compatible standard wire.
     Custom,
 }
@@ -85,6 +88,7 @@ impl ProviderKind {
             Self::Anthropic => "anthropic",
             Self::OpenRouter => "openrouter",
             Self::Zai => "zai",
+            Self::DashScope => "dashscope",
             Self::Custom => "custom",
         }
     }
@@ -98,6 +102,7 @@ impl ProviderKind {
             "anthropic" => Some(Self::Anthropic),
             "openrouter" => Some(Self::OpenRouter),
             "zai" => Some(Self::Zai),
+            "dashscope" => Some(Self::DashScope),
             "custom" => Some(Self::Custom),
             _ => None,
         }
@@ -122,6 +127,7 @@ impl From<RouteProviderKind> for ProviderKind {
             RouteProviderKind::OpenRouter => Self::OpenRouter,
             RouteProviderKind::Anthropic => Self::Anthropic,
             RouteProviderKind::Zai => Self::Zai,
+            RouteProviderKind::DashScope => Self::DashScope,
             RouteProviderKind::OpenAiCompatible | RouteProviderKind::Custom => {
                 Self::OpenAiCompatible
             }
@@ -143,6 +149,7 @@ impl From<ProviderIdentity> for ProviderKind {
             ProviderIdentity::OpenRouter => Self::OpenRouter,
             ProviderIdentity::Anthropic => Self::Anthropic,
             ProviderIdentity::Zai => Self::Zai,
+            ProviderIdentity::DashScope => Self::DashScope,
             // `Custom` is the legacy compatible-family default but remains a
             // distinct adapter-plane kind so the route-context mapping can
             // keep the historical `Custom` route partition.
@@ -163,6 +170,7 @@ impl From<ProviderKind> for RouteProviderKind {
             ProviderKind::OpenRouter => Self::OpenRouter,
             ProviderKind::Anthropic => Self::Anthropic,
             ProviderKind::Zai => Self::Zai,
+            ProviderKind::DashScope => Self::DashScope,
             ProviderKind::OpenAiCompatible => Self::OpenAiCompatible,
             ProviderKind::Custom => Self::Custom,
         }
@@ -207,6 +215,14 @@ pub struct UsagePolicy {
     pub first_party: bool,
     /// OpenRouter diagnostics metadata header requested.
     pub openrouter_metadata: bool,
+    /// Treat `finish_reason=length` as an accepted truncated completion
+    /// (Completed with `stop_reason=Length`) instead of a fatal
+    /// `MaxTokensTruncation`. Open-weight self-hosted backends (vLLM/SGLang
+    /// family) routinely truncate long generations; the turn already streamed
+    /// its output and re-issuing would duplicate it on screen, so the honest
+    /// recovery is to accept the truncation and let the session surface it
+    /// (the shell keeps defense-in-depth `StopReason::Length` arms).
+    pub accept_length_truncation: bool,
 }
 
 impl UsagePolicy {
@@ -219,6 +235,19 @@ impl UsagePolicy {
             include_message_model_id,
             first_party,
             openrouter_metadata,
+            accept_length_truncation: false,
+        }
+    }
+
+    /// Policy with the length-truncation class explicitly set (vLLM-family
+    /// compatible dialects). All other fields keep the plain third-party
+    /// defaults.
+    pub(crate) const fn with_length_truncation(accept: bool) -> Self {
+        Self {
+            include_message_model_id: false,
+            first_party: false,
+            openrouter_metadata: false,
+            accept_length_truncation: accept,
         }
     }
 }
@@ -294,6 +323,13 @@ pub struct RequestContext {
     pub zai_tool_stream: bool,
     /// Z.ai thinking object.
     pub zai_thinking: Option<serde_json::Value>,
+    /// DashScope Qwen3 thinking toggle (`enable_thinking`).
+    pub dashscope_enable_thinking: Option<bool>,
+    /// DashScope Qwen3 thinking token budget (`thinking_budget`).
+    pub dashscope_thinking_budget: Option<u32>,
+    /// vLLM/SGLang `chat_template_kwargs` object (e.g. `{"enable_thinking":
+    /// false}` for hybrid-thinking Qwen3 servers).
+    pub vllm_chat_template_kwargs: Option<serde_json::Value>,
     /// Whether `messages[].model_id` metadata is allowed.
     pub include_message_model_id: bool,
 }
@@ -313,6 +349,11 @@ pub struct RequestExtensions {
     pub openrouter_body: bool,
     /// Z.ai request-body extensions (tool_stream / thinking).
     pub zai_body: bool,
+    /// DashScope request-body extensions (enable_thinking / thinking_budget).
+    pub dashscope_body: bool,
+    /// vLLM/SGLang request-body extensions (`chat_template_kwargs`), gated on
+    /// a vLLM-family dialect **and** configured kwargs.
+    pub vllm_body: bool,
     /// ChatGPT subscription OAuth (Codex) wire headers.
     pub chatgpt_oauth_headers: bool,
     /// Allow `messages[].model_id` metadata on the wire.
@@ -326,6 +367,8 @@ impl Default for RequestExtensions {
             openrouter_metadata_header: false,
             openrouter_body: false,
             zai_body: false,
+            dashscope_body: false,
+            vllm_body: false,
             chatgpt_oauth_headers: false,
             include_message_model_id: false,
         }
@@ -518,6 +561,17 @@ pub trait ProviderAdapter: Send + Sync + 'static {
     /// `reasoning`; OpenRouter gates `reasoning_details`.
     fn shape_delta(&self, _delta: &mut ChatChunkDelta) {}
 
+    /// vLLM-native `chat_template_kwargs` pass-through, gated by the adapter.
+    /// Only the OpenAI-compatible adapter with a vLLM-family dialect returns
+    /// the configured object; every other kind returns `None` so strict
+    /// servers never see an unknown key.
+    fn vllm_chat_template_kwargs<'a>(
+        &self,
+        _configured: Option<&'a serde_json::Value>,
+    ) -> Option<&'a serde_json::Value> {
+        None
+    }
+
     /// Per-provider HTTP pool tuning for **sampling** (Phase 6b / R5).
     ///
     /// The default is the empty [`ProviderPoolTuning`], which keeps sampling
@@ -584,6 +638,7 @@ impl ProviderFactory {
             ProviderKind::Anthropic => Box::new(anthropic::AnthropicAdapter::new()),
             ProviderKind::OpenRouter => Box::new(openrouter::OpenRouterAdapter::new()),
             ProviderKind::Zai => Box::new(zai::ZaiAdapter::new()),
+            ProviderKind::DashScope => Box::new(dashscope::DashScopeAdapter::new()),
             // Unknown/legacy kind → the compatible-family default. The wire
             // dialect is honored (not forced to `Standard`): a `Custom`
             // identity with `dialect = "vllm"` must select the vLLM wire so
@@ -692,6 +747,11 @@ mod tests {
                 WireDialect::Standard,
             ),
             (ProviderKind::Zai, ProviderKind::Zai, WireDialect::Standard),
+            (
+                ProviderKind::DashScope,
+                ProviderKind::DashScope,
+                WireDialect::Standard,
+            ),
             // Custom maps to the compatible family.
             (
                 ProviderKind::Custom,
@@ -719,6 +779,7 @@ mod tests {
             ProviderFactory::build(ProviderKind::Anthropic, WireDialect::Standard),
             ProviderFactory::build(ProviderKind::OpenRouter, WireDialect::Standard),
             ProviderFactory::build(ProviderKind::Zai, WireDialect::Standard),
+            ProviderFactory::build(ProviderKind::DashScope, WireDialect::Standard),
         ];
         for a in &adapters {
             assert_eq!(
@@ -731,7 +792,7 @@ mod tests {
     }
 
     #[test]
-    fn all_six_adapters_policy_and_auth_invariants() {
+    fn all_adapters_policy_and_auth_invariants() {
         let adapters = [
             ProviderFactory::build(ProviderKind::Xai, WireDialect::Standard),
             ProviderFactory::build(ProviderKind::OpenAi, WireDialect::Standard),
@@ -740,6 +801,7 @@ mod tests {
             ProviderFactory::build(ProviderKind::Anthropic, WireDialect::Standard),
             ProviderFactory::build(ProviderKind::OpenRouter, WireDialect::Standard),
             ProviderFactory::build(ProviderKind::Zai, WireDialect::Standard),
+            ProviderFactory::build(ProviderKind::DashScope, WireDialect::Standard),
         ];
 
         // backend_preference is a 1..=3 static list for every adapter.
@@ -763,7 +825,7 @@ mod tests {
         }
 
         // Usage policy flags are gated by kind.
-        for a in &adapters {
+        for (i, a) in adapters.iter().enumerate() {
             let policy = a.policy();
             let is_xai = a.id() == ProviderKind::Xai;
             let is_openrouter = a.id() == ProviderKind::OpenRouter;
@@ -778,6 +840,14 @@ mod tests {
                 policy.usage_policy.include_message_model_id,
                 is_xai,
                 "{:?}",
+                a.id()
+            );
+            // Length-truncation acceptance is the vLLM-family dialect's alone
+            // (index 3 is the compatible adapter bound to WireDialect::Vllm).
+            assert_eq!(
+                policy.usage_policy.accept_length_truncation,
+                a.id() == ProviderKind::OpenAiCompatible && i == 3,
+                "{:?} (adapter {i})",
                 a.id()
             );
         }
@@ -799,7 +869,8 @@ mod tests {
                 ProviderKind::Xai
                 | ProviderKind::OpenAi
                 | ProviderKind::Anthropic
-                | ProviderKind::Zai => ReasoningEcho::Echo,
+                | ProviderKind::Zai
+                | ProviderKind::DashScope => ReasoningEcho::Echo,
                 ProviderKind::OpenRouter => ReasoningEcho::Details,
                 // The vLLM-compatible adapter (index 3) strips; the standard
                 // compatible adapter (index 2) echoes.
@@ -812,7 +883,7 @@ mod tests {
     }
 
     #[test]
-    fn all_six_delta_shaping_table() {
+    fn all_adapters_delta_shaping_table() {
         use xai_grok_inference_types::ChatChunkDelta;
 
         let make_delta = || ChatChunkDelta {
@@ -851,6 +922,7 @@ mod tests {
             ProviderKind::OpenAi,
             ProviderKind::Anthropic,
             ProviderKind::Zai,
+            ProviderKind::DashScope,
         ] {
             let mut d = make_delta();
             ProviderFactory::build(kind, WireDialect::Standard).shape_delta(&mut d);

@@ -704,6 +704,13 @@ async fn run_one_attempt(
     output_observed: Arc<AtomicBool>,
 ) -> AttemptOutcome {
     let project = request.project_response_field;
+    // Provider verdict on `finish_reason=length` (vLLM-family dialects accept
+    // the truncation; every other provider keeps the historic fatal class).
+    let accept_length_truncation = client
+        .provider_adapter()
+        .policy()
+        .usage_policy
+        .accept_length_truncation;
     match client.api_backend() {
         ApiBackend::ChatCompletions => {
             let (raw, metadata) = match client.conversation_stream(request).await {
@@ -727,6 +734,7 @@ async fn run_one_attempt(
                 captured,
                 None,
                 output_observed,
+                accept_length_truncation,
             )
             .await
         }
@@ -758,6 +766,7 @@ async fn run_one_attempt(
                 captured,
                 doom_check,
                 output_observed,
+                accept_length_truncation,
             )
             .await
         }
@@ -776,6 +785,7 @@ async fn run_one_attempt(
                 captured,
                 None,
                 output_observed,
+                accept_length_truncation,
             )
             .await
         }
@@ -833,6 +843,7 @@ async fn drive_l2(
     captured: ErrorCell,
     doom_check: Option<xai_grok_inference_types::DoomLoopRecoveryPolicy>,
     output_observed: Arc<AtomicBool>,
+    accept_length_truncation: bool,
 ) -> AttemptOutcome {
     let mut l2 = pin!(l2);
     loop {
@@ -857,10 +868,23 @@ async fn drive_l2(
                             };
                         }
                     }
-                    if response.stop_reason == Some(xai_grok_inference_types::StopReason::Length) {
+                    if response.stop_reason == Some(xai_grok_inference_types::StopReason::Length)
+                        && !accept_length_truncation
+                    {
                         return AttemptOutcome::Failed {
                             error: InferenceError::MaxTokensTruncation,
                         };
+                    }
+                    if response.stop_reason == Some(xai_grok_inference_types::StopReason::Length) {
+                        // vLLM-family verdict: accept the truncated completion
+                        // (the turn already streamed its output; a re-issue
+                        // would duplicate it). Surface it as a warning so the
+                        // truncation is diagnosable from logs.
+                        tracing::warn!(
+                            target: crate::inference_log::TARGET,
+                            event = "length_truncation_accepted",
+                            "provider accepted finish_reason=length as a truncated completion"
+                        );
                     }
                     // OpenRouter (and some other routers) terminate mid-stream with
                     // finish_reason "error". That is a provider failure, not a

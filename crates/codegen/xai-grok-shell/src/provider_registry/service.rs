@@ -36,6 +36,7 @@ use super::lifecycle::{
     ProviderRegistrySnapshot, validate_http_base_url,
 };
 use crate::agent::config::EnvKeys;
+use crate::agent::dashscope::{DASHSCOPE_PROVIDER_ID, dashscope_builtin_provider_config};
 use crate::agent::model_providers::{
     ModelProviderConfig, ModelProviderKind, grok_build_anthropic_config, grok_build_openai_config,
     grok_build_openrouter_config, model_provider_auth_name,
@@ -147,11 +148,22 @@ impl ProviderService {
         metadata.insert(ZAI_PROVIDER_ID.to_owned(), meta);
         descriptors.insert(ZAI_PROVIDER_ID.to_owned(), desc);
 
+        // 2b. DashScope: configured-style first-class instance.
+        let dashscope_cfg = entries
+            .get(DASHSCOPE_PROVIDER_ID)
+            .cloned()
+            .unwrap_or_else(dashscope_builtin_provider_config);
+        let (desc, meta) =
+            Self::build_from_config(DASHSCOPE_PROVIDER_ID, DASHSCOPE_PROVIDER_ID, &dashscope_cfg)?;
+        metadata.insert(DASHSCOPE_PROVIDER_ID.to_owned(), meta);
+        descriptors.insert(DASHSCOPE_PROVIDER_ID.to_owned(), desc);
+
         // 3. Remaining configured entries deterministically in input order.
         for (id, cfg) in entries {
             if BuiltInProviderId::parse(id).is_some()
                 || is_internal_alias(id)
                 || id == ZAI_PROVIDER_ID
+                || id == DASHSCOPE_PROVIDER_ID
             {
                 continue;
             }
@@ -511,7 +523,7 @@ fn canonical_routes(kind: ProviderKind) -> Vec<ProviderRouteDescriptor> {
             ApiSurface::OpenAiCompatibleSubset,
             CredentialRoute::ApiKey,
         )],
-        ProviderKind::Zai => vec![ProviderRouteDescriptor::new(
+        ProviderKind::Zai | ProviderKind::DashScope => vec![ProviderRouteDescriptor::new(
             ApiSurface::OpenAiCompatibleSubset,
             CredentialRoute::ApiKey,
         )],
@@ -526,7 +538,7 @@ fn default_surface(kind: ProviderKind) -> ApiSurface {
         ProviderKind::OpenRouter => ApiSurface::OpenRouterNative,
         ProviderKind::Anthropic => ApiSurface::AnthropicMessages,
         ProviderKind::OpenAiCompatible => ApiSurface::OpenAiCompatibleSubset,
-        ProviderKind::Zai => ApiSurface::OpenAiCompatibleSubset,
+        ProviderKind::Zai | ProviderKind::DashScope => ApiSurface::OpenAiCompatibleSubset,
     }
 }
 
@@ -544,7 +556,7 @@ fn default_route(kind: ProviderKind, cfg: &ModelProviderConfig) -> CredentialRou
         ProviderKind::OpenAi => CredentialRoute::ApiKey,
         ProviderKind::OpenRouter => CredentialRoute::ApiKey,
         ProviderKind::Anthropic => CredentialRoute::ApiKey,
-        ProviderKind::Zai => CredentialRoute::ApiKey,
+        ProviderKind::Zai | ProviderKind::DashScope => CredentialRoute::ApiKey,
         ProviderKind::OpenAiCompatible => {
             if cfg.api_key.is_some() || cfg.env_key.as_ref().and_then(EnvKeys::primary).is_some() {
                 CredentialRoute::ApiKey
@@ -632,7 +644,14 @@ mod tests {
         let ids: Vec<&str> = svc.list().iter().map(|d| d.id.as_str()).collect();
         assert_eq!(
             ids,
-            ["xai", "openai", "openrouter", "anthropic", "zai-model-api"]
+            [
+                "xai",
+                "openai",
+                "openrouter",
+                "anthropic",
+                "zai-model-api",
+                "dashscope"
+            ]
         );
         for id in ["xai", "openai", "openrouter", "anthropic"] {
             let d = svc.get(id).unwrap();
@@ -643,6 +662,11 @@ mod tests {
         }
         let z = svc.get("zai-model-api").unwrap();
         assert!(matches!(z.provider_ref, ProviderRef::Configured(_)));
+        let ds = svc.get("dashscope").unwrap();
+        assert!(
+            matches!(ds.provider_ref, ProviderRef::Configured(_)),
+            "dashscope is a configured-style first-class instance"
+        );
         // Default is infallible through internally valid constants.
         assert_eq!(svc.generation(), 0);
     }

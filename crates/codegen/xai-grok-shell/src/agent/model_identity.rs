@@ -333,6 +333,7 @@ fn kind_label(kind: crate::agent::model_providers::ModelProviderKind) -> &'stati
         ModelProviderKind::OpenRouter => "openrouter",
         ModelProviderKind::Anthropic => "anthropic",
         ModelProviderKind::Zai => "zai",
+        ModelProviderKind::DashScope => "dashscope",
         ModelProviderKind::OpenAiCompatible => "openai_compatible",
     }
 }
@@ -601,6 +602,9 @@ mod tests {
                 openrouter_provider_preferences: None,
                 openrouter_plugins: Vec::new(),
                 openrouter_pacing: false,
+                dashscope_enable_thinking: None,
+                dashscope_thinking_budget: None,
+                vllm_chat_template_kwargs: None,
                 max_completion_tokens: None,
                 dialect: None,
                 command: Vec::new(),

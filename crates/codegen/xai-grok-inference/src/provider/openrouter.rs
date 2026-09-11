@@ -199,6 +199,7 @@ mod tests {
             ProviderKind::OpenAiCompatible,
             ProviderKind::Anthropic,
             ProviderKind::Zai,
+            ProviderKind::DashScope,
         ] {
             let adapter = ProviderFactory::build(kind, WireDialect::default());
             assert_eq!(

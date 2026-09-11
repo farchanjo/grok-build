@@ -6155,6 +6155,7 @@ pub fn provider_identity_for_model(model: &ModelEntry) -> ProviderIdentity {
         Some(ModelProviderKind::OpenRouter) => ProviderIdentity::OpenRouter,
         Some(ModelProviderKind::Anthropic) => ProviderIdentity::Anthropic,
         Some(ModelProviderKind::Zai) => ProviderIdentity::Zai,
+        Some(ModelProviderKind::DashScope) => ProviderIdentity::DashScope,
         Some(ModelProviderKind::OpenAiCompatible) => ProviderIdentity::Custom,
     }
 }
@@ -6380,6 +6381,32 @@ fn build_inference_config_for_model(
     } else {
         None
     };
+    // DashScope Qwen3 thinking extensions: only for the DashScope provider
+    // kind, and only the values the TOML actually declared (a tri-state
+    // toggle so an explicit `false` disables thinking on models that think
+    // by default).
+    let dashscope_enable_thinking = model
+        .model_provider
+        .as_ref()
+        .filter(|p| {
+            p.kind == ModelProviderKind::DashScope
+                || p.id == crate::agent::dashscope::DASHSCOPE_PROVIDER_ID
+        })
+        .and_then(|p| p.dashscope_enable_thinking);
+    let dashscope_thinking_budget = model
+        .model_provider
+        .as_ref()
+        .filter(|p| {
+            p.kind == ModelProviderKind::DashScope
+                || p.id == crate::agent::dashscope::DASHSCOPE_PROVIDER_ID
+        })
+        .and_then(|p| p.dashscope_thinking_budget.filter(|&n| n > 0));
+    // vLLM/SGLang `chat_template_kwargs`: kind- and dialect-gated upstream in
+    // `resolved()`, so any value that reaches here is already legitimate.
+    let vllm_chat_template_kwargs = model
+        .model_provider
+        .as_ref()
+        .and_then(|p| p.vllm_chat_template_kwargs.clone());
     // Validate the catalog/default effort against the normalized model-bound
     // selector before it can reach any wire backend. Unknown keeps explicit
     // canonical tokens compatible; Unsupported and stale Exact/Legacy values
@@ -6437,6 +6464,9 @@ fn build_inference_config_for_model(
         openrouter_pacing,
         zai_tool_stream,
         zai_thinking,
+        dashscope_enable_thinking,
+        dashscope_thinking_budget,
+        vllm_chat_template_kwargs,
         api_backend,
         wire_dialect,
         include_message_model_id: !model
@@ -6685,6 +6715,7 @@ pub fn provider_kind_label(kind: crate::agent::model_providers::ModelProviderKin
         ModelProviderKind::Anthropic => "anthropic",
         ModelProviderKind::Xai => "xai",
         ModelProviderKind::Zai => "zai",
+        ModelProviderKind::DashScope => "dashscope",
         ModelProviderKind::OpenAiCompatible => "openai_compatible",
     }
 }
@@ -6711,6 +6742,7 @@ fn provider_identity_label(model: &ModelEntry) -> String {
             crate::agent::model_providers::ModelProviderKind::Xai => "xai".to_string(),
             crate::agent::model_providers::ModelProviderKind::OpenAiCompatible
             | crate::agent::model_providers::ModelProviderKind::Zai => "custom".to_string(),
+            crate::agent::model_providers::ModelProviderKind::DashScope => "dashscope".to_string(),
         },
     )
 }
@@ -8748,6 +8780,9 @@ reasoning_effort = "low"
             openrouter_provider_preferences: None,
             openrouter_plugins: vec![],
             openrouter_pacing: false,
+            dashscope_enable_thinking: None,
+            dashscope_thinking_budget: None,
+            vllm_chat_template_kwargs: None,
             max_completion_tokens: Some(16_384),
             dialect: None,
             command: vec![],
@@ -8871,6 +8906,9 @@ reasoning_effort = "low"
             openrouter_provider_preferences: None,
             openrouter_plugins: Vec::new(),
             openrouter_pacing: false,
+            dashscope_enable_thinking: None,
+            dashscope_thinking_budget: None,
+            vllm_chat_template_kwargs: None,
             max_completion_tokens: None,
             dialect: None,
             command: Vec::new(),
@@ -8890,6 +8928,9 @@ reasoning_effort = "low"
             openrouter_provider_preferences: None,
             openrouter_plugins: Vec::new(),
             openrouter_pacing: false,
+            dashscope_enable_thinking: None,
+            dashscope_thinking_budget: None,
+            vllm_chat_template_kwargs: None,
             max_completion_tokens: None,
             dialect: None,
             command: Vec::new(),
@@ -8908,6 +8949,9 @@ reasoning_effort = "low"
             openrouter_provider_preferences: None,
             openrouter_plugins: Vec::new(),
             openrouter_pacing: false,
+            dashscope_enable_thinking: None,
+            dashscope_thinking_budget: None,
+            vllm_chat_template_kwargs: None,
             max_completion_tokens: None,
             dialect: None,
             command: Vec::new(),
@@ -8939,6 +8983,9 @@ reasoning_effort = "low"
             openrouter_provider_preferences: None,
             openrouter_plugins: Vec::new(),
             openrouter_pacing: false,
+            dashscope_enable_thinking: None,
+            dashscope_thinking_budget: None,
+            vllm_chat_template_kwargs: None,
             max_completion_tokens: None,
             dialect: None,
             command: Vec::new(),
@@ -8959,6 +9006,9 @@ reasoning_effort = "low"
             openrouter_provider_preferences: None,
             openrouter_plugins: Vec::new(),
             openrouter_pacing: false,
+            dashscope_enable_thinking: None,
+            dashscope_thinking_budget: None,
+            vllm_chat_template_kwargs: None,
             max_completion_tokens: None,
             dialect: None,
             command: Vec::new(),
@@ -8981,6 +9031,9 @@ reasoning_effort = "low"
             openrouter_provider_preferences: None,
             openrouter_plugins: Vec::new(),
             openrouter_pacing: false,
+            dashscope_enable_thinking: None,
+            dashscope_thinking_budget: None,
+            vllm_chat_template_kwargs: None,
             max_completion_tokens: None,
             dialect: None,
             command: Vec::new(),
@@ -9005,6 +9058,9 @@ reasoning_effort = "low"
             openrouter_provider_preferences: None,
             openrouter_plugins: Vec::new(),
             openrouter_pacing: false,
+            dashscope_enable_thinking: None,
+            dashscope_thinking_budget: None,
+            vllm_chat_template_kwargs: None,
             max_completion_tokens: None,
             dialect: None,
             command: Vec::new(),
@@ -9331,6 +9387,9 @@ reasoning_effort = "low"
             }),
             openrouter_plugins: vec![],
             openrouter_pacing: false,
+            dashscope_enable_thinking: None,
+            dashscope_thinking_budget: None,
+            vllm_chat_template_kwargs: None,
             max_completion_tokens: None,
             dialect: None,
             command: vec![],
@@ -9381,6 +9440,9 @@ reasoning_effort = "low"
             }),
             openrouter_plugins: vec![],
             openrouter_pacing: true,
+            dashscope_enable_thinking: None,
+            dashscope_thinking_budget: None,
+            vllm_chat_template_kwargs: None,
             max_completion_tokens: None,
             dialect: None,
             command: vec![],
@@ -9428,6 +9490,9 @@ reasoning_effort = "low"
             openrouter_provider_preferences: None,
             openrouter_plugins: vec![],
             openrouter_pacing: false,
+            dashscope_enable_thinking: None,
+            dashscope_thinking_budget: None,
+            vllm_chat_template_kwargs: None,
             max_completion_tokens: None,
             dialect: Some(WireDialect::Standard),
             command: vec![],
@@ -9447,6 +9512,55 @@ reasoning_effort = "low"
         );
         assert_eq!(config.provider_identity, ProviderIdentity::Zai);
         assert_eq!(config.wire_dialect, Some(WireDialect::Standard));
+    }
+
+    /// DashScope keeps a real 1:1 provider identity, and its thinking knobs
+    /// propagate to the inference config only for that kind.
+    #[test]
+    fn dashscope_identity_round_trips_and_thinking_knobs_plumb_to_wire() {
+        use crate::agent::model_providers::ResolvedModelProvider;
+
+        let mut model = test_model_entry(
+            "dashscope:qwen3-max",
+            "https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
+            Some("dashscope-key"),
+            None,
+            None,
+        );
+        model.model_provider = Some(ResolvedModelProvider {
+            id: "dashscope".into(),
+            kind: ModelProviderKind::DashScope,
+            openrouter_fallback_models: vec![],
+            openrouter_provider_preferences: None,
+            openrouter_plugins: vec![],
+            openrouter_pacing: false,
+            dashscope_enable_thinking: Some(false),
+            dashscope_thinking_budget: Some(4096),
+            vllm_chat_template_kwargs: None,
+            max_completion_tokens: None,
+            dialect: None,
+            command: vec![],
+        });
+        assert_eq!(
+            provider_identity_for_model(&model),
+            ProviderIdentity::DashScope,
+            "DashScope must map to its real identity, not Custom"
+        );
+        let config = inference_config_for_model(
+            &model,
+            resolve_credentials(&model, None),
+            None,
+            None,
+            None,
+            None,
+        );
+        assert_eq!(config.provider_identity, ProviderIdentity::DashScope);
+        assert_eq!(
+            config.dashscope_enable_thinking,
+            Some(false),
+            "an explicit false toggle must survive to the wire config"
+        );
+        assert_eq!(config.dashscope_thinking_budget, Some(4096));
     }
 
     #[test]
@@ -9629,6 +9743,9 @@ reasoning_effort = "low"
             openrouter_provider_preferences: None,
             openrouter_plugins: Vec::new(),
             openrouter_pacing: false,
+            dashscope_enable_thinking: None,
+            dashscope_thinking_budget: None,
+            vllm_chat_template_kwargs: None,
             max_completion_tokens: None,
             dialect: None,
             command: Vec::new(),
@@ -9970,6 +10087,9 @@ reasoning_effort = "low"
             openrouter_provider_preferences: None,
             openrouter_plugins: vec![],
             openrouter_pacing: false,
+            dashscope_enable_thinking: None,
+            dashscope_thinking_budget: None,
+            vllm_chat_template_kwargs: None,
             max_completion_tokens: None,
             dialect: None,
             command: vec![],
@@ -9992,6 +10112,9 @@ reasoning_effort = "low"
             openrouter_provider_preferences: None,
             openrouter_plugins: vec![],
             openrouter_pacing: false,
+            dashscope_enable_thinking: None,
+            dashscope_thinking_budget: None,
+            vllm_chat_template_kwargs: None,
             max_completion_tokens: None,
             dialect: None,
             command: vec![],
@@ -10085,6 +10208,9 @@ reasoning_effort = "low"
             openrouter_provider_preferences: None,
             openrouter_plugins: vec![],
             openrouter_pacing: false,
+            dashscope_enable_thinking: None,
+            dashscope_thinking_budget: None,
+            vllm_chat_template_kwargs: None,
             max_completion_tokens: None,
             dialect: None,
             command: vec![],
@@ -10150,6 +10276,9 @@ reasoning_effort = "low"
                 }),
                 openrouter_plugins: vec![],
                 openrouter_pacing: false,
+                dashscope_enable_thinking: None,
+                dashscope_thinking_budget: None,
+                vllm_chat_template_kwargs: None,
                 max_completion_tokens: None,
                 dialect: None,
                 command: vec![],
@@ -10216,6 +10345,9 @@ reasoning_effort = "low"
             openrouter_provider_preferences: None,
             openrouter_plugins: vec![],
             openrouter_pacing: false,
+            dashscope_enable_thinking: None,
+            dashscope_thinking_budget: None,
+            vllm_chat_template_kwargs: None,
             max_completion_tokens: None,
             dialect: None,
             command: vec![],
@@ -10260,6 +10392,9 @@ reasoning_effort = "low"
                 ),
                 openrouter_plugins: vec![],
                 openrouter_pacing: false,
+                dashscope_enable_thinking: None,
+                dashscope_thinking_budget: None,
+                vllm_chat_template_kwargs: None,
                 max_completion_tokens: None,
                 dialect: None,
                 command: vec![],

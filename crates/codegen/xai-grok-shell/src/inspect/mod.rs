@@ -1131,6 +1131,7 @@ fn provider_kind_label(kind: crate::agent::model_providers::ModelProviderKind) -
         ModelProviderKind::OpenRouter => "openrouter",
         ModelProviderKind::Anthropic => "anthropic",
         ModelProviderKind::Zai => "zai",
+        ModelProviderKind::DashScope => "dashscope",
         ModelProviderKind::OpenAiCompatible => "openai_compatible",
     }
 }

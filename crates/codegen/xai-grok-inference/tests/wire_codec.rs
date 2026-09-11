@@ -116,7 +116,10 @@ async fn drive_chat(client: &InferenceClient, req: ConversationRequest) -> Vec<I
 }
 
 /// Drive a Responses stream through the pump and return the events.
-async fn drive_responses(client: &InferenceClient, req: ConversationRequest) -> Vec<InferenceEvent> {
+async fn drive_responses(
+    client: &InferenceClient,
+    req: ConversationRequest,
+) -> Vec<InferenceEvent> {
     let (raw, meta, doom_loop) = client
         .conversation_stream_responses(req)
         .await
@@ -137,7 +140,13 @@ async fn drive_messages(client: &InferenceClient, req: ConversationRequest) -> V
         .conversation_stream_messages(req)
         .await
         .expect("conversation_stream_messages");
-    collect(xai_grok_inference::stream_messages(raw, meta, rid(), TIMEOUT)).await
+    collect(xai_grok_inference::stream_messages(
+        raw,
+        meta,
+        rid(),
+        TIMEOUT,
+    ))
+    .await
 }
 
 /// Assert the chat stream carried exactly one terminal `Completed` with the
@@ -161,9 +170,13 @@ fn assert_chat_completed(events: &[InferenceEvent], expected_text: &str) {
 /// `reasoning_content` was routed through the reasoning channel).
 fn assert_reasoning_channel_present(events: &[InferenceEvent]) {
     assert!(
-        events
-            .iter()
-            .any(|e| matches!(e, InferenceEvent::ChannelToken { channel: InferenceChannel::Reasoning, .. })),
+        events.iter().any(|e| matches!(
+            e,
+            InferenceEvent::ChannelToken {
+                channel: InferenceChannel::Reasoning,
+                ..
+            }
+        )),
         "expected a reasoning channel token"
     );
 }
@@ -176,9 +189,13 @@ fn assert_reasoning_channel_present(events: &[InferenceEvent]) {
 async fn xai_chat_streams_text_and_usage() {
     let server = MockInferenceServer::start().await.expect("start mock");
     server.set_response(TEXT);
-    let client =
-        InferenceClient::new(config_for(&server, ProviderIdentity::Xai, ApiBackend::ChatCompletions, None))
-            .expect("client");
+    let client = InferenceClient::new(config_for(
+        &server,
+        ProviderIdentity::Xai,
+        ApiBackend::ChatCompletions,
+        None,
+    ))
+    .expect("client");
     let events = drive_chat(&client, user_request("hi")).await;
     assert_chat_completed(&events, TEXT);
 }
@@ -187,9 +204,13 @@ async fn xai_chat_streams_text_and_usage() {
 async fn openai_responses_streams_text_and_usage() {
     let server = MockInferenceServer::start().await.expect("start mock");
     server.set_response(TEXT);
-    let client =
-        InferenceClient::new(config_for(&server, ProviderIdentity::OpenAi, ApiBackend::Responses, None))
-            .expect("client");
+    let client = InferenceClient::new(config_for(
+        &server,
+        ProviderIdentity::OpenAi,
+        ApiBackend::Responses,
+        None,
+    ))
+    .expect("client");
     let events = drive_responses(&client, user_request("hi")).await;
     let completed = events
         .iter()
@@ -265,11 +286,161 @@ async fn openrouter_chat_streams_text_and_usage() {
 async fn zai_chat_streams_text_and_usage() {
     let server = MockInferenceServer::start().await.expect("start mock");
     server.set_response(TEXT);
-    let client =
-        InferenceClient::new(config_for(&server, ProviderIdentity::Zai, ApiBackend::ChatCompletions, None))
-            .expect("client");
+    let client = InferenceClient::new(config_for(
+        &server,
+        ProviderIdentity::Zai,
+        ApiBackend::ChatCompletions,
+        None,
+    ))
+    .expect("client");
     let events = drive_chat(&client, user_request("hi")).await;
     assert_chat_completed(&events, TEXT);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn dashscope_chat_streams_text_and_usage() {
+    let server = MockInferenceServer::start().await.expect("start mock");
+    server.set_response(TEXT);
+    let client = InferenceClient::new(config_for(
+        &server,
+        ProviderIdentity::DashScope,
+        ApiBackend::ChatCompletions,
+        None,
+    ))
+    .expect("client");
+    let events = drive_chat(&client, user_request("hi")).await;
+    assert_chat_completed(&events, TEXT);
+}
+
+/// The Qwen3 thinking extensions serialize on the streaming wire only for the
+/// DashScope identity: `enable_thinking` (tri-state, including an explicit
+/// false) and `thinking_budget` appear in the chat body; other identities
+/// never see the keys even when the config carries them.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn dashscope_thinking_extensions_gate_on_identity() {
+    let server = MockInferenceServer::start().await.expect("start mock");
+    server.set_response(TEXT);
+
+    let mut cfg = config_for(
+        &server,
+        ProviderIdentity::DashScope,
+        ApiBackend::ChatCompletions,
+        None,
+    );
+    cfg.dashscope_enable_thinking = Some(false);
+    cfg.dashscope_thinking_budget = Some(4096);
+    let client = InferenceClient::new(cfg).expect("client");
+    drive_chat(&client, user_request("hi")).await;
+
+    let body = chat_request_body(&server);
+    assert_eq!(
+        body.get("enable_thinking"),
+        Some(&serde_json::json!(false)),
+        "an explicit false toggle must reach the DashScope wire"
+    );
+    assert_eq!(
+        body.get("thinking_budget"),
+        Some(&serde_json::json!(4096)),
+        "the thinking budget must reach the DashScope wire"
+    );
+
+    // The same knobs on a non-DashScope identity are dropped entirely.
+    let mut cfg = config_for(
+        &server,
+        ProviderIdentity::Custom,
+        ApiBackend::ChatCompletions,
+        None,
+    );
+    cfg.dashscope_enable_thinking = Some(true);
+    cfg.dashscope_thinking_budget = Some(1024);
+    let client = InferenceClient::new(cfg).expect("client");
+    drive_chat(&client, user_request("hi")).await;
+
+    let body = chat_request_body(&server);
+    assert!(
+        body.get("enable_thinking").is_none(),
+        "non-DashScope identities must not receive enable_thinking"
+    );
+    assert!(
+        body.get("thinking_budget").is_none(),
+        "non-DashScope identities must not receive thinking_budget"
+    );
+}
+
+/// `chat_template_kwargs` serializes on the streaming wire only for a
+/// vLLM-family dialect, and only as a non-empty JSON object. A standard
+/// OpenAI-compatible dialect must never see the key, and an empty object is
+/// dropped (strict vLLM servers reject empty/unknown template kwargs).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn vllm_chat_template_kwargs_gate_on_dialect() {
+    let server = MockInferenceServer::start().await.expect("start mock");
+    server.set_response(TEXT);
+
+    // vLLM dialect + non-empty kwargs → key on the wire, streaming.
+    let mut cfg = config_for(
+        &server,
+        ProviderIdentity::Custom,
+        ApiBackend::ChatCompletions,
+        Some(WireDialect::Vllm),
+    );
+    cfg.vllm_chat_template_kwargs = Some(serde_json::json!({"enable_thinking": false}));
+    let client = InferenceClient::new(cfg).expect("client");
+    drive_chat(&client, user_request("hi")).await;
+    let body = chat_request_body(&server);
+    assert_eq!(
+        body.get("chat_template_kwargs"),
+        Some(&serde_json::json!({"enable_thinking": false})),
+        "vLLM dialect must carry chat_template_kwargs"
+    );
+
+    // Standard dialect + same kwargs → key absent (strict servers 400).
+    let mut cfg = config_for(
+        &server,
+        ProviderIdentity::Custom,
+        ApiBackend::ChatCompletions,
+        Some(WireDialect::Standard),
+    );
+    cfg.vllm_chat_template_kwargs = Some(serde_json::json!({"enable_thinking": false}));
+    let client = InferenceClient::new(cfg).expect("client");
+    drive_chat(&client, user_request("hi")).await;
+    let body = chat_request_body(&server);
+    assert!(
+        body.get("chat_template_kwargs").is_none(),
+        "standard OpenAI-compatible wire must not receive chat_template_kwargs"
+    );
+
+    // vLLM dialect + empty object → dropped (server noise / 400).
+    let mut cfg = config_for(
+        &server,
+        ProviderIdentity::Custom,
+        ApiBackend::ChatCompletions,
+        Some(WireDialect::Vllm),
+    );
+    cfg.vllm_chat_template_kwargs = Some(serde_json::json!({}));
+    let client = InferenceClient::new(cfg).expect("client");
+    drive_chat(&client, user_request("hi")).await;
+    let body = chat_request_body(&server);
+    assert!(
+        body.get("chat_template_kwargs").is_none(),
+        "an empty kwargs object must not serialize"
+    );
+
+    // OpenAI Platform identity + vLLM dialect field → dropped by the
+    // adapter-default gate (only the compatible adapter can emit it).
+    let mut cfg = config_for(
+        &server,
+        ProviderIdentity::OpenAi,
+        ApiBackend::ChatCompletions,
+        Some(WireDialect::Vllm),
+    );
+    cfg.vllm_chat_template_kwargs = Some(serde_json::json!({"enable_thinking": false}));
+    let client = InferenceClient::new(cfg).expect("client");
+    drive_chat(&client, user_request("hi")).await;
+    let body = chat_request_body(&server);
+    assert!(
+        body.get("chat_template_kwargs").is_none(),
+        "non-compatible kinds must not receive chat_template_kwargs"
+    );
 }
 
 // ---------------------------------------------------------------------------

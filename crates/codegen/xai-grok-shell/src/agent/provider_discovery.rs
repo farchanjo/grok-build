@@ -106,7 +106,10 @@ pub async fn discover_provider_models(
             )
             .await
         }
-        ProviderKind::OpenAi | ProviderKind::OpenAiCompatible | ProviderKind::Zai => {
+        ProviderKind::OpenAi
+        | ProviderKind::OpenAiCompatible
+        | ProviderKind::Zai
+        | ProviderKind::DashScope => {
             fetch_openai_catalog(
                 &models_url,
                 &token,
@@ -209,7 +212,10 @@ pub async fn discover_with_identity(
             )
             .await
         }
-        ProviderKind::OpenAi | ProviderKind::OpenAiCompatible | ProviderKind::Zai => {
+        ProviderKind::OpenAi
+        | ProviderKind::OpenAiCompatible
+        | ProviderKind::Zai
+        | ProviderKind::DashScope => {
             fetch_openai_catalog(
                 models_list_url,
                 credential.token(),
@@ -308,6 +314,7 @@ fn kind_to_model(k: ProviderKind) -> ModelProviderKind {
         ProviderKind::Xai => ModelProviderKind::Xai,
         ProviderKind::Anthropic => ModelProviderKind::Anthropic,
         ProviderKind::Zai => ModelProviderKind::Zai,
+        ProviderKind::DashScope => ModelProviderKind::DashScope,
         ProviderKind::OpenAiCompatible => ModelProviderKind::OpenAiCompatible,
     }
 }

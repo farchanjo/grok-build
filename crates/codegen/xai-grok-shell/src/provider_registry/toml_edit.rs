@@ -247,7 +247,7 @@ fn validate_patch(patch: &ProviderTomlPatch) -> Result<(), ProviderLifecycleErro
     if let Some(kind) = &patch.kind {
         let ok = matches!(
             kind.as_str(),
-            "openai_compatible" | "custom" | "openai" | "openrouter" | "xai" | "zai"
+            "openai_compatible" | "custom" | "openai" | "openrouter" | "xai" | "zai" | "dashscope"
         );
         if !ok {
             return Err(ProviderLifecycleError::Validation(format!(

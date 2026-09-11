@@ -610,6 +610,7 @@ impl ProviderManagementService {
         if !entries.contains_key(id)
             && BuiltInProviderId::parse(id).is_none()
             && id != crate::agent::zai::ZAI_PROVIDER_ID
+            && id != crate::agent::dashscope::DASHSCOPE_PROVIDER_ID
         {
             let service =
                 ProviderService::from_model_providers(&entries).map_err(|e| e.to_string())?;

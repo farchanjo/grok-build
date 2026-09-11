@@ -657,6 +657,28 @@ impl SessionActor {
         });
         let zai_thinking =
             is_zai.then(|| serde_json::json!({"type": "enabled", "clear_thinking": false}));
+        // DashScope Qwen3 thinking knobs: identity-gated on the resolved
+        // provider, values come from provider TOML (tri-state toggle).
+        let (dashscope_enable_thinking, dashscope_thinking_budget) = resolved_entry
+            .and_then(|entry| entry.model_provider.as_ref())
+            .filter(|provider| {
+                provider.kind == crate::agent::model_providers::ModelProviderKind::DashScope
+                    || provider.id == crate::agent::dashscope::DASHSCOPE_PROVIDER_ID
+            })
+            .map(|provider| {
+                (
+                    provider.dashscope_enable_thinking,
+                    provider.dashscope_thinking_budget.filter(|&n| n > 0),
+                )
+            })
+            .unwrap_or((None, None));
+        // vLLM/SGLang chat_template_kwargs: populated upstream in
+        // ModelProviderConfig::resolved() only for a compatible kind with a
+        // vLLM-family dialect, so any value on the resolved provider is
+        // already legitimate.
+        let vllm_chat_template_kwargs = resolved_entry
+            .and_then(|entry| entry.model_provider.as_ref())
+            .and_then(|provider| provider.vllm_chat_template_kwargs.clone());
 
         // Production route sidecar for exact-source credential resolution.
         let grok_home = self.auth_manager.as_ref().map(|am| am.grok_home());
@@ -741,6 +763,9 @@ impl SessionActor {
             openrouter_pacing: self.openrouter_pacing.get(),
             zai_tool_stream: is_zai,
             zai_thinking,
+            dashscope_enable_thinking,
+            dashscope_thinking_budget,
+            vllm_chat_template_kwargs,
             api_backend: cfg.api_backend,
             wire_dialect: resolved_entry.and_then(|e| {
                 e.model_provider
@@ -1737,6 +1762,7 @@ impl SessionActor {
             ProviderIdentity::Anthropic => "anthropic",
             ProviderIdentity::Xai => return None,
             ProviderIdentity::Zai => "zai",
+            ProviderIdentity::DashScope => "dashscope",
             ProviderIdentity::Custom => {
                 provider_id.as_ref()?;
                 "custom"
@@ -1749,6 +1775,7 @@ impl SessionActor {
             ModelProviderKind::Anthropic => "Anthropic".to_owned(),
             ModelProviderKind::Xai => return None,
             ModelProviderKind::Zai => "Z.ai".to_owned(),
+            ModelProviderKind::DashScope => "Alibaba Model Studio".to_owned(),
             ModelProviderKind::OpenAiCompatible => provider_id.clone(),
         };
 

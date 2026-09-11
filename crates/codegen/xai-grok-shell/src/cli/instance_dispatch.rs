@@ -420,6 +420,16 @@ fn resolve_app_token(instance: &SelectedInstance, home: &Path, pid: &ProviderId)
                 .ok()
                 .flatten()
         }
+        "dashscope" => {
+            if let Ok(v) = std::env::var(crate::agent::dashscope::DASHSCOPE_ENV_KEY)
+                && !v.trim().is_empty()
+            {
+                return Some(v);
+            }
+            read_provider_secret(home, &application_key_scope_for_kind(pid, instance.kind))
+                .ok()
+                .flatten()
+        }
         _ => read_provider_secret(home, &application_key_scope_for_kind(pid, instance.kind))
             .ok()
             .flatten(),

@@ -56,15 +56,23 @@ impl WireDialect {
         }
     }
 
+    /// Whether this dialect belongs to the vLLM/SGLang server family.
+    /// vLLM-native request extensions (`chat_template_kwargs`) serialize only
+    /// for these dialects; the standard OpenAI-compatible wire has no such
+    /// field and strict servers may reject unknown keys.
+    pub const fn is_vllm_family(self) -> bool {
+        matches!(self, Self::Vllm | Self::Sglang)
+    }
+
     /// Whether reasoning is expected under the vLLM/SGLang `reasoning` key
     /// (as opposed to OpenAI-compatible `reasoning_content`).
     pub const fn uses_reasoning_key(self) -> bool {
-        matches!(self, Self::Vllm | Self::Sglang)
+        self.is_vllm_family()
     }
 
     /// Whether replayed assistant reasoning should be stripped.
     pub const fn strips_reasoning_echo(self) -> bool {
-        matches!(self, Self::Vllm | Self::Sglang)
+        self.is_vllm_family()
     }
 }
 

@@ -17,6 +17,8 @@ pub enum RouteProviderKind {
     Anthropic,
     OpenAiCompatible,
     Zai,
+    #[serde(rename = "dashscope")]
+    DashScope,
     Custom,
 }
 
@@ -29,6 +31,7 @@ impl RouteProviderKind {
             Self::Anthropic => "anthropic",
             Self::OpenAiCompatible => "openai_compatible",
             Self::Zai => "zai",
+            Self::DashScope => "dashscope",
             Self::Custom => "custom",
         }
     }
@@ -45,6 +48,7 @@ impl RouteProviderKind {
             "anthropic" => Some(Self::Anthropic),
             "openai_compatible" => Some(Self::OpenAiCompatible),
             "zai" => Some(Self::Zai),
+            "dashscope" => Some(Self::DashScope),
             "custom" => Some(Self::Custom),
             _ => None,
         }
@@ -677,7 +681,9 @@ fn default_surface_and_route(kind: RouteProviderKind) -> (RouteApiSurface, Route
             RouteApiSurface::AnthropicMessages,
             RouteCredentialRoute::ApiKey,
         ),
-        RouteProviderKind::Zai | RouteProviderKind::OpenAiCompatible => (
+        RouteProviderKind::Zai
+        | RouteProviderKind::DashScope
+        | RouteProviderKind::OpenAiCompatible => (
             RouteApiSurface::OpenAiCompatibleSubset,
             RouteCredentialRoute::ApiKey,
         ),

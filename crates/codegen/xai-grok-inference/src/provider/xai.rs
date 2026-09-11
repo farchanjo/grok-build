@@ -7,8 +7,8 @@
 //!   (`include_message_model_id = true`).
 //! - Generic rate-limit threshold (no OpenRouter env override).
 
-use super::{AuthScheme, ProviderAdapter, ProviderKind, ProviderPolicy, RequestContext};
 use super::RequestExtensions;
+use super::{AuthScheme, ProviderAdapter, ProviderKind, ProviderPolicy, RequestContext};
 use crate::route_context::RouteProviderKind;
 use xai_grok_inference_types::{ApiBackend, ChatChunkDelta};
 
@@ -98,10 +98,7 @@ mod tests {
         assert!(policy.usage_policy.include_message_model_id);
         assert!(policy.usage_policy.first_party);
         assert!(!policy.usage_policy.openrouter_metadata);
-        assert_eq!(
-            policy.pacing_default,
-            crate::provider::PacingDefault::None
-        );
+        assert_eq!(policy.pacing_default, crate::provider::PacingDefault::None);
     }
 
     #[test]

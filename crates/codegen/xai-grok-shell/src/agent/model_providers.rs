@@ -42,6 +42,14 @@ pub enum ModelProviderKind {
     /// First-class Z.ai Model API profile (`https://api.z.ai/api/paas/v4`).
     #[serde(rename = "zai")]
     Zai,
+    /// First-class Alibaba DashScope / Model Studio profile
+    /// (`https://dashscope-intl.aliyuncs.com/compatible-mode/v1`).
+    ///
+    /// OpenAI-compatible wire with its own identity so the Qwen3 thinking
+    /// extensions (`enable_thinking` / `thinking_budget`) serialize only for
+    /// it. Never inherits OpenRouter defaults.
+    #[serde(rename = "dashscope")]
+    DashScope,
 }
 
 impl ModelProviderKind {
@@ -50,7 +58,7 @@ impl ModelProviderKind {
     pub const fn is_openai_compatible_family(self) -> bool {
         matches!(
             self,
-            Self::OpenAiCompatible | Self::OpenAi | Self::OpenRouter | Self::Zai
+            Self::OpenAiCompatible | Self::OpenAi | Self::OpenRouter | Self::Zai | Self::DashScope
         )
     }
 
@@ -62,6 +70,7 @@ impl ModelProviderKind {
             Self::OpenRouter => "openrouter",
             Self::Anthropic => "anthropic",
             Self::Zai => "zai",
+            Self::DashScope => "dashscope",
         }
     }
 }
@@ -79,6 +88,7 @@ impl From<ModelProviderKind> for crate::provider_registry::ProviderKind {
             ModelProviderKind::OpenRouter => ProviderKind::OpenRouter,
             ModelProviderKind::Anthropic => ProviderKind::Anthropic,
             ModelProviderKind::Zai => ProviderKind::Zai,
+            ModelProviderKind::DashScope => ProviderKind::DashScope,
         }
     }
 }
@@ -173,6 +183,16 @@ pub struct ResolvedModelProvider {
     /// override replaces the provider-level value; absent override inherits.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub openrouter_pacing: bool,
+    /// DashScope Qwen3 thinking toggle, populated only for `kind = "dashscope"`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dashscope_enable_thinking: Option<bool>,
+    /// DashScope Qwen3 thinking budget, populated only for `kind = "dashscope"`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dashscope_thinking_budget: Option<u32>,
+    /// vLLM/SGLang `chat_template_kwargs`, populated only for
+    /// `kind = "openai_compatible"` with a vLLM-family `dialect`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vllm_chat_template_kwargs: Option<serde_json::Value>,
     /// Provider-wide request `max_tokens` used when a model does not set
     /// [`super::config::ConfigModelOverride::max_completion_tokens`].
     /// OpenRouter (`kind = "openrouter"`) treats an unset value as
@@ -265,6 +285,24 @@ pub struct ModelProviderConfig {
     /// override replaces this value for that model.
     #[serde(default)]
     pub openrouter_pacing: bool,
+    /// DashScope Qwen3 hybrid-thinking toggle (`enable_thinking`). Ignored
+    /// unless `kind = "dashscope"`. Tri-state: `false` explicitly disables
+    /// thinking on models that think by default; absent means the model
+    /// default applies.
+    #[serde(default)]
+    pub dashscope_enable_thinking: Option<bool>,
+    /// DashScope Qwen3 reasoning-phase token cap (`thinking_budget`). Ignored
+    /// unless `kind = "dashscope"`. On exhaustion the model stops thinking and
+    /// answers.
+    #[serde(default)]
+    pub dashscope_thinking_budget: Option<u32>,
+    /// vLLM/SGLang `chat_template_kwargs` request-body pass-through (e.g.
+    /// `{ enable_thinking = false }` to disable hybrid thinking on Qwen3
+    /// servers). Ignored unless `kind = "openai_compatible"` with a
+    /// `dialect = "vllm"` / `"sglang"` wire. A JSON object mapped verbatim
+    /// onto the `chat_template_kwargs` key.
+    #[serde(default)]
+    pub vllm_chat_template_kwargs: Option<serde_json::Value>,
     /// Provider-wide default request `max_tokens`. Absent OpenRouter
     /// instances use [`OPENROUTER_DEFAULT_MAX_COMPLETION_TOKENS`].
     #[serde(default)]
@@ -314,6 +352,9 @@ impl Default for ModelProviderConfig {
             provider_preferences: None,
             plugins: Vec::new(),
             openrouter_pacing: false,
+            dashscope_enable_thinking: None,
+            dashscope_thinking_budget: None,
+            vllm_chat_template_kwargs: None,
             max_completion_tokens: None,
             pool_max_idle: None,
             pool_idle_timeout_secs: None,
@@ -359,6 +400,27 @@ impl ModelProviderConfig {
             // need an explicit way to enable spacing without claiming native
             // OpenRouter request extensions.
             openrouter_pacing,
+            // DashScope thinking extensions are identity-gated: the wire keys
+            // are DashScope-only and non-DashScope backends may reject them.
+            dashscope_enable_thinking: (self.kind == ModelProviderKind::DashScope)
+                .then_some(self.dashscope_enable_thinking)
+                .flatten(),
+            dashscope_thinking_budget: (self.kind == ModelProviderKind::DashScope)
+                .then_some(self.dashscope_thinking_budget)
+                .flatten(),
+            // `chat_template_kwargs` is dialect-gated: only the compatible
+            // family with a vLLM-family wire serializes it, and only a
+            // non-empty JSON object (an empty/non-object value is server
+            // noise or a 400 on strict vLLM builds).
+            vllm_chat_template_kwargs: (self.kind == ModelProviderKind::OpenAiCompatible
+                && self.dialect.is_some_and(|d| d.is_vllm_family()))
+            .then(|| {
+                self.vllm_chat_template_kwargs
+                    .as_ref()
+                    .filter(|v| v.as_object().is_some_and(|o| !o.is_empty()))
+            })
+            .flatten()
+            .cloned(),
             max_completion_tokens: self.max_completion_tokens.filter(|&n| n > 0),
             dialect: self.dialect,
             command: self.command.clone(),
@@ -680,6 +742,11 @@ impl ConfigModelOverride {
             provider_preferences,
             plugins,
             openrouter_pacing,
+            // Read by `ModelProviderConfig::resolved()` directly from the
+            // provider; a model-level override does not exist yet.
+            dashscope_enable_thinking: _,
+            dashscope_thinking_budget: _,
+            vllm_chat_template_kwargs: _,
             max_completion_tokens: _,
             pool_max_idle: _,
             pool_idle_timeout_secs: _,
@@ -2476,5 +2543,114 @@ mod tests {
             Some(crate::agent::zai::ZAI_DEFAULT_BASE_URL)
         );
         assert!(zai.api_key.is_none(), "never inline a Z.ai key");
+    }
+
+    #[test]
+    fn dashscope_profile_installs_with_compatible_mode_base() {
+        use super::super::providers::ProviderManager;
+        let mut model_providers = indexmap::IndexMap::new();
+        let mut config_models = indexmap::IndexMap::new();
+        ProviderManager::install_model_presets_into(&mut model_providers, &mut config_models);
+        let ds = model_providers
+            .get(crate::agent::dashscope::DASHSCOPE_PROVIDER_ID)
+            .expect("dashscope profile installed");
+        assert_eq!(ds.kind, super::ModelProviderKind::DashScope);
+        assert_eq!(
+            ds.base_url.as_deref(),
+            Some(crate::agent::dashscope::DASHSCOPE_DEFAULT_BASE_URL)
+        );
+        assert!(ds.api_key.is_none(), "never inline a DashScope key");
+    }
+
+    #[test]
+    fn dashscope_thinking_knobs_are_dropped_for_other_kinds() {
+        // `resolved()` is the identity gate: the wire keys serialize only for
+        // `kind = "dashscope"`, so another kind must lose the knobs.
+        let mut cfg = super::ModelProviderConfig {
+            kind: super::ModelProviderKind::OpenAiCompatible,
+            dashscope_enable_thinking: Some(true),
+            dashscope_thinking_budget: Some(1024),
+            ..Default::default()
+        };
+        let resolved = cfg.resolved("proxy", vec![], None, vec![], false);
+        assert_eq!(resolved.dashscope_enable_thinking, None);
+        assert_eq!(resolved.dashscope_thinking_budget, None);
+
+        cfg.kind = super::ModelProviderKind::DashScope;
+        let resolved = cfg.resolved("dashscope", vec![], None, vec![], false);
+        assert_eq!(resolved.dashscope_enable_thinking, Some(true));
+        assert_eq!(resolved.dashscope_thinking_budget, Some(1024));
+
+        // An explicit `false` toggle is still a knob and survives.
+        cfg.dashscope_enable_thinking = Some(false);
+        let resolved = cfg.resolved("dashscope", vec![], None, vec![], false);
+        assert_eq!(resolved.dashscope_enable_thinking, Some(false));
+    }
+
+    #[test]
+    fn vllm_chat_template_kwargs_gate_on_kind_and_dialect() {
+        use xai_grok_inference::provider::WireDialect;
+
+        let kwargs = serde_json::json!({"enable_thinking": false});
+        let mk = |kind, dialect, value: Option<serde_json::Value>| super::ModelProviderConfig {
+            kind,
+            dialect,
+            vllm_chat_template_kwargs: value,
+            ..Default::default()
+        };
+
+        // Compatible + vllm dialect + non-empty object → populated.
+        let resolved = mk(
+            super::ModelProviderKind::OpenAiCompatible,
+            Some(WireDialect::Vllm),
+            Some(kwargs.clone()),
+        )
+        .resolved("proxy", vec![], None, vec![], false);
+        assert_eq!(resolved.vllm_chat_template_kwargs, Some(kwargs.clone()));
+
+        // Compatible + sglang dialect → populated too.
+        let resolved = mk(
+            super::ModelProviderKind::OpenAiCompatible,
+            Some(WireDialect::Sglang),
+            Some(kwargs.clone()),
+        )
+        .resolved("proxy", vec![], None, vec![], false);
+        assert_eq!(resolved.vllm_chat_template_kwargs, Some(kwargs.clone()));
+
+        // Compatible + standard dialect → dropped (strict servers 400).
+        let resolved = mk(
+            super::ModelProviderKind::OpenAiCompatible,
+            Some(WireDialect::Standard),
+            Some(kwargs.clone()),
+        )
+        .resolved("proxy", vec![], None, vec![], false);
+        assert_eq!(resolved.vllm_chat_template_kwargs, None);
+
+        // Compatible + no dialect (implies standard) → dropped.
+        let resolved = mk(
+            super::ModelProviderKind::OpenAiCompatible,
+            None,
+            Some(kwargs.clone()),
+        )
+        .resolved("proxy", vec![], None, vec![], false);
+        assert_eq!(resolved.vllm_chat_template_kwargs, None);
+
+        // OpenAI kind + vllm dialect → dropped (kind gate).
+        let resolved = mk(
+            super::ModelProviderKind::OpenAi,
+            Some(WireDialect::Vllm),
+            Some(kwargs.clone()),
+        )
+        .resolved("proxy", vec![], None, vec![], false);
+        assert_eq!(resolved.vllm_chat_template_kwargs, None);
+
+        // vllm dialect + empty object → dropped (noise gate).
+        let resolved = mk(
+            super::ModelProviderKind::OpenAiCompatible,
+            Some(WireDialect::Vllm),
+            Some(serde_json::json!({})),
+        )
+        .resolved("proxy", vec![], None, vec![], false);
+        assert_eq!(resolved.vllm_chat_template_kwargs, None);
     }
 }

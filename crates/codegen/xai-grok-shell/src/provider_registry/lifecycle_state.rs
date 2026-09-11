@@ -29,6 +29,7 @@ const BUILTIN_OPENROUTER: &str = "00000000-0000-4000-8000-000000000002";
 const BUILTIN_XAI: &str = "00000000-0000-4000-8000-000000000003";
 const BUILTIN_ANTHROPIC: &str = "00000000-0000-4000-8000-000000000004";
 const BUILTIN_ZAI: &str = "00000000-0000-4000-8000-000000000005";
+const BUILTIN_DASHSCOPE: &str = "00000000-0000-4000-8000-000000000006";
 
 /// One live configured (or restored) instance record.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -112,7 +113,10 @@ impl ProviderLifecycleState {
         restore: bool,
     ) -> Result<ProviderIncarnation, LifecycleStateError> {
         let key = id.as_str();
-        if BuiltInProviderId::parse(key).is_some() || key == crate::agent::zai::ZAI_PROVIDER_ID {
+        if BuiltInProviderId::parse(key).is_some()
+            || key == crate::agent::zai::ZAI_PROVIDER_ID
+            || key == crate::agent::dashscope::DASHSCOPE_PROVIDER_ID
+        {
             return stable_builtin_incarnation(key).ok_or(LifecycleStateError::InvalidId);
         }
         if let Some(existing) = self.instances.get(key) {
@@ -433,6 +437,7 @@ pub fn stable_builtin_incarnation(id: &str) -> Option<ProviderIncarnation> {
         Some(BuiltInProviderId::Xai) => BUILTIN_XAI,
         Some(BuiltInProviderId::Anthropic) => BUILTIN_ANTHROPIC,
         None if id == crate::agent::zai::ZAI_PROVIDER_ID => BUILTIN_ZAI,
+        None if id == crate::agent::dashscope::DASHSCOPE_PROVIDER_ID => BUILTIN_DASHSCOPE,
         None => return None,
     };
     ProviderIncarnation::new(raw).ok()

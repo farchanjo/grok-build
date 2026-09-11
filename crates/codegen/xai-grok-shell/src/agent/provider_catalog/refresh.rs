@@ -297,7 +297,10 @@ async fn refresh_one_account(
     }
 
     let live = match target.identity.kind {
-        ProviderKind::OpenAi | ProviderKind::OpenAiCompatible | ProviderKind::Zai => {
+        ProviderKind::OpenAi
+        | ProviderKind::OpenAiCompatible
+        | ProviderKind::Zai
+        | ProviderKind::DashScope => {
             fetch_openai_catalog(
                 &target.models_list_url,
                 target.credential.token(),

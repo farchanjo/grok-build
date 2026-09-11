@@ -737,6 +737,8 @@ impl ProviderManager {
             .or_insert_with(grok_build_anthropic_config);
         // First-class Z.ai Model API profile (credentials never inlined).
         super::zai::install_zai_provider(model_providers);
+        // First-class Alibaba DashScope / Model Studio profile.
+        super::dashscope::install_dashscope_provider(model_providers);
         let openrouter_configured = credential_lookup_manager()
             .api_key(ProviderId::OpenRouter)
             .ok()
@@ -2412,7 +2414,10 @@ pub(crate) fn missing_api_key_provider(model: &super::config::ModelEntry) -> Opt
         ModelProviderKind::OpenAi => ProviderId::OpenAi,
         ModelProviderKind::OpenRouter => ProviderId::OpenRouter,
         ModelProviderKind::Anthropic => ProviderId::Anthropic,
-        ModelProviderKind::OpenAiCompatible | ModelProviderKind::Zai | ModelProviderKind::Xai => {
+        ModelProviderKind::OpenAiCompatible
+        | ModelProviderKind::Zai
+        | ModelProviderKind::DashScope
+        | ModelProviderKind::Xai => {
             return None;
         }
     };
@@ -4273,6 +4278,9 @@ mod tests {
             openrouter_provider_preferences: None,
             openrouter_plugins: Vec::new(),
             openrouter_pacing: true,
+            dashscope_enable_thinking: None,
+            dashscope_thinking_budget: None,
+            vllm_chat_template_kwargs: None,
             max_completion_tokens: None,
             dialect: None,
             command: Vec::new(),
@@ -5080,6 +5088,9 @@ mod tests {
                 openrouter_provider_preferences: None,
                 openrouter_plugins: Vec::new(),
                 openrouter_pacing: false,
+                dashscope_enable_thinking: None,
+                dashscope_thinking_budget: None,
+                vllm_chat_template_kwargs: None,
                 max_completion_tokens: None,
                 dialect: None,
                 command: Vec::new(),
@@ -6075,6 +6086,9 @@ mod tests {
                 openrouter_provider_preferences: None,
                 openrouter_plugins: Vec::new(),
                 openrouter_pacing: false,
+                dashscope_enable_thinking: None,
+                dashscope_thinking_budget: None,
+                vllm_chat_template_kwargs: None,
                 max_completion_tokens: None,
                 dialect: None,
                 command: Vec::new(),

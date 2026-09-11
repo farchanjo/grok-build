@@ -7,10 +7,8 @@
 //! - Z.ai keeps a plain bearer key; no first-party headers, no OpenRouter
 //!   metadata/body, and it rejects the non-standard `model_id` metadata.
 
-use super::{
-    AuthScheme, ProviderAdapter, ProviderKind, ProviderPolicy, ReasoningEcho,
-};
-use super::{RequestContext, RequestExtensions, ReasoningWire};
+use super::{AuthScheme, ProviderAdapter, ProviderKind, ProviderPolicy, ReasoningEcho};
+use super::{ReasoningWire, RequestContext, RequestExtensions};
 use crate::route_context::RouteProviderKind;
 use xai_grok_inference_types::ApiBackend;
 

@@ -4,6 +4,8 @@ pub mod auth_method;
 pub mod chat_modes;
 pub mod config;
 pub mod config_model_override_parse;
+/// First-class Alibaba DashScope / Model Studio profile and wire extensions.
+pub mod dashscope;
 pub mod execution_backend;
 mod ext_parsers;
 pub mod external_runtime;

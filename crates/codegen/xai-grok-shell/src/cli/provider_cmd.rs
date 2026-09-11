@@ -609,11 +609,12 @@ fn capability_report(id: &str) -> serde_json::Value {
     let openrouter = id == "openrouter";
     let anthropic = id == "anthropic";
     let zai = id == "zai" || id == "zai-model-api";
+    let dashscope = id == "dashscope";
     json!({
         "provider_id": id,
         "openai_compatibility": {
-            "chat_completions": if zai { "supported" } else { "unknown" },
-            "responses": if openrouter { "supported" } else if zai { "unknown" } else { "unknown" },
+            "chat_completions": if zai || dashscope { "supported" } else { "unknown" },
+            "responses": if openrouter { "supported" } else if zai || dashscope { "unknown" } else { "unknown" },
             "embeddings": "unknown",
             "note": "Per-provider capability is distinct from client completeness"
         },

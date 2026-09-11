@@ -59,6 +59,17 @@ pub enum ProviderIdentity {
     /// every non-OpenRouter third-party identity).
     #[serde(rename = "zai")]
     Zai,
+    /// First-class Alibaba DashScope / Model Studio profile
+    /// (`https://dashscope-intl.aliyuncs.com/compatible-mode/v1`).
+    ///
+    /// Distinct from `Custom` OpenAI-compatible backends. DashScope speaks the
+    /// OpenAI-compatible chat wire (reasoning in `delta.reasoning_content`) but
+    /// carries its own identity so the Qwen3 thinking extensions
+    /// (`enable_thinking` / `thinking_budget`) serialize only for it. Authority
+    /// stays `Unverified` and it never paces (conservative, like every
+    /// non-OpenRouter third-party identity).
+    #[serde(rename = "dashscope")]
+    DashScope,
 }
 
 /// OpenRouter routing `sort`: string shorthand (`"latency"`) or object form
@@ -270,6 +281,7 @@ impl ProviderIdentity {
             ProviderIdentity::OpenRouter => "OpenRouter",
             ProviderIdentity::Anthropic => "Anthropic",
             ProviderIdentity::Zai => "Z.ai",
+            ProviderIdentity::DashScope => "Alibaba Model Studio",
             ProviderIdentity::Custom => "the model provider",
         }
     }
@@ -357,6 +369,25 @@ pub struct InferenceConfig {
     /// Only serialized when present and the Z.ai profile is active.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub zai_thinking: Option<serde_json::Value>,
+    /// DashScope (Alibaba Model Studio): Qwen3 hybrid-thinking toggle
+    /// (`enable_thinking`). Tri-state so an explicit `false` still reaches
+    /// the wire (some Qwen3 models think by default). Only serialized when
+    /// present and the DashScope profile is active; never for other providers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dashscope_enable_thinking: Option<bool>,
+    /// DashScope (Alibaba Model Studio): reasoning-phase token cap
+    /// (`thinking_budget`). On exhaustion the model stops thinking and
+    /// answers. Only serialized when present and the DashScope profile is
+    /// active; never for other providers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dashscope_thinking_budget: Option<u32>,
+    /// vLLM/SGLang `chat_template_kwargs` pass-through object (e.g.
+    /// `{"enable_thinking": false}` to disable hybrid thinking on Qwen3
+    /// servers, or `{"top_k": 20}`). Only serialized when present and the
+    /// adapter serves a vLLM-family wire dialect (`dialect = "vllm"` /
+    /// `"sglang"`); a non-empty JSON object is required at serialization.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vllm_chat_template_kwargs: Option<serde_json::Value>,
     pub api_backend: ApiBackend,
     /// Optional OpenAI-compatible wire dialect (vLLM, SGLang). This tunes
     /// request-side reasoning keys, the reasoning echo policy, and per-delta
@@ -499,6 +530,9 @@ impl std::fmt::Debug for InferenceConfig {
             .field("openrouter_pacing", &self.openrouter_pacing)
             .field("zai_tool_stream", &self.zai_tool_stream)
             .field("zai_thinking", &self.zai_thinking)
+            .field("dashscope_enable_thinking", &self.dashscope_enable_thinking)
+            .field("dashscope_thinking_budget", &self.dashscope_thinking_budget)
+            .field("vllm_chat_template_kwargs", &self.vllm_chat_template_kwargs)
             .field("api_backend", &self.api_backend)
             .field("wire_dialect", &self.wire_dialect)
             .field("include_message_model_id", &self.include_message_model_id)
@@ -559,6 +593,9 @@ impl Default for InferenceConfig {
             openrouter_pacing: false,
             zai_tool_stream: false,
             zai_thinking: None,
+            dashscope_enable_thinking: None,
+            dashscope_thinking_budget: None,
+            vllm_chat_template_kwargs: None,
             api_backend: ApiBackend::default(),
             wire_dialect: None,
             include_message_model_id: true,
