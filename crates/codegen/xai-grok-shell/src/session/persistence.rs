@@ -4098,8 +4098,12 @@ mod resumed_sandbox_profile_tests {
         assert_eq!(picked.info.id.0.as_ref(), "valid");
     }
 
+    /// `1b25d995` widened the picker's skip from `NotFound` to *every*
+    /// `RelocationError::Io`, so one unreadable entry can no longer abort the
+    /// whole list. A `PermissionDenied` newer sibling is skipped and the
+    /// readable older one wins. Errors outside `Io`/`Json` still propagate.
     #[test]
-    fn most_recent_cwd_propagates_non_not_found_io_errors() {
+    fn most_recent_cwd_skips_non_not_found_io_errors_and_picks_readable() {
         let tmp = TempDir::new().unwrap();
         let root = tmp.path().join("sessions");
         let cwd = "/work/proj";
@@ -4123,7 +4127,7 @@ mod resumed_sandbox_profile_tests {
         );
         let view = RelocationView::load_for_sessions_root(&root).unwrap();
 
-        let error = most_recent_local_summary_for_cwd_in_view(cwd, &view, |session_dir| {
+        let picked = most_recent_local_summary_for_cwd_in_view(cwd, &view, |session_dir| {
             if session_dir.ends_with("unreadable-newer") {
                 Err(RelocationError::Io {
                     operation: "read",
@@ -4134,12 +4138,9 @@ mod resumed_sandbox_profile_tests {
                 read_summary_from_dir(session_dir)
             }
         })
-        .unwrap_err();
-        assert!(matches!(
-            error,
-            RelocationError::Io { source, .. }
-                if source.kind() == io::ErrorKind::PermissionDenied
-        ));
+        .unwrap()
+        .expect("the readable sibling must still be picked");
+        assert_eq!(picked.info.id.0.as_ref(), "older");
     }
 
     #[test]
@@ -4227,10 +4228,48 @@ mod resumed_sandbox_profile_tests {
     }
 }
 
+/// Test-only: plant a schema-valid `summary.json` for `session_id` under
+/// `<root>/<encoded cwd>/`, returning the session directory.
+///
+/// Resume resolution decides resumability by *deserializing* `summary.json`
+/// into [`Summary`] (`is_persisted_session_dir` → `read_summary_contained`), so
+/// a hand-rolled `{}` — or an object carrying only the field under test — is
+/// discarded as malformed and the resolver silently returns `None` instead of
+/// failing loudly. Building through the production constructor keeps these
+/// fixtures from drifting when `Summary` gains another required field;
+/// `mutate` applies the per-test overrides afterwards.
+#[cfg(test)]
+pub(crate) fn plant_summary(
+    root: &Path,
+    cwd: &str,
+    session_id: &str,
+    mutate: impl FnOnce(&mut Summary),
+) -> PathBuf {
+    let dir = root
+        .join(crate::util::grok_home::encode_cwd_dirname(cwd))
+        .join(session_id);
+    std::fs::create_dir_all(&dir).expect("create session dir");
+    let mut summary = Summary::new(
+        &Info {
+            id: acp::SessionId::new(session_id),
+            cwd: cwd.to_owned(),
+        },
+        default_model_id(),
+    )
+    .expect("build summary fixture");
+    mutate(&mut summary);
+    std::fs::write(
+        dir.join("summary.json"),
+        serde_json::to_vec(&summary).expect("serialize summary fixture"),
+    )
+    .expect("write summary fixture");
+    dir
+}
+
 #[cfg(test)]
 mod session_exists_for_cwd_tests {
     use super::{
-        resolve_local_session_any_cwd_in_root, session_exists_for_cwd_in_root,
+        plant_summary, resolve_local_session_any_cwd_in_root, session_exists_for_cwd_in_root,
         session_exists_in_root,
     };
     use std::fs;
@@ -4243,10 +4282,7 @@ mod session_exists_for_cwd_tests {
         let cwd = "/project/alpha";
         let session_id = "my-session";
 
-        let encoded = crate::util::grok_home::encode_cwd_dirname(cwd);
-        let dir = root.join(&encoded).join(session_id);
-        fs::create_dir_all(&dir).unwrap();
-        fs::write(dir.join("summary.json"), b"{}").unwrap();
+        plant_summary(&root, cwd, session_id, |_| {});
 
         assert!(session_exists_for_cwd_in_root(session_id, cwd, &root));
     }
@@ -4281,10 +4317,7 @@ mod session_exists_for_cwd_tests {
         let session_id = "cross-cwd-session";
 
         // Create the session only under cwd-A (a real session has a summary.json).
-        let encoded_a = crate::util::grok_home::encode_cwd_dirname("/project/alpha");
-        let dir_a = root.join(&encoded_a).join(session_id);
-        fs::create_dir_all(&dir_a).unwrap();
-        fs::write(dir_a.join("summary.json"), b"{}").unwrap();
+        plant_summary(&root, "/project/alpha", session_id, |_| {});
 
         // Global scan (old behaviour) finds it — this is the incorrect check
         assert!(
@@ -4333,10 +4366,7 @@ mod session_exists_for_cwd_tests {
 
         // Real session under cwd-A.
         let cwd_a = "/project/alpha";
-        let encoded_a = crate::util::grok_home::encode_cwd_dirname(cwd_a);
-        let dir_a = root.join(&encoded_a).join(session_id);
-        fs::create_dir_all(&dir_a).unwrap();
-        fs::write(dir_a.join("summary.json"), b"{}").unwrap();
+        plant_summary(&root, cwd_a, session_id, |_| {});
 
         // Images-only stub for the SAME id under cwd-B.
         let cwd_b = "/project/beta";
@@ -4357,10 +4387,15 @@ mod session_exists_for_cwd_tests {
 
 #[cfg(test)]
 mod find_local_child_tests {
-    use super::find_local_child_for_remote_in_root;
+    use super::{find_local_child_for_remote_in_root, plant_summary};
+    use chrono::{DateTime, Utc};
     use filetime::{self, FileTime};
     use std::fs;
     use tempfile::TempDir;
+
+    fn ts(raw: &str) -> DateTime<Utc> {
+        raw.parse().expect("timestamp fixture")
+    }
 
     fn make_session_with_parent(
         root: &std::path::Path,
@@ -4368,11 +4403,9 @@ mod find_local_child_tests {
         session_id: &str,
         parent_id: &str,
     ) {
-        let encoded = crate::util::grok_home::encode_cwd_dirname(cwd);
-        let dir = root.join(&encoded).join(session_id);
-        fs::create_dir_all(&dir).unwrap();
-        let summary = serde_json::json!({ "parent_session_id": parent_id });
-        fs::write(dir.join("summary.json"), summary.to_string()).unwrap();
+        plant_summary(root, cwd, session_id, |summary| {
+            summary.parent_session_id = Some(parent_id.to_owned());
+        });
     }
 
     #[test]
@@ -4427,25 +4460,17 @@ mod find_local_child_tests {
         let tmp = TempDir::new().unwrap();
         let root = tmp.path().join("sessions");
         let cwd = "/project";
-        let encoded = crate::util::grok_home::encode_cwd_dirname(cwd);
-
         // Older child — earlier timestamp.
-        let old_dir = root.join(&encoded).join("old-child");
-        fs::create_dir_all(&old_dir).unwrap();
-        fs::write(
-            old_dir.join("summary.json"),
-            r#"{"parent_session_id":"remote-parent","updated_at":"2026-01-01T10:00:00Z"}"#,
-        )
-        .unwrap();
+        plant_summary(&root, cwd, "old-child", |summary| {
+            summary.parent_session_id = Some("remote-parent".to_owned());
+            summary.updated_at = ts("2026-01-01T10:00:00Z");
+        });
 
         // Newer child — later timestamp.
-        let new_dir = root.join(&encoded).join("new-child");
-        fs::create_dir_all(&new_dir).unwrap();
-        fs::write(
-            new_dir.join("summary.json"),
-            r#"{"parent_session_id":"remote-parent","updated_at":"2026-06-01T10:00:00Z"}"#,
-        )
-        .unwrap();
+        plant_summary(&root, cwd, "new-child", |summary| {
+            summary.parent_session_id = Some("remote-parent".to_owned());
+            summary.updated_at = ts("2026-06-01T10:00:00Z");
+        });
 
         let found = find_local_child_for_remote_in_root("remote-parent", cwd, &root);
         assert_eq!(
@@ -4463,18 +4488,14 @@ mod find_local_child_tests {
         let tmp = TempDir::new().unwrap();
         let root = tmp.path().join("sessions");
         let cwd = "/project-tie";
-        let encoded = crate::util::grok_home::encode_cwd_dirname(cwd);
         let same_ts = "2026-03-15T12:00:00Z";
 
         let mut dirs = Vec::new();
         for name in ["aaaa-uuid", "zzzz-uuid", "mmmm-uuid"] {
-            let dir = root.join(&encoded).join(name);
-            fs::create_dir_all(&dir).unwrap();
-            fs::write(
-                dir.join("summary.json"),
-                format!(r#"{{"parent_session_id":"remote-tie","updated_at":"{same_ts}"}}"#),
-            )
-            .unwrap();
+            let dir = plant_summary(&root, cwd, name, |summary| {
+                summary.parent_session_id = Some("remote-tie".to_owned());
+                summary.updated_at = ts(same_ts);
+            });
             dirs.push(dir);
         }
 
@@ -4499,7 +4520,9 @@ mod find_local_child_tests {
 
 #[cfg(test)]
 mod resolve_local_session_tests {
-    use super::{find_local_child_for_remote_in_root, session_exists_for_cwd_in_root};
+    use super::{
+        find_local_child_for_remote_in_root, plant_summary, session_exists_for_cwd_in_root,
+    };
     use std::fs;
     use tempfile::TempDir;
 
@@ -4509,18 +4532,13 @@ mod resolve_local_session_tests {
     // For unit isolation, we test the equivalent logic via the inner helpers.
 
     fn setup_session(root: &std::path::Path, cwd: &str, session_id: &str) {
-        let encoded = crate::util::grok_home::encode_cwd_dirname(cwd);
-        let dir = root.join(&encoded).join(session_id);
-        fs::create_dir_all(&dir).unwrap();
-        fs::write(dir.join("summary.json"), b"{}").unwrap();
+        plant_summary(root, cwd, session_id, |_| {});
     }
 
     fn setup_child_session(root: &std::path::Path, cwd: &str, child_id: &str, parent_id: &str) {
-        let encoded = crate::util::grok_home::encode_cwd_dirname(cwd);
-        let dir = root.join(&encoded).join(child_id);
-        fs::create_dir_all(&dir).unwrap();
-        let summary = serde_json::json!({ "parent_session_id": parent_id });
-        fs::write(dir.join("summary.json"), summary.to_string()).unwrap();
+        plant_summary(root, cwd, child_id, |summary| {
+            summary.parent_session_id = Some(parent_id.to_owned());
+        });
     }
 
     #[test]
@@ -4601,20 +4619,14 @@ mod repo_wide_resolution_tests {
     use std::fs;
 
     fn setup_session(root: &Path, cwd: &str, session_id: &str) {
-        let encoded = crate::util::grok_home::encode_cwd_dirname(cwd);
-        let dir = root.join(&encoded).join(session_id);
-        fs::create_dir_all(&dir).unwrap();
-        fs::write(dir.join("summary.json"), b"{}").unwrap();
+        plant_summary(root, cwd, session_id, |_| {});
     }
 
     fn setup_child_session(root: &Path, cwd: &str, child_id: &str, parent_id: &str) {
-        let encoded = crate::util::grok_home::encode_cwd_dirname(cwd);
-        let dir = root.join(&encoded).join(child_id);
-        fs::create_dir_all(&dir).unwrap();
-        let summary = format!(
-            r#"{{"session_id":"{child_id}","parent_session_id":"{parent_id}","updated_at":"2024-01-01T00:00:00Z"}}"#
-        );
-        fs::write(dir.join("summary.json"), summary).unwrap();
+        plant_summary(root, cwd, child_id, |summary| {
+            summary.parent_session_id = Some(parent_id.to_owned());
+            summary.updated_at = "2024-01-01T00:00:00Z".parse().unwrap();
+        });
     }
 
     #[test]

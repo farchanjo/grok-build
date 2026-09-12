@@ -415,11 +415,19 @@ mod tests {
         );
     }
 
+    /// `lock_path_for_ws_url` / `socket_path_for_ws_url` are override-aware:
+    /// with `GROK_LEADER_SOCKET` exported — which the canonical development
+    /// environment always does — both return the override path and the
+    /// WS-URL-derived suffix vanishes, so asserting on the wrappers would
+    /// compare `Some("")` against the hash. Assert the derivation through the
+    /// pure `_in` helpers instead; `override_socket_path_wins_over_ws_url_derivation`
+    /// covers the override arm.
     #[test]
     fn derived_lock_and_socket_paths_match_suffix() {
+        let root = Path::new("/home/u/.grok");
         let ws_url = "wss://relay.staging.example/ws/code-agent";
-        let lock_path = lock_path_for_ws_url(ws_url);
-        let socket_path = socket_path_for_ws_url(ws_url);
+        let lock_path = lock_path_for_ws_url_in(root, ws_url);
+        let socket_path = socket_path_for_ws_url_in(root, ws_url);
 
         assert_eq!(
             ws_url_suffix_from_paths(&lock_path, &socket_path),

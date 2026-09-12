@@ -878,10 +878,7 @@ mod tests {
         let root = tmp.path();
         let exact_cwd = "/project/main";
         let sibling_cwd = "/project/worktree-1";
-        let encoded = crate::util::grok_home::encode_cwd_dirname(sibling_cwd);
-        let session_dir = root.join(&encoded).join("sess-remote-123");
-        std::fs::create_dir_all(&session_dir).unwrap();
-        std::fs::write(session_dir.join("summary.json"), b"{}").unwrap();
+        crate::session::persistence::plant_summary(root, sibling_cwd, "sess-remote-123", |_| {});
         let candidates: &[&str] = &[exact_cwd, sibling_cwd];
         let result = crate::session::persistence::resolve_local_session_for_repo_in_root(
             "sess-remote-123",

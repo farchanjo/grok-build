@@ -523,7 +523,11 @@ fn write_summary(
         agent_name: Some("benchmark-agent".to_owned()),
         sandbox_profile: Some("workspace".to_owned()),
         reasoning_effort: None,
-        execution_backend: crate::agent::execution_backend::ExecutionBackend::NativeInference,
+        conversation_language: None,
+        // `benches/` is a separate crate, so the shell path cannot be reached
+        // through `crate::`.
+        execution_backend:
+            xai_grok_shell::agent::execution_backend::ExecutionBackend::NativeInference,
         external_runtime: None,
     };
     let summary_path = session_dir.join("summary.json");
