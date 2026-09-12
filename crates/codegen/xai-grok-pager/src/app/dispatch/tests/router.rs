@@ -1962,6 +1962,8 @@ fn pager_registry_default_matches_agent_view_new_initializer() {
             // Action deep-link into the tools sheet; no runtime scalar.
             ("open_retrieval_settings", SettingKind::Status) => {}
             ("open_tools", SettingKind::Status) => {}
+            // Action deep-link into the subscriptions picker; no runtime scalar.
+            ("open_subscriptions", SettingKind::Status) => {}
             // Hint mirrors resolved from disk config, not AgentView state.
             ("repetition_guard", SettingKind::Bool { default }) => {
                 assert_eq!(

@@ -961,7 +961,12 @@ fn provider_operation_complete_token_race_safety() {
         });
     }
 
+    // Hermetic auth home: with no live OpenRouter source on disk the
+    // receipt-bearing completion must fail closed instead of re-resolving
+    // against whatever the developer's own profile happens to hold.
+    let auth_dir = tempfile::tempdir().expect("temp auth home");
     let mut app = test_app_with_agent();
+    app.auth_home_override = Some(auth_dir.path().to_path_buf());
     let id = AgentId(0);
     {
         let agent = app.agents.get_mut(&id).unwrap();

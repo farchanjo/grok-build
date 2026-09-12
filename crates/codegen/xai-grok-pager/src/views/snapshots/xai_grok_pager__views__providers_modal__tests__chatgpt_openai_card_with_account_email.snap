@@ -4,7 +4,7 @@ expression: rendered
 ---
                ┌─ Providers ─────────────────────────────────────────────────────────── [✗] ─┐
                │                                                                             │
-               │  Configure model providers. Keys are masked and are never written to confi  │
+               │  Configure model providers (gen 0). Keys are masked and never written to c  │
                │    xAI                                               [Key/connect missing]  │
                │      Grok/xAI account (OAuth) or xAI API key                                │
                │  › OpenAI                                             [         Connected]  │
@@ -20,7 +20,7 @@ expression: rendered
                │                                                                             │
                │                                                                             │
                │                                                                             │
-               │                                                                             │
                │    ↵ connect  |  c replace key  |  t test  |  d disconnect  |  r status     │
-               │                        s subscription  |  Esc close                         │
+               │     e edit  |  a add  |  y/n enable  |  R retrieval  |  s subscription      │
+               │                                  Esc close                                  │
                └─────────────────────────────────────────────────────────────────────────────┘

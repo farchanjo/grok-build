@@ -4,11 +4,11 @@ expression: rendered
 ---
                ┌─ Providers ─────────────────────────────────────────────────────────── [✗] ─┐
                │                                                                             │
-               │  Configure model providers. Keys are masked and are never written to confi  │
                │  ChatGPT subscription model overrides                                       │
                │  › GPT-5.6 Sol · 272000 tokens · compact @ 75%                              │
                │    GPT-5.5 · 400000 tokens · compact @ 85%                                  │
                │  Enter context window · a compact threshold · x clear · Esc back            │
+               │                                                                             │
                │                                                                             │
                │                                                                             │
                │                                                                             │

@@ -1863,6 +1863,9 @@ mod tests {
                 }
                 // Read-only runtime row; it has no scalar PagerLocalSnapshot default.
                 ("compaction_status", SettingKind::Status) => {}
+                // Deep-link row into the subscriptions picker; read-only, no
+                // scalar default.
+                ("open_subscriptions", SettingKind::Status) => {}
                 ("media_status", SettingKind::Status) => {
                     assert_eq!(
                         pager.media_status,

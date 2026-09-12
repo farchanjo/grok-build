@@ -268,6 +268,7 @@ mod tests {
             "context",
             "copy",
             "cost",
+            "create-skill",
             "dashboard",
             "debug",
             "docs",
@@ -297,6 +298,7 @@ mod tests {
             "loop",
             "m",
             "marketplace",
+            "max-tokens",
             "mcps",
             "minimal",
             "ml",
@@ -319,6 +321,9 @@ mod tests {
             "remember",
             "rename",
             "resume",
+            "retrieval",
+            "retrieval-config",
+            "retrieval-settings",
             "rewind",
             "scroll-debug",
             "session-info",
@@ -330,14 +335,17 @@ mod tests {
             "subagents",
             "summarize",
             "tasks",
+            "temperature",
             "terminal-check",
             "terminal-info",
             "terminal-setup",
+            "tersify",
             "theme",
             "timeline",
             "timestamps",
             "title",
             "toggle-mouse-reporting",
+            "top-p",
             "transcript",
             "t",
             "usage",
@@ -348,11 +356,22 @@ mod tests {
             "workflows",
             "yolo",
         ];
+        // Collect every missing key before failing: iterating one key per run
+        // costs a full compile cycle per newly added command otherwise.
+        let mut missing: Vec<String> = Vec::new();
         for command in builtin_commands() {
             for key in std::iter::once(command.name()).chain(command.aliases().iter().copied()) {
-                assert!(SHELL_RESERVED.contains(&key), "unreserved pager key {key}");
+                if !SHELL_RESERVED.contains(&key) {
+                    missing.push(key.to_owned());
+                }
             }
         }
+        missing.sort_unstable();
+        missing.dedup();
+        assert!(
+            missing.is_empty(),
+            "unreserved pager keys (add to SHELL_RESERVED): {missing:?}"
+        );
     }
     #[test]
     fn builtin_registry_lookup_by_alias() {

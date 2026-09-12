@@ -939,7 +939,9 @@ fn dispatch_open_reset_confirm_no_op_in_release_when_no_settings_modal() {
 /// like `("compact_mode", _) => Some(Action::SetTheme(...))`.
 /// This version dispatches the returned action and asserts the
 /// setting reads back at its registered default — catching both
-/// presence AND payload correctness.
+/// presence AND payload correctness. Rows with no in-memory mirror
+/// (disk-backed `[hints]` values) are checked through the deferred
+/// `Effect::PersistSetting` payload instead.
 #[test]
 fn every_setting_has_action_for_reset_arm() {
     use crate::settings::current_value_for;
@@ -965,13 +967,30 @@ fn every_setting_has_action_for_reset_arm() {
             }
             let mut app = test_app_with_agent();
             move_setting_away_from_default(&mut app, meta.key);
-            let _ = dispatch(action.unwrap(), &mut app);
+            let effects = dispatch(action.unwrap(), &mut app);
             let pager = build_pager_snapshot(&app);
             let reread = current_value_for(meta.key, &app.current_ui, &pager);
+            if reread == Some(default_value.clone()) {
+                continue;
+            }
+            // Disk-backed settings have no in-memory mirror: the `[hints]`
+            // tersify_* and repetition_guard rows read back through
+            // `config.toml`, and the reset only lands on disk once the
+            // returned `Effect::PersistSetting` is executed — which this test
+            // does not do (it never runs the effect loop). Accept the deferred
+            // write, but only when it carries the registered default, so a
+            // mis-mapped arm is still caught.
+            let deferred = effects.iter().find_map(|effect| match effect {
+                Effect::PersistSetting { key, value, .. } if *key == meta.key => {
+                    Some(value.clone())
+                }
+                _ => None,
+            });
             assert_eq!(
-                reread,
+                deferred,
                 Some(default_value.clone()),
-                "action_for_reset({}, ...) round-trip drift: dispatch did not restore the default",
+                "action_for_reset({}, ...) round-trip drift: dispatch neither restored the \
+                 default in memory nor emitted a PersistSetting carrying it",
                 meta.key,
             );
         }
