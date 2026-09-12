@@ -256,7 +256,11 @@ fn write_memory_section(doc: &mut toml_edit::DocumentMut, graph: &RetrievalGraph
         doc["memory"] = toml_edit::Item::Table(toml_edit::Table::new());
     }
     if let Some(mem) = doc.get_mut("memory").and_then(|i| i.as_table_mut()) {
-        if let Some(p) = graph.memory_retrieval_profile.as_deref().filter(|s| !s.is_empty()) {
+        if let Some(p) = graph
+            .memory_retrieval_profile
+            .as_deref()
+            .filter(|s| !s.is_empty())
+        {
             mem["retrieval_profile"] = toml_edit::value(p);
         } else {
             mem.remove("retrieval_profile");
@@ -264,7 +268,11 @@ fn write_memory_section(doc: &mut toml_edit::DocumentMut, graph: &RetrievalGraph
         if let Some(m) = graph.memory_mode {
             mem["mode"] = toml_edit::value(m.as_str());
         }
-        if let Some(vs) = graph.memory_vector_store.as_deref().filter(|s| !s.is_empty()) {
+        if let Some(vs) = graph
+            .memory_vector_store
+            .as_deref()
+            .filter(|s| !s.is_empty())
+        {
             mem["vector_store"] = toml_edit::value(vs);
         } else {
             mem.remove("vector_store");

@@ -290,9 +290,7 @@ pub(crate) fn merge_project_memory_layer_from(memory: &mut toml::Value, cwd: &Pa
             continue;
         };
         let mut mem = mem.clone();
-        if !project_trusted
-            && let Some(table) = mem.as_table_mut()
-        {
+        if !project_trusted && let Some(table) = mem.as_table_mut() {
             for key in PROJECT_MEMORY_ROUTE_KEYS {
                 if table.remove(*key).is_some() {
                     tracing::warn!(
@@ -877,10 +875,7 @@ mod tests {
         let home = tempdir().unwrap();
         let _home = EnvGuard::set("GROK_HOME", home.path());
         let _flag = EnvGuard::unset("GROK_FOLDER_TRUST");
-        let _sim = EnvGuard::set(
-            xai_grok_version::TEST_VERSION_ENV,
-            "0.0.0-sim",
-        );
+        let _sim = EnvGuard::set(xai_grok_version::TEST_VERSION_ENV, "0.0.0-sim");
         write_project_config(
             tmp.path(),
             "[memory]\nmode = \"milvus\"\nvector_store = \"evil\"\nretrieval_profile = \"evil-profile\"\n[memory.search]\nmax_results = 3\n",
@@ -905,10 +900,7 @@ mod tests {
         let home = tempdir().unwrap();
         let _home = EnvGuard::set("GROK_HOME", home.path());
         let _flag = EnvGuard::unset("GROK_FOLDER_TRUST");
-        let _sim = EnvGuard::set(
-            xai_grok_version::TEST_VERSION_ENV,
-            "0.0.0-sim",
-        );
+        let _sim = EnvGuard::set(xai_grok_version::TEST_VERSION_ENV, "0.0.0-sim");
         crate::agent::folder_trust::grant_folder_trust(tmp.path());
         write_project_config(
             tmp.path(),

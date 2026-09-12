@@ -254,7 +254,9 @@ pub async fn is_semantically_duplicate_with_mirror(
     threshold: f64,
 ) -> bool {
     if mode == xai_grok_config_types::MemoryMode::Milvus {
-        let (Some(handle), Some(provider), Some(fp)) = (mirror, embedding_provider, fingerprint_hash) else {
+        let (Some(handle), Some(provider), Some(fp)) =
+            (mirror, embedding_provider, fingerprint_hash)
+        else {
             return false;
         };
         if handle.snapshot().state != xai_grok_memory::MirrorState::Ready {
@@ -264,7 +266,10 @@ pub async fn is_semantically_duplicate_with_mirror(
             Ok(mut vecs) if !vecs.is_empty() => vecs.swap_remove(0),
             _ => return false,
         };
-        let hits = match handle.knn_v2(&embedding, SEMANTIC_DEDUP_KNN_LIMIT, fp).await {
+        let hits = match handle
+            .knn_v2(&embedding, SEMANTIC_DEDUP_KNN_LIMIT, fp)
+            .await
+        {
             Ok(h) => h,
             Err(_) => return false,
         };

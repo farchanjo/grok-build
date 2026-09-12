@@ -37,8 +37,8 @@ use milvus::v2::types::{
 use milvus::v2::{ClientV2, ConnectConfig};
 
 use crate::mirror::{
-    MirrorError, MirrorErrorKind, VectorMirror, collection_tag, parse_collection_tag,
-    similarity_to_l2_distance, MemoryRow, RemoteSearchHit, MEMORY_SCHEMA_VERSION_V2,
+    MEMORY_SCHEMA_VERSION_V2, MemoryRow, MirrorError, MirrorErrorKind, RemoteSearchHit,
+    VectorMirror, collection_tag, parse_collection_tag, similarity_to_l2_distance,
 };
 
 /// Name of the VARCHAR primary-key field (`id`).
@@ -381,11 +381,7 @@ impl MilvusStore {
                     .input_fields([FIELD_TEXT])
                     .output_fields([FIELD_SPARSE]),
             );
-        let tag = collection_tag(
-            fingerprint_hash,
-            dims,
-            MEMORY_SCHEMA_VERSION_V2,
-        );
+        let tag = collection_tag(fingerprint_hash, dims, MEMORY_SCHEMA_VERSION_V2);
         self.client
             .create_collection(
                 CreateCollectionRequest::builder()
@@ -428,7 +424,10 @@ impl MilvusStore {
         obj.insert(FIELD_HASH.to_owned(), serde_json::json!(row.hash));
         obj.insert(FIELD_SOURCE.to_owned(), serde_json::json!(row.source));
         obj.insert(FIELD_PATH.to_owned(), serde_json::json!(row.path));
-        obj.insert(FIELD_CREATED_AT.to_owned(), serde_json::json!(row.created_at));
+        obj.insert(
+            FIELD_CREATED_AT.to_owned(),
+            serde_json::json!(row.created_at),
+        );
         serde_json::Value::Object(obj)
     }
 }
@@ -604,18 +603,12 @@ impl VectorMirror for MilvusStore {
             .map_err(|e| self.transient(&e))
     }
 
-    async fn upsert_rows_v2(
-        &self,
-        name: &str,
-        rows: &[MemoryRow],
-    ) -> Result<(), MirrorError> {
+    async fn upsert_rows_v2(&self, name: &str, rows: &[MemoryRow]) -> Result<(), MirrorError> {
         if rows.is_empty() {
             return Ok(());
         }
-        let json_rows: Vec<serde_json::Value> = rows
-            .iter()
-            .map(|r| self.upsert_row_v2(r))
-            .collect();
+        let json_rows: Vec<serde_json::Value> =
+            rows.iter().map(|r| self.upsert_row_v2(r)).collect();
         let insert = InsertRequest::builder()
             .collection_name(name)
             .rows(json_rows)
@@ -644,7 +637,13 @@ impl VectorMirror for MilvusStore {
             .vector_field(FIELD_SPARSE)
             .vectors(SearchVectors::EmbeddedText(vec![query.to_owned()]))
             .filter(format!("{FIELD_FP} == \"{}\"", fingerprint_hash))
-            .output_fields([FIELD_ID, FIELD_TEXT, FIELD_PATH, FIELD_SOURCE, FIELD_CREATED_AT])
+            .output_fields([
+                FIELD_ID,
+                FIELD_TEXT,
+                FIELD_PATH,
+                FIELD_SOURCE,
+                FIELD_CREATED_AT,
+            ])
             .limit(k.max(1) as i64)
             .build()
             .map_err(|e| self.error(MirrorErrorKind::Malformed, &e))?;
@@ -668,7 +667,13 @@ impl VectorMirror for MilvusStore {
             .vector_field(FIELD_EMBEDDING)
             .vectors(SearchVectors::Float(vec![query.to_vec()]))
             .filter(format!("{FIELD_FP} == \"{}\"", fingerprint_hash))
-            .output_fields([FIELD_ID, FIELD_TEXT, FIELD_PATH, FIELD_SOURCE, FIELD_CREATED_AT])
+            .output_fields([
+                FIELD_ID,
+                FIELD_TEXT,
+                FIELD_PATH,
+                FIELD_SOURCE,
+                FIELD_CREATED_AT,
+            ])
             .limit(k.max(1) as i64)
             .build()
             .map_err(|e| self.error(MirrorErrorKind::Malformed, &e))?;
@@ -1249,13 +1254,20 @@ mod live_conformance {
             .bm25_search_v2(&name, "Rust memory safety", 5, FP_A)
             .await
             .expect("bm25_search_v2 runs search");
-        assert!(!bm25_hits.is_empty(), "expected at least 1 hit from BM25 search");
+        assert!(
+            !bm25_hits.is_empty(),
+            "expected at least 1 hit from BM25 search"
+        );
         assert_eq!(bm25_hits[0].id, "row1");
         assert_eq!(bm25_hits[0].text, row1.text);
         assert_eq!(bm25_hits[0].path, row1.path);
         assert_eq!(bm25_hits[0].source, row1.source);
         assert_eq!(bm25_hits[0].created_at, row1.created_at);
-        assert!(bm25_hits[0].score > 0.0, "expected positive BM25 score, got {}", bm25_hits[0].score);
+        assert!(
+            bm25_hits[0].score > 0.0,
+            "expected positive BM25 score, got {}",
+            bm25_hits[0].score
+        );
 
         // Dense KNN search returning full metadata
         let knn_hits = store
@@ -1265,7 +1277,11 @@ mod live_conformance {
         assert_eq!(knn_hits.len(), 1);
         assert_eq!(knn_hits[0].id, "row1");
         assert_eq!(knn_hits[0].text, row1.text);
-        assert!(knn_hits[0].score < DISTANCE_EPSILON, "expected distance ~0.0, got {}", knn_hits[0].score);
+        assert!(
+            knn_hits[0].score < DISTANCE_EPSILON,
+            "expected distance ~0.0, got {}",
+            knn_hits[0].score
+        );
 
         // List id hashes query
         let id_hashes = store
@@ -1273,8 +1289,14 @@ mod live_conformance {
             .await
             .expect("list_id_hashes_v2 returns id and content hash map");
         assert_eq!(id_hashes.len(), 2);
-        assert_eq!(id_hashes.get("row1").map(String::as_str), Some("hash_row1_blake3"));
-        assert_eq!(id_hashes.get("row2").map(String::as_str), Some("hash_row2_blake3"));
+        assert_eq!(
+            id_hashes.get("row1").map(String::as_str),
+            Some("hash_row1_blake3")
+        );
+        assert_eq!(
+            id_hashes.get("row2").map(String::as_str),
+            Some("hash_row2_blake3")
+        );
 
         store
             .drop_collection(&name)

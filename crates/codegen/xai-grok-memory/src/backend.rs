@@ -846,7 +846,8 @@ impl MemoryBackend for MemoryBackendImpl {
             {
                 let dims = spec.dimensions as u32;
                 if !handle.is_ready_for(&fp.hash, dims) || reindex_claim.is_some() {
-                    let _ = crate::reconcile_milvus_mode(&mut index, &**embedder, handle, &fp.hash).await;
+                    let _ = crate::reconcile_milvus_mode(&mut index, &**embedder, handle, &fp.hash)
+                        .await;
                 }
             }
         }
@@ -880,7 +881,10 @@ impl MemoryBackend for MemoryBackendImpl {
             if let Some(ref handle) = self.vector_mirror
                 && let Some(ref spec) = spec
             {
-                let fp_hash = spec.fingerprint(&self.index_config).map(|f| f.hash).unwrap_or_default();
+                let fp_hash = spec
+                    .fingerprint(&self.index_config)
+                    .map(|f| f.hash)
+                    .unwrap_or_default();
                 let dims = spec.dimensions as u32;
 
                 let results = crate::search::milvus_search(
@@ -3508,7 +3512,10 @@ mod index_embedding_tests {
         let report = crate::drain_local_to_milvus(&mut idx, None, &handle, FP, 4)
             .await
             .expect("drain local to milvus succeeds");
-        assert_eq!(report.unchanged, 1, "1 local chunk drained without re-embedding");
+        assert_eq!(
+            report.unchanged, 1,
+            "1 local chunk drained without re-embedding"
+        );
         assert_eq!(report.embedded, 0);
         assert!(handle.is_ready_for(FP, 4));
 

@@ -413,11 +413,7 @@ pub trait VectorMirror: Send + Sync {
     }
 
     /// Idempotently upsert schema-v2 memory rows.
-    async fn upsert_rows_v2(
-        &self,
-        name: &str,
-        rows: &[MemoryRow],
-    ) -> Result<(), MirrorError> {
+    async fn upsert_rows_v2(&self, name: &str, rows: &[MemoryRow]) -> Result<(), MirrorError> {
         let _ = (name, rows);
         Err(MirrorError::new(MirrorErrorKind::Malformed))
     }
@@ -563,8 +559,14 @@ impl MirrorHandle {
     }
 
     /// Ensure the schema-v2 collection exists on the remote store.
-    pub async fn ensure_collection_v2(&self, dims: u32, fingerprint_hash: &str) -> Result<(), MirrorError> {
-        self.mirror().ensure_collection_v2(&self.collection, dims, fingerprint_hash).await
+    pub async fn ensure_collection_v2(
+        &self,
+        dims: u32,
+        fingerprint_hash: &str,
+    ) -> Result<(), MirrorError> {
+        self.mirror()
+            .ensure_collection_v2(&self.collection, dims, fingerprint_hash)
+            .await
     }
 
     /// Upsert schema-v2 rows into the remote collection.
@@ -573,18 +575,37 @@ impl MirrorHandle {
     }
 
     /// BM25 full-text keyword search against the remote collection.
-    pub async fn bm25_search_v2(&self, query: &str, k: usize, fingerprint_hash: &str) -> Result<Vec<RemoteSearchHit>, MirrorError> {
-        self.mirror().bm25_search_v2(&self.collection, query, k, fingerprint_hash).await
+    pub async fn bm25_search_v2(
+        &self,
+        query: &str,
+        k: usize,
+        fingerprint_hash: &str,
+    ) -> Result<Vec<RemoteSearchHit>, MirrorError> {
+        self.mirror()
+            .bm25_search_v2(&self.collection, query, k, fingerprint_hash)
+            .await
     }
 
     /// Dense KNN vector search against the remote collection.
-    pub async fn knn_v2(&self, query: &[f32], k: usize, fingerprint_hash: &str) -> Result<Vec<RemoteSearchHit>, MirrorError> {
-        self.mirror().knn_v2(&self.collection, query, k, fingerprint_hash).await
+    pub async fn knn_v2(
+        &self,
+        query: &[f32],
+        k: usize,
+        fingerprint_hash: &str,
+    ) -> Result<Vec<RemoteSearchHit>, MirrorError> {
+        self.mirror()
+            .knn_v2(&self.collection, query, k, fingerprint_hash)
+            .await
     }
 
     /// List all `(id, hash)` entries in the remote collection for reconciliation.
-    pub async fn list_id_hashes_v2(&self, fingerprint_hash: &str) -> Result<std::collections::HashMap<String, String>, MirrorError> {
-        self.mirror().list_id_hashes_v2(&self.collection, fingerprint_hash).await
+    pub async fn list_id_hashes_v2(
+        &self,
+        fingerprint_hash: &str,
+    ) -> Result<std::collections::HashMap<String, String>, MirrorError> {
+        self.mirror()
+            .list_id_hashes_v2(&self.collection, fingerprint_hash)
+            .await
     }
 
     /// Delete rows by id from the remote collection.
@@ -980,7 +1001,10 @@ impl VectorMirror for InMemoryVectorMirror {
     ) -> Result<(), MirrorError> {
         let mut lock = self.collections.lock().unwrap();
         if let Some(col) = lock.get_mut(name) {
-            if col.dims == dims && col.fingerprint_hash == fingerprint_hash && col.schema_version == 1 {
+            if col.dims == dims
+                && col.fingerprint_hash == fingerprint_hash
+                && col.schema_version == 1
+            {
                 return Ok(());
             }
         }
@@ -1004,7 +1028,9 @@ impl VectorMirror for InMemoryVectorMirror {
         fingerprint_hash: &str,
     ) -> Result<(), MirrorError> {
         let mut lock = self.collections.lock().unwrap();
-        let col = lock.get_mut(name).ok_or_else(|| MirrorError::new(MirrorErrorKind::SourceUnavailable))?;
+        let col = lock
+            .get_mut(name)
+            .ok_or_else(|| MirrorError::new(MirrorErrorKind::SourceUnavailable))?;
         for (id, vec) in ids.iter().zip(vectors.iter()) {
             col.rows.insert(
                 id.clone(),
@@ -1041,7 +1067,9 @@ impl VectorMirror for InMemoryVectorMirror {
         fingerprint_hash: &str,
     ) -> Result<Vec<(String, f32)>, MirrorError> {
         let lock = self.collections.lock().unwrap();
-        let col = lock.get(name).ok_or_else(|| MirrorError::new(MirrorErrorKind::SourceUnavailable))?;
+        let col = lock
+            .get(name)
+            .ok_or_else(|| MirrorError::new(MirrorErrorKind::SourceUnavailable))?;
         let mut scored: Vec<(String, f32)> = col
             .rows
             .values()
@@ -1060,7 +1088,12 @@ impl VectorMirror for InMemoryVectorMirror {
         let lock = self.collections.lock().unwrap();
         let count = lock
             .get(name)
-            .map(|c| c.rows.values().filter(|r| r.fingerprint_hash == fingerprint_hash).count() as u64)
+            .map(|c| {
+                c.rows
+                    .values()
+                    .filter(|r| r.fingerprint_hash == fingerprint_hash)
+                    .count() as u64
+            })
             .unwrap_or(0);
         Ok(count)
     }
@@ -1079,7 +1112,10 @@ impl VectorMirror for InMemoryVectorMirror {
     ) -> Result<(), MirrorError> {
         let mut lock = self.collections.lock().unwrap();
         if let Some(col) = lock.get_mut(name) {
-            if col.dims == dims && col.fingerprint_hash == fingerprint_hash && col.schema_version == MEMORY_SCHEMA_VERSION_V2 {
+            if col.dims == dims
+                && col.fingerprint_hash == fingerprint_hash
+                && col.schema_version == MEMORY_SCHEMA_VERSION_V2
+            {
                 return Ok(());
             }
         }
@@ -1095,13 +1131,11 @@ impl VectorMirror for InMemoryVectorMirror {
         Ok(())
     }
 
-    async fn upsert_rows_v2(
-        &self,
-        name: &str,
-        rows: &[MemoryRow],
-    ) -> Result<(), MirrorError> {
+    async fn upsert_rows_v2(&self, name: &str, rows: &[MemoryRow]) -> Result<(), MirrorError> {
         let mut lock = self.collections.lock().unwrap();
-        let col = lock.get_mut(name).ok_or_else(|| MirrorError::new(MirrorErrorKind::SourceUnavailable))?;
+        let col = lock
+            .get_mut(name)
+            .ok_or_else(|| MirrorError::new(MirrorErrorKind::SourceUnavailable))?;
         for row in rows {
             col.rows.insert(row.id.clone(), row.clone());
         }
@@ -1116,7 +1150,9 @@ impl VectorMirror for InMemoryVectorMirror {
         fingerprint_hash: &str,
     ) -> Result<Vec<RemoteSearchHit>, MirrorError> {
         let lock = self.collections.lock().unwrap();
-        let col = lock.get(name).ok_or_else(|| MirrorError::new(MirrorErrorKind::SourceUnavailable))?;
+        let col = lock
+            .get(name)
+            .ok_or_else(|| MirrorError::new(MirrorErrorKind::SourceUnavailable))?;
         let terms: Vec<String> = query
             .split_whitespace()
             .map(|w| w.to_lowercase())
@@ -1145,7 +1181,11 @@ impl VectorMirror for InMemoryVectorMirror {
                 });
             }
         }
-        hits.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+        hits.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
         hits.truncate(k.max(1));
         Ok(hits)
     }
@@ -1158,7 +1198,9 @@ impl VectorMirror for InMemoryVectorMirror {
         fingerprint_hash: &str,
     ) -> Result<Vec<RemoteSearchHit>, MirrorError> {
         let lock = self.collections.lock().unwrap();
-        let col = lock.get(name).ok_or_else(|| MirrorError::new(MirrorErrorKind::SourceUnavailable))?;
+        let col = lock
+            .get(name)
+            .ok_or_else(|| MirrorError::new(MirrorErrorKind::SourceUnavailable))?;
         let mut hits: Vec<RemoteSearchHit> = col
             .rows
             .values()
@@ -1175,7 +1217,11 @@ impl VectorMirror for InMemoryVectorMirror {
                 }
             })
             .collect();
-        hits.sort_by(|a, b| a.score.partial_cmp(&b.score).unwrap_or(std::cmp::Ordering::Equal));
+        hits.sort_by(|a, b| {
+            a.score
+                .partial_cmp(&b.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
         hits.truncate(k.max(1));
         Ok(hits)
     }
@@ -1186,7 +1232,9 @@ impl VectorMirror for InMemoryVectorMirror {
         fingerprint_hash: &str,
     ) -> Result<std::collections::HashMap<String, String>, MirrorError> {
         let lock = self.collections.lock().unwrap();
-        let col = lock.get(name).ok_or_else(|| MirrorError::new(MirrorErrorKind::SourceUnavailable))?;
+        let col = lock
+            .get(name)
+            .ok_or_else(|| MirrorError::new(MirrorErrorKind::SourceUnavailable))?;
         let map = col
             .rows
             .values()
@@ -1698,15 +1746,24 @@ mod tests {
 
         // Calling ensure_collection_v2 drops v1 and creates v2
         mirror.ensure_collection_v2(name, 4, "fp_a").await.unwrap();
-        assert_eq!(mirror.collection_schema_version(name), Some(MEMORY_SCHEMA_VERSION_V2));
+        assert_eq!(
+            mirror.collection_schema_version(name),
+            Some(MEMORY_SCHEMA_VERSION_V2)
+        );
 
         // Re-ensuring same v2 is a no-op
         mirror.ensure_collection_v2(name, 4, "fp_a").await.unwrap();
-        assert_eq!(mirror.collection_schema_version(name), Some(MEMORY_SCHEMA_VERSION_V2));
+        assert_eq!(
+            mirror.collection_schema_version(name),
+            Some(MEMORY_SCHEMA_VERSION_V2)
+        );
 
         // Different fingerprint drops and recreates
         mirror.ensure_collection_v2(name, 4, "fp_b").await.unwrap();
-        assert_eq!(mirror.collection_schema_version(name), Some(MEMORY_SCHEMA_VERSION_V2));
+        assert_eq!(
+            mirror.collection_schema_version(name),
+            Some(MEMORY_SCHEMA_VERSION_V2)
+        );
         assert_eq!(mirror.row_ids(name).len(), 0);
     }
 
@@ -1737,7 +1794,10 @@ mod tests {
             created_at: 200,
         };
 
-        mirror.upsert_rows_v2(name, &[row1.clone(), row2.clone()]).await.unwrap();
+        mirror
+            .upsert_rows_v2(name, &[row1.clone(), row2.clone()])
+            .await
+            .unwrap();
 
         // Count
         assert_eq!(mirror.count(name, "fp1").await.unwrap(), 2);
@@ -1749,7 +1809,10 @@ mod tests {
         assert_eq!(id_hashes.get("id_2").map(|s| s.as_str()), Some("hash_2"));
 
         // BM25 keyword search
-        let bm25_hits = mirror.bm25_search_v2(name, "Rust borrow", 5, "fp1").await.unwrap();
+        let bm25_hits = mirror
+            .bm25_search_v2(name, "Rust borrow", 5, "fp1")
+            .await
+            .unwrap();
         assert_eq!(bm25_hits.len(), 1);
         assert_eq!(bm25_hits[0].id, "id_1");
         assert_eq!(bm25_hits[0].text, row1.text);

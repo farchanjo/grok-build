@@ -245,7 +245,10 @@ pub async fn milvus_search(
     }
 
     // 1. BM25 full-text search against the remote collection
-    let bm25_hits = match handle.bm25_search_v2(query, candidate_limit, fingerprint_hash).await {
+    let bm25_hits = match handle
+        .bm25_search_v2(query, candidate_limit, fingerprint_hash)
+        .await
+    {
         Ok(hits) => hits,
         Err(e) => {
             tracing::warn!(
@@ -260,7 +263,10 @@ pub async fn milvus_search(
 
     // 2. Dense KNN vector search against the remote collection
     let query_vec = if let Some(provider) = embedding_provider {
-        let emb_res = provider.embed_batch(&[query]).await.map_err(|e| e.to_string());
+        let emb_res = provider
+            .embed_batch(&[query])
+            .await
+            .map_err(|e| e.to_string());
         match emb_res {
             Ok(mut embeddings) if !embeddings.is_empty() => Some(embeddings.swap_remove(0)),
             Ok(_) => None,
@@ -278,7 +284,10 @@ pub async fn milvus_search(
     };
 
     let knn_hits = if let Some(ref q_vec) = query_vec {
-        match handle.knn_v2(q_vec, candidate_limit, fingerprint_hash).await {
+        match handle
+            .knn_v2(q_vec, candidate_limit, fingerprint_hash)
+            .await
+        {
             Ok(hits) => hits,
             Err(e) => {
                 tracing::warn!(
@@ -2258,8 +2267,13 @@ mod mirror_read_tests {
         let handle = Arc::new(MirrorHandle::new(mirror, "grok_mem_test"));
         // Handle is not ready
         let config = MemorySearchConfig::default();
-        let results = milvus_search(&handle, None, "test query", FP, 4, &config).await.unwrap();
-        assert!(results.is_empty(), "unready milvus search must return empty results (no local fallback)");
+        let results = milvus_search(&handle, None, "test query", FP, 4, &config)
+            .await
+            .unwrap();
+        assert!(
+            results.is_empty(),
+            "unready milvus search must return empty results (no local fallback)"
+        );
     }
 
     #[tokio::test]
@@ -2267,7 +2281,10 @@ mod mirror_read_tests {
         let mirror = Arc::new(crate::mirror::InMemoryVectorMirror::new());
         let handle = Arc::new(MirrorHandle::new(mirror.clone(), "grok_mem_test"));
 
-        mirror.ensure_collection_v2("grok_mem_test", 4, FP).await.unwrap();
+        mirror
+            .ensure_collection_v2("grok_mem_test", 4, FP)
+            .await
+            .unwrap();
 
         let row1 = crate::mirror::MemoryRow {
             id: "row_1".to_string(),
@@ -2289,17 +2306,27 @@ mod mirror_read_tests {
             path: "memory/py.md".to_string(),
             created_at: 1000,
         };
-        mirror.upsert_rows_v2("grok_mem_test", &[row1, row2]).await.unwrap();
+        mirror
+            .upsert_rows_v2("grok_mem_test", &[row1, row2])
+            .await
+            .unwrap();
         handle.mark_ready(FP, 4, 2);
 
         struct FixedProvider([f32; 4]);
         #[async_trait]
         impl EmbeddingProvider for FixedProvider {
-            async fn embed_batch(&self, _texts: &[&str]) -> Result<Vec<Vec<f32>>, Box<dyn std::error::Error>> {
+            async fn embed_batch(
+                &self,
+                _texts: &[&str],
+            ) -> Result<Vec<Vec<f32>>, Box<dyn std::error::Error>> {
                 Ok(vec![self.0.to_vec()])
             }
-            fn model_name(&self) -> &str { "fixed" }
-            fn dimensions(&self) -> usize { 4 }
+            fn model_name(&self) -> &str {
+                "fixed"
+            }
+            fn dimensions(&self) -> usize {
+                4
+            }
         }
 
         let provider = FixedProvider([1.0, 0.0, 0.0, 0.0]);
@@ -2309,7 +2336,9 @@ mod mirror_read_tests {
             ..Default::default()
         };
 
-        let results = milvus_search(&handle, Some(&provider), "Rust memory", FP, 4, &config).await.unwrap();
+        let results = milvus_search(&handle, Some(&provider), "Rust memory", FP, 4, &config)
+            .await
+            .unwrap();
         assert!(!results.is_empty(), "milvus search must return hits");
         assert_eq!(results[0].chunk_id, "row_1");
         assert!(results[0].snippet.contains("Rust memory management"));

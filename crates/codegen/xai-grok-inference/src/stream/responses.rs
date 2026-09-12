@@ -18,10 +18,10 @@ use xai_grok_inference_types::{
     TokenUsage, ToolCall, rs,
 };
 
+use super::WireCodec;
 use crate::events::{InferenceChannel, InferenceErrorInfo, InferenceEvent};
 use crate::metrics::InferenceLatencyStats;
 use crate::types::RequestId;
-use super::WireCodec;
 
 /// Returns whether a Responses API event reflects real model progress
 /// rather than a liveness-only heartbeat / status transition.

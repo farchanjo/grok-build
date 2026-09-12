@@ -625,7 +625,10 @@ impl SessionActor {
             } else {
                 ("sqlite".to_string(), "ready".to_string())
             };
-            let total_chunks = self.memory.chunks_added.load(std::sync::atomic::Ordering::Relaxed);
+            let total_chunks = self
+                .memory
+                .chunks_added
+                .load(std::sync::atomic::Ordering::Relaxed);
             Some(crate::session::acp_types::MemoryContextInfo {
                 mode,
                 backend,

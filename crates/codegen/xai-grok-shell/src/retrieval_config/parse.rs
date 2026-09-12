@@ -1059,7 +1059,9 @@ fn parse_memory_vector_store(raw: &toml::Value) -> Option<String> {
     let mem = raw.get("memory")?;
     let table = mem.as_table()?;
     let v = table.get("vector_store")?;
-    v.as_str().map(|s| s.trim().to_owned()).filter(|s| !s.is_empty())
+    v.as_str()
+        .map(|s| s.trim().to_owned())
+        .filter(|s| !s.is_empty())
 }
 
 fn parse_embedding_protocol(s: &str) -> Option<EmbeddingProtocol> {

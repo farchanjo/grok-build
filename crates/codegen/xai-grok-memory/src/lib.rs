@@ -61,9 +61,9 @@ pub use metadata_index::{
     metadata_index_path_for_cwd, reject_persisted_paths,
 };
 pub use mirror::{
-    DEFAULT_MIRROR_TIMEOUT_SECS, InMemoryVectorMirror, MemoryRow, MemoryVecResyncSource,
-    MirrorError, MirrorErrorKind, MirrorHandle, MirrorResyncSource, MirrorSnapshot, MirrorState,
-    MEMORY_SCHEMA_VERSION_V2, RESYNC_BATCH_ROWS, RemoteSearchHit, ResyncReport, VectorMirror,
+    DEFAULT_MIRROR_TIMEOUT_SECS, InMemoryVectorMirror, MEMORY_SCHEMA_VERSION_V2, MemoryRow,
+    MemoryVecResyncSource, MirrorError, MirrorErrorKind, MirrorHandle, MirrorResyncSource,
+    MirrorSnapshot, MirrorState, RESYNC_BATCH_ROWS, RemoteSearchHit, ResyncReport, VectorMirror,
     collection_tag, memory_collection_name, mirror_call, mirror_delete_ids, mirror_sync_rows,
     mirror_timeout, parse_collection_tag, prime_collection_name, resync_collection,
     similarity_to_l2_distance,
@@ -516,26 +516,29 @@ pub async fn drain_local_to_milvus(
                 let Ok(mut stmt) = conn.prepare(SQL) else {
                     break;
                 };
-                let Ok(rows) = stmt.query_map(rusqlite::params![cursor, mirror::RESYNC_BATCH_ROWS as i64], |row| {
-                    let id: String = row.get(0)?;
-                    let text: String = row.get(1)?;
-                    let hash: String = row.get(2)?;
-                    let source: String = row.get(3)?;
-                    let path: String = row.get(4)?;
-                    let created_at: i64 = row.get(5)?;
-                    let blob: Vec<u8> = row.get(6)?;
-                    let vector = mirror::decode_f32_le(&blob);
-                    Ok(MemoryRow {
-                        id,
-                        text,
-                        vector,
-                        fingerprint_hash: fingerprint_hash.to_owned(),
-                        hash,
-                        source,
-                        path,
-                        created_at,
-                    })
-                }) else {
+                let Ok(rows) = stmt.query_map(
+                    rusqlite::params![cursor, mirror::RESYNC_BATCH_ROWS as i64],
+                    |row| {
+                        let id: String = row.get(0)?;
+                        let text: String = row.get(1)?;
+                        let hash: String = row.get(2)?;
+                        let source: String = row.get(3)?;
+                        let path: String = row.get(4)?;
+                        let created_at: i64 = row.get(5)?;
+                        let blob: Vec<u8> = row.get(6)?;
+                        let vector = mirror::decode_f32_le(&blob);
+                        Ok(MemoryRow {
+                            id,
+                            text,
+                            vector,
+                            fingerprint_hash: fingerprint_hash.to_owned(),
+                            hash,
+                            source,
+                            path,
+                            created_at,
+                        })
+                    },
+                ) else {
                     break;
                 };
 
@@ -559,7 +562,10 @@ pub async fn drain_local_to_milvus(
     if let Some(p) = provider {
         reconcile_milvus_mode(index, p, handle, fingerprint_hash).await
     } else {
-        let total = index.all_chunks().map(|c| c.len()).unwrap_or(drained_ids.len());
+        let total = index
+            .all_chunks()
+            .map(|c| c.len())
+            .unwrap_or(drained_ids.len());
         let _ = index.record_installed_fingerprint(fingerprint_hash);
         handle.mark_ready(fingerprint_hash, dims, total as u64);
         Ok(MilvusReconcileReport {

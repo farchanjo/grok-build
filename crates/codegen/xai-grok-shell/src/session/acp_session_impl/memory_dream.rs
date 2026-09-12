@@ -533,13 +533,24 @@ impl SessionActor {
                                     .flush_config
                                     .semantic_dedup_threshold
                                     .unwrap_or(SEMANTIC_DEDUP_SIMILARITY_THRESHOLD);
-                                let mirror = self.memory.backend_params.as_ref().and_then(|p| p.vector_mirror.as_deref());
-                                let mode = self.memory.backend_params.as_ref().map(|p| p.mode).unwrap_or_default();
-                                let fp_hash = self.memory.backend_params.as_ref()
-                                    .and_then(|p| {
-                                        let cfg = &p.index_config;
-                                        p.embedding_source_spec()?.fingerprint(cfg).ok().map(|f| f.hash)
-                                    });
+                                let mirror = self
+                                    .memory
+                                    .backend_params
+                                    .as_ref()
+                                    .and_then(|p| p.vector_mirror.as_deref());
+                                let mode = self
+                                    .memory
+                                    .backend_params
+                                    .as_ref()
+                                    .map(|p| p.mode)
+                                    .unwrap_or_default();
+                                let fp_hash = self.memory.backend_params.as_ref().and_then(|p| {
+                                    let cfg = &p.index_config;
+                                    p.embedding_source_spec()?
+                                        .fingerprint(cfg)
+                                        .ok()
+                                        .map(|f| f.hash)
+                                });
                                 is_semantically_duplicate_with_mirror(
                                     &content,
                                     &index,

@@ -149,9 +149,7 @@ impl InferencePacer {
             .env_minimum_interval_ms
             .map(Duration::from_millis)
             .unwrap_or_else(|| Duration::from_millis(base_ms));
-        let recovery = self
-            .env_recovery_requests
-            .unwrap_or(base_recovery);
+        let recovery = self.env_recovery_requests.unwrap_or(base_recovery);
         (minimum, recovery)
     }
 
