@@ -744,6 +744,39 @@ fn try_parse_error(data: &str) -> Option<ParsedError> {
                 code: None,
             });
         }
+        // Flat OpenAI-compatible gateway error (SGLang / vLLM / LiteLLM):
+        // `{"object":"error","message":"…","type":"BadRequestError","code":400}`.
+        // There is no `error` wrapper and `code` carries the numeric HTTP
+        // status, so neither `ErrorResponse` nor `FlatErrorResponse` matches.
+        // Without this branch the actionable upstream text (context length,
+        // max-completion-tokens, or validation detail) is dropped for the
+        // generic status copy — which also hides `is_context_length_error`, so
+        // an oversized request fails terminally instead of triggering
+        // auto-compaction.
+        if value.get("choices").is_none()
+            && value.get("error").is_none()
+            && let Some(message) = value
+                .get("message")
+                .and_then(|v| v.as_str())
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+        {
+            return Some(ParsedError {
+                error_type: value
+                    .get("type")
+                    .and_then(|v| v.as_str())
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or("server_error")
+                    .to_string(),
+                message: message.to_string(),
+                code: value
+                    .get("code")
+                    .and_then(|v| v.as_str())
+                    .filter(|s| !s.is_empty())
+                    .map(ApiErrorCode::parse),
+            });
+        }
     }
     if let Ok(resp) = serde_json::from_str::<ErrorResponse>(data) {
         return Some(ParsedError {
@@ -1429,6 +1462,43 @@ mod tests {
         let bytes = br#"{"detail":[{"type":"missing","loc":["query","client_version"],"msg":"Field required"}]}"#;
         let msg = user_facing_api_error_message(StatusCode::BAD_REQUEST, bytes);
         assert_eq!(msg, "invalid_request_error: Field required");
+    }
+
+    /// Flat SGLang/vLLM/LiteLLM error envelopes carry the message and a
+    /// numeric `code` at the top level, with no `error` wrapper. The upstream
+    /// text must reach the user — and must stay recognizable to
+    /// `is_context_length_error`, which is what arms auto-compaction on an
+    /// oversized request.
+    #[test]
+    fn user_facing_surfaces_flat_gateway_error_message() {
+        let bytes = br#"{"object":"error","message":"Requested token count exceeds the model's maximum context length of 524288 tokens. You requested a total of 524293 tokens.","type":"BadRequestError","param":null,"code":400}"#;
+        let msg = user_facing_api_error_message(StatusCode::BAD_REQUEST, bytes);
+        assert_eq!(
+            msg,
+            "BadRequestError: Requested token count exceeds the model's maximum context length \
+             of 524288 tokens. You requested a total of 524293 tokens."
+        );
+        assert!(is_context_length_error(&msg));
+        // A numeric `code` mirrors the HTTP status and is not a semantic code.
+        assert_eq!(parse_error_code(bytes), None);
+    }
+
+    /// A string `code` in the same flat envelope is semantic and still
+    /// surfaces (e.g. the invalid-image recovery signal).
+    #[test]
+    fn flat_gateway_error_keeps_string_code() {
+        let bytes =
+            br#"{"object":"error","message":"could not process image","type":"BadRequestError","code":"invalid_image"}"#;
+        assert_eq!(parse_error_code(bytes), Some(ApiErrorCode::InvalidImage));
+    }
+
+    /// Without a top-level `message` the flat envelope falls back to the
+    /// status copy instead of inventing one.
+    #[test]
+    fn flat_gateway_error_without_message_uses_status_copy() {
+        let bytes = br#"{"object":"error","type":"BadRequestError","param":null,"code":400}"#;
+        let msg = user_facing_api_error_message(StatusCode::BAD_REQUEST, bytes);
+        assert_eq!(msg, status_user_message(StatusCode::BAD_REQUEST));
     }
 
     #[test]

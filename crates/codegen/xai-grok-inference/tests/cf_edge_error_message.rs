@@ -96,6 +96,21 @@ async fn stream_json_error_envelope_is_preserved() {
     assert!(!s.contains("temporarily unavailable"));
 }
 
+/// Flat SGLang/vLLM/LiteLLM envelope: no `error` wrapper, top-level
+/// `message`, and a numeric `code` mirroring the HTTP status. The upstream
+/// text must survive to the typed error — the shell keys auto-compaction off
+/// `is_context_length_error`, so dropping the body leaves an oversized
+/// request failing terminally on the generic "Request failed (HTTP 400)".
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn stream_flat_gateway_error_keeps_context_length_message() {
+    let body = r#"{"object":"error","message":"Requested token count exceeds the model's maximum context length of 524288 tokens. You requested a total of 641077 tokens: 510005 tokens from the input messages and 131072 tokens for the completion.","type":"BadRequestError","param":null,"code":400}"#;
+    let err = stream_err(400, body).await;
+    let s = err.to_string();
+    assert!(s.contains("maximum context length of 524288"), "{s}");
+    assert!(err.is_context_length_error());
+    assert!(!s.contains("Request failed (HTTP 400)"), "{s}");
+}
+
 #[test]
 fn status_user_message_matrix() {
     let cases: &[(u16, &str)] = &[
