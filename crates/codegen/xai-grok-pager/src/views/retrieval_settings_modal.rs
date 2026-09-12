@@ -1472,7 +1472,9 @@ impl RetrievalSettingsState {
                 } else {
                     Some(p.trim().to_owned())
                 };
-                self.draft_memory_mode = mode.map(|m| m.as_str().to_string()).unwrap_or_else(|| "local".into());
+                self.draft_memory_mode = mode
+                    .map(|m| m.as_str().to_string())
+                    .unwrap_or_else(|| "local".into());
                 self.draft_memory_vector_store = vector_store.clone();
                 self.draft_memory_profile = profile.clone();
                 self.dirty = true;

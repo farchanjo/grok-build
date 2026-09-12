@@ -228,6 +228,7 @@ pub fn render_turn_status(
     is_bash_turn: bool,
     is_pending_user_input: bool,
     goal_verifying: bool,
+    is_wake_turn: bool,
     watchers: Watchers,
     parked: bool,
     flat_background: bool,
@@ -318,8 +319,14 @@ pub fn render_turn_status(
         );
 
     // ── Compute activity style and label ──
-    let (activity_style, label, is_tool) =
-        compute_activity(&theme, state, activity, is_bash_turn, goal_verifying);
+    let (activity_style, label, is_tool) = compute_activity(
+        &theme,
+        state,
+        activity,
+        is_bash_turn,
+        goal_verifying,
+        is_wake_turn,
+    );
 
     // Early return for idle (shouldn't happen if should_show is respected, but be safe).
     if matches!(state, AgentState::Idle) {
@@ -613,11 +620,25 @@ fn compute_activity(
     activity: &Option<TurnActivity>,
     is_bash_turn: bool,
     goal_verifying: bool,
+    is_wake_turn: bool,
 ) -> (Style, String, bool) {
     match (state, activity) {
         (AgentState::TurnCancelling | AgentState::CommandCancelling { .. }, _) => (
             Style::default().fg(theme.accent_error),
             "Cancelling…".to_string(),
+            false,
+        ),
+        // Auto-wake turn (background task / subagent / notification completion):
+        // the same live chrome as a user turn, but labelled so it reads as the
+        // agent acting on its own rather than on what the user just asked.
+        // Tool activity, compaction and retries keep their more specific labels.
+        (
+            AgentState::TurnRunning,
+            Some(TurnActivity::Thinking | TurnActivity::Responding | TurnActivity::Waiting(_))
+            | None,
+        ) if is_wake_turn => (
+            Style::default().fg(theme.text_secondary),
+            "Working in background…".to_string(),
             false,
         ),
         // Goal-mode completion verification runs in-turn after the model
@@ -968,10 +989,12 @@ mod tests {
     fn activity_label_reads_verifying_while_goal_verifying_overriding_stale_activity() {
         let theme = Theme::current();
         // Running turn, no streaming activity, goal verifying → "Verifying…".
-        let (_, label, _) = compute_activity(&theme, &AgentState::TurnRunning, &None, false, true);
+        let (_, label, _) =
+            compute_activity(&theme, &AgentState::TurnRunning, &None, false, true, false);
         assert_eq!(label, "Verifying…");
         // Same state without the verifying flag → generic "Waiting…".
-        let (_, label, _) = compute_activity(&theme, &AgentState::TurnRunning, &None, false, false);
+        let (_, label, _) =
+            compute_activity(&theme, &AgentState::TurnRunning, &None, false, false, false);
         assert_eq!(label, "Waiting…");
         // During verification the model is idle but its last streaming
         // activity (Responding/Thinking) can linger — the flag overrides it
@@ -983,6 +1006,7 @@ mod tests {
                 &Some(activity),
                 false,
                 true,
+                false,
             );
             assert_eq!(label, "Verifying…");
         }
@@ -991,6 +1015,7 @@ mod tests {
             &theme,
             &AgentState::TurnRunning,
             &Some(TurnActivity::Responding),
+            false,
             false,
             false,
         );
@@ -1023,6 +1048,7 @@ mod tests {
                 &Some(TurnActivity::Waiting(reason.clone())),
                 false,
                 false,
+                false,
             );
             assert_eq!(label, expected, "reason {reason:?}");
             assert!(!is_tool, "waiting is not a tool activity");
@@ -1034,7 +1060,8 @@ mod tests {
         let theme = Theme::current();
         // A bash (non-inference) turn with no activity keeps its own "Running…"
         // label — the view leaves it as `None` rather than Waiting(Model).
-        let (_, label, _) = compute_activity(&theme, &AgentState::TurnRunning, &None, true, false);
+        let (_, label, _) =
+            compute_activity(&theme, &AgentState::TurnRunning, &None, true, false, false);
         assert_eq!(label, "Running…");
     }
 
@@ -1216,6 +1243,7 @@ mod tests {
             false,
             false,
             false,
+            false,
             Watchers::default(),
             false,
             false,
@@ -1251,6 +1279,7 @@ mod tests {
             false,
             false,
             false,
+            false,
             watchers,
             false,
             false,
@@ -1278,6 +1307,7 @@ mod tests {
             false,
             None,
             None,
+            false,
             false,
             false,
             false,
@@ -1527,6 +1557,7 @@ mod tests {
             false,
             None,
             None,
+            false,
             false,
             false,
             false,

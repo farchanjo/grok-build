@@ -531,6 +531,20 @@ impl AgentView {
             && !self.replayed_terminal_prompts.contains(prompt_id)
             && !self.is_rewound_prompt(prompt_id)
     }
+    /// Whether a wake-shaped running prompt should be BOUND to real turn state
+    /// by this client (`enter_wake_turn`) rather than left unmodelled.
+    ///
+    /// Same terminal-in-replay guard as [`Self::should_adopt_running_prompt`],
+    /// for the same reason: a wake turn whose durable `TurnCompleted` already
+    /// arrived in this load's replay has ended, so binding it would wait for a
+    /// terminal that already fired. Wake turns differ from adoptable turns in
+    /// their exit (durable `TurnCompleted`, not `prompt_complete`), which is why
+    /// this is a separate predicate from `should_adopt_running_prompt`.
+    pub(crate) fn should_bind_wake_turn(&self, prompt_id: &str) -> bool {
+        crate::app::acp_handler::is_wake_prompt(prompt_id)
+            && !self.replayed_terminal_prompts.contains(prompt_id)
+            && !self.is_rewound_prompt(prompt_id)
+    }
     /// Finalize a reconnect-reload window and, iff the running prompt is
     /// adoptable, adopt it. Returns whether the window finalized.
     ///
@@ -546,11 +560,22 @@ impl AgentView {
         running_prompt_id: Option<String>,
     ) -> bool {
         let finalized = self.finish_session_reload(generation, ok);
-        if finalized
-            && let Some(pid) = running_prompt_id
-            && self.should_adopt_running_prompt(&pid)
-        {
-            self.adopt_running_prompt(pid);
+        if finalized && let Some(pid) = running_prompt_id {
+            if self.should_adopt_running_prompt(&pid) {
+                self.adopt_running_prompt(pid);
+            } else if self.session.state.is_idle() && self.should_bind_wake_turn(&pid) {
+                // A wake turn was in flight across the reload: bind it so the
+                // running chrome (and Ctrl+C) survives the reconnect. The exit
+                // is its durable `TurnCompleted`, which the replay already
+                // delivered if it ended first — hence `should_bind_wake_turn`.
+                // The replayed deltas refreshed `turn_start_ms` with this
+                // turn's own stamp, so back-dating from it is correct here.
+                crate::app::acp_handler::enter_wake_turn(
+                    self,
+                    &pid,
+                    crate::app::acp_handler::viewer_turn_anchor(self.turn_start_ms),
+                );
+            }
         }
         finalized
     }

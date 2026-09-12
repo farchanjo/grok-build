@@ -29,12 +29,17 @@ pub(crate) fn is_scheduler_fired_prompt(prompt_id: &str) -> bool {
 }
 
 /// Returns true for the auto-wake turn families (`task-completed-…`,
-/// `subagent-completed-…`, `notifications-…`). These run non-adopted — no
-/// `PromptResponse`, no viewer finalize — so their durable `TurnCompleted` is
-/// the only signal marking the back-to-idle point (see [`finish_wake_turn`];
-/// wake turns close markerless). Deliberately narrower than "non-adopted
+/// `subagent-completed-…`, `notifications-…`). These run with no
+/// `PromptResponse`, so their durable `TurnCompleted` is the only signal marking
+/// the back-to-idle point (see [`enter_wake_turn`] / [`finish_wake_turn`]; wake
+/// turns close markerless). Deliberately narrower than "non-adopted
 /// synthetic": goal turns render through the goal chip/loop chrome and
 /// `plan-resume-…` keeps its own markerless shape.
+///
+/// A live wake turn IS bound to real turn state (so it gets chrome and a working
+/// Ctrl+C) — but via [`enter_wake_turn`], never via `start_turn`/the turn-start
+/// shim, and never through [`should_adopt_running_prompt`], whose contract is
+/// keyed to the `prompt_complete` exit.
 pub(crate) fn is_wake_prompt(prompt_id: &str) -> bool {
     matches!(
         xai_grok_shell::session::PromptOrigin::from_prompt_id(prompt_id),
@@ -62,6 +67,11 @@ pub(crate) fn is_wake_prompt(prompt_id: &str) -> bool {
 /// this guard with "not terminal-in-replay" so an already-ended turn replayed on
 /// reattach is not re-adopted.
 ///
+/// Wake turns are false here by design and take a sibling path: they have a
+/// durable `TurnCompleted` exit rather than `prompt_complete`, so they are bound
+/// by [`enter_wake_turn`] under the terminal-in-replay-guarded
+/// `AgentView::should_bind_wake_turn` instead of by the turn-start shim.
+///
 /// [`AgentView::should_adopt_running_prompt`]: crate::app::agent_view::AgentView::should_adopt_running_prompt
 pub(crate) fn should_adopt_running_prompt(prompt_id: &str) -> bool {
     !is_server_initiated_prompt(prompt_id) || is_scheduler_fired_prompt(prompt_id)
@@ -78,7 +88,7 @@ pub(crate) fn should_adopt_running_prompt(prompt_id: &str) -> bool {
 /// elapsed then matches the driver's, both live and on completion. Falls back
 /// to `now` when `turnStartMs` is absent (older shell) or the wall clock is
 /// skewed forward.
-pub(super) fn viewer_turn_anchor(turn_start_ms: Option<i64>) -> std::time::Instant {
+pub(crate) fn viewer_turn_anchor(turn_start_ms: Option<i64>) -> std::time::Instant {
     let now = std::time::Instant::now();
     let Some(start_ms) = turn_start_ms else {
         return now;
@@ -93,10 +103,75 @@ pub(super) fn viewer_turn_anchor(turn_start_ms: Option<i64>) -> std::time::Insta
         .unwrap_or(now)
 }
 
-/// Close out a wake turn: markerless, but the stream must be finished here —
-/// wake turns skip `PromptResponse`, so this is the only flush site for an
-/// in-flight streamed entry (dead wakes included). Leaves a real turn's
-/// stop-hook stash pending for its own marker rail.
+/// Bind a live auto-wake turn to real turn state.
+///
+/// Wake turns run through the actor with no `PromptResponse`, so they never
+/// reach `start_turn`. Left unmodelled they stream in with no status line, no
+/// elapsed counter and a dead Ctrl+C — and because the session stays `Idle`,
+/// a prompt typed meanwhile drains locally and steals the turn instead of
+/// queueing behind the wake turn the way the shell already serializes it.
+///
+/// Binding fixes all of that: the session becomes `TurnRunning` (status line,
+/// spinner, elapsed, `[stop]`, `Ctrl+c:cancel`), `is_idle()` turns false so
+/// the local drain holds, and `current_prompt_id` matches the wake pid so its
+/// deltas pass the mismatch gate rather than being dropped.
+///
+/// Deliberately does NOT call `start_turn()`: that resets the tracker and arms
+/// `expect_user_echo()`, but a wake turn has no client-sent prompt to echo.
+/// The caller must only invoke this when the session is idle — a wake turn
+/// that fires mid-user-turn keeps the old unmodelled behavior.
+///
+/// `anchor` is the monotonic turn-start the elapsed counter reads. Callers must
+/// pass the wake turn's OWN start, never a bare `turn_start_ms` read: the
+/// `queue/changed` entry fires before the first delta, when `turn_start_ms`
+/// still holds the PREVIOUS turn's stamp and back-dating from it inflates the
+/// counter by that whole turn's duration.
+pub(crate) fn enter_wake_turn(agent: &mut AgentView, prompt_id: &str, anchor: std::time::Instant) {
+    if agent.session.wake_turn_prompt_id.is_some() {
+        return;
+    }
+    agent.session.wake_turn_prompt_id = Some(prompt_id.to_string());
+    agent.session.current_prompt_id = Some(prompt_id.to_string());
+    agent.session.state = crate::app::agent::AgentState::TurnRunning;
+    agent.turn_started_at = Some(anchor);
+}
+
+/// The turn-start anchor for a wake turn entered from a live `session/update`:
+/// back-date from the shell's authoritative `turnStartMs` when THIS delta
+/// carried it, otherwise stamp `now` (the delta arrived without a turn clock,
+/// so the field still holds the previous turn's value).
+pub(super) fn wake_anchor_from_live_delta(
+    agent: &AgentView,
+    delta_had_turn_start: bool,
+) -> std::time::Instant {
+    if delta_had_turn_start {
+        viewer_turn_anchor(agent.turn_start_ms)
+    } else {
+        std::time::Instant::now()
+    }
+}
+
+/// Close out a wake turn.
+///
+/// Wake turns skip `PromptResponse`, so this is the only flush site for an
+/// in-flight streamed entry (dead wakes included) and the only place that
+/// returns the session to `Idle`. When this client actually bound the turn
+/// (the common case) the teardown is the full `finish_turn`, so
+/// `current_prompt_id` is cleared and the prompt the server promotes next
+/// adopts cleanly. A wake turn that was never bound — it fired and finished
+/// while a user turn held the state — keeps the original markerless flush.
 pub(super) fn finish_wake_turn(agent: &mut AgentView) {
-    agent.session.tracker.finish_turn(&mut agent.scrollback);
+    if agent.session.wake_turn_prompt_id.take().is_some() {
+        agent.session.finish_turn(&mut agent.scrollback);
+        agent.turn_started_at = None;
+        agent.activity_started_at = None;
+        agent.last_activity = None;
+    } else {
+        agent.session.tracker.finish_turn(&mut agent.scrollback);
+    }
+}
+
+/// Whether this client is currently rendering the given wake turn.
+pub(super) fn is_active_wake_turn(agent: &AgentView, prompt_id: &str) -> bool {
+    agent.session.wake_turn_prompt_id.as_deref() == Some(prompt_id)
 }

@@ -476,10 +476,14 @@
     /// inside the actor and emit no `prompt_complete` / `PromptResponse`, so
     /// `start_turn()` here would strand the pager on "Responding…" forever
     /// (the exact reported bug — a background task finishing left the spinner
-    /// running indefinitely). It must stay Idle (content still renders via the
-    /// live-delta path, which no longer claims `current_prompt_id` for a driver).
+    /// running indefinitely).
+    ///
+    /// It is instead BOUND by `enter_wake_turn`: real turn state (so the status
+    /// line, elapsed counter and Ctrl+C work) whose exit is the wake turn's own
+    /// durable `TurnCompleted`. The distinction that matters is that no
+    /// `start_turn` runs, so the tracker is not reset and no user echo is armed.
     #[test]
-    fn queue_changed_does_not_adopt_server_initiated_running_prompt() {
+    fn queue_changed_binds_without_shim_adopting_server_initiated_running_prompt() {
         let mut app = make_app_with_agent("sess-1");
         let id = AgentId(0);
         assert!(app.agents[&id].session.current_prompt_id.is_none());
@@ -491,13 +495,19 @@
 
         let agent = app.agents.get(&id).unwrap();
         assert!(
-            matches!(agent.session.state, AgentState::Idle),
-            "auto-wake running prompt must NOT enter TurnRunning (no prompt_complete \
-             would ever finish it → permanent stuck 'Responding…' spinner)"
+            matches!(agent.session.state, AgentState::TurnRunning),
+            "the wake turn must be bound so it is visible and cancellable, got {:?}",
+            agent.session.state
         );
-        assert!(
-            agent.session.current_prompt_id.is_none(),
-            "the shim must not run, so current_prompt_id stays unset here"
+        assert_eq!(
+            agent.session.wake_turn_prompt_id.as_deref(),
+            Some("task-completed-bg-123"),
+            "the wake identity is what the durable TurnCompleted matches on"
+        );
+        assert_eq!(
+            agent.session.current_prompt_id.as_deref(),
+            Some("task-completed-bg-123"),
+            "the wake pid must be current so its deltas are not dropped"
         );
         assert!(
             !app.pending_running_adoptions.contains_key(&id),
@@ -610,14 +620,18 @@
 
     /// Regression (live-delta path): the auto-wake turn streams its reply as a
     /// synthetic-promptId `session/update`. On a driver (not a viewer) the
-    /// content must render, but the turn must NOT be claimed — no role flip, no
-    /// `current_prompt_id`, no `TurnRunning` — otherwise it strands the
-    /// turn-status and poisons the slot so later real turns' PromptResponses get
-    /// discarded. (Pairs with the `handle_queue_changed` skip above: together
-    /// they keep synthetic auto-wake turns out of the running slot on BOTH the
-    /// queue-broadcast and the streaming-delta paths.)
+    /// content must render AND the turn must be bound — the session leaves Idle,
+    /// claims the wake pid, and stamps a start anchor, so the status line,
+    /// elapsed counter and Ctrl+C all have something to hang off.
+    ///
+    /// The role must NOT flip: the wake pid is synthetic, so the viewer
+    /// re-derivation skips it and `attached_as_viewer` stays false. The exit is
+    /// the wake turn's own durable `TurnCompleted`, which is why binding here
+    /// does not strand the turn-status the way the old `start_turn` shim would.
+    /// (Pairs with the `handle_queue_changed` binding above: together they cover
+    /// the queue-broadcast and streaming-delta entry paths.)
     #[test]
-    fn synthetic_auto_wake_delta_renders_without_claiming_turn() {
+    fn synthetic_auto_wake_delta_renders_and_binds_turn() {
         let mut app = make_app_with_agent("sess-1");
         let id = AgentId(0);
 
@@ -637,9 +651,23 @@
             "background task finished on its own",
             "auto-wake content must still render"
         );
-        assert!(matches!(agent.session.state, AgentState::Idle));
-        assert!(agent.session.current_prompt_id.is_none());
-        assert!(!agent.attached_as_viewer);
+        assert!(
+            matches!(agent.session.state, AgentState::TurnRunning),
+            "a live wake delta must bind the turn, got {:?}",
+            agent.session.state
+        );
+        assert_eq!(
+            agent.session.current_prompt_id.as_deref(),
+            Some("task-completed-bg1")
+        );
+        assert_eq!(
+            agent.session.wake_turn_prompt_id.as_deref(),
+            Some("task-completed-bg1")
+        );
+        assert!(
+            !agent.attached_as_viewer,
+            "the synthetic pid must not flip the driver into a viewer"
+        );
     }
 
     /// FIFO handoff: the leader's running broadcast for the next prompt
@@ -1132,15 +1160,15 @@
     }
 
     /// A `SessionLoaded` conveying a SYNTHETIC non-scheduler `running_prompt_id`
-    /// (auto-wake / subagent-completion) must NOT be adopted: those actor-run
-    /// turns emit no `prompt_complete`, so adopting one would strand the viewer
-    /// in `TurnRunning` forever. The agent stays `Idle`, and the preserve arg is
-    /// gated on the same predicate so the running turn's buffered follow-up chips
-    /// are NOT preserved (adoption — their only flusher — is skipped, so
-    /// preserving would orphan them). The ADOPTABLE-id preserve contrast is
+    /// (auto-wake / subagent-completion) is BOUND rather than adopted: those
+    /// actor-run turns emit no `prompt_complete`, but they do emit a durable
+    /// `TurnCompleted`, so real turn state is safe and the chrome survives the
+    /// attach. The preserve arg stays gated on the adoption predicate, so the
+    /// running turn's buffered follow-up chips are NOT preserved (the shim's
+    /// flush is what would render them). The ADOPTABLE-id preserve contrast is
     /// covered by `reload_preserves_running_turn_follow_ups_and_renders_on_adoption`.
     #[test]
-    fn session_loaded_with_synthetic_running_prompt_id_stays_idle() {
+    fn session_loaded_with_synthetic_running_prompt_id_binds_wake_turn() {
         use crate::app::dispatch::dispatch;
         use crate::app::actions::{Action, TaskResult};
 
@@ -1177,12 +1205,19 @@
         );
 
         assert!(
-            app.agents[&id].session.current_prompt_id.is_none(),
-            "synthetic non-scheduler running prompt must not be adopted on load"
+            app.agents[&id].session.current_prompt_id.as_deref()
+                == Some("task-completed-abc-123"),
+            "a wake running prompt is bound on load so its chrome survives the attach"
         );
         assert!(
-            app.agents[&id].session.state.is_idle(),
-            "adopting a synthetic actor-run turn would strand the viewer in TurnRunning"
+            matches!(app.agents[&id].session.state, AgentState::TurnRunning),
+            "binding gives the wake turn real chrome; its durable TurnCompleted \
+             is the exit, so it cannot strand"
+        );
+        assert_eq!(
+            app.agents[&id].session.wake_turn_prompt_id.as_deref(),
+            Some("task-completed-abc-123"),
+            "the wake identity is what the durable terminal matches on"
         );
         assert!(
             app.agents[&id].follow_up_pending.is_empty(),
@@ -2189,16 +2224,17 @@
     }
 
     #[test]
-    fn viewer_does_not_enter_turn_running_for_server_initiated_turn() {
+    fn viewer_enters_turn_running_for_server_initiated_turn() {
         // A server-initiated / auto-wake turn (synthetic prompt id, e.g. a
         // background subagent or task completion: `task-completed-…`) runs inside
-        // the actor and emits NO `x.ai/session/prompt_complete`. If a viewer
-        // entered TurnRunning for it, nothing would ever finish the turn and the
-        // viewer would be stuck "Responding…" forever — exactly the bug where one
-        // dashboard showed "Worked for" while the other was stuck responding.
-        // The driver also declines to show chrome for these (its server-initiated
-        // adopt path never calls start_turn), so the viewer must mirror that:
-        // adopt the id (so content renders) but stay Idle (no running chrome).
+        // the actor and emits NO `x.ai/session/prompt_complete`. It DOES emit a
+        // durable `TurnCompleted`, which is why binding it cannot strand: the
+        // viewer gets live chrome and the terminal is the exit. Previously the
+        // viewer stayed Idle for these, which is the bug where the pane looked
+        // idle (and Ctrl+C did nothing) while a wake turn streamed.
+        //
+        // Both driver and viewer bind through the same `enter_wake_turn`, so the
+        // two stay consistent instead of one showing chrome and the other not.
         let mut app = make_app_with_agent("sess-view");
         app.agents.get_mut(&AgentId(0)).unwrap().attached_as_viewer = true;
 
@@ -2216,14 +2252,21 @@
         assert_eq!(
             agent.session.current_prompt_id.as_deref(),
             Some("task-completed-abc"),
-            "the synthetic turn id is still adopted so its content renders"
+            "the synthetic turn id is adopted so its content renders"
         );
         assert!(
-            matches!(agent.session.state, AgentState::Idle),
-            "a viewer must NOT enter TurnRunning for a server-initiated turn (no \
-             prompt_complete would ever finish it → permanent stuck spinner)"
+            matches!(agent.session.state, AgentState::TurnRunning),
+            "a viewer binds a server-initiated turn too — the durable \
+             TurnCompleted is the exit, so it cannot strand"
         );
-        assert!(agent.turn_started_at.is_none());
+        assert_eq!(
+            agent.session.wake_turn_prompt_id.as_deref(),
+            Some("task-completed-abc")
+        );
+        assert!(
+            agent.turn_started_at.is_some(),
+            "the viewer's elapsed counter needs the anchor"
+        );
     }
 
     #[test]

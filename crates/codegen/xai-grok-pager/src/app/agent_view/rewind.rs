@@ -221,6 +221,7 @@ mod sync_rewind_anchor_to_picker_tests {
                 in_flight_prompt: None,
                 compact_held_prompt: None,
                 current_prompt_id: None,
+                wake_turn_prompt_id: None,
                 created_via_new: false,
             },
             ScrollbackState::new(),

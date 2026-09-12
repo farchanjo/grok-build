@@ -60,10 +60,11 @@ use routing::{
     mcp_target_agent, resolve_notif_agent, resolve_target_view,
 };
 
-use prompt_origin::{finish_wake_turn, viewer_turn_anchor};
 pub(crate) use prompt_origin::{
-    is_server_initiated_prompt, is_wake_prompt, should_adopt_running_prompt,
+    enter_wake_turn, is_server_initiated_prompt, is_wake_prompt, should_adopt_running_prompt,
+    viewer_turn_anchor,
 };
+use prompt_origin::{finish_wake_turn, is_active_wake_turn};
 
 pub(crate) use subagent_activity::finalize_killed_subagent;
 use subagent_activity::{subagent_activity_label, sync_subagent_activity};
@@ -479,6 +480,39 @@ pub(crate) fn handle(msg: AcpClientMessage, app: &mut AppView) -> bool {
                         }
                         for entry_id in agent.session.tracker.take_pending_edit_hl() {
                             agent.submit_edit_highlight(entry_id);
+                        }
+
+                        // Auto-wake turn binding (driver AND viewer). The shell
+                        // runs background-task / subagent / notification
+                        // completions as real model turns through the actor, but
+                        // they have no `PromptResponse`, so nothing here ever
+                        // called `start_turn`. Left unmodelled the session stays
+                        // `Idle`: no status line, no elapsed, no `[stop]`, Ctrl+C
+                        // falls through to the quit-arm, and a prompt typed
+                        // meanwhile drains locally and steals the turn.
+                        //
+                        // Bind the FIRST live delta of a wake turn to real turn
+                        // state. Subsequent deltas then match `current_prompt_id`
+                        // and render instead of being dropped by the mismatch
+                        // gate. The exit is the wake turn's durable
+                        // `TurnCompleted` (see `finish_wake_turn`).
+                        //
+                        // Gated on `is_idle()`: a wake turn that fires while a
+                        // user turn is already running keeps the old unmodelled
+                        // shape, so its terminal cannot clobber the user turn.
+                        if !dedup_drop
+                            && !meta.is_replay
+                            && !agent.session.loading_replay
+                            && agent.session.state.is_idle()
+                            && agent.session.wake_turn_prompt_id.is_none()
+                            && let Some(notif_pid) = meta.prompt_id.as_deref()
+                            && agent.should_bind_wake_turn(notif_pid)
+                        {
+                            let anchor = prompt_origin::wake_anchor_from_live_delta(
+                                agent,
+                                meta.turn_start_ms.is_some(),
+                            );
+                            enter_wake_turn(agent, notif_pid, anchor);
                         }
 
                         // Viewer chrome (leader / multi-client). A viewer has no

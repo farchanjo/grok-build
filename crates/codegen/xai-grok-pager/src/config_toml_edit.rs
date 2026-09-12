@@ -1032,7 +1032,10 @@ mod tests {
         write_project_memory_config(&ws, "milvus", Some("milvus-vm")).unwrap();
 
         let cfg_path = ws.join(".grok").join("config.toml");
-        assert!(cfg_path.is_file(), "expected .grok/config.toml to be created");
+        assert!(
+            cfg_path.is_file(),
+            "expected .grok/config.toml to be created"
+        );
         let doc = read_config_document_for_edit(&cfg_path).expect("reparse");
         assert_eq!(doc["memory"]["mode"].as_str(), Some("milvus"));
         assert_eq!(doc["memory"]["vector_store"].as_str(), Some("milvus-vm"));

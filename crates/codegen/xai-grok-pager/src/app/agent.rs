@@ -732,6 +732,22 @@ pub struct AgentSession {
     /// whose `meta.promptId` is set and doesn't match this id is silently
     /// dropped. `None` between turns.
     pub current_prompt_id: Option<String>,
+    /// Synthetic prompt id of an auto-wake turn (background task / subagent /
+    /// workflow / notification-drain completion) that this client is currently
+    /// rendering as a real turn.
+    ///
+    /// Wake turns run through the actor with no `PromptResponse`, so they get
+    /// no `start_turn`; left unmodelled they stream in with no status line, no
+    /// elapsed counter, and a dead Ctrl+C. Binding one promotes the session to
+    /// `TurnRunning` (so all of that chrome lights up) and makes `is_idle()`
+    /// false, which routes a prompt typed meanwhile onto the server queue
+    /// instead of optimistically starting a local turn.
+    ///
+    /// Entered by `enter_wake_turn`, exited by the wake turn's durable
+    /// `TurnCompleted` (see `finish_wake_turn`). `None` when no wake turn is
+    /// being rendered — including while a user turn runs, since a wake turn
+    /// that fires mid-user-turn keeps today's unmodelled behavior.
+    pub wake_turn_prompt_id: Option<String>,
     /// Whether this session was created via the `/new` slash command.
     /// Checked in the `SessionCreated` handler to decide whether to show
     /// the `/dashboard` discoverability tip. `false` for sessions created
@@ -1551,6 +1567,7 @@ mod tests {
             in_flight_prompt: None,
             compact_held_prompt: None,
             current_prompt_id: None,
+            wake_turn_prompt_id: None,
             created_via_new: false,
         }
     }

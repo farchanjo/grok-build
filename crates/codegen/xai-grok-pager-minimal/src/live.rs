@@ -563,6 +563,7 @@ fn render_minimal_status(
         agent.bash_turn,
         is_pending_user_input,
         goal_verifying,
+        agent.session.wake_turn_prompt_id.is_some(),
         watchers,
         parked,
         true,

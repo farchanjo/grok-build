@@ -5766,6 +5766,7 @@ pub(crate) mod tests {
                 in_flight_prompt: None,
                 compact_held_prompt: None,
                 current_prompt_id: None,
+                wake_turn_prompt_id: None,
                 created_via_new: false,
             },
             ScrollbackState::new(),
@@ -5960,6 +5961,7 @@ pub(crate) mod tests {
             in_flight_prompt: None,
             compact_held_prompt: None,
             current_prompt_id: None,
+            wake_turn_prompt_id: None,
             created_via_new: false,
         };
         Box::new(AgentView::new(session, ScrollbackState::new()))

@@ -41,6 +41,7 @@ pub fn make_agent_view(session_id: Option<&str>, cwd: &str) -> crate::app::agent
         in_flight_prompt: None,
         compact_held_prompt: None,
         current_prompt_id: None,
+        wake_turn_prompt_id: None,
         created_via_new: false,
     };
     crate::app::agent_view::AgentView::new(

@@ -328,6 +328,7 @@ fn make_test_agent_session(app: &AppView, id: AgentId, sid: &str) -> AgentSessio
         in_flight_prompt: None,
         compact_held_prompt: None,
         current_prompt_id: None,
+        wake_turn_prompt_id: None,
         created_via_new: false,
     }
 }
@@ -576,6 +577,7 @@ fn insert_placeholder_agent(app: &mut AppView, id: AgentId) {
             in_flight_prompt: None,
             compact_held_prompt: None,
             current_prompt_id: None,
+            wake_turn_prompt_id: None,
             created_via_new: false,
         },
         ScrollbackState::new(),
@@ -722,6 +724,7 @@ fn two_agent_app_with_bg_task() -> AppView {
             in_flight_prompt: None,
             compact_held_prompt: None,
             current_prompt_id: None,
+            wake_turn_prompt_id: None,
             created_via_new: false,
         },
         ScrollbackState::new(),

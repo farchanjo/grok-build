@@ -2524,6 +2524,7 @@ pub(crate) mod test_fixtures {
             in_flight_prompt: None,
             compact_held_prompt: None,
             current_prompt_id: None,
+            wake_turn_prompt_id: None,
             created_via_new: false,
         };
         session.enqueue_prompt("local one".to_string());
@@ -2589,6 +2590,7 @@ pub(crate) mod test_fixtures {
                 in_flight_prompt: None,
                 compact_held_prompt: None,
                 current_prompt_id: None,
+                wake_turn_prompt_id: None,
                 created_via_new: false,
             },
             ScrollbackState::new(),
@@ -2900,8 +2902,8 @@ pub(crate) mod test_fixtures {
     /// Drives the production `finalize_reload_and_maybe_adopt` that the
     /// `event_loop.rs` reconnect loop also calls (so a future reorder of the
     /// finalize-before-adopt gate fails here). A synthetic non-scheduler running
-    /// id leaves the agent `Idle` (reload still finalized), while a `/loop` or
-    /// user id IS adopted.
+    /// id is BOUND (its durable `TurnCompleted` is the exit, so binding is safe
+    /// across the reconnect), while a `/loop` or user id takes the shim path.
     #[test]
     fn reconnect_reload_adopts_only_for_prompt_with_completion_exit() {
         let mut synthetic = make_agent();
@@ -2912,13 +2914,21 @@ pub(crate) mod test_fixtures {
                 true,
                 Some("task-completed-abc-123".into())
             ),
-            "the reload must finalize even when adoption is skipped"
+            "the reload must finalize"
         );
         assert!(synthetic.session_reload.is_none());
-        assert!(synthetic.session.current_prompt_id.is_none());
+        assert_eq!(
+            synthetic.session.current_prompt_id.as_deref(),
+            Some("task-completed-abc-123"),
+            "a wake running id is bound across the reconnect so its chrome survives"
+        );
+        assert_eq!(
+            synthetic.session.wake_turn_prompt_id.as_deref(),
+            Some("task-completed-abc-123")
+        );
         assert!(
-            synthetic.session.state.is_idle(),
-            "a synthetic non-scheduler running id must not strand the viewer in TurnRunning"
+            synthetic.session.state.is_turn_running(),
+            "binding gives real chrome; the durable TurnCompleted is the exit"
         );
         let mut cron = make_agent();
         cron.begin_session_reload(1);
@@ -3411,6 +3421,7 @@ pub(crate) fn test_agent_view(session_id: Option<&str>, cwd: std::path::PathBuf)
             in_flight_prompt: None,
             compact_held_prompt: None,
             current_prompt_id: None,
+            wake_turn_prompt_id: None,
             created_via_new: false,
         },
         crate::scrollback::state::ScrollbackState::new(),

@@ -177,6 +177,7 @@ fn dispatch_load_session_ungated(
             in_flight_prompt: None,
             compact_held_prompt: None,
             current_prompt_id: None,
+            wake_turn_prompt_id: None,
             created_via_new: false,
         },
         scrollback,
@@ -828,6 +829,7 @@ pub(in crate::app::dispatch) fn dispatch_load_session_with_restore(
             in_flight_prompt: None,
             compact_held_prompt: None,
             current_prompt_id: None,
+            wake_turn_prompt_id: None,
             created_via_new: false,
         },
         scrollback,
@@ -936,10 +938,25 @@ pub(in crate::app::dispatch) fn handle_session_loaded(
         let adopting = running_prompt_id
             .as_deref()
             .is_some_and(|pid| agent.should_adopt_running_prompt(pid));
+        // A wake turn in flight at load time binds instead of adopting: its exit
+        // is the durable `TurnCompleted`, so a turn that already ended in this
+        // load's replay must not be bound (`should_bind_wake_turn`).
+        let binding_wake = !adopting
+            && running_prompt_id.as_deref().is_some_and(|pid| {
+                agent.session.state.is_idle() && agent.should_bind_wake_turn(pid)
+            });
         let preserve = running_prompt_id.as_deref().filter(|_| adopting);
         agent.reset_follow_ups_for_reload_preserving(preserve);
-        if adopting && let Some(running_pid) = running_prompt_id {
+        if adopting && let Some(running_pid) = running_prompt_id.clone() {
             agent.adopt_running_prompt(running_pid);
+        } else if binding_wake && let Some(running_pid) = running_prompt_id.clone() {
+            // The replayed deltas refreshed `turn_start_ms` with the wake turn's
+            // own stamp, so back-dating from it is correct here.
+            crate::app::acp_handler::enter_wake_turn(
+                agent,
+                &running_pid,
+                crate::app::acp_handler::viewer_turn_anchor(agent.turn_start_ms),
+            );
         } else {
             agent.scrollback.finish_all_running();
             for child in agent.subagent_views.values_mut() {

@@ -192,6 +192,9 @@ pub(super) fn handle_session_notification(notif: &acp::ExtNotification, app: &mu
     }
     let mut plugins_changed_needs_skills_refetch = false;
     let mut terminal_outcome: Option<super::super::turn_completion::TerminalApply> = None;
+    // Set when this notification closed an auto-wake turn, so the queue is
+    // re-drained afterwards (the borrow on `agent` blocks it in the arm).
+    let mut wake_turn_finished = false;
     let root_session_id: &str = session_notif.session_id.0.as_ref();
     let raw_meta = session_notif.meta.as_ref().and_then(|v| v.as_object());
     let changed = match session_notif.update {
@@ -270,10 +273,20 @@ pub(super) fn handle_session_notification(notif: &acp::ExtNotification, app: &mu
                 agent.replayed_terminal_prompts.insert(prompt_id);
                 false
             } else if is_wake_prompt(&prompt_id) {
-                if agent.session.state.is_busy() {
+                if is_active_wake_turn(agent, &prompt_id) {
+                    // This client bound the wake turn (see `enter_wake_turn`) —
+                    // close it, which flushes the stream and returns the session
+                    // to Idle so the prompt the server promotes next adopts.
+                    finish_wake_turn(agent);
+                    wake_turn_finished = true;
+                    true
+                } else if agent.session.state.is_busy() {
+                    // A user turn owns the session; the wake turn ran unmodelled
+                    // alongside it. Leave the user turn untouched.
                     false
                 } else {
                     finish_wake_turn(agent);
+                    wake_turn_finished = true;
                     true
                 }
             } else {
@@ -410,6 +423,7 @@ pub(super) fn handle_session_notification(notif: &acp::ExtNotification, app: &mu
                 in_flight_prompt: None,
                 compact_held_prompt: None,
                 current_prompt_id: None,
+                wake_turn_prompt_id: None,
                 created_via_new: false,
             };
             let mut child_scrollback = crate::scrollback::state::ScrollbackState::new();
@@ -1079,6 +1093,14 @@ pub(super) fn handle_session_notification(notif: &acp::ExtNotification, app: &mu
         if let Some(id) = meta.event_id {
             agent.last_seen_event_id = Some(id);
         }
+    }
+    if wake_turn_finished {
+        // The wake turn held the session busy, so a prompt typed meanwhile that
+        // did not qualify for a server-authoritative send is still parked in the
+        // local queue. Now that `finish_wake_turn` returned the session to Idle,
+        // drain it.
+        let effects = super::super::dispatch::maybe_drain_queue_and_note_peek(app, parent_id);
+        app.pending_effects.extend(effects);
     }
     if let Some(outcome) = terminal_outcome {
         return super::super::turn_completion::apply_terminal_outcome(

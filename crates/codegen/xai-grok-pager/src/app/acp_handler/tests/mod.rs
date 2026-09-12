@@ -48,6 +48,7 @@ pub(super) fn make_session(session_id: Option<&str>) -> AgentSession {
         in_flight_prompt: None,
         compact_held_prompt: None,
         current_prompt_id: None,
+        wake_turn_prompt_id: None,
         created_via_new: false,
     }
 }
@@ -2123,6 +2124,7 @@ mod queue_and_adoption;
 mod plan_mode;
 mod reconnect;
 mod turn_completion;
+mod wake_turn;
 mod interjection;
 mod session_routing;
 mod plugins;

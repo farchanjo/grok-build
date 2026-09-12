@@ -273,6 +273,23 @@ pub(super) fn handle_queue_changed(notif: &acp::ExtNotification, app: &mut AppVi
                 .get(&aid)
                 .is_some_and(|a| !a.should_adopt_running_prompt(&pid)) =>
         {
+            // Auto-wake turn: bind it so the running chrome appears at turn
+            // START rather than at first delta (model ttft can be seconds, and
+            // an invisible turn is one the user cannot cancel). Same guards as
+            // the live-delta binding: only when otherwise idle, only for a
+            // genuinely wake-shaped pid that has not already ended in replay.
+            //
+            // Anchor with `now`, not `turn_start_ms`: this broadcast lands
+            // before any delta, so `turn_start_ms` still holds the PREVIOUS
+            // turn's stamp and back-dating from it would inflate the elapsed
+            // counter by that whole turn.
+            if let Some(agent) = app.agents.get_mut(&aid)
+                && agent.session.state.is_idle()
+                && agent.session.wake_turn_prompt_id.is_none()
+                && agent.should_bind_wake_turn(&pid)
+            {
+                super::enter_wake_turn(agent, &pid, std::time::Instant::now());
+            }
             tracing::debug!(
                 target: "qtrace",
                 pid = std::process::id(),
