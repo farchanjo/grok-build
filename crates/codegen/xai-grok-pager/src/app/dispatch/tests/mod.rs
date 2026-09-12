@@ -504,12 +504,32 @@ pub(super) fn end_turn() -> Action {
 }
 /// Plant a Build session under the process `grok_home()` (OnceLock-cached;
 /// do not rely on setting `GROK_HOME` mid-process). Caller must remove `sess_dir`.
+///
+/// The summary is written through the production constructor rather than as a
+/// bare `{}`: `is_persisted_session_dir` decides a dir is resumable by
+/// DESERIALIZING `summary.json`, and `Summary` has required fields, so an empty
+/// object fails to parse and the plant is invisible to the detector. That made
+/// every `--chat` refusal test silently take the happy path. Building it from
+/// `Summary::new` keeps the fixture from drifting off the schema again.
 fn plant_local_build_session(cwd: &std::path::Path, session_id: &str) -> std::path::PathBuf {
     let home = xai_grok_shell::util::grok_home::grok_home();
     let encoded = xai_grok_shell::util::grok_home::encode_cwd_dirname(&cwd.to_string_lossy());
     let sess_dir = home.join("sessions").join(encoded).join(session_id);
     std::fs::create_dir_all(&sess_dir).expect("plant session dir");
-    std::fs::write(sess_dir.join("summary.json"), b"{}").expect("plant summary");
+    let info = xai_grok_shell::session::info::Info {
+        id: acp::SessionId::new(session_id),
+        cwd: cwd.to_string_lossy().to_string(),
+    };
+    let summary = xai_grok_shell::session::persistence::Summary::new(
+        &info,
+        acp::ModelId::new("planted-model".to_owned()),
+    )
+    .expect("build planted summary");
+    std::fs::write(
+        sess_dir.join("summary.json"),
+        serde_json::to_vec(&summary).expect("serialize planted summary"),
+    )
+    .expect("plant summary");
     sess_dir
 }
 /// Extract the in-flight auth request sequence, panicking if the auth

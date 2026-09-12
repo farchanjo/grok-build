@@ -1125,7 +1125,24 @@ mod tests {
         let _cleanup = RmDirOnDrop(sessions_cwd_dir.clone());
         let session_dir = sessions_cwd_dir.join(id);
         std::fs::create_dir_all(&session_dir).unwrap();
-        std::fs::write(session_dir.join("summary.json"), "{}").unwrap();
+        // A bare `{}` does NOT parse as a `Summary` (required fields), and
+        // `is_persisted_session_dir` decides resumability by deserializing
+        // `summary.json` — so the plant must carry the full shape or the
+        // collision under test is never seen. Same shape the sibling
+        // `resume_session_title_*` test uses.
+        let summary = serde_json::json!({
+            "info": { "id": id, "cwd": cwd_str },
+            "session_summary": "",
+            "created_at": "2026-01-01T00:00:00Z",
+            "updated_at": "2026-01-01T00:00:00Z",
+            "num_messages": 0,
+            "current_model_id": "grok-4",
+        });
+        std::fs::write(
+            session_dir.join("summary.json"),
+            serde_json::to_vec(&summary).unwrap(),
+        )
+        .unwrap();
         let out = materialize_startup_for_cwd(
             chat_ctx(),
             SessionStartupIntent::Resume {
