@@ -230,9 +230,11 @@ fn compaction_prep_client_carries_exact_route_and_operation() {
 }
 
 /// Compaction inherits the request max from configuration, exactly like the
-/// main turn: the 16384 OpenRouter API default, never the raw catalog
-/// ceiling. The ceiling stays a separate clamp; nothing on the compaction
-/// path invents or strips a request budget.
+/// main turn. For OpenRouter the adapter's `CatalogDefault` policy makes the
+/// published catalog ceiling the mandatory request budget, so compaction must
+/// carry the ceiling and keep it on `max_output_ceiling` too; a model with no
+/// ceiling falls back to the shared 16384 API default. Nothing on the
+/// compaction path invents or strips a request budget.
 #[test]
 fn compaction_route_inherits_resolved_request_max_tokens() {
     use crate::agent::model_providers::OPENROUTER_DEFAULT_MAX_COMPLETION_TOKENS;
@@ -270,9 +272,9 @@ fn compaction_route_inherits_resolved_request_max_tokens() {
         resolved.inference
     };
 
-    // A catalog ceiling stays a separate clamp: the request budget keeps the
-    // 16384 API default so a 131072-wide model never reserves its whole
-    // context for output.
+    // An OpenRouter catalog ceiling is the mandatory default budget
+    // (`MaxTokensPolicy::CatalogDefault`), so a 131072-wide model sends
+    // 131072 rather than a stale 16384 that would truncate long generations.
     let dir = tempdir().unwrap();
     register_provider(
         dir.path(),
@@ -284,12 +286,12 @@ fn compaction_route_inherits_resolved_request_max_tokens() {
     let with_ceiling = resolve_max(Some(131_072), dir.path());
     assert_eq!(
         with_ceiling.max_completion_tokens,
-        Some(OPENROUTER_DEFAULT_MAX_COMPLETION_TOKENS),
-        "compaction must inherit the API default, not the raw ceiling"
+        Some(131_072),
+        "compaction must carry the catalog ceiling as its request budget"
     );
     assert_eq!(with_ceiling.max_output_ceiling, Some(131_072));
 
-    // No ceiling anywhere: the same shared OpenRouter API default applies.
+    // No ceiling anywhere: the shared OpenRouter API default applies.
     let without_ceiling = resolve_max(None, dir.path());
     assert_eq!(
         without_ceiling.max_completion_tokens,

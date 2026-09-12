@@ -437,12 +437,13 @@ impl ResolvedModelProvider {
     /// an explicit positive value.
     ///
     /// The OpenRouter catalog ceiling (`top_provider.max_completion_tokens`)
-    /// is a capability cap stored on `ModelInfo.max_output_ceiling` and is
-    /// deliberately **not** consulted here: copying it onto
-    /// `InferenceConfig.max_completion_tokens` (e.g. 131072 on a
-    /// 131072-wide model) makes every non-empty prompt fail context
-    /// validation. The sampler clamps whatever budget this returns to that
-    /// ceiling when both are present.
+    /// is a capability cap stored on `ModelInfo.max_output_ceiling`. This
+    /// fallback does **not** consult it — but it only runs when there is no
+    /// ceiling: `build_inference_config_for_model` short-circuits for an
+    /// OpenRouter model that publishes one, because the adapter's
+    /// `MaxTokensPolicy::CatalogDefault` makes the ceiling itself the mandatory
+    /// request budget. Whenever this fallback *is* reached and a ceiling is
+    /// present, the caller clamps the returned budget to it.
     pub fn request_max_completion_tokens(&self) -> Option<u32> {
         self.max_completion_tokens.filter(|&n| n > 0).or_else(|| {
             (self.kind == ModelProviderKind::OpenRouter)
@@ -2172,7 +2173,7 @@ mod tests {
     }
 
     #[test]
-    fn openrouter_ceiling_never_becomes_the_request_max() {
+    fn openrouter_ceiling_becomes_the_default_request_budget() {
         use super::OPENROUTER_DEFAULT_MAX_COMPLETION_TOKENS;
         let raw_config: toml::Value = toml::from_str(
             r#"
@@ -2200,16 +2201,21 @@ mod tests {
             None,
             None,
         );
+        // The OpenRouter adapter owns max-tokens governance and returns
+        // `MaxTokensPolicy::CatalogDefault`: the catalog ceiling is the
+        // mandatory default budget, not a clamp the 16384 API default sits
+        // under. A stale 16384 on a 131072-wide model truncated
+        // reasoning-heavy generations (`max_tokens_truncation`).
         assert_eq!(
             sampling.max_completion_tokens,
-            Some(OPENROUTER_DEFAULT_MAX_COMPLETION_TOKENS),
-            "the catalog ceiling must never be copied onto the request budget; \
-             the 16384 API default is sent and the sampler clamps it to the ceiling"
+            Some(131_072),
+            "the catalog ceiling is the OpenRouter default request budget; \
+             an explicit per-model override is the only thing that may sit below it"
         );
         assert_eq!(
             sampling.max_output_ceiling,
             Some(131_072),
-            "the capability ceiling stays a separate clamp"
+            "the capability ceiling is still published separately for clamping"
         );
     }
 
