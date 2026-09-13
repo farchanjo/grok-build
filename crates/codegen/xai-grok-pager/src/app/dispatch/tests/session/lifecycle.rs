@@ -1466,17 +1466,6 @@ fn login_mid_session_switches_to_welcome_and_stashes_view() {
 /// A mid-session `/login` switches to the welcome view to host the auth
 /// flow; that transition must collapse any expanded announcement so it
 /// can't reappear stale if auth completion lands back on a welcome screen.
-#[test]
-fn login_mid_session_resets_welcome_announcement_expanded() {
-    let mut app = test_app_with_agent();
-    app.welcome_announcement.expanded = true;
-    dispatch(Action::Login, &mut app);
-    assert_eq!(app.active_view, ActiveView::Welcome);
-    assert!(
-        !app.welcome_announcement.expanded,
-        "mid-session login must reset the expanded announcement"
-    );
-}
 /// xAI OAuth AuthComplete without a store write receipt must leave the
 /// matching credential CTA in place (fail closed).
 #[test]
@@ -2088,16 +2077,15 @@ fn dashboard_stop_with_peek_open_moves_selection_and_peek_down_one() {
     let render = |app: &mut AppView| {
         let mut buf = Buffer::empty(area);
         let _ = crate::views::dashboard::render_dashboard(
-            &mut buf,
-            area,
-            app.dashboard.as_mut().unwrap(),
-            &mut app.agents,
-            &reg,
-            None,
-            &[],
-            false,
-            None,
-        );
+&mut buf,
+area,
+app.dashboard.as_mut().unwrap(),
+&mut app.agents,
+&reg,
+None,
+&[],
+false,
+);
     };
     render(&mut app);
     assert!(

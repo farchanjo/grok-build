@@ -364,8 +364,7 @@ async fn startup_gate_shows_paywall_for_free_user_after_live_check() {
 ///
 /// The stale snapshot is delivered via the `/new` settings refresh — the
 /// only active `/v1/settings` consumer at that point (watch disabled via
-/// env, announcements poll at its 5-min default, gate poll only runs while
-/// gated, startup fetches settled). Queueing it at startup instead races
+/// env, gate poll only runs while gated, startup fetches settled). Queueing it at startup instead races
 /// the shell's concurrent startup fetches: a slow gated fetch landing after
 /// the verify check stores fresh settings can legitimately re-carry the
 /// gate — a time-travel artifact of the scripted one-shot, not a client

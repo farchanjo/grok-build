@@ -111,12 +111,7 @@ pub struct WelcomeRenderResult {
     pub changelog_action_present: bool,
     /// Hit-test rect for the clickable changelog info block (opens release notes).
     pub changelog_cta_rect: Option<Rect>,
-    /// Whether the announcement overflowed (the "expandable" signal).
-    pub announcement_truncated: bool,
-    /// Hit-test rect for the full announcement block (click anywhere to toggle).
-    pub announcement_rect: Option<Rect>,
     /// Hit-test rect for the promo upgrade CTA `[label]` button (click → open).
-    pub upgrade_cta_rect: Option<Rect>,
     pub privacy_banner_accept_rect: Option<Rect>,
     pub privacy_banner_customize_rect: Option<Rect>,
     pub privacy_banner_legal_rect: Option<Rect>,
@@ -157,7 +152,7 @@ pub(super) struct WelcomeLayout {
 /// Bundled (and `Default`-able) so call sites name each field — in particular
 /// the two distinct compaction flags can't be silently transposed.
 #[derive(Default)]
-struct WelcomeLayoutInput<'a> {
+struct WelcomeLayoutInput {
     content_area: Rect,
     /// Error/warning row height; 0 when there's nothing to show.
     error_height: u16,
@@ -167,13 +162,6 @@ struct WelcomeLayoutInput<'a> {
     changelog_height: u16,
     /// Vertical compaction (session picker visible): skip the logo + info slot.
     compact: bool,
-    /// Horizontal-inset compaction (appearance setting) for the stacked slot.
-    prompt_compact: bool,
-    announcement: Option<&'a xai_grok_announcements::RemoteAnnouncement>,
-    /// Whether a long announcement is expanded inline (vs. collapsed to 2 lines).
-    expanded: bool,
-    /// Whether the info slot reserves a promo upgrade CTA (spacer + button).
-    has_upgrade_cta: bool,
 }
 
 impl WelcomeLayout {
@@ -204,7 +192,7 @@ impl WelcomeLayout {
     }
 
     /// Compute the welcome screen layout, allowing the wide hero-box variant.
-    fn compute(input: WelcomeLayoutInput<'_>) -> Self {
+    fn compute(input: WelcomeLayoutInput) -> Self {
         Self::compute_inner(input, true)
     }
 
@@ -214,7 +202,7 @@ impl WelcomeLayout {
     /// `render_welcome_blocked`, which only paints the stacked `logo`/`menu`
     /// rects (and never an announcement). The hero-box layout zeroes those, so
     /// the blocked path must stay stacked regardless of terminal size.
-    fn compute_stacked(input: WelcomeLayoutInput<'_>) -> Self {
+    fn compute_stacked(input: WelcomeLayoutInput) -> Self {
         Self::compute_inner(input, false)
     }
 
@@ -224,7 +212,7 @@ impl WelcomeLayout {
     /// changelog) at that layout's slot width before placing rects — width is
     /// content-size-only, so it's a clean two-phase computation. `allow_hero_box`
     /// gates the wide variant; stacked-only callers pass `false`.
-    fn compute_inner(input: WelcomeLayoutInput<'_>, allow_hero_box: bool) -> Self {
+    fn compute_inner(input: WelcomeLayoutInput, allow_hero_box: bool) -> Self {
         let WelcomeLayoutInput {
             content_area,
             error_height,
@@ -232,61 +220,31 @@ impl WelcomeLayout {
             tip_height,
             changelog_height,
             compact,
-            prompt_compact,
-            announcement,
-            expanded,
-            has_upgrade_cta,
         } = input;
         let zero = Rect::default();
-        // Pick hero vs stacked first, independent of the announcement's height:
-        // the changelog isn't clamped so it must fit as-is, but an announcement
-        // clamps to fit, so with one present the box only needs to fit empty.
-        let gate_info = if announcement.is_some() {
-            0
-        } else {
-            changelog_height
-        };
         let use_hero_box = allow_hero_box
             && !compact
             && content_area.width >= HERO_BOX_MIN_WIDTH
             && menu_height > 0
             && content_area.height
-                >= hero_box::min_content_height(error_height, menu_height, tip_height, gate_info);
+                >= hero_box::min_content_height(
+                    error_height,
+                    menu_height,
+                    tip_height,
+                    changelog_height,
+                );
 
         if use_hero_box {
-            // The hero box measures + clamps the announcement itself.
             return hero_box::compute_hero_box(
                 content_area,
                 error_height,
                 menu_height,
                 tip_height,
                 changelog_height,
-                announcement,
-                expanded,
-                has_upgrade_cta,
             );
         }
 
-        // Stacked info slot: the announcement clamped to the column budget, else
-        // the changelog. Measure at the centered menu width inside the inset.
-        let info_height = match announcement {
-            Some(ann) => {
-                let avail = content_area
-                    .width
-                    .saturating_sub(prompt::prompt_inset(prompt_compact) * 2);
-                let width = stacked_info_width(avail, content_area.height, MENU_MIN_WIDTH);
-                hero_box::announcement_desired_rows(ann, width, expanded, has_upgrade_cta).min(
-                    stacked_info_budget(
-                        content_area,
-                        error_height,
-                        menu_height,
-                        tip_height,
-                        compact,
-                    ),
-                )
-            }
-            None => changelog_height,
-        };
+        let info_height = changelog_height;
 
         // Stacked layout: skip the logo in compact mode (the session picker
         // needs the space); otherwise pick small/full/none by height.
@@ -597,7 +555,6 @@ pub struct WelcomeRenderParams<'a> {
     pub auth_code_cursor_byte: usize,
     pub clipboard_delivery: Option<crate::clipboard::ClipboardDelivery>,
     pub show_raw_url: bool,
-    pub announcement: Option<&'a xai_grok_announcements::RemoteAnnouncement>,
     pub tip: Option<&'a str>,
     pub model_name: &'a str,
     pub flags: &'a [PromptFlag<'a>],
@@ -644,13 +601,6 @@ pub struct WelcomeRenderParams<'a> {
     pub changelog_bullets: &'a [String],
     /// Whether full release notes markdown is available (controls the CTA hint).
     pub changelog_has_full_notes: bool,
-    /// Whether a long managed-config announcement is expanded inline (vs the
-    /// default 2-line collapsed view with a trailing `…`).
-    pub welcome_announcement_expanded: bool,
-    /// Promo upgrade CTA `[label]` to paint below the hero announcement: `Some`
-    /// drives both the reserved row height and the `[label]` button. `None` = no
-    /// CTA on the welcome screen.
-    pub upgrade_cta: Option<&'a str>,
     /// Non-blocking welcome privacy banner above the prompt.
     pub privacy_banner: bool,
 }
@@ -688,7 +638,7 @@ pub fn render_welcome(
         width: top_bar_area.width.saturating_sub(h_margin * 2),
         height: 1,
     };
-    render_top_bar(top_bar_inner, buf, &theme, None);
+    render_top_bar(top_bar_inner, buf, &theme);
 
     let mut result = match params.auth_state {
         AuthState::Pending { error } => {
@@ -726,9 +676,6 @@ pub fn render_welcome(
                 gate_url_rect: None,
                 changelog_action_present: false,
                 changelog_cta_rect: None,
-                announcement_truncated: false,
-                announcement_rect: None,
-                upgrade_cta_rect: None,
                 privacy_banner_accept_rect: None,
                 privacy_banner_customize_rect: None,
                 privacy_banner_legal_rect: None,
@@ -761,9 +708,6 @@ pub fn render_welcome(
                 gate_url_rect: None,
                 changelog_action_present: false,
                 changelog_cta_rect: None,
-                announcement_truncated: false,
-                announcement_rect: None,
-                upgrade_cta_rect: None,
                 privacy_banner_accept_rect: None,
                 privacy_banner_customize_rect: None,
                 privacy_banner_legal_rect: None,
@@ -797,9 +741,6 @@ pub fn render_welcome(
                 gate_url_rect: None,
                 changelog_action_present: false,
                 changelog_cta_rect: None,
-                announcement_truncated: false,
-                announcement_rect: None,
-                upgrade_cta_rect: None,
                 privacy_banner_accept_rect: None,
                 privacy_banner_customize_rect: None,
                 privacy_banner_legal_rect: None,
@@ -880,7 +821,6 @@ fn render_welcome_blocked(
         error_height: msg_height,
         menu_height,
         compact,
-        prompt_compact: compact,
         ..Default::default()
     });
 
@@ -985,7 +925,6 @@ fn render_welcome_trust(
         error_height: msg_height,
         menu_height,
         compact,
-        prompt_compact: compact,
         ..Default::default()
     });
 
@@ -1606,81 +1545,6 @@ fn render_changelog_section(
     clickable.then_some(centered)
 }
 
-/// Wrap width of the stacked info slot, centered at the menu width inside the
-/// inset. Both `compute`'s height measurement and `render_announcement_section`
-/// go through here — same width, no drift. `logo_height` selects the min menu
-/// width.
-fn stacked_info_width(avail_width: u16, logo_height: u16, min_width_hint: u16) -> u16 {
-    logo::logo_visual_width(logo_height)
-        .max(30)
-        .max(min_width_hint)
-        .min(avail_width)
-}
-
-/// Largest info-slot height the stacked column can allocate, mirroring
-/// [`WelcomeLayout::effective_changelog`]. Compact never shows the slot.
-fn stacked_info_budget(
-    content_area: Rect,
-    error_height: u16,
-    menu_height: u16,
-    tip_height: u16,
-    compact: bool,
-) -> u16 {
-    if compact {
-        return 0;
-    }
-    let logo_rows = logo_line_count(content_area.height);
-    let gap_after_logo = if error_height > 0 { 1u16 } else { 0 };
-    let fixed_above = logo_rows + 1 + gap_after_logo + error_height;
-    let fixed_below = WelcomeLayout::fixed_below(tip_height);
-    // +1 info-slot gap, +1 min flex gap above the tip.
-    content_area
-        .height
-        .saturating_sub(fixed_above + menu_height + 1 + fixed_below + 1)
-}
-
-/// Render the announcement in the stacked info slot, centered to the menu width.
-/// Returns `(block_rect, truncated)`: the clickable block and the overflow flag.
-#[allow(clippy::too_many_arguments)]
-fn render_announcement_section(
-    area: Rect,
-    buf: &mut Buffer,
-    theme: &Theme,
-    announcement: &xai_grok_announcements::RemoteAnnouncement,
-    min_width_hint: u16,
-    content_height: u16,
-    expanded: bool,
-    mouse_pos: Option<(u16, u16)>,
-    upgrade_cta: Option<&str>,
-) -> (Option<Rect>, bool, Option<Rect>) {
-    // Same width the height pre-pass reserved for (see `stacked_info_width`).
-    let menu_width = stacked_info_width(area.width, content_height, min_width_hint);
-    let [_, centered, _] = Layout::horizontal([
-        Constraint::Min(0),
-        Constraint::Length(menu_width),
-        Constraint::Min(0),
-    ])
-    .flex(Flex::Center)
-    .areas(area);
-
-    if centered.width < 20 || centered.height == 0 {
-        return (None, false, None);
-    }
-
-    // Mirror the hero: reserve the CTA rows at the bottom, draw the text into
-    // what's left, then place the `[label]` button right after the drawn text.
-    let (text_area, truncated, cta_rect) = hero_box::render_announcement_with_upgrade_cta(
-        buf,
-        theme,
-        centered,
-        announcement,
-        expanded,
-        mouse_pos,
-        upgrade_cta,
-    );
-    (Some(text_area), truncated, cta_rect)
-}
-
 /// Render the normal welcome screen (Done state -- already authenticated).
 fn render_welcome_done(
     content_area: Rect,
@@ -1807,8 +1671,6 @@ fn render_welcome_done(
         0
     };
     let content_height = menu_height + picker_height;
-    // The layout measures the announcement slot itself (collapsed: title + up to
-    // 2 wrapped lines; expanded: the full message, clamped so the box fits).
     let layout = WelcomeLayout::compute(WelcomeLayoutInput {
         content_area,
         error_height: hint_height,
@@ -1816,10 +1678,6 @@ fn render_welcome_done(
         tip_height,
         changelog_height,
         compact: welcome_compact,
-        prompt_compact: p.compact,
-        announcement: p.announcement,
-        expanded: p.welcome_announcement_expanded,
-        has_upgrade_cta: p.upgrade_cta.is_some(),
     });
 
     // Render startup warning in the error area (same slot as auth errors).
@@ -1827,9 +1685,6 @@ fn render_welcome_done(
 
     // Hit-rects / truncation flag, set by whichever layout draws each block.
     let mut changelog_cta_rect: Option<Rect> = None;
-    let mut announcement_truncated = false;
-    let mut announcement_rect: Option<Rect> = None;
-    let mut upgrade_cta_rect: Option<Rect> = None;
 
     let (menu_rects, picker_close_button) = if show_picker {
         // Use the full area since logo/menu are hidden and shortcuts
@@ -1870,16 +1725,10 @@ fn render_welcome_done(
             menu_items,
             p.selected,
             p.mouse_pos,
-            p.announcement,
-            p.welcome_announcement_expanded,
             p.changelog_bullets,
             p.changelog_has_full_notes,
-            p.upgrade_cta,
         );
         changelog_cta_rect = rects.changelog_cta_rect;
-        announcement_truncated = rects.announcement_truncated;
-        announcement_rect = rects.announcement_rect;
-        upgrade_cta_rect = rects.upgrade_cta_rect;
         (rects.menu_rects, None)
     } else {
         // Narrow layout: stacked logo above, menu below. Inset the menu the
@@ -1901,38 +1750,20 @@ fn render_welcome_done(
         )
     };
 
-    // Stacked info slot below the menu (narrow layout): show the announcement
-    // or the changelog (announcement takes priority), mirroring the hero box.
-    // Inset to match the input bar so it lines up with the menu above.
+    // Stacked info slot below the menu (narrow layout). Inset to match the
+    // input bar so it lines up with the menu above.
     if layout.changelog.height > 0 {
         let info_area = inset_horizontal(layout.changelog, prompt::prompt_inset(p.compact));
-        if let Some(ann) = p.announcement {
-            let (block, truncated, cta_rect) = render_announcement_section(
-                info_area,
-                buf,
-                theme,
-                ann,
-                MENU_MIN_WIDTH,
-                content_area.height,
-                p.welcome_announcement_expanded,
-                p.mouse_pos,
-                p.upgrade_cta,
-            );
-            announcement_rect = block;
-            announcement_truncated = truncated;
-            upgrade_cta_rect = cta_rect;
-        } else {
-            changelog_cta_rect = render_changelog_section(
-                info_area,
-                buf,
-                theme,
-                p.changelog_bullets,
-                MENU_MIN_WIDTH,
-                content_area.height,
-                p.changelog_has_full_notes,
-                p.mouse_pos,
-            );
-        }
+        changelog_cta_rect = render_changelog_section(
+            info_area,
+            buf,
+            theme,
+            p.changelog_bullets,
+            MENU_MIN_WIDTH,
+            content_area.height,
+            p.changelog_has_full_notes,
+            p.mouse_pos,
+        );
     }
 
     // Skip the prompt input when picker is visible to save space;
@@ -2208,9 +2039,6 @@ fn render_welcome_done(
         gate_url_rect: gate_url_hit_rect,
         changelog_action_present: show_changelog_action,
         changelog_cta_rect,
-        announcement_truncated,
-        announcement_rect,
-        upgrade_cta_rect,
         privacy_banner_accept_rect,
         privacy_banner_customize_rect,
         privacy_banner_legal_rect,
@@ -2889,7 +2717,6 @@ mod tests {
             auth_code_cursor_byte: 0,
             clipboard_delivery: None,
             show_raw_url: false,
-            announcement: None,
             tip: None,
             model_name: "test",
             flags: &[],
@@ -2922,8 +2749,6 @@ mod tests {
             usage_visible: true,
             changelog_bullets: &[],
             changelog_has_full_notes: false,
-            welcome_announcement_expanded: false,
-            upgrade_cta: None,
             privacy_banner: false,
         }
     }
@@ -3359,40 +3184,6 @@ mod tests {
     }
 
     #[test]
-    fn stacked_slot_sized_for_announcement_over_changelog() {
-        // Narrow terminal (80 cols < 90 → no hero box). With both present, the
-        // stacked info slot is sized for the announcement (priority), not the
-        // changelog.
-        let area = Rect::new(0, 0, 80, 50);
-        let a = long_ann();
-        let layout = WelcomeLayout::compute(WelcomeLayoutInput {
-            content_area: area,
-            menu_height: 4,
-            changelog_height: 5,
-            announcement: Some(&a),
-            ..Default::default()
-        });
-        assert!(!layout.has_hero_box());
-        assert_eq!(layout.changelog.height, 3);
-    }
-
-    #[test]
-    fn stacked_slot_uses_announcement_when_no_changelog() {
-        // Narrow terminal, announcement but no changelog: the stacked slot is
-        // still allocated for the announcement (it used to be changelog-only).
-        let area = Rect::new(0, 0, 80, 50);
-        let a = long_ann();
-        let layout = WelcomeLayout::compute(WelcomeLayoutInput {
-            content_area: area,
-            menu_height: 4,
-            announcement: Some(&a),
-            ..Default::default()
-        });
-        assert!(!layout.has_hero_box());
-        assert_eq!(layout.changelog.height, 3);
-    }
-
-    #[test]
     fn changelog_hidden_when_compact() {
         let area = Rect::new(0, 0, 80, 60);
         let layout = WelcomeLayout::compute(WelcomeLayoutInput {
@@ -3400,7 +3191,6 @@ mod tests {
             menu_height: 4,
             changelog_height: 5,
             compact: true,
-            prompt_compact: true,
             ..Default::default()
         });
         assert_eq!(layout.changelog.height, 0);
@@ -3538,7 +3328,6 @@ mod tests {
             content_area: area,
             menu_height: 4,
             compact: true,
-            prompt_compact: true,
             ..Default::default()
         });
         assert!(
@@ -3694,106 +3483,6 @@ mod tests {
         // The subtitle is hidden when the info slot is shown.
         assert_eq!(layout.hero_subtitle.height, 0);
         assert!(layout.hero_info.y > layout.hero_version.y);
-    }
-
-    #[test]
-    fn hero_box_with_announcement() {
-        let area = Rect::new(0, 0, 100, 50);
-        let a = long_ann();
-        let layout = WelcomeLayout::compute(WelcomeLayoutInput {
-            content_area: area,
-            menu_height: 3,
-            announcement: Some(&a),
-            ..Default::default()
-        });
-        assert!(layout.has_hero_box());
-        // Collapsed: title (1) + 2 wrapped message lines.
-        assert_eq!(layout.hero_info.height, 3);
-        // The subtitle is hidden when the info slot is shown.
-        assert_eq!(layout.hero_subtitle.height, 0);
-        assert!(layout.hero_info.y > layout.hero_version.y);
-        // The menu sits one blank row below the info block — no divider line.
-        assert_eq!(
-            layout.hero_menu.y,
-            layout.hero_info.y + layout.hero_info.height + 1
-        );
-    }
-
-    #[test]
-    fn hero_box_announcement_takes_priority_over_changelog() {
-        // When both are present, the info slot is sized for the announcement
-        // and the changelog is suppressed (never shown outside the box).
-        let area = Rect::new(0, 0, 100, 50);
-        let a = long_ann();
-        let layout = WelcomeLayout::compute(WelcomeLayoutInput {
-            content_area: area,
-            menu_height: 3,
-            changelog_height: 5,
-            announcement: Some(&a),
-            ..Default::default()
-        });
-        assert!(layout.has_hero_box());
-        assert_eq!(layout.hero_info.height, 3); // announcement height, not changelog (5)
-        assert_eq!(layout.changelog.height, 0);
-    }
-
-    #[test]
-    fn hero_box_announcement_clamped_when_tight() {
-        // A real announcement can't disable the hero box: the slot is clamped to
-        // whatever still fits (the renderer trails a `…`), so the box stays
-        // active rather than falling back to the stacked layout.
-        let area = Rect::new(0, 0, 100, 17);
-        let a = long_ann();
-        let without = WelcomeLayout::compute(WelcomeLayoutInput {
-            content_area: area,
-            menu_height: 3,
-            ..Default::default()
-        });
-        assert!(without.has_hero_box());
-        let with_ann = WelcomeLayout::compute(WelcomeLayoutInput {
-            content_area: area,
-            menu_height: 3,
-            announcement: Some(&a),
-            ..Default::default()
-        });
-        assert!(
-            with_ann.has_hero_box(),
-            "announcement clamps to fit instead of disabling the box"
-        );
-        assert!(with_ann.hero_info.height > 0);
-        assert!(
-            hero_box::min_content_height(0, 3, 0, with_ann.hero_info.height) <= area.height,
-            "clamped slot must keep the box within the area"
-        );
-    }
-
-    #[test]
-    fn hero_box_keeps_one_bottom_pad_below_actions() {
-        // With a changelog/announcement the subtitle is hidden, but there's
-        // still exactly one padding row between the actions and the bottom
-        // border. (menu=4 + info=3 fills the inner, so the menu reaches the pad.)
-        let area = Rect::new(0, 0, 100, 50);
-        let a = long_ann();
-        let no_info = WelcomeLayout::compute(WelcomeLayoutInput {
-            content_area: area,
-            menu_height: 4,
-            ..Default::default()
-        });
-        let with_info = WelcomeLayout::compute(WelcomeLayoutInput {
-            content_area: area,
-            menu_height: 4,
-            announcement: Some(&a),
-            ..Default::default()
-        });
-        assert_eq!(no_info.hero_subtitle.height, 1);
-        assert_eq!(with_info.hero_subtitle.height, 0);
-        let menu_bottom = with_info.hero_menu.y + with_info.hero_menu.height;
-        let border_bottom = with_info.hero_box.y + with_info.hero_box.height - 1;
-        assert_eq!(
-            border_bottom - menu_bottom,
-            1,
-            "one pad row below the actions"
-        );
     }
 
     /// Flatten a rendered buffer into one string for substring assertions.
@@ -4041,106 +3730,6 @@ mod tests {
         );
     }
 
-    fn long_ann() -> xai_grok_announcements::RemoteAnnouncement {
-        xai_grok_announcements::RemoteAnnouncement {
-            title: Some("Security policy".into()),
-            message: Some(
-                "Report security incidents to the security team promptly through \
-the usual channels. "
-                    .repeat(60),
-            ),
-            ..Default::default()
-        }
-    }
-
-    #[test]
-    fn announcement_expands_for_long_message() {
-        // Wide + tall → hero box; the measured info slot grows when expanded.
-        let area = Rect::new(0, 0, 120, 60);
-        let a = long_ann();
-        let collapsed = WelcomeLayout::compute(WelcomeLayoutInput {
-            content_area: area,
-            menu_height: 4,
-            announcement: Some(&a),
-            ..Default::default()
-        });
-        let expanded = WelcomeLayout::compute(WelcomeLayoutInput {
-            content_area: area,
-            menu_height: 4,
-            announcement: Some(&a),
-            expanded: true,
-            ..Default::default()
-        });
-        assert!(collapsed.has_hero_box() && expanded.has_hero_box());
-        // Collapsed is title (1) + 2 wrapped lines; expanded shows much more.
-        assert_eq!(collapsed.hero_info.height, 3);
-        assert!(
-            expanded.hero_info.height > collapsed.hero_info.height,
-            "expanded {} should exceed collapsed {}",
-            expanded.hero_info.height,
-            collapsed.hero_info.height
-        );
-    }
-
-    #[test]
-    fn announcement_equal_for_short_message() {
-        let area = Rect::new(0, 0, 120, 60);
-        let a = xai_grok_announcements::RemoteAnnouncement {
-            title: Some("FYI".into()),
-            message: Some("All good.".into()),
-            ..Default::default()
-        };
-        let collapsed = WelcomeLayout::compute(WelcomeLayoutInput {
-            content_area: area,
-            menu_height: 4,
-            announcement: Some(&a),
-            ..Default::default()
-        });
-        let expanded = WelcomeLayout::compute(WelcomeLayoutInput {
-            content_area: area,
-            menu_height: 4,
-            announcement: Some(&a),
-            expanded: true,
-            ..Default::default()
-        });
-        // Title (1) + a single wrapped line, identical whether expanded or not.
-        assert_eq!(collapsed.hero_info.height, 2);
-        assert_eq!(collapsed.hero_info.height, expanded.hero_info.height);
-    }
-
-    #[test]
-    fn announcement_clamped_in_short_box() {
-        let tall = Rect::new(0, 0, 120, 60);
-        let short = Rect::new(0, 0, 120, 30);
-        let a = long_ann();
-        let tall_expanded = WelcomeLayout::compute(WelcomeLayoutInput {
-            content_area: tall,
-            menu_height: 4,
-            announcement: Some(&a),
-            expanded: true,
-            ..Default::default()
-        });
-        let short_expanded = WelcomeLayout::compute(WelcomeLayoutInput {
-            content_area: short,
-            menu_height: 4,
-            announcement: Some(&a),
-            expanded: true,
-            ..Default::default()
-        });
-        assert!(tall_expanded.has_hero_box() && short_expanded.has_hero_box());
-        // The short box clamps the expansion below the tall-box height...
-        assert!(
-            short_expanded.hero_info.height < tall_expanded.hero_info.height,
-            "short {} should be clamped below tall {}",
-            short_expanded.hero_info.height,
-            tall_expanded.hero_info.height
-        );
-        // ...and the clamped height still keeps the hero box within the area.
-        assert!(
-            hero_box::min_content_height(0, 4, 0, short_expanded.hero_info.height) <= short.height
-        );
-    }
-
     #[test]
     fn no_announcement_uses_changelog_for_info_slot() {
         // Without an announcement the info slot falls back to the changelog
@@ -4154,38 +3743,4 @@ the usual channels. "
         assert_eq!(layout.hero_info.height, 0);
     }
 
-    #[test]
-    fn stacked_info_width_clamps_to_available() {
-        // Min menu width is MENU_MIN_WIDTH, capped at the available (inset) slot.
-        let unclamped = logo::logo_visual_width(50).max(30).max(MENU_MIN_WIDTH);
-        assert_eq!(stacked_info_width(200, 50, MENU_MIN_WIDTH), unclamped);
-        assert_eq!(stacked_info_width(40, 50, MENU_MIN_WIDTH), 40);
-    }
-
-    #[test]
-    fn stacked_expanded_announcement_allocates_slot() {
-        // Narrow terminal → stacked layout. A long expanded announcement must
-        // still get a nonzero info slot wherever the column has room (regression:
-        // over-reserving once collapsed the whole slot to zero, hiding it).
-        let a = long_ann();
-        for height in 20u16..=60 {
-            let area = Rect::new(0, 0, 80, height);
-            assert!(area.width < hero_box::HERO_BOX_MIN_WIDTH);
-            let layout = WelcomeLayout::compute(WelcomeLayoutInput {
-                content_area: area,
-                menu_height: 4,
-                announcement: Some(&a),
-                expanded: true,
-                ..Default::default()
-            });
-            assert!(!layout.has_hero_box());
-            let budget = stacked_info_budget(area, 0, 4, 0, false);
-            if budget > 0 {
-                assert!(
-                    layout.changelog.height > 0,
-                    "height {height}: stacked slot dropped to 0 with budget {budget}"
-                );
-            }
-        }
-    }
 }

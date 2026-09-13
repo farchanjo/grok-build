@@ -4,7 +4,6 @@
 //! command structs and provides `builtin_commands()` for registry
 //! construction.
 pub mod always_approve;
-pub mod announcements;
 pub mod auto;
 pub mod btw;
 pub mod cd;
@@ -121,7 +120,6 @@ pub fn builtin_commands() -> Vec<Arc<dyn SlashCommand>> {
         Arc::new(cd::CdCommand),
         Arc::new(theme::ThemeCommand),
         Arc::new(feedback::FeedbackCommand),
-        Arc::new(announcements::AnnouncementsCommand),
         Arc::new(remember::RememberCommand),
         Arc::new(plan::PlanCommand),
         Arc::new(view_plan::ViewPlanCommand),
@@ -542,7 +540,6 @@ mod tests {
         let ctx = crate::slash::command::AppCtx {
             models: &models,
             cwd: std::path::Path::new("."),
-            has_session_announcements: false,
             billing_surface_visible: true,
             workflows_available: true,
             screen_mode: crate::app::ScreenMode::Fullscreen,
@@ -567,7 +564,6 @@ mod tests {
         let ctx = crate::slash::command::AppCtx {
             models: &models,
             cwd: std::path::Path::new("."),
-            has_session_announcements: false,
             billing_surface_visible: true,
             workflows_available: true,
             screen_mode: crate::app::ScreenMode::Fullscreen,
@@ -650,7 +646,6 @@ mod tests {
         let mut ctx = crate::slash::command::AppCtx {
             models: &models,
             cwd: std::path::Path::new("."),
-            has_session_announcements: false,
             billing_surface_visible: true,
             workflows_available: true,
             screen_mode: crate::app::ScreenMode::Fullscreen,
@@ -666,7 +661,6 @@ mod tests {
         let mut ctx = crate::slash::command::AppCtx {
             models: &models,
             cwd: std::path::Path::new("."),
-            has_session_announcements: false,
             billing_surface_visible: true,
             workflows_available: false,
             screen_mode: crate::app::ScreenMode::Fullscreen,
@@ -740,7 +734,6 @@ mod tests {
         let ctx = crate::slash::command::AppCtx {
             models: &models,
             cwd: std::path::Path::new("."),
-            has_session_announcements: false,
             billing_surface_visible: true,
             workflows_available: true,
             screen_mode: crate::app::ScreenMode::Fullscreen,

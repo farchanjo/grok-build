@@ -214,7 +214,6 @@ pub(in crate::app::dispatch) fn dispatch_fork_resolved(
             app.usage_visible,
             app.chat_mode,
             app.screen_mode,
-            &app.active_announcements,
             &app.tier_restricted_commands,
         );
         agent.chat_kind = parent_chat_kind;

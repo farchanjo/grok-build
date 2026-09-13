@@ -1046,53 +1046,6 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
                 value,
             }]
         }
-        Action::AnnouncementsHide => {
-            let shown_key = crate::views::announcements::first_session_announcement(
-                &app.active_announcements,
-                &app.hidden_announcement_ids,
-            )
-            .filter(|a| crate::views::announcements::is_dismissible(a))
-            .map(xai_grok_announcements::announcement_hide_key);
-            if let Some(key) = shown_key
-                && app.hidden_announcement_ids.insert(key)
-            {
-                vec![Effect::PersistAnnouncementsHidden {
-                    hidden_ids: app.hidden_announcement_ids.clone(),
-                }]
-            } else {
-                vec![]
-            }
-        }
-        Action::AnnouncementsShow => {
-            let mut changed = false;
-            for key in crate::views::announcements::session_announcement_hide_keys(
-                &app.active_announcements,
-            ) {
-                changed |= app.hidden_announcement_ids.remove(&key);
-            }
-            if changed {
-                vec![Effect::PersistAnnouncementsHidden {
-                    hidden_ids: app.hidden_announcement_ids.clone(),
-                }]
-            } else {
-                vec![]
-            }
-        }
-        Action::AnnouncementsOpenCta(surface) => {
-            if let Some((promo, url)) = crate::views::announcements::promo_cta_target(
-                &app.active_announcements,
-                &app.hidden_announcement_ids,
-            ) {
-                let url = url.to_owned();
-                let promo_id = promo.id.clone();
-                log_event(xai_grok_telemetry::events::AnnouncementCtaClicked {
-                    id: promo_id,
-                    source: surface,
-                });
-                open_url_or_show(app, &url);
-            }
-            vec![]
-        }
         Action::CancelTurn => dispatch_cancel_turn(app),
         Action::CancelTurnChoice(choice) => dispatch_cancel_turn_choice(app, choice),
         Action::KillBgTask(task_id) => dispatch_kill_bg_task(app, task_id),

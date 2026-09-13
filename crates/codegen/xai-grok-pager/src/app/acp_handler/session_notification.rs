@@ -440,9 +440,6 @@ pub(super) fn handle_session_notification(notif: &acp::ExtNotification, app: &mu
                 .get("dashboard")
                 .is_some();
             child_view.set_dashboard_visible(dashboard_visible);
-            child_view.set_has_session_announcements(
-                agent.prompt.slash_controller.has_session_announcements(),
-            );
             child_view
                 .prompt
                 .set_screen_mode(agent.prompt.slash_controller.screen_mode());

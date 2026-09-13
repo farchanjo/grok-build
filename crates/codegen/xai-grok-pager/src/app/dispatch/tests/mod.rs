@@ -64,7 +64,6 @@ use crate::app::agent::{AgentId, AgentSession, AgentState};
 use crate::app::agent_view::{ActivePane, AgentView, PromptMode};
 use crate::app::app_view::{
     ActiveView, AppView, AuthMode, AuthState, TrustState, VoiceState, VoiceTarget,
-    WelcomeAnnouncementState,
 };
 use crate::scrollback::block::RenderBlock;
 use crate::scrollback::blocks::{SessionEvent, ToolCallBlock};
@@ -106,10 +105,6 @@ fn test_app() -> AppView {
         pending_notification_escapes: None,
         deferred_notification: None,
         tracing_rx: None,
-        active_announcements: vec![],
-        hidden_announcement_ids: Default::default(),
-        announcements_last_gen: 0,
-        announcement: None,
         changelog_markdown: None,
         changelog_bullets: Vec::new(),
         tips: Vec::new(),
@@ -174,7 +169,6 @@ fn test_app() -> AppView {
         zdr_access_enabled: false,
         usage_billing_redirect_url: None,
         access_gate_shown_logged: false,
-        announcement_cta_impressions_logged: Default::default(),
         gate: None,
         subscription_tier: None,
         paywall_check_started: None,
@@ -202,18 +196,15 @@ fn test_app() -> AppView {
         welcome_auth_url_rect: None,
         welcome_on_auth_url: false,
         welcome_on_changelog_cta: false,
-        welcome_announcement: WelcomeAnnouncementState::default(),
         welcome_auth_fallback_rect: None,
         welcome_refresh_rect: None,
         welcome_gate_url_rect: None,
         welcome_changelog_cta_rect: None,
-        welcome_upgrade_cta_rect: None,
         welcome_privacy_banner_accept_rect: None,
         welcome_privacy_banner_customize_rect: None,
         welcome_privacy_banner_legal_rect: None,
         welcome_toast: None,
         welcome_on_privacy_banner: false,
-        welcome_on_upgrade_cta: false,
         auth_show_raw_url: false,
         auth_mouse_disabled: false,
         session_picker_entries: None,

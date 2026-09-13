@@ -2086,16 +2086,6 @@ pub(crate) fn execute(
                     }
                 });
         }
-        Effect::PersistAnnouncementsHidden { hidden_ids } => {
-            tasks
-                .spawn(async move {
-                    xai_grok_announcements::write_hidden_announcement_ids(&hidden_ids)
-                        .await;
-                    TaskResult::AnnouncementsHiddenPersisted {
-                        result: Ok(()),
-                    }
-                });
-        }
         Effect::PersistPrivacyBannerAcked { acked_at } => {
             tasks
                 .spawn(async move {

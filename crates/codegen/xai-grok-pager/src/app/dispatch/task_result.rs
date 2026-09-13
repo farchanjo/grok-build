@@ -729,12 +729,6 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             deliver_doctor_message(app, target.agent_id, message);
             vec![]
         }
-        TaskResult::AnnouncementsHiddenPersisted { result } => {
-            if let Err(e) = result {
-                tracing::warn!("Failed to persist announcements hidden state: {}", e);
-            }
-            vec![]
-        }
         TaskResult::PromptHistoryLoaded { agent_id, prompts } => {
             use xai_grok_tools::implementations::skills::skill::extract_skill_display_text;
             if let Some(agent) = app.agents.get_mut(&agent_id) {
@@ -1384,7 +1378,6 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
         TaskResult::LogoutComplete => {
             app.auth_state = AuthState::Pending { error: None };
             app.access_gate_shown_logged = false;
-            app.announcement_cta_impressions_logged.clear();
             app.gate = None;
             app.pending_gate_verification = None;
             app.last_subscription_check_at = None;

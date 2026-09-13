@@ -200,9 +200,6 @@ impl AgentView {
             hit_follow_indicator: Default::default(),
             hit_cwd: Default::default(),
             hit_cancel_button: Default::default(),
-            hit_announcement_hide: Default::default(),
-            hit_announcement_cta: Default::default(),
-            hit_upgrade_cta: Default::default(),
             hit_voice_stop_button: Default::default(),
             hit_scrollbar: Default::default(),
             scrollbar_dragging: false,
@@ -245,8 +242,6 @@ impl AgentView {
             last_word_select_probe: None,
             sticky_toast: None,
             mode_switch_banner: None,
-            session_banner_active: false,
-            pinned_upgrade_cta_live: false,
             block_viewer: None,
             scrollback_search: None,
             hit_sb_copy: Default::default(),
@@ -961,12 +956,6 @@ impl AgentView {
             .registry_mut()
             .set_dashboard_visible(visible);
     }
-    /// Offer `/announcements` when session announcements (critical or promo) exist.
-    pub fn set_has_session_announcements(&mut self, has: bool) {
-        self.prompt
-            .slash_controller
-            .set_has_session_announcements(has);
-    }
     /// One place for the app-scoped gates a new/adopted session inherits so the session-creation sites cannot drift.
     pub(crate) fn apply_app_scoped_gates(
         &mut self,
@@ -974,7 +963,6 @@ impl AgentView {
         billing_surface_visible: bool,
         chat_mode: bool,
         screen_mode: crate::app::ScreenMode,
-        announcements: &[xai_grok_announcements::RemoteAnnouncement],
         restricted_commands: &[String],
     ) {
         self.set_sharing_enabled(sharing_enabled);
@@ -982,9 +970,6 @@ impl AgentView {
         self.app_chat_mode = chat_mode;
         self.prompt.set_screen_mode(screen_mode);
         self.set_dashboard_visible(crate::views::dashboard::dashboard_enabled());
-        self.set_has_session_announcements(crate::views::announcements::has_session_announcements(
-            announcements,
-        ));
         self.set_restricted_commands(restricted_commands);
     }
     /// Show or hide the `/recap` slash command in this agent's registry.

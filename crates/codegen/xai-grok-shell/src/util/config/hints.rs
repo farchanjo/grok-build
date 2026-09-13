@@ -156,7 +156,7 @@ pub fn resolve_contextual_hints(
 
 /// Merge config layers in effective-config order (system managed → managed →
 /// user → requirements). Used when [`load_effective_config`] fails but some
-/// layers still loaded (same pattern as tips/announcements).
+/// layers still loaded (same pattern as tips).
 fn merge_hints_config_layers(
     requirements: Option<&TomlValue>,
     user: Option<&TomlValue>,
@@ -180,7 +180,7 @@ fn merge_hints_config_layers(
 ///
 /// Prefer passing a pre-loaded `effective_config` when startup already called
 /// [`crate::config::load_effective_config`]. When it is `None`, merges the
-/// same layers tips/announcements use so managed/requirements still apply.
+/// same layers tips use so managed/requirements still apply.
 pub fn resolve_hints(
     effective_config: Option<&TomlValue>,
     requirements: Option<&TomlValue>,

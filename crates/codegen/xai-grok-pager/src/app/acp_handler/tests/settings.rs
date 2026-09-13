@@ -425,32 +425,23 @@
         );
     }
 
-    /// The settings path must not touch announcements: the shell already emits
-    /// gen-ordered `x.ai/announcements/update` for every settings writer, and a
-    /// gen-less apply here could clobber a newer push.
+    /// A payload carrying the legacy `announcements` field (this build removed
+    /// the announcement surfaces) must not disturb the fields it does carry.
     #[test]
-    fn settings_update_ignores_announcements_payload() {
+    fn settings_update_tolerates_legacy_announcements_payload() {
         let mut app = make_app_with_agent("sess-ann");
-        app.active_announcements = vec![critical_announcement("from-push")];
-        app.announcements_last_gen = 7;
 
         let notif = acp::ExtNotification::new(
             "x.ai/settings/update",
             serde_json::value::to_raw_value(&serde_json::json!({
                 "sharing_enabled": true,
-                "announcements": [critical_announcement("from-settings")],
+                "announcements": [{"id": "legacy", "message": "legacy banner"}],
             }))
             .unwrap()
             .into(),
         );
         let _ = handle_ext_notification(&notif, &mut app);
 
-        assert_eq!(
-            app.active_announcements,
-            vec![critical_announcement("from-push")],
-            "settings/update must not replace the pushed announcements"
-        );
-        assert_eq!(app.announcements_last_gen, 7, "watermark untouched");
         assert!(app.sharing_enabled, "other settings fields still apply");
     }
 

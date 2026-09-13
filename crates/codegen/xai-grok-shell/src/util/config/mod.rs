@@ -1,6 +1,5 @@
 // `McpOAuthConfig` / `McpOAuthConfigMap` re-exported via `mcp` (see `mcp.rs`).
 
-mod announcements;
 mod campaigns;
 mod hints;
 mod load;
@@ -13,7 +12,6 @@ mod tersify;
 mod tips;
 mod worktree;
 
-pub use announcements::*;
 pub use campaigns::{
     load_effective_config, load_effective_config_disk_only, merge_project_memory_layer,
     persist_models_default, remote_campaigns_from_settings, set_remote_campaigns_from_settings,

@@ -143,7 +143,7 @@ impl MvpAgent {
         };
 
         // Keep stored jemalloc knobs in sync with the live fetch without a
-        // wholesale remote_settings rewrite (no telemetry / announcements churn).
+        // wholesale remote_settings rewrite.
         {
             let mut cfg = self.cfg.borrow_mut();
             if let Some(rs) = cfg.remote_settings.as_mut() {

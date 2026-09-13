@@ -947,10 +947,7 @@ pub(crate) async fn run(
         post_render_effects.extend(app.impose_gate(gate));
     }
 
-    // Load persisted per-ID hidden state
-    app.hidden_announcement_ids = xai_grok_announcements::read_hidden_announcement_ids().await;
-
-    // Load config layers once, resolve announcements, tips, and feature flags.
+    // Load config layers once, resolve tips and feature flags.
     let requirements = xai_grok_shell::config::load_merged_requirements();
     let user_config = xai_grok_shell::config::load_from_disk().ok();
     let managed_config = xai_grok_shell::config::load_managed_config().ok();
@@ -1046,24 +1043,7 @@ pub(crate) async fn run(
     }
 
     {
-        use xai_grok_shell::util::config::{resolve_announcements, resolve_tips};
-
-        let remote_announcements = remote_settings
-            .as_ref()
-            .and_then(|s| s.announcements.as_deref());
-        let announcements = resolve_announcements(
-            requirements.as_ref(),
-            user_config.as_ref(),
-            managed_config.as_ref(),
-            remote_announcements,
-        );
-        app.active_announcements = xai_grok_announcements::filter_expired(announcements);
-        if !app.active_announcements.is_empty() {
-            use rand::Rng;
-            let idx = rand::rng().random_range(0..app.active_announcements.len());
-            app.announcement = app.active_announcements.get(idx).cloned();
-        }
-        app.sync_session_announcement_slash_gate();
+        use xai_grok_shell::util::config::resolve_tips;
 
         let remote_tips = remote_settings.as_ref().and_then(|s| s.tips.as_deref());
         app.tips = resolve_tips(
@@ -2532,9 +2512,6 @@ pub(crate) async fn run(
                         );
                         last_leader_generation = generation;
                         app.reconnect_pending = true;
-                        // Connection-scoped: a re-elected shell reseeds its push gen from wall clock,
-                        // so a surviving higher watermark would silently drop its fresh pushes.
-                        app.announcements_last_gen = 0;
                         // Drop generation/notifySeq watermarks and the file-poll
                         // cursor so a new shell's first `x.ai/prime/index/update`
                         // is not rejected as stale, including a same-generation

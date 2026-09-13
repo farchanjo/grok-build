@@ -2477,21 +2477,19 @@ fn dashboard_attach_subagent_switches_to_parent_with_subagent_focused() {
     let mut buf = ratatui::buffer::Buffer::empty(area);
     let mut scratch = crate::scrollback::render::ScratchBuffer::new();
     let _ = child.draw(
-        area,
-        &mut buf,
-        &app.registry,
-        &mut scratch,
-        None,
-        false,
-        0,
-        &[],
-        &std::collections::BTreeSet::new(),
-        None,
-        &crate::app::bundle::BundleState::default(),
-        false,
-        &mut Vec::new(),
-        crate::app::agent_view::AppRenderParams::default(),
-    );
+area,
+&mut buf,
+&app.registry,
+&mut scratch,
+None,
+false,
+0,
+None,
+&crate::app::bundle::BundleState::default(),
+false,
+&mut Vec::new(),
+crate::app::agent_view::AppRenderParams::default(),
+);
     assert!(child.hit_bg_button.rect.is_none());
     let parent_tool = parent_view
         .session
@@ -3777,158 +3775,6 @@ fn dashboard_rename_esc_keystroke_routes_to_cancel() {
 /// dismissible promo shows the button but keeps Ctrl+O falling through and
 /// suppresses any caption; no promo shows nothing.
 #[serial_test::serial(GROK_AGENT_DASHBOARD)]
-#[test]
-fn dashboard_upgrade_cta_paints_arms_rect_and_ctrl_o_override() {
-    use crate::actions::ActionRegistry;
-    use crate::app::app_view::InputOutcome;
-    use crate::views::dashboard::HeaderUpgradeCta;
-    use crate::views::dashboard::render_dashboard;
-    use crate::views::dashboard::state::DashboardState;
-    use crossterm::event::{
-        Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
-    };
-    use ratatui::buffer::Buffer;
-    use ratatui::layout::Rect;
-    use xai_grok_telemetry::events::AnnouncementCtaSurface;
-    let registry = ActionRegistry::defaults();
-    let mut agents: indexmap::IndexMap<AgentId, crate::app::agent_view::AgentView> =
-        indexmap::IndexMap::new();
-    let area = Rect::new(0, 0, 140, 20);
-    let ctrl_o = || Event::Key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL));
-    let header_row = |buf: &Buffer, y: u16| -> String {
-        (0..area.width)
-            .filter_map(|x| buf.cell((x, y)).map(|c| c.symbol().to_string()))
-            .collect()
-    };
-    const CAPTION: &str = "or use Ctrl+O";
-    let mut buf = Buffer::empty(area);
-    let mut state = DashboardState::new();
-    let _ = render_dashboard(
-        &mut buf,
-        area,
-        &mut state,
-        &mut agents,
-        &registry,
-        None,
-        &[],
-        false,
-        Some(HeaderUpgradeCta {
-            label: "Upgrade Account",
-            pinned: true,
-            caption: Some(CAPTION),
-        }),
-    );
-    assert!(
-        state.pinned_upgrade_cta_live,
-        "pinned promo lights the Ctrl+O override"
-    );
-    let rect = state
-        .upgrade_cta_hit
-        .rect
-        .expect("pinned promo arms the header CTA rect");
-    let header = header_row(&buf, rect.y);
-    assert!(header.contains("[Upgrade Account]"), "header={header:?}");
-    assert!(
-        header.contains(CAPTION),
-        "pinned dashboard promo shows its configured caption; header={header:?}"
-    );
-    assert!(matches!(
-        state.handle_input(&ctrl_o(), &registry),
-        InputOutcome::Action(Action::AnnouncementsOpenCta(
-            AnnouncementCtaSurface::Keyboard
-        ))
-    ));
-    let click = Event::Mouse(MouseEvent {
-        kind: MouseEventKind::Down(MouseButton::Left),
-        column: rect.x,
-        row: rect.y,
-        modifiers: KeyModifiers::empty(),
-    });
-    assert!(matches!(
-        state.handle_input(&click, &registry),
-        InputOutcome::Action(Action::AnnouncementsOpenCta(
-            AnnouncementCtaSurface::Dashboard
-        ))
-    ));
-    let mut buf = Buffer::empty(area);
-    let mut state = DashboardState::new();
-    let _ = render_dashboard(
-        &mut buf,
-        area,
-        &mut state,
-        &mut agents,
-        &registry,
-        None,
-        &[],
-        false,
-        Some(HeaderUpgradeCta {
-            label: "Upgrade Account",
-            pinned: true,
-            caption: None,
-        }),
-    );
-    assert!(state.pinned_upgrade_cta_live);
-    let rect = state
-        .upgrade_cta_hit
-        .rect
-        .expect("caption-less pinned promo still arms the button");
-    let header = header_row(&buf, rect.y);
-    assert!(header.contains("[Upgrade Account]"), "header={header:?}");
-    assert!(
-        !header.contains(CAPTION),
-        "absent caption paints nothing after the button; header={header:?}"
-    );
-    let mut buf = Buffer::empty(area);
-    let mut state = DashboardState::new();
-    let _ = render_dashboard(
-        &mut buf,
-        area,
-        &mut state,
-        &mut agents,
-        &registry,
-        None,
-        &[],
-        false,
-        Some(HeaderUpgradeCta {
-            label: "Upgrade Account",
-            pinned: false,
-            caption: Some(CAPTION),
-        }),
-    );
-    assert!(!state.pinned_upgrade_cta_live);
-    let rect = state
-        .upgrade_cta_hit
-        .rect
-        .expect("dismissible promo still shows the clickable button");
-    let header = header_row(&buf, rect.y);
-    assert!(header.contains("[Upgrade Account]"), "header={header:?}");
-    assert!(
-        !header.contains(CAPTION),
-        "dismissible dashboard promo suppresses its configured caption; header={header:?}"
-    );
-    assert!(
-        !matches!(
-            state.handle_input(&ctrl_o(), &registry),
-            InputOutcome::Action(Action::AnnouncementsOpenCta(_))
-        ),
-        "dismissible promo must not steal Ctrl+O in the dashboard"
-    );
-    let mut buf = Buffer::empty(area);
-    let mut state = DashboardState::new();
-    let _ = render_dashboard(
-        &mut buf,
-        area,
-        &mut state,
-        &mut agents,
-        &registry,
-        None,
-        &[],
-        false,
-        None,
-    );
-    assert!(state.upgrade_cta_hit.rect.is_none());
-    assert!(!state.pinned_upgrade_cta_live);
-}
 /// Empty rename draft cancels without emitting an Effect.
 #[serial_test::serial(GROK_AGENT_DASHBOARD)]
 #[test]
@@ -5111,16 +4957,15 @@ fn dashboard_peek_auto_opens_for_selected_row() {
         )));
     let mut buf = Buffer::empty(area);
     let _ = crate::views::dashboard::render_dashboard(
-        &mut buf,
-        area,
-        app.dashboard.as_mut().unwrap(),
-        &mut app.agents,
-        &reg,
-        None,
-        &[],
-        false,
-        None,
-    );
+&mut buf,
+area,
+app.dashboard.as_mut().unwrap(),
+&mut app.agents,
+&reg,
+None,
+&[],
+false,
+);
     assert!(
         app.dashboard.as_ref().unwrap().peek.is_some(),
         "peek must auto-open for a selected row",
@@ -5128,16 +4973,15 @@ fn dashboard_peek_auto_opens_for_selected_row() {
     app.dashboard.as_mut().unwrap().focus_new_agent_button();
     let mut buf2 = Buffer::empty(area);
     let _ = crate::views::dashboard::render_dashboard(
-        &mut buf2,
-        area,
-        app.dashboard.as_mut().unwrap(),
-        &mut app.agents,
-        &reg,
-        None,
-        &[],
-        false,
-        None,
-    );
+&mut buf2,
+area,
+app.dashboard.as_mut().unwrap(),
+&mut app.agents,
+&reg,
+None,
+&[],
+false,
+);
     assert!(
         app.dashboard.as_ref().unwrap().peek.is_none(),
         "peek must close when no row is selected",
@@ -5164,16 +5008,15 @@ fn dashboard_peek_box_grows_for_multiline_reply() {
         let render = |app: &mut AppView| {
             let mut buf = Buffer::empty(area);
             let _ = crate::views::dashboard::render_dashboard(
-                &mut buf,
-                area,
-                app.dashboard.as_mut().unwrap(),
-                &mut app.agents,
-                &reg,
-                None,
-                &[],
-                false,
-                None,
-            );
+&mut buf,
+area,
+app.dashboard.as_mut().unwrap(),
+&mut app.agents,
+&reg,
+None,
+&[],
+false,
+);
         };
         render(&mut app);
         app.dashboard

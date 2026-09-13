@@ -1708,21 +1708,19 @@ mod question_no_freeform_tests {
         let mut scratch = crate::scrollback::render::ScratchBuffer::new();
         agent.last_terminal_size = (80, 30);
         agent.draw(
-            area,
-            &mut buf,
-            &reg,
-            &mut scratch,
-            None,
-            false,
-            0,
-            &[],
-            &std::collections::BTreeSet::new(),
-            None,
-            &bundle,
-            false,
-            &mut Vec::new(),
-            crate::app::agent_view::AppRenderParams::default(),
-        );
+area,
+&mut buf,
+&reg,
+&mut scratch,
+None,
+false,
+0,
+None,
+&bundle,
+false,
+&mut Vec::new(),
+crate::app::agent_view::AppRenderParams::default(),
+);
     }
     fn down(col: u16, row: u16) -> MouseEvent {
         MouseEvent {

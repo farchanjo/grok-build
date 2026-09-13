@@ -596,14 +596,6 @@ impl acp::Agent for MvpAgent {
         }
         self.spawn_initialize_launch_mcp_setup(fetch_managed_mcps);
         self.spawn_managed_gateway_tool_catalog_fetch();
-        {
-            let agent_ref = LocalRef::new(self);
-            tokio::task::spawn_local(async move {
-                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-                agent_ref.get().emit_announcements(AnnouncementsPushMode::SeedNewClient);
-            });
-        }
-        self.spawn_announcements_refresh();
         self.spawn_heap_profile_monitor();
         let init_model_state = if crate::agent::chat_modes::process_chat_mode_enabled() {
             self.chat_modes.model_state().await

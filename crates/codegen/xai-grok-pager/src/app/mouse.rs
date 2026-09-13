@@ -125,18 +125,6 @@ impl AgentView {
                     self.cancel_trigger_hint = Some(crate::app::actions::CancelTrigger::Mouse);
                     return InputOutcome::Action(Action::CancelTurn);
                 }
-                if self.hit_announcement_hide.contains(mouse.column, mouse.row)
-                    && !self.pos_occluded(mouse.column, mouse.row)
-                {
-                    return InputOutcome::Action(Action::AnnouncementsHide);
-                }
-                if self.hit_announcement_cta.contains(mouse.column, mouse.row)
-                    && !self.pos_occluded(mouse.column, mouse.row)
-                {
-                    return InputOutcome::Action(Action::AnnouncementsOpenCta(
-                        xai_grok_telemetry::events::AnnouncementCtaSurface::Banner,
-                    ));
-                }
                 if self
                     .plugin_cta
                     .hit_dismiss
@@ -182,13 +170,6 @@ impl AgentView {
                 }
                 if self.hit_voice_stop_button.contains(mouse.column, mouse.row) {
                     return InputOutcome::Action(Action::VoiceToggle);
-                }
-                if self.hit_upgrade_cta.contains(mouse.column, mouse.row)
-                    && !self.pos_occluded(mouse.column, mouse.row)
-                {
-                    return InputOutcome::Action(Action::AnnouncementsOpenCta(
-                        xai_grok_telemetry::events::AnnouncementCtaSurface::Header,
-                    ));
                 }
                 if self.hit_cwd.contains(mouse.column, mouse.row) {
                     let path = self.session.cwd.display().to_string();
@@ -1032,12 +1013,6 @@ impl AgentView {
                 changed |= self.hit_cancel_button.update_hover(mouse.column, mouse.row);
                 changed |= self.hit_bg_button.update_hover(mouse.column, mouse.row);
                 changed |= self
-                    .hit_announcement_hide
-                    .update_hover(mouse.column, mouse.row);
-                changed |= self
-                    .hit_announcement_cta
-                    .update_hover(mouse.column, mouse.row);
-                changed |= self
                     .plugin_cta
                     .hit_connect
                     .update_hover(mouse.column, mouse.row);
@@ -1053,7 +1028,6 @@ impl AgentView {
                 changed |= self.hit_bg_close.update_hover(mouse.column, mouse.row);
                 changed |= self.hit_catalog_close.update_hover(mouse.column, mouse.row);
                 changed |= self.hit_cwd.update_hover(mouse.column, mouse.row);
-                changed |= self.hit_upgrade_cta.update_hover(mouse.column, mouse.row);
                 {
                     let new_kill = self
                         .tasks

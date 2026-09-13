@@ -1,7 +1,7 @@
 [package]
 license = "Apache-2.0"
 name = "xai-grok-shell"
-version = "1.4.6"
+version = "1.4.7"
 edition.workspace = true
 # Explicit integration-test targets below. This keeps the consolidated
 # scheduling families from being double-discovered as their own binaries.
@@ -22,7 +22,6 @@ dunce = { workspace = true }
 tonic-prost = { workspace = true, optional = true }
 agent-client-protocol = { workspace = true }
 anyhow = { workspace = true }
-xai-grok-announcements = { workspace = true }
 xai-prompt-queue = { workspace = true }
 xai-grok-version = { workspace = true }
 

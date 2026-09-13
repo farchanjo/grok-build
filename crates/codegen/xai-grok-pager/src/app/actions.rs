@@ -463,14 +463,6 @@ pub enum Action {
         kind: String,
         name: String,
     },
-    /// Hide the announcements banner.
-    AnnouncementsHide,
-    /// Show the announcements banner.
-    AnnouncementsShow,
-    /// Open the promo CTA link (url resolved from current state at dispatch
-    /// time, mirroring how `AnnouncementsHide` resolves its target). The
-    /// payload records which surface activated it, for telemetry.
-    AnnouncementsOpenCta(xai_grok_telemetry::events::AnnouncementCtaSurface),
     /// Cycle session mode (Shift+Tab): Normal → Plan → Always-Approve → Normal.
     /// Plan mode sends a signal to the shell; always-approve is local.
     CycleMode,
@@ -1883,10 +1875,6 @@ pub enum Effect {
     /// Runs off the render path via `spawn_blocking`. Result is cached
     /// on `AppView` so `/release-notes` and the welcome screen share it.
     FetchChangelog,
-    /// Persist the hidden announcement ids to disk.
-    PersistAnnouncementsHidden {
-        hidden_ids: std::collections::BTreeSet<String>,
-    },
     /// Persist `[privacy].privacy_banner_acked` (RFC 3339 dismiss time).
     PersistPrivacyBannerAcked { acked_at: String },
     /// Persist memory modal fullscreen preference to `[hints]` in config.toml.
@@ -2830,10 +2818,6 @@ pub enum TaskResult {
     ChangelogFetched {
         markdown: Option<String>,
         entries: Vec<xai_grok_shell::util::changelog::ChangelogEntry>,
-    },
-    /// Announcements hidden state persisted.
-    AnnouncementsHiddenPersisted {
-        result: Result<(), String>,
     },
     /// Cross-session prompt history loaded from ACP.
     PromptHistoryLoaded {

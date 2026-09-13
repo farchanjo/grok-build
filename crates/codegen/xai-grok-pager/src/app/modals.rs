@@ -67,7 +67,6 @@ impl AgentView {
         let ctx = crate::slash::command::AppCtx {
             models,
             cwd,
-            has_session_announcements: slash_controller.has_session_announcements(),
             billing_surface_visible: slash_controller.billing_surface_visible(),
             workflows_available: slash_controller.workflows_available(),
             screen_mode: slash_controller.screen_mode(),

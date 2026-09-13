@@ -344,7 +344,6 @@ pub(in crate::app::dispatch) fn dispatch_new_session_inner_with_id(
             app.usage_visible,
             app.chat_mode,
             app.screen_mode,
-            &app.active_announcements,
             &app.tier_restricted_commands,
         );
         agent.apply_credit_balance(app.credit_balance.clone(), app.auto_topup.clone());
@@ -696,7 +695,6 @@ pub(in crate::app::dispatch) fn dispatch_new_worktree_session(
             app.usage_visible,
             app.chat_mode,
             app.screen_mode,
-            &app.active_announcements,
             &app.tier_restricted_commands,
         );
         agent.chat_kind = chat_kind;

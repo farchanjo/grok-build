@@ -476,27 +476,6 @@ fn small_screen_trigger_waits_for_stable_agent_measure_then_fires_once() {
 /// permission ask, modal, open dropdown) defers WITHOUT consuming — the show
 /// gate would refuse it, and spending the one-shot invisibly would kill the
 /// hint for the run. Once the occluder clears, the next draw shows it.
-#[test]
-fn small_screen_trigger_defers_while_banner_row_occluded() {
-    let mut app = test_app_with_agent();
-    let id = AgentId(0);
-    {
-        let agent = app.agents.get_mut(&id).unwrap();
-        agent.last_terminal_size = (100, 24);
-        agent.session_banner_active = true;
-    }
-
-    app.maybe_trigger_small_screen_tip();
-    assert!(!app.small_screen_tip_evaluated, "occlusion must defer");
-    assert!(!app.agents[&id].ephemeral_tip.is_active());
-    assert!(app.tip_seen_counts.is_empty(), "no count burned");
-
-    // Occluder gone: the next draw evaluates and shows.
-    app.agents.get_mut(&id).unwrap().session_banner_active = false;
-    app.maybe_trigger_small_screen_tip();
-    assert!(app.small_screen_tip_evaluated);
-    assert!(app.agents[&id].ephemeral_tip.is_active());
-}
 
 /// An out-of-band first measure consumes the one-shot without showing, so a
 /// later resize INTO the band can never bring the tip back.

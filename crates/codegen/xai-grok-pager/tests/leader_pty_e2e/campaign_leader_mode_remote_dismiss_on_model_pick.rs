@@ -54,7 +54,7 @@ async fn campaign_leader_mode_remote_dismiss_on_model_pick() {
     // Session (OAuth) auth, not the harness's default XAI_API_KEY: the
     // settings fetch requires `auth_manager.auth()` — in ApiKey/BYOK mode the
     // pager never requests `/v1/settings`, so a remote campaign would be
-    // structurally unreachable (see `spawn_polling_session`'s doc).
+    // structurally unreachable.
     seed_fake_oauth(&content, "pty-campaign-leader");
     let binary = pager_binary().expect("resolve pager binary");
     let spawn = || -> PtyHarness {
