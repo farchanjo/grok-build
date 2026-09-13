@@ -2,26 +2,11 @@
 //!
 //! Constructed by the host's TOML parsing (`McpServerConfig::oauth_config`)
 //! and consumed by [`crate::oauth`].
+//!
+//! The definitions live in `xai-grok-config-types` (the config leaf crate) and
+//! are re-exported here so the historical path
+//! `xai_grok_mcp::oauth_config::McpOAuthConfig` stays valid. Defining them in
+//! the leaf keeps `xai-grok-config-types` free of a dependency on this crate,
+//! which is what lets `xai-file-utils` depend on it without a cycle.
 
-use std::collections::HashMap;
-
-/// OAuth configuration extracted from an MCP server's config.
-///
-/// Travels alongside `acp::McpServer` (which can't be extended since it's
-/// an external crate type). Keyed by server name in [`McpOAuthConfigMap`].
-#[derive(Debug, Clone, Default)]
-pub struct McpOAuthConfig {
-    pub client_id: Option<String>,
-    pub client_secret: Option<String>,
-    pub scopes: Option<Vec<String>>,
-    pub callback_port: Option<u16>,
-}
-
-impl McpOAuthConfig {
-    pub fn is_configured(&self) -> bool {
-        self.client_id.is_some()
-    }
-}
-
-/// Per-server OAuth configuration map, keyed by MCP server name.
-pub type McpOAuthConfigMap = HashMap<String, McpOAuthConfig>;
+pub use xai_grok_config_types::{McpOAuthConfig, McpOAuthConfigMap};

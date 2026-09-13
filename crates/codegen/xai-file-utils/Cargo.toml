@@ -8,9 +8,13 @@ authors = ["xAI"]
 
 [dependencies]
 anyhow = { workspace = true }
+async-trait = { workspace = true }
 base64.workspace = true
+bytes = { workspace = true }
 dunce = { workspace = true }
 xai-circuit-breaker = { workspace = true }
+# `[assets]` / `[assets_providers.*]` schema. Config types only; no credentials.
+xai-grok-config-types = { workspace = true }
 xai-grok-version = { workspace = true }
 aws-sdk-s3 = { version = "1", default-features = false, features = [
     "rt-tokio",
@@ -48,10 +52,14 @@ zstd.workspace = true
 
 [features]
 default-bazel = []
+# Exposes `assets::MockAssetStore` (and its builder) to downstream crates that
+# need an in-memory `AssetStore` seam in their own tests.
+test-support = []
 
 
 [dev-dependencies]
 tempfile = { workspace = true }
+toml = { workspace = true }
 axum = { workspace = true, features = ["multipart"] }
 tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "sync", "net", "time"] }
 xai-test-utils = { workspace = true }

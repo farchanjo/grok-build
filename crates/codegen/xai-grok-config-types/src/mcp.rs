@@ -6,7 +6,31 @@ use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
-use xai_grok_mcp::oauth_config::McpOAuthConfig;
+
+/// OAuth configuration extracted from an MCP server's config.
+///
+/// Defined here (not in `xai-grok-mcp`) so that this crate stays a leaf:
+/// `xai-grok-mcp` re-exports it from [`crate::mcp`] via
+/// `xai_grok_mcp::oauth_config`, keeping the historical path valid.
+///
+/// Travels alongside `acp::McpServer` (which can't be extended since it's
+/// an external crate type). Keyed by server name in [`McpOAuthConfigMap`].
+#[derive(Debug, Clone, Default)]
+pub struct McpOAuthConfig {
+    pub client_id: Option<String>,
+    pub client_secret: Option<String>,
+    pub scopes: Option<Vec<String>>,
+    pub callback_port: Option<u16>,
+}
+
+impl McpOAuthConfig {
+    pub fn is_configured(&self) -> bool {
+        self.client_id.is_some()
+    }
+}
+
+/// Per-server OAuth configuration map, keyed by MCP server name.
+pub type McpOAuthConfigMap = HashMap<String, McpOAuthConfig>;
 
 /// serde default helper. Kept module-local rather than shared — the `pool`
 /// module keeps its own copy for `PoolConfig`.

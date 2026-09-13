@@ -13,7 +13,10 @@ serde_json = { workspace = true }
 strum = { workspace = true }
 tracing = { workspace = true }
 xai-grok-config = { workspace = true }
-xai-grok-mcp = { workspace = true }
+# Deliberately NOT `xai-grok-mcp`: that crate depends on `xai-file-utils`, so
+# depending on it here would make `xai-file-utils -> xai-grok-config-types ->
+# xai-grok-mcp -> xai-file-utils` a cyclic package dependency. `McpOAuthConfig`
+# moved into `src/mcp.rs` and is re-exported from `xai_grok_mcp::oauth_config`.
 
 [dev-dependencies]
 toml = { workspace = true }

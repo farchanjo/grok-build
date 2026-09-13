@@ -18,6 +18,7 @@ pub fn with_auth_retry(
         .with(xai_grok_auth::AuthRetryMiddleware::new(credentials, 1))
         .build()
 }
+pub mod assets;
 pub mod events;
 pub mod gcs;
 pub mod queue;

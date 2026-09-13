@@ -9,6 +9,8 @@ mod flags;
 pub use flags::*;
 mod memory;
 pub use memory::*;
+mod assets;
+pub use assets::*;
 mod retrieval;
 pub use retrieval::*;
 mod mcp;
