@@ -33,11 +33,17 @@ enum HeadOutcome {
 
 /// Some S3-compatible endpoints reject single PutObject chunks above 16 MiB.
 /// Use multipart upload with 8 MiB parts to stay within that limit.
-const MULTIPART_THRESHOLD: usize = 8 * 1024 * 1024;
-const MULTIPART_PART_SIZE: usize = 8 * 1024 * 1024;
+pub(crate) const MULTIPART_THRESHOLD: usize = 8 * 1024 * 1024;
+pub(crate) const MULTIPART_PART_SIZE: usize = 8 * 1024 * 1024;
 
-/// Parse credential content (JSON or INI format) into AWS SDK credentials.
-fn parse_aws_credentials(content: &str) -> anyhow::Result<aws_sdk_s3::config::Credentials> {
+/// Parse credential content (JSON or INI format) into the three AWS fields.
+///
+/// The single parsing entry point: `parse_aws_credentials` (SDK credentials)
+/// and [`static_credentials_from_content`] (presign credentials) both build on
+/// it, so the accepted formats cannot drift apart.
+pub(crate) fn parse_credential_fields(
+    content: &str,
+) -> anyhow::Result<(String, String, Option<String>)> {
     #[derive(serde::Deserialize)]
     struct JsonCreds {
         aws_access_key_id: String,
@@ -47,12 +53,10 @@ fn parse_aws_credentials(content: &str) -> anyhow::Result<aws_sdk_s3::config::Cr
     }
 
     if let Ok(parsed) = serde_json::from_str::<JsonCreds>(content) {
-        return Ok(aws_sdk_s3::config::Credentials::new(
-            &parsed.aws_access_key_id,
-            &parsed.aws_secret_access_key,
+        return Ok((
+            parsed.aws_access_key_id,
+            parsed.aws_secret_access_key,
             parsed.aws_session_token,
-            None,
-            "grok-shell-trace-upload",
         ));
     }
 
@@ -77,17 +81,55 @@ fn parse_aws_credentials(content: &str) -> anyhow::Result<aws_sdk_s3::config::Cr
     }
 
     match (key_id, secret) {
-        (Some(k), Some(s)) => Ok(aws_sdk_s3::config::Credentials::new(
-            &k,
-            &s,
-            token,
-            None,
-            "grok-shell-trace-upload",
-        )),
+        (Some(k), Some(s)) => Ok((k, s, token)),
         _ => anyhow::bail!(
             "AWS credentials are neither valid JSON \
              nor contain aws_access_key_id and aws_secret_access_key"
         ),
+    }
+}
+
+/// Parse credential content (JSON or INI format) into AWS SDK credentials.
+fn parse_aws_credentials(content: &str) -> anyhow::Result<aws_sdk_s3::config::Credentials> {
+    let (key_id, secret, token) = parse_credential_fields(content)?;
+    Ok(aws_sdk_s3::config::Credentials::new(
+        &key_id,
+        &secret,
+        token,
+        None,
+        "grok-shell-trace-upload",
+    ))
+}
+
+/// Build [`S3StaticCredentials`] from the same content formats
+/// [`parse_aws_credentials`] accepts. Used to presign without rebuilding a
+/// credential chain.
+pub(crate) fn static_credentials_from_content(
+    content: &str,
+) -> anyhow::Result<S3StaticCredentials> {
+    let (access_key_id, secret_access_key, _token) = parse_credential_fields(content)?;
+    Ok(S3StaticCredentials {
+        access_key_id,
+        secret_access_key,
+    })
+}
+
+/// Resolve credential *content* from the inline value or a file.
+///
+/// Inline wins; a missing file is an error; neither yields `None` so the SDK's
+/// ambient chain stays in charge.
+pub(crate) async fn resolve_credentials_content(
+    credentials_content: Option<&str>,
+    credentials_file: Option<&str>,
+) -> anyhow::Result<Option<String>> {
+    match (credentials_content, credentials_file) {
+        (Some(inline), _) => Ok(Some(inline.to_owned())),
+        (None, Some(path)) => {
+            Ok(Some(tokio::fs::read_to_string(path).await.with_context(
+                || format!("Failed to read AWS credentials file: {path}"),
+            )?))
+        }
+        (None, None) => Ok(None),
     }
 }
 
@@ -122,15 +164,8 @@ pub(crate) async fn build_s3_client(
         .http_client(http_client)
         .region(aws_config::Region::new(region.to_owned()));
 
-    let resolved_content = match (credentials_content, credentials_file) {
-        (Some(inline), _) => Some(inline.to_owned()),
-        (None, Some(path)) => Some(
-            tokio::fs::read_to_string(path)
-                .await
-                .with_context(|| format!("Failed to read AWS credentials file: {path}"))?,
-        ),
-        (None, None) => None,
-    };
+    let resolved_content =
+        resolve_credentials_content(credentials_content, credentials_file).await?;
 
     if let Some(ref content) = resolved_content {
         config_loader = config_loader.credentials_provider(parse_aws_credentials(content)?);
@@ -221,6 +256,260 @@ pub async fn presign_get_url(
         .presigned(presigning_config)
         .await?;
     Ok(presigned.uri().to_string())
+}
+
+// ---------------------------------------------------------------------------
+// Object operations used by the asset store
+// ---------------------------------------------------------------------------
+
+/// How an S3 SDK call failed, in the shape the asset layer branches on.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum S3Failure {
+    NotFound,
+    Unauthorized,
+    AccessDenied,
+    /// The bucket rejects `x-amz-acl` (bucket-owner-enforced).
+    AclNotSupported,
+    /// A retryable transport / 5xx failure.
+    Transient(String),
+    /// Anything else, already rendered secret-free by `Display`.
+    Other(String),
+}
+
+/// Error code emitted by S3 when a bucket-owner-enforced bucket rejects an ACL.
+pub(crate) const ACL_NOT_SUPPORTED_CODE: &str = "AccessControlListNotSupported";
+
+/// Map an SDK error to an [`S3Failure`].
+///
+/// 404 → `NotFound`, 401 → `Unauthorized`, 403 → `AccessDenied`; everything
+/// without a status (construction, dispatch, timeout) is `Transient`.
+pub(crate) fn classify_sdk_error<E>(err: &aws_sdk_s3::error::SdkError<E>) -> S3Failure
+where
+    E: aws_sdk_s3::error::ProvideErrorMetadata + std::fmt::Debug,
+{
+    use aws_sdk_s3::error::SdkError;
+
+    let status = match err {
+        SdkError::ServiceError(ctx) => Some(ctx.raw().status().as_u16()),
+        SdkError::ResponseError(ctx) => Some(ctx.raw().status().as_u16()),
+        _ => None,
+    };
+
+    // The ACL rejection is a 400 with a specific code; check it before the
+    // generic status mapping so the degrade path can trigger.
+    if is_acl_not_supported(err) {
+        return S3Failure::AclNotSupported;
+    }
+
+    match status {
+        Some(404) => S3Failure::NotFound,
+        Some(401) => S3Failure::Unauthorized,
+        Some(403) => S3Failure::AccessDenied,
+        Some(code) if (500..600).contains(&code) => S3Failure::Transient(format!("HTTP {code}")),
+        Some(code) => S3Failure::Other(format!("HTTP {code}")),
+        None => S3Failure::Transient(format!("{err:?}")),
+    }
+}
+
+/// True when the error is S3's "this bucket does not support ACLs" rejection.
+///
+/// Checks the parsed error code first and falls back to the rendered error,
+/// which carries the metadata even when the body could not be modeled.
+pub(crate) fn is_acl_not_supported<E>(err: &aws_sdk_s3::error::SdkError<E>) -> bool
+where
+    E: aws_sdk_s3::error::ProvideErrorMetadata + std::fmt::Debug,
+{
+    if let Some(code) = err.as_service_error().and_then(|e| e.code())
+        && code == ACL_NOT_SUPPORTED_CODE
+    {
+        return true;
+    }
+    format!("{err:?}").contains(ACL_NOT_SUPPORTED_CODE)
+}
+
+/// `PutObject` with an optional canned ACL.
+///
+/// `content_length` is required when the body cannot report its own size (a
+/// streamed file); S3 rejects a chunked PUT without `Content-Length`.
+pub(crate) async fn put_object(
+    client: &aws_sdk_s3::Client,
+    bucket: &str,
+    key: &str,
+    body: aws_sdk_s3::primitives::ByteStream,
+    content_type: &str,
+    content_length: Option<u64>,
+    acl: Option<aws_sdk_s3::types::ObjectCannedAcl>,
+) -> Result<(), S3Failure> {
+    let mut request = client
+        .put_object()
+        .bucket(bucket)
+        .key(key)
+        .content_type(content_type)
+        .body(body);
+    if let Some(length) = content_length {
+        request = request.content_length(length as i64);
+    }
+    if let Some(acl) = acl {
+        request = request.acl(acl);
+    }
+    request.send().await.map(|_| ()).map_err(|e| {
+        let failure = classify_sdk_error(&e);
+        tracing::debug!(key, ?failure, "s3 put_object failed");
+        failure
+    })
+}
+
+/// `PutObjectAcl` — the emulated visibility path for S3.
+pub(crate) async fn put_object_acl(
+    client: &aws_sdk_s3::Client,
+    bucket: &str,
+    key: &str,
+    acl: aws_sdk_s3::types::ObjectCannedAcl,
+) -> Result<(), S3Failure> {
+    client
+        .put_object_acl()
+        .bucket(bucket)
+        .key(key)
+        .acl(acl)
+        .send()
+        .await
+        .map(|_| ())
+        .map_err(|e| classify_sdk_error(&e))
+}
+
+/// `DeleteObject`. S3 returns 204 even for a missing key, so this is
+/// idempotent by construction.
+pub(crate) async fn delete_object(
+    client: &aws_sdk_s3::Client,
+    bucket: &str,
+    key: &str,
+) -> Result<(), S3Failure> {
+    client
+        .delete_object()
+        .bucket(bucket)
+        .key(key)
+        .send()
+        .await
+        .map(|_| ())
+        .map_err(|e| classify_sdk_error(&e))
+}
+
+/// One page of `ListObjectsV2`.
+#[derive(Debug, Default)]
+pub(crate) struct ListObjectsPage {
+    /// `(key, size_bytes)` pairs, in service order.
+    pub keys: Vec<(String, u64)>,
+    pub next_continuation_token: Option<String>,
+    pub is_truncated: bool,
+}
+
+/// `ListObjectsV2` with prefix, page size, and continuation token.
+pub(crate) async fn list_objects_v2(
+    client: &aws_sdk_s3::Client,
+    bucket: &str,
+    prefix: Option<&str>,
+    max_keys: i32,
+    continuation_token: Option<&str>,
+) -> Result<ListObjectsPage, S3Failure> {
+    let mut request = client.list_objects_v2().bucket(bucket).max_keys(max_keys);
+    if let Some(prefix) = prefix {
+        request = request.prefix(prefix);
+    }
+    if let Some(token) = continuation_token {
+        request = request.continuation_token(token);
+    }
+    let output = request.send().await.map_err(|e| classify_sdk_error(&e))?;
+
+    let keys = output
+        .contents()
+        .iter()
+        .filter_map(|object| {
+            let key = object.key()?.to_owned();
+            Some((key, object.size().unwrap_or(0).max(0) as u64))
+        })
+        .collect();
+
+    Ok(ListObjectsPage {
+        keys,
+        next_continuation_token: output.next_continuation_token().map(str::to_owned),
+        is_truncated: output.is_truncated().unwrap_or(false),
+    })
+}
+
+/// `HeadBucket` — a cheap reachability probe that needs no list permission.
+pub(crate) async fn head_bucket(
+    client: &aws_sdk_s3::Client,
+    bucket: &str,
+) -> Result<(), S3Failure> {
+    client
+        .head_bucket()
+        .bucket(bucket)
+        .send()
+        .await
+        .map(|_| ())
+        .map_err(|e| classify_sdk_error(&e))
+}
+
+/// Metadata returned by [`head_object`].
+#[derive(Debug, Clone, Default)]
+pub(crate) struct HeadObjectInfo {
+    pub content_length: u64,
+    pub content_type: Option<String>,
+    pub etag: Option<String>,
+    /// RFC 3339 timestamp, when the service reported one.
+    pub last_modified: Option<String>,
+}
+
+/// `HeadObject` — existence plus metadata, without transferring the body.
+pub(crate) async fn head_object(
+    client: &aws_sdk_s3::Client,
+    bucket: &str,
+    key: &str,
+) -> Result<HeadObjectInfo, S3Failure> {
+    let output = client
+        .head_object()
+        .bucket(bucket)
+        .key(key)
+        .send()
+        .await
+        .map_err(|e| classify_sdk_error(&e))?;
+
+    Ok(HeadObjectInfo {
+        content_length: output.content_length().unwrap_or(0).max(0) as u64,
+        content_type: output.content_type().map(str::to_owned),
+        etag: output.e_tag().map(str::to_owned),
+        last_modified: output.last_modified().map(|t| t.to_string()),
+    })
+}
+
+/// `GetObject`, returning the raw output so the caller can stream the body.
+pub(crate) async fn get_object(
+    client: &aws_sdk_s3::Client,
+    bucket: &str,
+    key: &str,
+) -> Result<aws_sdk_s3::operation::get_object::GetObjectOutput, S3Failure> {
+    client
+        .get_object()
+        .bucket(bucket)
+        .key(key)
+        .send()
+        .await
+        .map_err(|e| classify_sdk_error(&e))
+}
+
+/// `GetObject`, buffering the whole body.
+pub(crate) async fn get_object_bytes(
+    client: &aws_sdk_s3::Client,
+    bucket: &str,
+    key: &str,
+) -> Result<bytes::Bytes, S3Failure> {
+    let output = get_object(client, bucket, key).await?;
+    output
+        .body
+        .collect()
+        .await
+        .map(|aggregated| aggregated.into_bytes())
+        .map_err(|e| S3Failure::Transient(e.to_string()))
 }
 
 /// Multipart upload for payloads that exceed [`MULTIPART_THRESHOLD`].
@@ -616,26 +905,76 @@ impl S3StorageClient {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use axum::{
         Router,
         extract::Path as AxumPath,
         http::StatusCode,
         response::IntoResponse,
-        routing::{head, put},
+        routing::{get, head, put},
     };
     use std::collections::HashMap;
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use tokio::sync::RwLock;
 
     /// In-progress multipart uploads: upload_id -> (key, parts: part_number -> bytes).
     type MultipartUploads = HashMap<String, (String, HashMap<i32, Vec<u8>>)>;
 
     /// Shared state for the mock S3 server.
-    struct MockS3State {
-        objects: RwLock<HashMap<String, Vec<u8>>>,
-        multipart_uploads: RwLock<MultipartUploads>,
+    pub(crate) struct MockS3State {
+        pub(crate) objects: RwLock<HashMap<String, Vec<u8>>>,
+        pub(crate) multipart_uploads: RwLock<MultipartUploads>,
+        /// Canned ACLs written through `PutObjectAcl`, keyed by object key.
+        pub(crate) acls: RwLock<HashMap<String, String>>,
+        /// `x-amz-acl` header observed on the last `PutObject` per key.
+        pub(crate) put_acl_headers: RwLock<HashMap<String, Option<String>>>,
+        /// Content type stored with each object, echoed by HEAD/GET.
+        pub(crate) content_types: RwLock<HashMap<String, String>>,
+        /// When `false`, ACL-bearing requests are rejected with
+        /// `AccessControlListNotSupported` — the bucket-owner-enforced bucket.
+        pub(crate) acl_supported: AtomicBool,
+    }
+
+    impl MockS3State {
+        fn new() -> Self {
+            Self {
+                objects: RwLock::new(HashMap::new()),
+                multipart_uploads: RwLock::new(HashMap::new()),
+                acls: RwLock::new(HashMap::new()),
+                put_acl_headers: RwLock::new(HashMap::new()),
+                content_types: RwLock::new(HashMap::new()),
+                acl_supported: AtomicBool::new(true),
+            }
+        }
+
+        /// Model a bucket that rejects `x-amz-acl`.
+        pub(crate) fn reject_acls(&self) {
+            self.acl_supported.store(false, Ordering::SeqCst);
+        }
+
+        /// `x-amz-acl` sent with the last `PutObject` for `key`.
+        pub(crate) async fn put_acl_header(&self, key: &str) -> Option<String> {
+            self.put_acl_headers
+                .read()
+                .await
+                .get(key)
+                .cloned()
+                .flatten()
+        }
+
+        /// Canned ACL recorded for `key` through `PutObjectAcl`.
+        pub(crate) async fn acl(&self, key: &str) -> Option<String> {
+            self.acls.read().await.get(key).cloned()
+        }
+
+        /// Every stored object key, sorted.
+        pub(crate) async fn object_keys(&self) -> Vec<String> {
+            let mut keys: Vec<String> = self.objects.read().await.keys().cloned().collect();
+            keys.sort();
+            keys
+        }
     }
 
     fn xml_response(status: u16, body: String) -> axum::response::Response {
@@ -647,20 +986,84 @@ mod tests {
             .into_response()
     }
 
-    /// Mock S3 server with PUT/GET/HEAD/POST/DELETE and multipart upload support.
-    fn mock_s3_router() -> (Router, Arc<MockS3State>) {
-        let state = Arc::new(MockS3State {
-            objects: RwLock::new(HashMap::new()),
-            multipart_uploads: RwLock::new(HashMap::new()),
-        });
+    /// The ACL rejection a bucket-owner-enforced bucket returns.
+    fn acl_not_supported_response() -> axum::response::Response {
+        xml_response(
+            400,
+            format!(
+                "<Error><Code>{ACL_NOT_SUPPORTED_CODE}</Code>\
+                 <Message>The bucket does not support ACLs</Message></Error>"
+            ),
+        )
+    }
+
+    /// Decode `aws-chunked` framing, which the SDK uses when it streams an
+    /// unknown-length body. Real S3 does the same when
+    /// `x-amz-decoded-content-length` is present.
+    fn decode_aws_chunked(body: &[u8]) -> Vec<u8> {
+        let mut out = Vec::with_capacity(body.len());
+        let mut pos = 0usize;
+        while pos < body.len() {
+            let Some(newline) = body[pos..].iter().position(|b| *b == b'\n') else {
+                break;
+            };
+            let line = String::from_utf8_lossy(&body[pos..pos + newline])
+                .trim()
+                .to_owned();
+            pos += newline + 1;
+            // Blank separators and trailer headers are not chunk sizes.
+            let Some(size) = line
+                .split(';')
+                .next()
+                .and_then(|s| usize::from_str_radix(s, 16).ok())
+            else {
+                continue;
+            };
+            if size == 0 {
+                break;
+            }
+            if pos + size > body.len() {
+                out.extend_from_slice(&body[pos..]);
+                break;
+            }
+            out.extend_from_slice(&body[pos..pos + size]);
+            pos += size;
+        }
+        out
+    }
+
+    /// True when the request carries `x-amz-acl` on a bucket that rejects it.
+    fn acl_rejected(state: &MockS3State, headers: &axum::http::HeaderMap) -> bool {
+        !state.acl_supported.load(Ordering::SeqCst) && headers.contains_key("x-amz-acl")
+    }
+
+    /// Mock S3 server with PUT/GET/HEAD/POST/DELETE, multipart, ACL, and
+    /// ListObjectsV2 support.
+    pub(crate) fn mock_s3_router() -> (Router, Arc<MockS3State>) {
+        let state = Arc::new(MockS3State::new());
 
         let s = state.clone();
         let head_handler = move |AxumPath((_, key)): AxumPath<(String, String)>| {
             let state = s.clone();
             async move {
                 match state.objects.read().await.get(&key) {
-                    Some(data) => (StatusCode::OK, [("content-length", data.len().to_string())])
-                        .into_response(),
+                    Some(data) => {
+                        let content_type = state
+                            .content_types
+                            .read()
+                            .await
+                            .get(&key)
+                            .cloned()
+                            .unwrap_or_else(|| "application/octet-stream".to_owned());
+                        (
+                            StatusCode::OK,
+                            [
+                                ("content-length", data.len().to_string()),
+                                ("content-type", content_type),
+                            ],
+                        )
+                            .into_response()
+                    }
                     None => StatusCode::NOT_FOUND.into_response(),
                 }
             }
@@ -669,22 +1072,78 @@ mod tests {
         let s = state.clone();
         let put_handler = move |AxumPath((_, key)): AxumPath<(String, String)>,
                                 query: axum::extract::Query<HashMap<String, String>>,
+                                headers: axum::http::HeaderMap,
                                 body: axum::body::Bytes| {
             let state = s.clone();
             async move {
+                if query.contains_key("acl") {
+                    if acl_rejected(&state, &headers) {
+                        return acl_not_supported_response();
+                    }
+                    let acl = headers
+                        .get("x-amz-acl")
+                        .and_then(|v| v.to_str().ok())
+                        .unwrap_or("private")
+                        .to_owned();
+                    state.acls.write().await.insert(key, acl);
+                    return StatusCode::OK.into_response();
+                }
+
                 if let (Some(pn), Some(uid)) = (query.get("partNumber"), query.get("uploadId")) {
                     let part_num: i32 = pn.parse().unwrap_or(0);
                     let mut uploads = state.multipart_uploads.write().await;
                     if let Some((_, parts)) = uploads.get_mut(uid) {
-                        parts.insert(part_num, body.to_vec());
-                        return xml_response(200, "<UploadPartResult/>".into());
+                        let stored = if headers.contains_key("x-amz-decoded-content-length") {
+                            decode_aws_chunked(&body)
+                        } else {
+                            body.to_vec()
+                        };
+                        parts.insert(part_num, stored);
+                        // UploadPart must echo an ETag; the SDK needs it for
+                        // the CompleteMultipartUpload manifest.
+                        return axum::http::Response::builder()
+                            .status(200)
+                            .header("content-type", "application/xml")
+                            .header("etag", format!("\"part-{part_num}-etag\""))
+                            .body(axum::body::Body::from("<UploadPartResult/>"))
+                            .unwrap()
+                            .into_response();
                     }
                     return StatusCode::NOT_FOUND.into_response();
+                }
+
+                let acl_header = headers
+                    .get("x-amz-acl")
+                    .and_then(|v| v.to_str().ok())
+                    .map(str::to_owned);
+                state
+                    .put_acl_headers
+                    .write()
+                    .await
+                    .insert(key.clone(), acl_header);
+
+                if acl_rejected(&state, &headers) {
+                    return acl_not_supported_response();
                 }
                 if body.len() > 16 * 1024 * 1024 {
                     return (StatusCode::BAD_REQUEST, "chunk too big").into_response();
                 }
-                state.objects.write().await.insert(key, body.to_vec());
+                let content_type = headers
+                    .get("content-type")
+                    .and_then(|v| v.to_str().ok())
+                    .unwrap_or("application/octet-stream")
+                    .to_owned();
+                state
+                    .content_types
+                    .write()
+                    .await
+                    .insert(key.clone(), content_type);
+                let stored = if headers.contains_key("x-amz-decoded-content-length") {
+                    decode_aws_chunked(&body)
+                } else {
+                    body.to_vec()
+                };
+                state.objects.write().await.insert(key, stored);
                 StatusCode::OK.into_response()
             }
         };
@@ -700,14 +1159,85 @@ mod tests {
             }
         };
 
+        async fn head_bucket_handler() -> StatusCode {
+            StatusCode::OK
+        }
+
+        let s = state.clone();
+        let list_handler =
+            move |AxumPath(_bucket): AxumPath<String>,
+                  query: axum::extract::Query<HashMap<String, String>>| {
+                let state = s.clone();
+                async move {
+                    let prefix = query.get("prefix").cloned().unwrap_or_default();
+                    let max_keys: usize = query
+                        .get("max-keys")
+                        .and_then(|v| v.parse().ok())
+                        .unwrap_or(1_000);
+                    let start: usize = query
+                        .get("continuation-token")
+                        .and_then(|v| v.parse().ok())
+                        .unwrap_or(0);
+
+                    let mut keys: Vec<String> = state
+                        .objects
+                        .read()
+                        .await
+                        .keys()
+                        .filter(|k| k.starts_with(&prefix))
+                        .cloned()
+                        .collect();
+                    keys.sort();
+
+                    let page: Vec<String> =
+                        keys.iter().skip(start).take(max_keys).cloned().collect();
+                    let next = start + page.len();
+                    let truncated = next < keys.len();
+
+                    let mut body = String::from("<?xml version=\"1.0\" encoding=\"UTF-8\"?>");
+                    body.push_str("<ListBucketResult>");
+                    body.push_str(&format!("<Name>bucket</Name><Prefix>{prefix}</Prefix>"));
+                    body.push_str(&format!(
+                        "<KeyCount>{}</KeyCount><MaxKeys>{max_keys}</MaxKeys>",
+                        page.len()
+                    ));
+                    body.push_str(&format!("<IsTruncated>{truncated}</IsTruncated>"));
+                    for key in &page {
+                        let size = state
+                            .objects
+                            .read()
+                            .await
+                            .get(key)
+                            .map(|d| d.len())
+                            .unwrap_or(0);
+                        body.push_str(&format!(
+                            "<Contents><Key>{key}</Key><Size>{size}</Size>\
+                         <LastModified>2026-01-01T00:00:00.000Z</LastModified>\
+                         <ETag>\"etag\"</ETag><StorageClass>STANDARD</StorageClass></Contents>"
+                        ));
+                    }
+                    if truncated {
+                        body.push_str(&format!(
+                            "<NextContinuationToken>{next}</NextContinuationToken>"
+                        ));
+                    }
+                    body.push_str("</ListBucketResult>");
+                    xml_response(200, body)
+                }
+            };
+
         let s = state.clone();
         let post_handler = move |AxumPath((_, key)): AxumPath<(String, String)>,
                                  query: axum::extract::Query<HashMap<String, String>>,
+                                 headers: axum::http::HeaderMap,
                                  body: axum::body::Bytes| {
             let state = s.clone();
             async move {
                 if query.contains_key("uploads") {
-                    use std::sync::atomic::{AtomicU64, Ordering};
+                    if acl_rejected(&state, &headers) {
+                        return acl_not_supported_response();
+                    }
+                    use std::sync::atomic::AtomicU64;
                     static CTR: AtomicU64 = AtomicU64::new(0);
                     let uid = format!("upload-{}", CTR.fetch_add(1, Ordering::Relaxed));
                     state
@@ -748,24 +1278,33 @@ mod tests {
                         state.multipart_uploads.write().await.remove(uid);
                     } else {
                         state.objects.write().await.remove(&key);
+                        state.acls.write().await.remove(&key);
                     }
                     StatusCode::NO_CONTENT
                 }
             };
 
-        let router = Router::new().route(
-            "/{bucket}/{*key}",
-            head(head_handler)
-                .put(put_handler)
-                .get(get_handler)
-                .post(post_handler)
-                .delete(delete_handler),
-        );
+        let router = Router::new()
+            .route(
+                "/{bucket}/{*key}",
+                head(head_handler)
+                    .put(put_handler)
+                    .get(get_handler)
+                    .post(post_handler)
+                    .delete(delete_handler),
+            )
+            .route(
+                "/{bucket}",
+                get(list_handler.clone()).head(head_bucket_handler),
+            )
+            .route("/{bucket}/", get(list_handler))
+            // 8 MiB multipart parts exceed axum's 2 MiB default body limit.
+            .layer(axum::extract::DefaultBodyLimit::max(16 * 1024 * 1024));
         (router, state)
     }
 
     /// Start the mock server and return (endpoint_url, state).
-    async fn start_mock_server() -> (String, Arc<MockS3State>) {
+    pub(crate) async fn start_mock_server() -> (String, Arc<MockS3State>) {
         let (router, state) = mock_s3_router();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -773,6 +1312,26 @@ mod tests {
             axum::serve(listener, router).await.unwrap();
         });
         (format!("http://{addr}"), state)
+    }
+
+    /// A raw `aws_sdk_s3::Client` pointed at the mock, for adapter tests.
+    pub(crate) async fn make_raw_test_client(endpoint_url: &str) -> aws_sdk_s3::Client {
+        build_s3_client(
+            "us-east-1",
+            Some(r#"{"aws_access_key_id":"test","aws_secret_access_key":"test"}"#),
+            None,
+            Some(endpoint_url),
+        )
+        .await
+        .unwrap()
+    }
+
+    /// Static credentials matching [`make_raw_test_client`].
+    pub(crate) fn test_static_credentials() -> S3StaticCredentials {
+        S3StaticCredentials {
+            access_key_id: "test".to_owned(),
+            secret_access_key: "test".to_owned(),
+        }
     }
 
     async fn make_test_client(endpoint_url: &str) -> S3StorageClient {

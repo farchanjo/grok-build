@@ -391,6 +391,8 @@ impl AssetStore for LocalAssetStore {
         };
         self.check_size(&request.key, Some(bytes.len() as u64))?;
         self.write_bytes_atomic(&dest, &bytes).await?;
+        self.write_visibility(&request.key, request.visibility)
+            .await?;
         self.meta_for(&request.key).await
     }
 
@@ -412,6 +414,11 @@ impl AssetStore for LocalAssetStore {
                 self.stream_file_atomic(&dest, path).await?;
             }
         }
+        // The requested visibility is recorded, not enforced. Recording on
+        // every write (rather than only for `public`) keeps a re-upload with
+        // the default from leaving a stale `public` sidecar behind.
+        self.write_visibility(&request.key, request.visibility)
+            .await?;
         self.meta_for(&request.key).await
     }
 

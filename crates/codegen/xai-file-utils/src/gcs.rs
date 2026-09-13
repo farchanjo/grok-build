@@ -486,7 +486,7 @@ async fn upload_file_via_proxy(
 }
 
 /// Build a GCS client with optional service account key, or default ADC.
-async fn build_gcs_client(
+pub(crate) async fn build_gcs_client(
     service_account_key: Option<&str>,
 ) -> anyhow::Result<gcloud_storage::client::Client> {
     use gcloud_storage::client::{Client as GcsClient, ClientConfig as GcsClientConfig};

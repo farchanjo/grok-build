@@ -25,10 +25,10 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 
 use aws_sdk_s3::primitives::{ByteStream, Length};
-use tokio::io::AsyncWriteExt;
 use aws_sdk_s3::types::{CompletedMultipartUpload, CompletedPart, ObjectCannedAcl};
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
+use tokio::io::AsyncWriteExt;
 
 use super::error::{AssetError, AssetOperation};
 use super::factory::AssetStoreSource;
@@ -97,10 +97,13 @@ impl S3AssetStore {
     /// Fails only on construction problems (unreadable credentials file,
     /// client build failure); no network call happens here.
     pub async fn from_source(source: &AssetStoreSource) -> Result<Self, AssetError> {
-        let bucket = source.bucket.clone().ok_or_else(|| AssetError::InvalidKey {
-            key: "assets.bucket".to_owned(),
-            reason: "the s3 backend needs a bucket".to_owned(),
-        })?;
+        let bucket = source
+            .bucket
+            .clone()
+            .ok_or_else(|| AssetError::InvalidKey {
+                key: "assets.bucket".to_owned(),
+                reason: "the s3 backend needs a bucket".to_owned(),
+            })?;
         let region = source
             .region
             .clone()
@@ -186,7 +189,8 @@ impl S3AssetStore {
 
     /// ACL to send for this write, or `None` once the bucket has degraded.
     fn acl_for(&self, visibility: Visibility) -> Option<ObjectCannedAcl> {
-        self.visibility_enforced().then(|| Self::canned_acl(visibility))
+        self.visibility_enforced()
+            .then(|| Self::canned_acl(visibility))
     }
 
     // ---- error plumbing --------------------------------------------------
@@ -280,19 +284,26 @@ impl S3AssetStore {
         }
     }
 
+    /// Record visibility in the sidecar.
+    ///
+    /// Written on both paths: it is the only way `list`/`meta` can report
+    /// visibility without an extra `GetObjectAcl` round trip, and `enforced`
+    /// keeps the sidecar honest about whether the ACL actually landed.
     async fn record_visibility(
         &self,
         key: &AssetKey,
         visibility: Visibility,
+        enforced: bool,
     ) -> Result<(), AssetError> {
         let sidecar = VisibilitySidecar {
             key: key.to_string(),
             visibility: visibility.as_str().to_owned(),
-            enforced: false,
+            enforced,
         };
         let encoded = serde_json::to_vec(&sidecar).map_err(|e| {
             AssetError::io("serialize_sidecar", &std::io::Error::other(e.to_string()))
         })?;
+        let encoded_len = encoded.len() as u64;
         self.run(
             AssetOperation::SetVisibility,
             Some(key),
@@ -302,6 +313,7 @@ impl S3AssetStore {
                 &self.sidecar(key),
                 ByteStream::from(encoded),
                 "application/json",
+                Some(encoded_len),
                 None,
             ),
         )
@@ -366,6 +378,7 @@ impl S3AssetStore {
         key: &AssetKey,
         source: &PutSource,
         content_type: &str,
+        content_length: Option<u64>,
         visibility: Visibility,
     ) -> Result<(), AssetError> {
         let physical = self.physical(key);
@@ -377,6 +390,7 @@ impl S3AssetStore {
                 &physical,
                 body,
                 content_type,
+                content_length,
                 self.acl_for(visibility),
             ))
             .await
@@ -394,11 +408,12 @@ impl S3AssetStore {
                         &physical,
                         body,
                         content_type,
+                        content_length,
                         None,
                     ),
                 )
                 .await?;
-                self.record_visibility(key, visibility).await
+                self.record_visibility(key, visibility, false).await
             }
             Err(failure) => Err(self.map_failure(AssetOperation::Put, failure, Some(key))),
         }
@@ -450,6 +465,7 @@ impl S3AssetStore {
                     .key(&physical)
                     .upload_id(&upload_id)
                     .part_number(part_number)
+                    .content_length(length as i64)
                     .body(body)
                     .send()
                     .await
@@ -509,7 +525,13 @@ impl S3AssetStore {
 
         if size < crate::s3::MULTIPART_THRESHOLD as u64 {
             return self
-                .put_body(key, &request.source, content_type, request.visibility)
+                .put_body(
+                    key,
+                    &request.source,
+                    content_type,
+                    Some(size),
+                    request.visibility,
+                )
                 .await;
         }
 
@@ -532,7 +554,7 @@ impl S3AssetStore {
                     self.put_file_multipart(key, path, size, content_type, None),
                 )
                 .await?;
-                self.record_visibility(key, request.visibility).await
+                self.record_visibility(key, request.visibility, false).await
             }
             Err(failure) => Err(self.map_failure(AssetOperation::PutFile, failure, Some(key))),
         }
@@ -556,7 +578,9 @@ impl S3AssetStore {
 /// Resolve credential content: an inline env value wins, then the env value as
 /// a file path, then `credentials_file`. `None` leaves the SDK's ambient chain
 /// in charge.
-async fn resolve_credential_content(source: &AssetStoreSource) -> Result<Option<String>, AssetError> {
+async fn resolve_credential_content(
+    source: &AssetStoreSource,
+) -> Result<Option<String>, AssetError> {
     if let Some(name) = source.env_key.as_deref()
         && let Ok(value) = std::env::var(name)
         && !value.trim().is_empty()
@@ -618,10 +642,12 @@ impl AssetStore for S3AssetStore {
                 ))
             }
         };
+        let length = source.buffered_len();
         self.put_body(
             &request.key,
             &source,
             request.content_type.as_str(),
+            length,
             request.visibility,
         )
         .await?;
@@ -646,6 +672,7 @@ impl AssetStore for S3AssetStore {
                     &request.key,
                     &request.source,
                     request.content_type.as_str(),
+                    Some(bytes.len() as u64),
                     request.visibility,
                 )
                 .await?;
@@ -655,7 +682,8 @@ impl AssetStore for S3AssetStore {
     }
 
     async fn get(&self, key: &AssetKey) -> Result<Bytes, AssetError> {
-        self.capabilities().require(BackendKind::S3, AssetOperation::Get)?;
+        self.capabilities()
+            .require(BackendKind::S3, AssetOperation::Get)?;
         self.run(
             AssetOperation::Get,
             Some(key),
@@ -690,7 +718,9 @@ impl AssetStore for S3AssetStore {
             tokio::io::copy(&mut reader, &mut file)
                 .await
                 .map_err(|e| AssetError::io("copy", &e))?;
-            file.flush().await.map_err(|e| AssetError::io("flush", &e))?;
+            file.flush()
+                .await
+                .map_err(|e| AssetError::io("flush", &e))?;
             Ok::<(), AssetError>(())
         }
         .await;
@@ -738,7 +768,8 @@ impl AssetStore for S3AssetStore {
     }
 
     async fn list(&self, query: ListQuery) -> Result<ListPage, AssetError> {
-        self.capabilities().require(BackendKind::S3, AssetOperation::List)?;
+        self.capabilities()
+            .require(BackendKind::S3, AssetOperation::List)?;
         query.validate()?;
 
         let physical_prefix = format!("{}{}", self.key_prefix, query.prefix.as_str());
@@ -796,11 +827,7 @@ impl AssetStore for S3AssetStore {
         })
     }
 
-    async fn presign_get(
-        &self,
-        key: &AssetKey,
-        ttl: Duration,
-    ) -> Result<PresignedUrl, AssetError> {
+    async fn presign_get(&self, key: &AssetKey, ttl: Duration) -> Result<PresignedUrl, AssetError> {
         self.capabilities()
             .require(BackendKind::S3, AssetOperation::PresignGet)?;
         let ttl = validate_ttl(ttl)?;
@@ -845,14 +872,10 @@ impl AssetStore for S3AssetStore {
         )
         .await
         .map_err(|e| AssetError::io("presign_put", &std::io::Error::other(e.to_string())))?;
-        Ok(PresignedUrl::new(
-            key.clone(),
-            url,
-            PresignMethod::Put,
-            ttl,
-            false,
+        Ok(
+            PresignedUrl::new(key.clone(), url, PresignMethod::Put, ttl, false)
+                .with_content_type(content_type.as_str()),
         )
-        .with_content_type(content_type.as_str()))
     }
 
     async fn set_visibility(
@@ -869,7 +892,7 @@ impl AssetStore for S3AssetStore {
         }
 
         if !self.visibility_enforced() {
-            self.record_visibility(key, visibility).await?;
+            self.record_visibility(key, visibility, false).await?;
             return self.meta_for(key).await;
         }
 
@@ -883,10 +906,13 @@ impl AssetStore for S3AssetStore {
             ))
             .await
         {
-            Ok(()) => self.meta_for(key).await,
+            Ok(()) => {
+                self.record_visibility(key, visibility, true).await?;
+                self.meta_for(key).await
+            }
             Err(S3Failure::AclNotSupported) => {
                 self.degrade_acl(key);
-                self.record_visibility(key, visibility).await?;
+                self.record_visibility(key, visibility, false).await?;
                 self.meta_for(key).await
             }
             Err(failure) => {
@@ -902,7 +928,12 @@ impl AssetStore for S3AssetStore {
         }
         match self.endpoint_url.as_deref() {
             // Path-style endpoint: the bucket is a path segment.
-            Some(endpoint) => Some(format!("{}/{}/{}", endpoint.trim_end_matches('/'), self.bucket, path)),
+            Some(endpoint) => Some(format!(
+                "{}/{}/{}",
+                endpoint.trim_end_matches('/'),
+                self.bucket,
+                path
+            )),
             // Virtual-hosted bucket URL.
             None => Some(format!(
                 "https://{}.s3.{}.amazonaws.com/{}",
@@ -932,6 +963,7 @@ impl AssetStore for S3AssetStore {
                 &physical,
                 ByteStream::from_static(b"ok"),
                 "text/plain",
+                Some(2),
                 None,
             ))
             .await
@@ -1029,11 +1061,18 @@ mod tests {
         assert_eq!(meta.content_type.as_str(), "text/plain");
         assert_eq!(meta.visibility, Visibility::Private);
 
-        assert_eq!(&store.get(&key("uploads/a.txt")).await.unwrap()[..], b"hello");
+        assert_eq!(
+            &store.get(&key("uploads/a.txt")).await.unwrap()[..],
+            b"hello"
+        );
         assert!(store.exists(&key("uploads/a.txt")).await.unwrap());
         assert!(!store.exists(&key("uploads/missing.txt")).await.unwrap());
         assert_eq!(
-            store.get(&key("uploads/missing.txt")).await.unwrap_err().code(),
+            store
+                .get(&key("uploads/missing.txt"))
+                .await
+                .unwrap_err()
+                .code(),
             "asset_not_found"
         );
 
@@ -1132,7 +1171,10 @@ mod tests {
             .unwrap();
         assert!(meta.visibility.is_public());
         assert!(meta.visibility_enforced);
-        assert_eq!(state.acl("uploads/a.txt").await.as_deref(), Some("public-read"));
+        assert_eq!(
+            state.acl("uploads/a.txt").await.as_deref(),
+            Some("public-read")
+        );
 
         // Second call on a degraded bucket records instead of ACLing.
         let (endpoint, state) = start_mock_server().await;
@@ -1213,7 +1255,10 @@ mod tests {
 
         let dir = tempfile::tempdir().unwrap();
         let dest = dir.path().join("nested/out.bin");
-        let meta = store.download_to(&key("uploads/blob.bin"), &dest).await.unwrap();
+        let meta = store
+            .download_to(&key("uploads/blob.bin"), &dest)
+            .await
+            .unwrap();
         assert_eq!(meta.size_bytes, payload.len() as u64);
         assert_eq!(std::fs::read(&dest).unwrap(), payload);
         let leftovers: Vec<String> = std::fs::read_dir(dir.path().join("nested"))
@@ -1268,7 +1313,9 @@ mod tests {
             .unwrap();
 
         let hidden = store
-            .list(ListQuery::new(crate::assets::AssetPrefix::parse("uploads/").unwrap()))
+            .list(ListQuery::new(
+                crate::assets::AssetPrefix::parse("uploads/").unwrap(),
+            ))
             .await
             .unwrap();
         assert_eq!(hidden.items.len(), 1);
@@ -1283,7 +1330,11 @@ mod tests {
         assert!(
             shown.items.iter().any(|m| m.key.is_physical_meta()),
             "sidecar missing from {:?}",
-            shown.items.iter().map(|m| m.key.to_string()).collect::<Vec<_>>()
+            shown
+                .items
+                .iter()
+                .map(|m| m.key.to_string())
+                .collect::<Vec<_>>()
         );
     }
 
@@ -1380,7 +1431,7 @@ mod tests {
         let (endpoint, state) = start_mock_server().await;
         let store = store(&endpoint).await;
         let status = store.health().await.unwrap();
-        assert!(status.is_healthy());
+        assert!(status.is_healthy(), "{status:?}");
         assert_eq!(status.backend, BackendKind::S3);
         assert!(
             state.object_keys().await.is_empty(),

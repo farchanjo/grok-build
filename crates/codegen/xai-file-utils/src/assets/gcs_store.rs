@@ -25,7 +25,7 @@ use gcloud_storage::http::objects::download::Range;
 use gcloud_storage::http::objects::get::GetObjectRequest;
 use gcloud_storage::http::objects::list::ListObjectsRequest;
 use gcloud_storage::http::objects::upload::{Media, UploadObjectRequest, UploadType};
-use gcloud_storage::sign::{SignBy, SignedURLOptions, SignedURLMethod};
+use gcloud_storage::sign::{SignBy, SignedURLMethod, SignedURLOptions};
 use serde::{Deserialize, Serialize};
 use tokio::io::AsyncWriteExt;
 use tokio_util::io::ReaderStream;
@@ -128,8 +128,9 @@ impl GcsAssetStore {
         let key_json = resolve_service_account_key(source).await?;
         let client = crate::gcs::build_gcs_client(key_json.as_deref())
             .await
+            // `{:#}` keeps the whole anyhow chain, not just the outer context.
             .map_err(|e| {
-                AssetError::io("build_gcs_client", &std::io::Error::other(e.to_string()))
+                AssetError::io("build_gcs_client", &std::io::Error::other(format!("{e:#}")))
             })?;
         Self::from_source_with_client(source, key_json.as_deref(), client).await
     }
@@ -142,10 +143,13 @@ impl GcsAssetStore {
         service_account_key: Option<&str>,
         client: Client,
     ) -> Result<Self, AssetError> {
-        let bucket = source.bucket.clone().ok_or_else(|| AssetError::InvalidKey {
-            key: "assets.bucket".to_owned(),
-            reason: "the gcs backend needs a bucket".to_owned(),
-        })?;
+        let bucket = source
+            .bucket
+            .clone()
+            .ok_or_else(|| AssetError::InvalidKey {
+                key: "assets.bucket".to_owned(),
+                reason: "the gcs backend needs a bucket".to_owned(),
+            })?;
 
         let signing = service_account_key.and_then(|json| {
             serde_json::from_str::<ServiceAccountKey>(json)
@@ -321,13 +325,19 @@ impl GcsAssetStore {
             .map_err(|e| classify(&e))
     }
 
-    async fn head(&self, object: &str) -> Result<gcloud_storage::http::objects::Object, GcsFailure> {
+    async fn head(
+        &self,
+        object: &str,
+    ) -> Result<gcloud_storage::http::objects::Object, GcsFailure> {
         let request = GetObjectRequest {
             bucket: self.bucket.clone(),
             object: object.to_owned(),
             ..Default::default()
         };
-        self.client.get_object(&request).await.map_err(|e| classify(&e))
+        self.client
+            .get_object(&request)
+            .await
+            .map_err(|e| classify(&e))
     }
 
     async fn record_visibility(
@@ -597,16 +607,12 @@ impl AssetStore for GcsAssetStore {
             ..Default::default()
         };
         let stream = self
-            .run(
-                AssetOperation::DownloadTo,
-                Some(key),
-                async {
-                    self.client
-                        .download_streamed_object(&request, &Range::default())
-                        .await
-                        .map_err(|e| classify(&e))
-                },
-            )
+            .run(AssetOperation::DownloadTo, Some(key), async {
+                self.client
+                    .download_streamed_object(&request, &Range::default())
+                    .await
+                    .map_err(|e| classify(&e))
+            })
             .await?;
 
         let temp = temp_sibling(dest);
@@ -623,7 +629,9 @@ impl AssetStore for GcsAssetStore {
                     .await
                     .map_err(|e| AssetError::io("write", &e))?;
             }
-            file.flush().await.map_err(|e| AssetError::io("flush", &e))?;
+            file.flush()
+                .await
+                .map_err(|e| AssetError::io("flush", &e))?;
             Ok::<(), AssetError>(())
         }
         .await;
@@ -700,21 +708,19 @@ impl AssetStore for GcsAssetStore {
         };
 
         let response = self
-            .run(
-                AssetOperation::List,
-                None,
-                async {
-                    self.client
-                        .list_objects(&request)
-                        .await
-                        .map_err(|e| classify(&e))
-                },
-            )
+            .run(AssetOperation::List, None, async {
+                self.client
+                    .list_objects(&request)
+                    .await
+                    .map_err(|e| classify(&e))
+            })
             .await?;
 
         let mut items = Vec::new();
         for object in response.items.unwrap_or_default() {
-            let is_meta = object.name.starts_with(&format!("{RESERVED_META_SEGMENT}/"));
+            let is_meta = object
+                .name
+                .starts_with(&format!("{RESERVED_META_SEGMENT}/"));
             if is_meta && !query.include_meta {
                 continue;
             }
@@ -749,15 +755,13 @@ impl AssetStore for GcsAssetStore {
         })
     }
 
-    async fn presign_get(
-        &self,
-        key: &AssetKey,
-        ttl: Duration,
-    ) -> Result<PresignedUrl, AssetError> {
+    async fn presign_get(&self, key: &AssetKey, ttl: Duration) -> Result<PresignedUrl, AssetError> {
         self.capabilities()
             .require(BackendKind::Gcs, AssetOperation::PresignGet)?;
         let ttl = validate_ttl(ttl)?;
-        let url = self.signed_url(key, SignedURLMethod::GET, ttl, None).await?;
+        let url = self
+            .signed_url(key, SignedURLMethod::GET, ttl, None)
+            .await?;
         Ok(PresignedUrl::new(
             key.clone(),
             url,
@@ -779,14 +783,10 @@ impl AssetStore for GcsAssetStore {
         let url = self
             .signed_url(key, SignedURLMethod::PUT, ttl, Some(content_type.as_str()))
             .await?;
-        Ok(PresignedUrl::new(
-            key.clone(),
-            url,
-            PresignMethod::Put,
-            ttl,
-            true,
+        Ok(
+            PresignedUrl::new(key.clone(), url, PresignMethod::Put, ttl, true)
+                .with_content_type(content_type.as_str()),
         )
-        .with_content_type(content_type.as_str()))
     }
 
     async fn set_visibility(
@@ -946,18 +946,21 @@ mod tests {
         let state = Arc::new(MockGcsState::default());
 
         let s = state.clone();
-        let upload = move |axum::extract::Query(query): axum::extract::Query<
-            HashMap<String, String>,
-        >,
-                           body: axum::body::Bytes| {
-            let state = s.clone();
-            async move {
-                let name = query.get("name").cloned().unwrap_or_default();
-                let size = body.len();
-                state.objects.write().await.insert(name.clone(), body.to_vec());
-                json(StatusCode::OK, object_json(&name, size))
-            }
-        };
+        let upload =
+            move |axum::extract::Query(query): axum::extract::Query<HashMap<String, String>>,
+                  body: axum::body::Bytes| {
+                let state = s.clone();
+                async move {
+                    let name = query.get("name").cloned().unwrap_or_default();
+                    let size = body.len();
+                    state
+                        .objects
+                        .write()
+                        .await
+                        .insert(name.clone(), body.to_vec());
+                    json(StatusCode::OK, object_json(&name, size))
+                }
+            };
 
         let s = state.clone();
         let get_or_download =
@@ -982,8 +985,11 @@ mod tests {
         let delete_object = move |AxumPath((_, object)): AxumPath<(String, String)>| {
             let state = s.clone();
             async move {
-                state.objects.write().await.remove(&object);
-                StatusCode::NO_CONTENT
+                // GCS returns 404 for a missing object, unlike S3.
+                match state.objects.write().await.remove(&object) {
+                    Some(_) => StatusCode::NO_CONTENT.into_response(),
+                    None => json(StatusCode::NOT_FOUND, error_body(404, "not found")),
+                }
             }
         };
 
@@ -1058,7 +1064,10 @@ mod tests {
         path
     }
 
-    fn source(credentials_file: Option<String>, public_base_url: Option<String>) -> AssetStoreSource {
+    fn source(
+        credentials_file: Option<String>,
+        public_base_url: Option<String>,
+    ) -> AssetStoreSource {
         AssetStoreSource {
             kind: BackendKind::Gcs,
             origin: super::super::SelectionOrigin::ExplicitProvider,
@@ -1101,6 +1110,32 @@ mod tests {
         .unwrap()
     }
 
+    /// Exercises the real `from_source` path (client builder included).
+    ///
+    /// `gcloud-storage` has no lazy variant: `with_credentials` performs an
+    /// **eager** service-account token fetch at construction. So this test
+    /// needs egress *and* a real account; the embedded key has a synthetic
+    /// `client_email`, which the token endpoint rejects with `invalid_grant`.
+    /// Both outcomes are asserted explicitly rather than papered over.
+    #[tokio::test]
+    async fn from_source_with_a_service_account_key_builds_a_client() {
+        let dir = tempfile::tempdir().unwrap();
+        let sa = write_service_account(dir.path());
+        let result =
+            GcsAssetStore::from_source(&source(Some(sa.to_string_lossy().into_owned()), None))
+                .await;
+        match result {
+            Ok(store) => assert_eq!(store.bucket(), "test-bucket"),
+            Err(err) => {
+                let rendered = err.to_string();
+                assert!(
+                    rendered.contains("token") || rendered.contains("invalid_grant"),
+                    "unexpected construction failure: {rendered}"
+                );
+            }
+        }
+    }
+
     #[tokio::test]
     async fn put_get_exists_delete_round_trip() {
         let (endpoint, state) = start_mock_gcs().await;
@@ -1119,7 +1154,10 @@ mod tests {
         assert_eq!(meta.visibility, Visibility::Private);
         assert!(!meta.visibility_enforced);
 
-        assert_eq!(&store.get(&key("uploads/a.txt")).await.unwrap()[..], b"hello");
+        assert_eq!(
+            &store.get(&key("uploads/a.txt")).await.unwrap()[..],
+            b"hello"
+        );
         assert!(store.exists(&key("uploads/a.txt")).await.unwrap());
         assert!(!store.exists(&key("uploads/missing.txt")).await.unwrap());
         assert_eq!(state.keys().await, vec!["uploads/a.txt".to_owned()]);
@@ -1186,7 +1224,9 @@ mod tests {
             .unwrap();
 
         let page = store
-            .list(ListQuery::new(crate::assets::AssetPrefix::parse("uploads/").unwrap()))
+            .list(ListQuery::new(
+                crate::assets::AssetPrefix::parse("uploads/").unwrap(),
+            ))
             .await
             .unwrap();
         assert_eq!(page.items.len(), 2);
@@ -1346,7 +1386,10 @@ mod tests {
         let status = store.health().await.unwrap();
         assert!(status.is_healthy());
         assert_eq!(status.backend, BackendKind::Gcs);
-        assert!(state.keys().await.is_empty(), "probe object must be removed");
+        assert!(
+            state.keys().await.is_empty(),
+            "probe object must be removed"
+        );
     }
 
     #[tokio::test]

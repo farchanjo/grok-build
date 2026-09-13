@@ -40,7 +40,11 @@ sha2 = { workspace = true, features = ["force-soft"] }
 xai-grok-auth = { path = "../xai-grok-auth", features = ["middleware"] }
 prod-mc-cli-chat-proxy-types = { path = "../../../prod/mc/cli-chat-proxy-types" }
 async-compression = { workspace = true, features = ["tokio"] }
-gcloud-storage = { workspace = true }
+# The workspace entry sets `default-features = false`, which leaves `rustls-tls`
+# off: every https request through gcloud-storage then fails at connect time
+# with "invalid URL, scheme is not http". The asset GCS adapter is the first
+# caller to actually make one, so opt the feature back in here.
+gcloud-storage = { workspace = true, features = ["rustls-tls"] }
 opentelemetry = { workspace = true }
 reflink-copy = { workspace = true }
 tracing-opentelemetry = { workspace = true }

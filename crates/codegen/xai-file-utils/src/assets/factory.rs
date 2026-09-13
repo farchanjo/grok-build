@@ -579,6 +579,7 @@ fn degrade_to_local(source: &AssetStoreSource, err: &AssetError) -> SharedAssetS
 
 /// A store for a backend whose adapter is not wired up yet.
 ///
+/// Only `proxy` still lands here (the proxy adapter needs `storage_client`).
 /// Every operation fails through [`BackendCapabilities::require`] first, so an
 /// operation the backend genuinely cannot do reports the capability reason and
 /// everything else reports "adapter not implemented". Never a fake success.
@@ -1013,6 +1014,74 @@ local_root = "/srv/team"
     async fn resolve_asset_store_propagates_fail_closed_selection_errors() {
         let settings = settings("[assets]\nactive_profile = \"typo\"\n");
         assert!(resolve_asset_store(&settings, &ctx()).await.is_err());
+    }
+
+    /// The factory must hand back the real adapter, not the stub.
+    #[tokio::test]
+    async fn resolve_asset_store_builds_the_s3_adapter() {
+        let settings = settings(
+            "[assets]\nprovider = \"s3\"\nbucket = \"b\"\nendpoint_url = \"http://127.0.0.1:1\"\n",
+        );
+        let store = resolve_asset_store(&settings, &ctx()).await.unwrap();
+        assert_eq!(store.backend(), BackendKind::S3);
+        assert_eq!(store.capabilities(), BackendCapabilities::S3);
+        assert!(
+            store
+                .public_url(&AssetKey::parse("uploads/a.txt").unwrap())
+                .is_some()
+        );
+    }
+
+    /// GCS construction goes through a service-account key so the test never
+    /// depends on ambient ADC.
+    ///
+    /// `gcloud-storage` fetches a service-account token **eagerly** at
+    /// construction, so with no egress (or a synthetic `client_email`) the
+    /// documented total fallback to `local` kicks in. Both are asserted.
+    #[tokio::test]
+    async fn resolve_asset_store_builds_the_gcs_adapter() {
+        let dir = tempfile::tempdir().unwrap();
+        let sa_path = dir.path().join("sa.json");
+        let json = serde_json::json!({
+            "type": "service_account",
+            "project_id": "test",
+            "private_key_id": "key-id",
+            "private_key": include_str!("testdata/gcs_test_key.pem"),
+            "client_email": "svc@test.iam.gserviceaccount.com",
+            "client_id": "123",
+            "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+            "token_uri": "https://oauth2.googleapis.com/token",
+            "auth_provider_x509_cert_url": "https://www.googleapis.com/oauth2/v1/certs",
+            "client_x509_cert_url": "https://example/cert",
+        });
+        std::fs::write(&sa_path, json.to_string()).unwrap();
+
+        let settings = settings(&format!(
+            "[assets]\nprovider = \"gcs\"\nbucket = \"b\"\ncredentials_file = \"{}\"\n",
+            sa_path.display()
+        ));
+        let store = resolve_asset_store(&settings, &ctx()).await.unwrap();
+        assert!(
+            matches!(store.backend(), BackendKind::Gcs | BackendKind::Local),
+            "unexpected backend {:?}",
+            store.backend()
+        );
+        if store.backend() == BackendKind::Gcs {
+            assert_eq!(store.capabilities(), BackendCapabilities::GCS);
+        }
+    }
+
+    /// `proxy` still resolves to the stub until its adapter lands.
+    #[tokio::test]
+    async fn resolve_asset_store_keeps_proxy_on_the_stub() {
+        let settings = settings("[assets]\nprovider = \"proxy\"\nproxy_base_url = \"https://p\"\n");
+        let store = resolve_asset_store(&settings, &ctx()).await.unwrap();
+        assert_eq!(store.backend(), BackendKind::Proxy);
+        assert!(
+            store
+                .public_url(&AssetKey::parse("uploads/a.txt").unwrap())
+                .is_none()
+        );
     }
 
     #[tokio::test]
