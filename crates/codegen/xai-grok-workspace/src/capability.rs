@@ -105,6 +105,11 @@ pub(crate) const ALL_TOOL_KINDS: &[ToolKind] = &[
     ToolKind::Monitor,
     ToolKind::GoalUpdate,
     ToolKind::Workflow,
+    ToolKind::AssetUpload,
+    ToolKind::AssetShare,
+    ToolKind::AssetList,
+    ToolKind::AssetDelete,
+    ToolKind::AssetSetVisibility,
     ToolKind::Other,
 ];
 
@@ -146,9 +151,14 @@ pub(crate) fn kind_allowed(mode: CapabilityMode, kind: ToolKind) -> bool {
         // Inspect class.
         Lsp | ListDir | List => matches!(mode, M::ReadOnly | M::ReadWrite | M::Execute),
 
+        // Asset reads: a share URL and a listing mutate nothing.
+        AssetShare | AssetList => matches!(mode, M::ReadOnly | M::ReadWrite | M::Execute),
+
         // Edit class.
         Edit | Write | Delete | Move | ImageGen | VideoGen | ImageToVideo | ReferenceToVideo
-        | DeployApp => matches!(mode, M::ReadWrite),
+        | DeployApp | AssetUpload | AssetDelete | AssetSetVisibility => {
+            matches!(mode, M::ReadWrite)
+        }
 
         // Bash / shell.
         Execute => matches!(mode, M::Execute),

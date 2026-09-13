@@ -1093,6 +1093,8 @@ async fn file_toolset_override_e2e_to_finalized_toolset() {
         attribution_callback: None,
         web_search_attribution_callback: None,
         system_reminder_tag: xai_grok_tools::reminders::DEFAULT_REMINDER_TAG,
+assets_settings: Default::default(),
+asset_runtime_context: xai_file_utils::assets::AssetRuntimeContext::from_process(),
     };
     let toolset = builder
         .finalize(def.tool_config, ctx)

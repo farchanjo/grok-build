@@ -14331,6 +14331,7 @@ dependencies = [
  "xai-computer-hub-sdk",
  "xai-file-utils",
  "xai-grok-config",
+ "xai-grok-config-types",
  "xai-grok-env",
  "xai-grok-sandbox",
  "xai-grok-tools-api",

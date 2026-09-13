@@ -205,6 +205,10 @@ impl ToolAuth401AttributionCallback for ShellAttribution {
             ToolConsumer::VideoGenStart => (ConsumerKind::VideoGen, "start"),
             ToolConsumer::VideoGenPoll => (ConsumerKind::VideoGen, "poll"),
             ToolConsumer::WebSearch => (ConsumerKind::WebSearch, ""),
+            // The asset tools have no HTTP client of their own today: the store
+            // adapters own their credentials, so a 401 arrives with no bearer
+            // from this process. The arm exists so the mapping stays total.
+            ToolConsumer::AssetStore => (ConsumerKind::AssetStore, ""),
         };
         // Prefer exact-route credential when a production route sidecar is
         // installed (e.g. web-search aux pin); never fall through to a sibling.
@@ -264,6 +268,10 @@ pub(crate) enum ConsumerKind {
     /// `POST /responses` with a `WebSearch` tool. No per-op
     /// discriminator; consumer string is just `"WebSearch"`.
     WebSearch,
+    /// `xai_grok_tools::ToolConsumer::AssetStore` -- the `asset_*` tools'
+    /// object-storage backend. No per-op discriminator; consumer string is
+    /// just `"AssetStore"`.
+    AssetStore,
 }
 
 impl ConsumerKind {
@@ -278,6 +286,7 @@ impl ConsumerKind {
             Self::ImageGen => "ImageGen",
             Self::VideoGen => "VideoGen",
             Self::WebSearch => "WebSearch",
+            Self::AssetStore => "AssetStore",
         }
     }
 
@@ -289,7 +298,7 @@ impl ConsumerKind {
     fn takes_op(self) -> bool {
         !matches!(
             self,
-            Self::IdleResumeModelRefresh | Self::ImageGen | Self::WebSearch
+            Self::IdleResumeModelRefresh | Self::ImageGen | Self::WebSearch | Self::AssetStore
         )
     }
 }

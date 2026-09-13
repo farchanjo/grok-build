@@ -703,6 +703,11 @@ pub enum ToolOutput {
     SchedulerList(crate::implementations::grok_build::scheduler::list::SchedulerListOutput),
     UpdateGoal(crate::implementations::grok_build::update_goal::UpdateGoalOutput),
     Workflow(crate::implementations::grok_build::workflow::WorkflowToolOutput),
+    AssetUpload(crate::implementations::grok_build::assets::AssetUploadOutput),
+    AssetShare(crate::implementations::grok_build::assets::AssetShareOutput),
+    AssetList(crate::implementations::grok_build::assets::AssetListOutput),
+    AssetDelete(crate::implementations::grok_build::assets::AssetDeleteOutput),
+    AssetSetVisibility(crate::implementations::grok_build::assets::AssetSetVisibilityOutput),
     /// Dynamic output for runtime-registered tools (MCP, test tools, etc.)
     Dynamic(DynamicOutput),
     /// Generic text output for tools that produce simple formatted text
@@ -1042,6 +1047,11 @@ impl ToolOutput {
             }
             ToolOutput::UpdateGoal(o) => o.summary.clone(),
             ToolOutput::Workflow(o) => o.message.clone(),
+            ToolOutput::AssetUpload(o) => o.text.clone(),
+            ToolOutput::AssetShare(o) => o.text.clone(),
+            ToolOutput::AssetList(o) => o.text.clone(),
+            ToolOutput::AssetDelete(o) => o.text.clone(),
+            ToolOutput::AssetSetVisibility(o) => o.text.clone(),
             ToolOutput::Dynamic(v) => serde_json::to_string_pretty(&v.value).unwrap_or_default(),
             ToolOutput::Text(text) => text.text.clone(),
             ToolOutput::ImageGen(m) => m.prompt_text("Image generated"),

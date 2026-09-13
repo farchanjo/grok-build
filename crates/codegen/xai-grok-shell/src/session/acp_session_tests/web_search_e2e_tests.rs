@@ -119,6 +119,8 @@ async fn web_search_uses_model_override_from_config_end_to_end() {
         attribution_callback: None,
         web_search_attribution_callback: None,
         system_reminder_tag: xai_grok_tools::reminders::DEFAULT_REMINDER_TAG,
+        assets_settings: Default::default(),
+        asset_runtime_context: xai_file_utils::assets::AssetRuntimeContext::from_process(),
     };
     let bridge = crate::tools::bridge::ToolBridge::finalize_builder(builder, config, ctx)
         .await
@@ -189,6 +191,8 @@ async fn web_search_errors_when_configured_model_cannot_be_resolved() {
         attribution_callback: None,
         web_search_attribution_callback: None,
         system_reminder_tag: xai_grok_tools::reminders::DEFAULT_REMINDER_TAG,
+        assets_settings: Default::default(),
+        asset_runtime_context: xai_file_utils::assets::AssetRuntimeContext::from_process(),
     };
     let bridge = crate::tools::bridge::ToolBridge::finalize_builder(builder, config, ctx)
         .await

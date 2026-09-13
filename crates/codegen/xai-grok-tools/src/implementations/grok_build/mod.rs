@@ -9,6 +9,7 @@
 //! the standard toolset. It inserts shared resources (`Terminal`,
 //! `AvailableSkills`, `BashParams`) and registers every built-in tool.
 pub mod ask_user_question;
+pub mod assets;
 pub mod bash;
 pub mod create_skill;
 #[path = "deploy_app_stub.rs"]
@@ -35,6 +36,12 @@ pub mod web_fetch;
 pub mod web_search;
 pub mod workflow;
 pub use ask_user_question::AskUserQuestionTool;
+pub use assets::{
+    ASSET_DELETE_TOOL_NAME, ASSET_LIST_TOOL_NAME, ASSET_SET_VISIBILITY_TOOL_NAME,
+    ASSET_SHARE_TOOL_NAME, ASSET_UPLOAD_TOOL_NAME, AssetDeleteOutput, AssetDeleteTool,
+    AssetListOutput, AssetListTool, AssetSetVisibilityOutput, AssetSetVisibilityTool,
+    AssetShareOutput, AssetShareTool, AssetUploadOutput, AssetUploadTool,
+};
 pub use bash::BashTool;
 pub use create_skill::{CREATE_SKILL_TOOL_NAME, CreateSkillTool, publish_from_fields};
 pub use deploy_app::{AppBuilderDeployerConfig, DEPLOY_APP_TOOL_NAME};

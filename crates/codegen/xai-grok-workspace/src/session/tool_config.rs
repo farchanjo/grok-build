@@ -482,6 +482,8 @@ impl SessionContextFactory for WorkspaceSessionContextFactory {
             attribution_callback: None,
             web_search_attribution_callback: None,
             system_reminder_tag: xai_grok_tools::reminders::DEFAULT_REMINDER_TAG,
+            assets_settings: Default::default(),
+            asset_runtime_context: xai_file_utils::assets::AssetRuntimeContext::from_process(),
         }
     }
     fn build_terminal_backend(&self) -> crate::config::SessionTerminalBackend {
@@ -606,6 +608,8 @@ pub mod test_support {
                 attribution_callback: None,
                 web_search_attribution_callback: None,
                 system_reminder_tag: xai_grok_tools::reminders::DEFAULT_REMINDER_TAG,
+                assets_settings: Default::default(),
+                asset_runtime_context: xai_file_utils::assets::AssetRuntimeContext::from_process(),
             }
         }
         fn build_terminal_backend(&self) -> crate::config::SessionTerminalBackend {

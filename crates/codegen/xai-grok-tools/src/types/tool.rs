@@ -106,6 +106,16 @@ pub enum ToolKind {
     Monitor,
     GoalUpdate,
     Workflow,
+    /// Store a local file in the session asset store.
+    AssetUpload,
+    /// Mint a time-limited share URL for a stored asset.
+    AssetShare,
+    /// Page through stored assets.
+    AssetList,
+    /// Delete a stored asset.
+    AssetDelete,
+    /// Record (and, where the backend can, enforce) asset visibility.
+    AssetSetVisibility,
     #[serde(other)]
     Other,
 }

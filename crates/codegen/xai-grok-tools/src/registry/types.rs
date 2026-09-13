@@ -24,6 +24,10 @@ use parking_lot::Mutex;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, OnceLock};
+
+/// Re-exported so hosts that build a [`SessionContext`] without depending on
+/// `xai-file-utils` directly can still supply the runtime context.
+pub use xai_file_utils::assets::AssetRuntimeContext;
 /// Process-global registry of external "tool packs" — functions that
 /// contribute additional tool registrations into every
 /// [`ToolRegistryBuilder::new`].
@@ -316,6 +320,56 @@ pub struct SessionContext {
     /// Defaults to [`crate::reminders::DEFAULT_REMINDER_TAG`] (hyphen).
     /// Hosts that expect a different tag name may override this.
     pub system_reminder_tag: &'static str,
+    /// `[assets]` + `[assets_providers.*]` settings for the five `asset_*`
+    /// tools. The builder resolves them into a store once per session and
+    /// inserts it into `Resources`; the tools never read this value directly.
+    pub assets_settings: xai_grok_config_types::AssetsSettings,
+    /// Non-config inputs to asset-store resolution (`GROK_ASSETS_*` overrides
+    /// and the home directory used to expand a default `local_root`).
+    pub asset_runtime_context: xai_file_utils::assets::AssetRuntimeContext,
+}
+
+/// Total fallback for a failed store resolution: a local store rooted where the
+/// resolver would have put one, with the documented default key namespace, so
+/// the `asset_*` tools keep working instead of reporting a missing resource.
+fn local_fallback_store(
+    context: &xai_file_utils::assets::AssetRuntimeContext,
+) -> xai_file_utils::assets::SharedAssetStore {
+    let root = context
+        .default_local_root
+        .clone()
+        .or_else(|| context.home_dir.as_ref().map(|home| home.join("assets")))
+        .unwrap_or_else(|| PathBuf::from("assets"));
+    Arc::new(
+        xai_file_utils::assets::LocalAssetStore::new(root)
+            .with_key_prefix(xai_grok_config_types::DEFAULT_ASSET_KEY_PREFIX),
+    ) as xai_file_utils::assets::SharedAssetStore
+}
+
+/// Resolve the session asset store from the synchronous builder.
+///
+/// [`ToolRegistryBuilder::finalize`] is synchronous while
+/// [`xai_file_utils::assets::resolve_asset_store`] awaits remote adapter
+/// construction (S3/GCS clients). The store is therefore built exactly once
+/// here, before any tool can run.
+///
+/// `Handle::block_on` cannot be used from inside a runtime — the current thread
+/// is already driving tasks and tokio panics with "cannot start a runtime from
+/// within a runtime". On the multi-thread scheduler (the shell's flavor)
+/// `block_in_place` hands the thread over first; on a current-thread runtime
+/// and outside a runtime entirely the future is driven directly, which is
+/// sufficient for the total `local` path.
+fn resolve_asset_store_blocking(
+    settings: &xai_grok_config_types::AssetsSettings,
+    context: &xai_file_utils::assets::AssetRuntimeContext,
+) -> Result<xai_file_utils::assets::SharedAssetStore, xai_file_utils::assets::AssetError> {
+    let future = xai_file_utils::assets::resolve_asset_store(settings, context);
+    match tokio::runtime::Handle::try_current() {
+        Ok(handle) if handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread => {
+            tokio::task::block_in_place(|| handle.block_on(future))
+        }
+        _ => futures::executor::block_on(future),
+    }
 }
 /// Default metadata for dynamically registered tools (e.g., MCP tools)
 /// that don't implement `ToolMetadata`.
@@ -712,6 +766,11 @@ impl ToolRegistryBuilder {
         b.register::<grok_build::SchedulerCreateTool>();
         b.register::<grok_build::SchedulerDeleteTool>();
         b.register::<grok_build::SchedulerListTool>();
+        b.register::<grok_build::AssetUploadTool>();
+        b.register::<grok_build::AssetShareTool>();
+        b.register::<grok_build::AssetListTool>();
+        b.register::<grok_build::AssetDeleteTool>();
+        b.register::<grok_build::AssetSetVisibilityTool>();
         b.register::<codex::apply_patch::ApplyPatchTool>();
         b.register::<codex::list_dir::CodexListDirTool>();
         b.register::<codex::grep_files::CodexGrepFilesTool>();
@@ -1070,6 +1129,18 @@ impl ToolRegistryBuilder {
                 Err(e) => {
                     tracing::warn!("Failed to create WebFetchClient: {e}");
                 }
+            }
+        }
+        // Asset store: built once per session and shared through `Resources`.
+        // A resolve failure is logged and degraded to a local store rather than
+        // failing the session, so the `asset_*` tools always have a backend.
+        match resolve_asset_store_blocking(&ctx.assets_settings, &ctx.asset_runtime_context) {
+            Ok(store) => {
+                resources.insert(store);
+            }
+            Err(err) => {
+                tracing::warn!(error = %err, "assets: store resolution failed; using the local backend");
+                resources.insert(local_fallback_store(&ctx.asset_runtime_context));
             }
         }
         let concise_ns = crate::types::tool::ToolNamespace::GrokBuildConcise.to_string();
@@ -2082,6 +2153,8 @@ mod tests {
             attribution_callback: None,
             web_search_attribution_callback: None,
             system_reminder_tag: crate::reminders::DEFAULT_REMINDER_TAG,
+            assets_settings: Default::default(),
+            asset_runtime_context: Default::default(),
         }
     }
 
@@ -2090,6 +2163,40 @@ mod tests {
     struct MarkerCallback {
         label: &'static str,
     }
+
+    /// Store resolution must work from the sync builder whether or not a tokio
+    /// runtime is ambient, on both runtime flavors.
+    #[test]
+    fn asset_store_resolution_works_in_every_calling_context() {
+        use xai_file_utils::assets::{AssetRuntimeContext, BackendKind};
+        use xai_grok_config_types::AssetsSettings;
+
+        let settings = AssetsSettings::default();
+        let context = AssetRuntimeContext::new();
+
+        let outside = resolve_asset_store_blocking(&settings, &context).expect("no runtime");
+        assert_eq!(outside.backend(), BackendKind::Local);
+
+        let multi = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .expect("multi-thread runtime");
+        multi.block_on(async {
+            let store = resolve_asset_store_blocking(&settings, &context).expect("multi-thread");
+            assert_eq!(store.backend(), BackendKind::Local);
+        });
+
+        let current = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("current-thread runtime");
+        current.block_on(async {
+            let store = resolve_asset_store_blocking(&settings, &context).expect("current-thread");
+            assert_eq!(store.backend(), BackendKind::Local);
+        });
+    }
+
     impl crate::attribution::Auth401AttributionCallback for MarkerCallback {
         fn record_401(
             &self,

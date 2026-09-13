@@ -136,6 +136,8 @@ async fn test_agent_from_config(
         attribution_callback: None,
         web_search_attribution_callback: None,
         system_reminder_tag: xai_grok_tools::reminders::DEFAULT_REMINDER_TAG,
+        assets_settings: Default::default(),
+        asset_runtime_context: xai_file_utils::assets::AssetRuntimeContext::from_process(),
     };
     let tool_bridge = crate::tools::bridge::ToolBridge::finalize_builder(builder, config, ctx)
         .await

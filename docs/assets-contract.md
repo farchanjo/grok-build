@@ -188,3 +188,78 @@ Contract: `settings_e2e.rs` — every new key in `ALL_SETTINGS_EXERCISED` + keyb
 1. S3 public path: per-object ACL vs bucket policy + CDN. Default: ACL with degrade-on-rejection, `public_base_url` as the public contract.
 2. Whether `image_gen` auto-uploads after saving locally (Phase 3 coupling).
 3. `local_root` default (`$GROK_HOME/assets`) and its budget.
+
+---
+
+## 12. Async transfer jobs (slice 1e)
+
+Uploads and downloads of multi-GB media must not block the turn. Every transfer is a
+**job** with an id, observable and cancellable — the same shape as the terminal
+background-task registry (`xai-grok-shell/src/terminal/background_task.rs`).
+
+```rust
+pub type JobId = String;                     // uuid v7
+pub enum TransferKind { Upload, Download }
+pub enum JobState { Queued, Running, Completed, Failed, Cancelled }
+
+pub struct JobSnapshot {
+    pub job_id: JobId,
+    pub kind: TransferKind,
+    pub key: AssetKey,
+    pub backend: BackendKind,
+    pub state: JobState,
+    pub bytes_transferred: u64,
+    pub bytes_total: Option<u64>,
+    pub started_at: DateTime<Utc>,
+    pub ended_at: Option<DateTime<Utc>>,
+    pub error: Option<String>,               // secret-free
+}
+
+impl AssetJobRegistry {                      // per session, lives beside the store
+    pub fn spawn_upload(&self, store: SharedAssetStore, req: PutRequest) -> JobId;
+    pub fn spawn_download(&self, store: SharedAssetStore, key: AssetKey, dest: PathBuf) -> JobId;
+    pub async fn get(&self, id: &str) -> Option<JobSnapshot>;
+    pub async fn list(&self) -> Vec<JobSnapshot>;
+    pub async fn cancel(&self, id: &str) -> CancelOutcome;   // CancellationToken
+    pub fn subscribe(&self, id: &str, opts: SubscribeOptions) -> JobSubscription;
+}
+
+pub struct SubscribeOptions {
+    pub interval_ms: u64,        // throttle; default 500
+    pub buffer_bytes: usize,     // progress coalescing; default 64 KiB
+    pub capacity: u32,           // token bucket; default 10
+    pub max_events: usize,       // stream cutoff; default 50
+    pub until_complete: bool,    // close when the job ends
+}
+```
+
+- `put_file` / `download_to` gain a `progress: Option<ProgressHandle>` so the adapters can report bytes.
+- Cancellation is cooperative via `tokio_util::sync::CancellationToken` (`tokio-util` feature `rt`).
+- `TokenBucket` / `SuppressionTracker` move from `xai-grok-tools/.../monitor/rate_limiter.rs` to
+  `xai-file-utils` and are re-exported by the monitor — one implementation, no duplication.
+- Cap and truncation constants mirror the monitor's (`BUFFER_CAP_BYTES`, `MAX_RESULT_SIZE_CHARS`).
+
+**Tools:** `asset_upload`, `asset_download`, `asset_job_status`, `asset_job_list`,
+`asset_job_cancel`, `asset_job_subscribe`. `asset_upload`/`asset_download` return a `job_id`
+immediately; an optional `wait_secs` lets small files complete inline.
+
+---
+
+## 13. TUI integration (slice 1f)
+
+Jobs must be first-class activity in the console, exactly like monitors, subagents,
+scheduled tasks and workflows — not a silent background thread.
+
+| Layer | Work |
+|---|---|
+| Shell | emit `x.ai/asset_job_event` (coalesced progress + state), mirroring `x.ai/monitor_event` (`tools/notification_bridge.rs`) |
+| Pager | `handle_asset_job_event` → `session.transfers: BTreeMap<JobId, TransferState>` |
+| Status bar | include transfers in `TasksPane::running_count` → spinner + count on the `bg_tasks` segment |
+| Tasks pane | new `GroupKind::Transfers`, with the kill button wired to `asset_job_cancel` |
+| Realtime | progress (bytes/total, percent, rate) refreshes the row per tick |
+
+Throttling happens **shell-side**, before the ACP hop, so a fast upload cannot flood the
+channel. The pager only renders what it receives.
+
+`TransferState` mirrors `BgTaskState` (status, progress buffer with a cap and a `truncated`
+flag, `pending_kill`), so the existing pane/overlay/kill plumbing applies unchanged.

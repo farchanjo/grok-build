@@ -1108,6 +1108,9 @@ impl AgentBuilder {
                 attribution_callback: self.attribution_callback,
                 web_search_attribution_callback: self.web_search_attribution_callback,
                 system_reminder_tag: self.system_reminder_tag,
+                assets_settings: Default::default(),
+                asset_runtime_context:
+                    xai_grok_tools::registry::types::AssetRuntimeContext::from_process(),
             },
         )
         .await

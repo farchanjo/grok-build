@@ -70,6 +70,11 @@ impl ToolKind {
             ToolKind::Monitor => "Monitor",
             ToolKind::GoalUpdate => "Update Goal",
             ToolKind::Workflow => "Workflow",
+            ToolKind::AssetUpload => "Upload Asset",
+            ToolKind::AssetShare => "Share Asset",
+            ToolKind::AssetList => "List Assets",
+            ToolKind::AssetDelete => "Delete Asset",
+            ToolKind::AssetSetVisibility => "Set Asset Visibility",
             ToolKind::Other => "Tool",
         }
     }
@@ -90,7 +95,9 @@ impl ToolKind {
             | ToolKind::WebFetch
             | ToolKind::EnterPlan
             | ToolKind::ExitPlan
-            | ToolKind::AskUser => true,
+            | ToolKind::AskUser
+            | ToolKind::AssetShare
+            | ToolKind::AssetList => true,
             ToolKind::Edit
             | ToolKind::Delete
             | ToolKind::Write
@@ -112,6 +119,9 @@ impl ToolKind {
             | ToolKind::Monitor
             | ToolKind::GoalUpdate
             | ToolKind::Workflow
+            | ToolKind::AssetUpload
+            | ToolKind::AssetDelete
+            | ToolKind::AssetSetVisibility
             | ToolKind::Other => false,
             ToolKind::SearchModels => true,
         }

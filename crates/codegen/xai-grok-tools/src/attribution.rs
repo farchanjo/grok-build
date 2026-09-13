@@ -11,6 +11,8 @@ pub enum ToolConsumer {
     VideoGenStart,
     VideoGenPoll,
     WebSearch,
+    /// The `asset_*` tools' object-storage backend.
+    AssetStore,
 }
 
 impl ToolConsumer {
@@ -20,6 +22,7 @@ impl ToolConsumer {
             Self::VideoGenStart => "VideoGen.start",
             Self::VideoGenPoll => "VideoGen.poll",
             Self::WebSearch => "WebSearch",
+            Self::AssetStore => "AssetStore",
         }
     }
 }
@@ -56,5 +59,6 @@ mod tests {
         assert_eq!(ToolConsumer::VideoGenStart.as_str(), "VideoGen.start");
         assert_eq!(ToolConsumer::VideoGenPoll.as_str(), "VideoGen.poll");
         assert_eq!(ToolConsumer::WebSearch.as_str(), "WebSearch");
+        assert_eq!(ToolConsumer::AssetStore.as_str(), "AssetStore");
     }
 }
