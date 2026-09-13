@@ -3742,5 +3742,4 @@ mod tests {
         });
         assert_eq!(layout.hero_info.height, 0);
     }
-
 }

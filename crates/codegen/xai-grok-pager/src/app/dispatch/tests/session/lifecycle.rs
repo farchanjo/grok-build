@@ -2077,15 +2077,15 @@ fn dashboard_stop_with_peek_open_moves_selection_and_peek_down_one() {
     let render = |app: &mut AppView| {
         let mut buf = Buffer::empty(area);
         let _ = crate::views::dashboard::render_dashboard(
-&mut buf,
-area,
-app.dashboard.as_mut().unwrap(),
-&mut app.agents,
-&reg,
-None,
-&[],
-false,
-);
+            &mut buf,
+            area,
+            app.dashboard.as_mut().unwrap(),
+            &mut app.agents,
+            &reg,
+            None,
+            &[],
+            false,
+        );
     };
     render(&mut app);
     assert!(

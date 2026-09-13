@@ -1284,8 +1284,6 @@ pub enum AnnouncementCtaSurface {
     Keyboard,
 }
 
-
-
 /// Flat snapshot of the terminal environment for telemetry.
 ///
 /// Shared across pager events so terminal fields are typed once.
@@ -2107,7 +2105,6 @@ mod tests {
         assert_eq!(PluginCtaDismissed::NAME, "plugin_cta_dismissed");
         assert_eq!(PluginCtaInstalled::NAME, "plugin_cta_installed");
     }
-
 
     #[test]
     fn compaction_retry_degraded_name_and_shape() {

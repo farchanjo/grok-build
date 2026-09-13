@@ -647,19 +647,19 @@ impl AgentView {
         {
             child_view.mark_as_subagent_view();
             let (_, post_flush) = child_view.draw(
-inner,
-buf,
-registry,
-scratch,
-None,
-false,
-0,
-None,
-bundle_state,
-false,
-&mut Vec::new(),
-AppRenderParams::default(),
-);
+                inner,
+                buf,
+                registry,
+                scratch,
+                None,
+                false,
+                0,
+                None,
+                bundle_state,
+                false,
+                &mut Vec::new(),
+                AppRenderParams::default(),
+            );
             child_post_flush = post_flush;
         }
         (None, child_post_flush)
@@ -2047,9 +2047,7 @@ AppRenderParams::default(),
             {
                 crate::tips::render::render_tip(layout.banner, buf, tip_text);
             }
-            if tip_row_visible
-                && let Some(line) = self.ephemeral_tip.line()
-            {
+            if tip_row_visible && let Some(line) = self.ephemeral_tip.line() {
                 crate::tips::render::render_ephemeral_tip(layout.banner, buf, line);
             }
         }
@@ -4282,23 +4280,23 @@ mod voice_recording_overlay_tests {
         let mut buf = Buffer::empty(area);
         let mut scratch = ScratchBuffer::new();
         agent.draw(
-area,
-&mut buf,
-&reg,
-&mut scratch,
-None,
-false,
-0,
-None,
-&BundleState::default(),
-false,
-&mut Vec::new(),
-super::AppRenderParams {
+            area,
+            &mut buf,
+            &reg,
+            &mut scratch,
+            None,
+            false,
+            0,
+            None,
+            &BundleState::default(),
+            false,
+            &mut Vec::new(),
+            super::AppRenderParams {
                 voice_available: listening,
                 voice_listening: listening,
                 ..Default::default()
             },
-);
+        );
         (0..area.height)
             .map(|y| {
                 (0..area.width)
@@ -4347,19 +4345,19 @@ mod overlay_post_flush_tests {
         let mut scratch = ScratchBuffer::new();
         agent
             .draw(
-area,
-&mut buf,
-&ActionRegistry::defaults(),
-&mut scratch,
-None,
-false,
-0,
-None,
-&BundleState::default(),
-false,
-&mut Vec::new(),
-super::AppRenderParams::default(),
-)
+                area,
+                &mut buf,
+                &ActionRegistry::defaults(),
+                &mut scratch,
+                None,
+                false,
+                0,
+                None,
+                &BundleState::default(),
+                false,
+                &mut Vec::new(),
+                super::AppRenderParams::default(),
+            )
             .1
     }
     fn seed_static_owner(owner_id: u64) {

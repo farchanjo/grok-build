@@ -2477,19 +2477,19 @@ fn dashboard_attach_subagent_switches_to_parent_with_subagent_focused() {
     let mut buf = ratatui::buffer::Buffer::empty(area);
     let mut scratch = crate::scrollback::render::ScratchBuffer::new();
     let _ = child.draw(
-area,
-&mut buf,
-&app.registry,
-&mut scratch,
-None,
-false,
-0,
-None,
-&crate::app::bundle::BundleState::default(),
-false,
-&mut Vec::new(),
-crate::app::agent_view::AppRenderParams::default(),
-);
+        area,
+        &mut buf,
+        &app.registry,
+        &mut scratch,
+        None,
+        false,
+        0,
+        None,
+        &crate::app::bundle::BundleState::default(),
+        false,
+        &mut Vec::new(),
+        crate::app::agent_view::AppRenderParams::default(),
+    );
     assert!(child.hit_bg_button.rect.is_none());
     let parent_tool = parent_view
         .session
@@ -4957,15 +4957,15 @@ fn dashboard_peek_auto_opens_for_selected_row() {
         )));
     let mut buf = Buffer::empty(area);
     let _ = crate::views::dashboard::render_dashboard(
-&mut buf,
-area,
-app.dashboard.as_mut().unwrap(),
-&mut app.agents,
-&reg,
-None,
-&[],
-false,
-);
+        &mut buf,
+        area,
+        app.dashboard.as_mut().unwrap(),
+        &mut app.agents,
+        &reg,
+        None,
+        &[],
+        false,
+    );
     assert!(
         app.dashboard.as_ref().unwrap().peek.is_some(),
         "peek must auto-open for a selected row",
@@ -4973,15 +4973,15 @@ false,
     app.dashboard.as_mut().unwrap().focus_new_agent_button();
     let mut buf2 = Buffer::empty(area);
     let _ = crate::views::dashboard::render_dashboard(
-&mut buf2,
-area,
-app.dashboard.as_mut().unwrap(),
-&mut app.agents,
-&reg,
-None,
-&[],
-false,
-);
+        &mut buf2,
+        area,
+        app.dashboard.as_mut().unwrap(),
+        &mut app.agents,
+        &reg,
+        None,
+        &[],
+        false,
+    );
     assert!(
         app.dashboard.as_ref().unwrap().peek.is_none(),
         "peek must close when no row is selected",
@@ -5008,15 +5008,15 @@ fn dashboard_peek_box_grows_for_multiline_reply() {
         let render = |app: &mut AppView| {
             let mut buf = Buffer::empty(area);
             let _ = crate::views::dashboard::render_dashboard(
-&mut buf,
-area,
-app.dashboard.as_mut().unwrap(),
-&mut app.agents,
-&reg,
-None,
-&[],
-false,
-);
+                &mut buf,
+                area,
+                app.dashboard.as_mut().unwrap(),
+                &mut app.agents,
+                &reg,
+                None,
+                &[],
+                false,
+            );
         };
         render(&mut app);
         app.dashboard

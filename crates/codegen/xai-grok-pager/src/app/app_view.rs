@@ -4425,22 +4425,22 @@ impl AppView {
                                             |inner, buf| {
                                                 if let Some(agent) = agents.get_mut(&agent_id) {
                                                     agent.draw(
-inner,
-buf,
-registry,
-scratch,
-None,
-false,
-0,
-None,
-bundle_state,
-false,
-link_spans,
-AppRenderParams {
+                                                        inner,
+                                                        buf,
+                                                        registry,
+                                                        scratch,
+                                                        None,
+                                                        false,
+                                                        0,
+                                                        None,
+                                                        bundle_state,
+                                                        false,
+                                                        link_spans,
+                                                        AppRenderParams {
                                                             esc_owned_before_agent,
                                                             ..Default::default()
                                                         },
-)
+                                                    )
                                                 } else {
                                                     (None, None)
                                                 }
@@ -9141,19 +9141,19 @@ pub(crate) mod tests {
         agent.scrollback.prepare_layout(40, 10);
         let mut buf = ratatui::buffer::Buffer::empty(ratatui::layout::Rect::new(0, 0, 40, 20));
         let _ = agent.draw(
-ratatui::layout::Rect::new(0, 0, 40, 20),
-&mut buf,
-&ActionRegistry::defaults(),
-&mut crate::scrollback::render::ScratchBuffer::new(),
-None,
-false,
-0,
-None,
-&BundleState::default(),
-false,
-&mut Vec::new(),
-crate::app::agent_view::AppRenderParams::default(),
-);
+            ratatui::layout::Rect::new(0, 0, 40, 20),
+            &mut buf,
+            &ActionRegistry::defaults(),
+            &mut crate::scrollback::render::ScratchBuffer::new(),
+            None,
+            false,
+            0,
+            None,
+            &BundleState::default(),
+            false,
+            &mut Vec::new(),
+            crate::app::agent_view::AppRenderParams::default(),
+        );
         let hit = agent
             .last_scrollback_selection_model
             .ranges
@@ -9188,19 +9188,19 @@ crate::app::agent_view::AppRenderParams::default(),
         agent.scrollback.prepare_layout(40, 10);
         let mut buf = ratatui::buffer::Buffer::empty(ratatui::layout::Rect::new(0, 0, 40, 20));
         let _ = agent.draw(
-ratatui::layout::Rect::new(0, 0, 40, 20),
-&mut buf,
-&ActionRegistry::defaults(),
-&mut crate::scrollback::render::ScratchBuffer::new(),
-None,
-false,
-0,
-None,
-&BundleState::default(),
-false,
-&mut Vec::new(),
-crate::app::agent_view::AppRenderParams::default(),
-);
+            ratatui::layout::Rect::new(0, 0, 40, 20),
+            &mut buf,
+            &ActionRegistry::defaults(),
+            &mut crate::scrollback::render::ScratchBuffer::new(),
+            None,
+            false,
+            0,
+            None,
+            &BundleState::default(),
+            false,
+            &mut Vec::new(),
+            crate::app::agent_view::AppRenderParams::default(),
+        );
         let hit = agent
             .last_scrollback_selection_model
             .ranges
@@ -9239,19 +9239,19 @@ crate::app::agent_view::AppRenderParams::default(),
         agent.scrollback.prepare_layout(40, 10);
         let mut buf = ratatui::buffer::Buffer::empty(ratatui::layout::Rect::new(0, 0, 40, 20));
         let _ = agent.draw(
-ratatui::layout::Rect::new(0, 0, 40, 20),
-&mut buf,
-&ActionRegistry::defaults(),
-&mut crate::scrollback::render::ScratchBuffer::new(),
-None,
-false,
-0,
-None,
-&BundleState::default(),
-false,
-&mut Vec::new(),
-crate::app::agent_view::AppRenderParams::default(),
-);
+            ratatui::layout::Rect::new(0, 0, 40, 20),
+            &mut buf,
+            &ActionRegistry::defaults(),
+            &mut crate::scrollback::render::ScratchBuffer::new(),
+            None,
+            false,
+            0,
+            None,
+            &BundleState::default(),
+            false,
+            &mut Vec::new(),
+            crate::app::agent_view::AppRenderParams::default(),
+        );
         let hit = agent
             .last_scrollback_selection_model
             .ranges

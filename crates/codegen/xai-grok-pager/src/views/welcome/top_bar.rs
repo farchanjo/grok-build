@@ -11,15 +11,10 @@ use crate::git_info;
 use crate::render::line_utils::truncate_line;
 use crate::theme::Theme;
 
-pub fn render_top_bar(
-    area: Rect,
-    buf: &mut Buffer,
-    theme: &Theme,
-) {
+pub fn render_top_bar(area: Rect, buf: &mut Buffer, theme: &Theme) {
     let line = truncate_line(location_line(theme), area.width as usize);
     let line_width = line.width() as u16;
     buf.set_line(area.x, area.y, &line, line_width.min(area.width));
-
 }
 
 /// Build the `{git branch} {worktree} {cwd}` line for the welcome top bar,

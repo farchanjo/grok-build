@@ -1422,19 +1422,19 @@ mod link_click_tests {
             role_details: Vec::new(),
         };
         agent.draw(
-area,
-&mut buf,
-reg,
-&mut scratch,
-None,
-false,
-0,
-None,
-&bundle,
-false,
-&mut Vec::new(),
-crate::app::agent_view::AppRenderParams::default(),
-);
+            area,
+            &mut buf,
+            reg,
+            &mut scratch,
+            None,
+            false,
+            0,
+            None,
+            &bundle,
+            false,
+            &mut Vec::new(),
+            crate::app::agent_view::AppRenderParams::default(),
+        );
         buf
     }
     /// Concatenated symbols of buffer row `y` across `width` columns.
@@ -1521,19 +1521,19 @@ crate::app::agent_view::AppRenderParams::default(),
             role_details: Vec::new(),
         };
         agent.draw(
-tall,
-&mut buf,
-&reg,
-&mut scratch,
-None,
-false,
-0,
-Some("ZZSESSIONTIPZZ never shown in agent view"),
-&bundle,
-false,
-&mut Vec::new(),
-crate::app::agent_view::AppRenderParams::default(),
-);
+            tall,
+            &mut buf,
+            &reg,
+            &mut scratch,
+            None,
+            false,
+            0,
+            Some("ZZSESSIONTIPZZ never shown in agent view"),
+            &bundle,
+            false,
+            &mut Vec::new(),
+            crate::app::agent_view::AppRenderParams::default(),
+        );
         let tip_y = (0..tall.height)
             .find(|&y| buffer_row(&buf, tall.width, y).contains("Queued"))
             .expect("ephemeral tip must paint into the banner row");

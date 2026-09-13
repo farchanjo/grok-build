@@ -2068,19 +2068,19 @@ pub(super) mod paste_key_tests {
         let mut scratch = crate::scrollback::render::ScratchBuffer::new();
         let bundle = crate::app::bundle::BundleState::default();
         agent.draw(
-area,
-&mut buf,
-&registry,
-&mut scratch,
-None,
-false,
-0,
-None,
-&bundle,
-false,
-&mut Vec::new(),
-crate::app::agent_view::AppRenderParams::default(),
-);
+            area,
+            &mut buf,
+            &registry,
+            &mut scratch,
+            None,
+            false,
+            0,
+            None,
+            &bundle,
+            false,
+            &mut Vec::new(),
+            crate::app::agent_view::AppRenderParams::default(),
+        );
     }
     /// The scrolled-off/overlay branch of `AgentView::draw` (render.rs) must
     /// stop live inline playback through `stop_inline_playback` — dropping

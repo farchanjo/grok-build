@@ -912,7 +912,6 @@ fn render_header(
             height: 1,
         }));
     }
-
 }
 
 /// Apply the header location label's hover underline: underline only the
@@ -4365,15 +4364,15 @@ mod tests {
         }];
 
         let _ = render_dashboard(
-&mut buf,
-area,
-&mut state,
-&mut agents,
-&registry,
-None,
-&roster,
-false,
-);
+            &mut buf,
+            area,
+            &mut state,
+            &mut agents,
+            &registry,
+            None,
+            &roster,
+            false,
+        );
 
         let content = buf_to_text(&buf);
         assert!(
@@ -4541,13 +4540,7 @@ false,
         let layout = super::super::layout::compute_layout(area, false);
         // Manually paint each region so we don't need a live AgentView.
         buf.set_style(area, Style::default().bg(theme.bg_base));
-        render_header(
-&mut buf,
-layout.header,
-&theme,
-&rows,
-&mut state,
-);
+        render_header(&mut buf, layout.header, &theme, &rows, &mut state);
         render_rows(&mut buf, layout.list, &theme, &rows, &mut state);
         let _ = render_dispatch(&mut buf, layout.dispatch, &theme, &mut state, None);
         let registry = crate::actions::ActionRegistry::defaults();
@@ -4815,13 +4808,7 @@ layout.header,
         let mut focused = DashboardState::new();
         focused.focus_new_agent_button();
         let mut buf = Buffer::empty(area);
-        render_header(
-&mut buf,
-area,
-&theme,
-&rows,
-&mut focused,
-);
+        render_header(&mut buf, area, &theme, &rows, &mut focused);
         let rect = focused
             .new_agent_button_hit
             .rect
@@ -4839,13 +4826,7 @@ area,
             crate::app::agent::AgentId(0),
         ));
         let mut buf2 = Buffer::empty(area);
-        render_header(
-&mut buf2,
-area,
-&theme,
-&rows,
-&mut unfocused,
-);
+        render_header(&mut buf2, area, &theme, &rows, &mut unfocused);
         let rect2 = unfocused
             .new_agent_button_hit
             .rect
@@ -4879,13 +4860,7 @@ area,
 
         // First render populates the button's hit rect.
         let mut buf = Buffer::empty(area);
-        render_header(
-&mut buf,
-area,
-&theme,
-&rows,
-&mut state,
-);
+        render_header(&mut buf, area, &theme, &rows, &mut state);
         let rect = state.new_agent_button_hit.rect.expect("button must render");
 
         // Moving the mouse over the button flips hover on.
@@ -4897,13 +4872,7 @@ area,
         // Re-render with hover active → text_primary fg, background
         // unchanged (still bg_base — no fill on hover).
         let mut buf2 = Buffer::empty(area);
-        render_header(
-&mut buf2,
-area,
-&theme,
-&rows,
-&mut state,
-);
+        render_header(&mut buf2, area, &theme, &rows, &mut state);
         let cell = &buf2[(rect.x, rect.y)];
         assert_eq!(
             cell.fg, theme.text_primary,
@@ -4923,13 +4892,7 @@ area,
             "moving the mouse off the button must flip hover off",
         );
         let mut buf3 = Buffer::empty(area);
-        render_header(
-&mut buf3,
-area,
-&theme,
-&rows,
-&mut state,
-);
+        render_header(&mut buf3, area, &theme, &rows, &mut state);
         let cell3 = &buf3[(rect.x, rect.y)];
         assert_eq!(
             cell3.bg, theme.bg_base,
@@ -4961,13 +4924,7 @@ area,
         state.cwd = std::path::PathBuf::from("/grok-staged-cwd-marker");
 
         let mut buf = Buffer::empty(area);
-        render_header(
-&mut buf,
-area,
-&theme,
-&rows,
-&mut state,
-);
+        render_header(&mut buf, area, &theme, &rows, &mut state);
 
         let top_row: String = (0..area.width)
             .map(|x| buf[(x, 0)].symbol().to_string())
@@ -4991,13 +4948,7 @@ area,
         let mut off = DashboardState::new();
         off.cwd_has_git_ancestor = true;
         let mut buf = Buffer::empty(area);
-        render_header(
-&mut buf,
-area,
-&theme,
-&rows,
-&mut off,
-);
+        render_header(&mut buf, area, &theme, &rows, &mut off);
         let text = buf_to_text(&buf);
         assert!(
             text.contains("[+ New Agent]") && !text.contains("Worktree"),
@@ -5009,13 +4960,7 @@ area,
         armed.cwd_has_git_ancestor = true;
         armed.dispatch_worktree = true;
         let mut buf2 = Buffer::empty(area);
-        render_header(
-&mut buf2,
-area,
-&theme,
-&rows,
-&mut armed,
-);
+        render_header(&mut buf2, area, &theme, &rows, &mut armed);
         let text2 = buf_to_text(&buf2);
         assert!(
             text2.contains("[+ New Worktree]"),
@@ -5027,13 +4972,7 @@ area,
         armed_no_git.cwd_has_git_ancestor = false;
         armed_no_git.dispatch_worktree = true;
         let mut buf3 = Buffer::empty(area);
-        render_header(
-&mut buf3,
-area,
-&theme,
-&rows,
-&mut armed_no_git,
-);
+        render_header(&mut buf3, area, &theme, &rows, &mut armed_no_git);
         let text3 = buf_to_text(&buf3);
         assert!(
             text3.contains("[+ New Agent]") && !text3.contains("Worktree"),
@@ -7336,15 +7275,15 @@ area,
         let mut state = DashboardState::new();
         let registry = crate::actions::ActionRegistry::defaults();
         let _ = render_dashboard(
-&mut buf,
-area,
-&mut state,
-&mut agents,
-&registry,
-None,
-&[],
-false,
-);
+            &mut buf,
+            area,
+            &mut state,
+            &mut agents,
+            &registry,
+            None,
+            &[],
+            false,
+        );
 
         // Sample cells across the area; none should retain the seed
         // bg colour. The dashboard fills with `theme.bg_base`; the
@@ -7412,13 +7351,7 @@ false,
             header_test_row(3, RowState::Working, "c"),
             header_test_row(4, RowState::Idle, "d"),
         ];
-        render_header(
-&mut buf,
-area,
-&theme,
-&rows,
-&mut state,
-);
+        render_header(&mut buf, area, &theme, &rows, &mut state);
         let content = buf_to_text(&buf);
         let basename = cwd_basename();
         assert!(
@@ -7455,13 +7388,7 @@ area,
         let area = Rect::new(0, 0, 120, 1);
         let mut buf = Buffer::empty(area);
         let mut state = DashboardState::new();
-        render_header(
-&mut buf,
-area,
-&theme,
-&[],
-&mut state,
-);
+        render_header(&mut buf, area, &theme, &[], &mut state);
         assert!(
             state.location_hit.rect.is_some(),
             "render_header must record a click target for the location label",
@@ -7477,13 +7404,7 @@ area,
         let mut buf = Buffer::empty(area);
         let mut state = DashboardState::new();
         state.location_hit.hovered = true;
-        render_header(
-&mut buf,
-area,
-&theme,
-&[],
-&mut state,
-);
+        render_header(&mut buf, area, &theme, &[], &mut state);
 
         // Leading inset (x=0) is a space → must NOT be underlined.
         let inset = buf.cell((0, 0)).expect("inset cell");
@@ -7779,13 +7700,7 @@ area,
         let mut state = DashboardState::new();
         // Only one Idle row — no awaiting/working/done/failed chips.
         let rows = vec![header_test_row(1, RowState::Idle, "x")];
-        render_header(
-&mut buf,
-Rect::new(0, 0, 120, 1),
-&theme,
-&rows,
-&mut state,
-);
+        render_header(&mut buf, Rect::new(0, 0, 120, 1), &theme, &rows, &mut state);
         let content = buf_to_text(&buf);
         assert!(
             content.contains("1 idle"),
@@ -7810,13 +7725,7 @@ Rect::new(0, 0, 120, 1),
             header_test_row(1, RowState::Inactive, "a"),
             header_test_row(2, RowState::Idle, "b"),
         ];
-        render_header(
-&mut buf,
-Rect::new(0, 0, 120, 1),
-&theme,
-&rows,
-&mut state,
-);
+        render_header(&mut buf, Rect::new(0, 0, 120, 1), &theme, &rows, &mut state);
         let content = buf_to_text(&buf);
         assert!(
             content.contains("1 idle"),
@@ -7842,13 +7751,7 @@ Rect::new(0, 0, 120, 1),
 
         // 0 agents — the location still shows.
         let mut buf = Buffer::empty(area);
-        render_header(
-&mut buf,
-area,
-&theme,
-&[],
-&mut state,
-);
+        render_header(&mut buf, area, &theme, &[], &mut state);
         let c = buf_to_text(&buf);
         assert!(
             c.contains(&basename),
@@ -7858,13 +7761,7 @@ area,
         // 1 agent.
         let mut buf = Buffer::empty(area);
         let rows = vec![header_test_row(1, RowState::Idle, "x")];
-        render_header(
-&mut buf,
-area,
-&theme,
-&rows,
-&mut state,
-);
+        render_header(&mut buf, area, &theme, &rows, &mut state);
         let c = buf_to_text(&buf);
         assert!(
             c.contains(&basename),
@@ -7888,13 +7785,7 @@ area,
             header_test_row(2, RowState::Working, "b"),
             header_test_row(3, RowState::Idle, "c"),
         ];
-        render_header(
-&mut buf,
-area,
-&theme,
-&rows,
-&mut state,
-);
+        render_header(&mut buf, area, &theme, &rows, &mut state);
         let content = buf_to_text(&buf);
         // Chips and button must survive the (long) location label.
         for chunk in ["1 awaiting", "1 working", "1 idle", "[+ New Agent]"] {
@@ -8966,13 +8857,7 @@ area,
             ..header_test_row(11, RowState::Completed, "child")
         };
         let rows = vec![parent, sub_completed];
-        render_header(
-&mut buf,
-Rect::new(0, 0, 160, 1),
-&theme,
-&rows,
-&mut state,
-);
+        render_header(&mut buf, Rect::new(0, 0, 160, 1), &theme, &rows, &mut state);
         let content = buf_to_text(&buf);
         // Only the top-level parent counts: its Working chip shows.
         assert!(

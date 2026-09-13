@@ -297,9 +297,7 @@ pub(super) fn render_hero_box(
 
     // In-box info slot: the changelog, always in this same position.
     let mut changelog_cta_rect = None;
-    if layout.hero_info.height > 0
-        && !changelog_bullets.is_empty()
-    {
+    if layout.hero_info.height > 0 && !changelog_bullets.is_empty() {
         changelog_cta_rect = render_hero_changelog(
             buf,
             theme,
