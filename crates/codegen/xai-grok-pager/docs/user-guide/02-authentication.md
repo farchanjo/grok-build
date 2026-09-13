@@ -88,8 +88,10 @@ routes use the API key. Environment variables (`XAI_API_KEY`, `OPENAI_API_KEY`,
 removed by the TUI (clear the env var in your shell instead).
 
 When `GROK_HOME` is set, all Grok-owned credentials and provider catalog caches
-resolve under that directory. The `grok-custom` wrapper sets it to
-`~/.grok-prod`; it never copies credentials from another home.
+resolve under that directory. The `grok-custom` wrapper defaults it to
+`~/.grok` and honors an explicit `GROK_HOME` from the caller's environment; the
+leader socket is always derived from the effective home. It never copies
+credentials from another home.
 
 ---
 

@@ -166,9 +166,9 @@ verify:
 			fi; \
 		done; \
 	done; \
-	grok_home_pin="$$(/usr/bin/sed -n 's|^export GROK_HOME="$${HOME}/\(.*\)"|\1|p' "$(DEPLOY_WRAPPER)")"; \
+	grok_home_pin="$$(/usr/bin/sed -n 's|^export GROK_HOME="\$${GROK_HOME:-$${HOME}/\([^}]*\)}"|\1|p' "$(DEPLOY_WRAPPER)")"; \
 	if [ "$$(/usr/bin/grep -Fc 'export GROK_HOME=' "$(DEPLOY_WRAPPER)")" -ne 1 ] || [ -z "$$grok_home_pin" ]; then \
-	echo "error: wrapper must pin GROK_HOME exactly once to a HOME-relative path" >&2; \
+	echo "error: wrapper must default GROK_HOME exactly once to a HOME-relative path" >&2; \
 	exit 1; \
 	fi; \
 	/usr/bin/grep -Fqx 'export GROK_LEADER_SOCKET="$${GROK_HOME}/leader.sock"' "$(DEPLOY_WRAPPER)"; \
@@ -205,7 +205,7 @@ verify:
 	fi; \
 	inspect_json="$$(mktemp "$${TMPDIR:-/tmp}/grok-custom-inspect.XXXXXX")"; \
 	trap '/bin/unlink "$$inspect_json"' EXIT HUP INT TERM; \
-	"$(DEPLOY_WRAPPER)" inspect --json >"$$inspect_json"; \
+	/usr/bin/env -u GROK_HOME -u GROK_LEADER_SOCKET "$(DEPLOY_WRAPPER)" inspect --json >"$$inspect_json"; \
 	$(PYTHON3) -c 'import json, pathlib, sys; data = json.load(open(sys.argv[1], encoding="utf-8")); home = pathlib.Path(sys.argv[2]); surfaces = ("skills", "rules", "agents", "mcps", "hooks", "sessions"); expected = {(vendor, surface) for vendor in ("cursor", "claude") for surface in surfaces} | {("codex", "sessions")}; cells = data["externalCompat"]["cells"]; actual = {(cell["vendor"], cell["surface"]) for cell in cells}; actual == expected or sys.exit("unexpected runtime compatibility cells: " + repr(sorted(actual))); bad = [cell for cell in cells if cell.get("enabled") is not False or cell.get("source") != "env"]; not bad or sys.exit("compatibility cells not disabled by env: " + repr(bad)); user_roles = {"managed": "managed_config.toml", "user": "config.toml", "requirements": "requirements.toml"}; bad_paths = []; \
 	[bad_paths.append(layer) for layer in data["configSources"]["layers"] if layer.get("role") in user_roles and (lambda p, role: (p.parent != home) if p.is_absolute() else (p.name != user_roles[role] or p.parent not in (pathlib.Path("."), pathlib.Path(""))))(pathlib.Path(layer["path"]), layer["role"])]; not bad_paths or sys.exit("user configuration escaped isolated GROK_HOME: " + repr(bad_paths)); legacy_socket = str(home.parent / ".grok" / "leader.sock"); legacy_socket not in json.dumps(data) or sys.exit("legacy leader socket leaked into inspect output")' "$$inspect_json" "$$expected_home"; \
 	echo "$$wrapper_version"; \

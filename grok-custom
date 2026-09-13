@@ -30,7 +30,14 @@ if [[ ! -x "${GROK_BINARY}" ]]; then
     exit 1
 fi
 
-export GROK_HOME="${HOME}/.grok"
+# Respect an explicit GROK_HOME from the caller's environment; fall back to the
+# canonical production profile when unset. `:-` (not `:=`) keeps a
+# caller-supplied value untouched.
+#
+# The leader socket is always derived from the effective home — never inherited
+# — so a stale GROK_LEADER_SOCKET pointing at a different profile cannot leak
+# its leader into this one.
+export GROK_HOME="${GROK_HOME:-${HOME}/.grok}"
 export GROK_LEADER_SOCKET="${GROK_HOME}/leader.sock"
 
 # Enable the explicitly feature-compiled experimental Claude Agent CLI runtime.
