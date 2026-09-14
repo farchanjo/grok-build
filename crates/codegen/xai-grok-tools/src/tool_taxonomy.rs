@@ -75,6 +75,11 @@ impl ToolKind {
             ToolKind::AssetList => "List Assets",
             ToolKind::AssetDelete => "Delete Asset",
             ToolKind::AssetSetVisibility => "Set Asset Visibility",
+            ToolKind::AssetDownload => "Download Asset",
+            ToolKind::AssetJobStatus => "Transfer Job",
+            ToolKind::AssetJobList => "List Transfer Jobs",
+            ToolKind::AssetJobCancel => "Cancel Transfer",
+            ToolKind::AssetJobSubscribe => "Watch Transfer",
             ToolKind::Other => "Tool",
         }
     }
@@ -97,7 +102,10 @@ impl ToolKind {
             | ToolKind::ExitPlan
             | ToolKind::AskUser
             | ToolKind::AssetShare
-            | ToolKind::AssetList => true,
+            | ToolKind::AssetList
+            | ToolKind::AssetJobStatus
+            | ToolKind::AssetJobList
+            | ToolKind::AssetJobSubscribe => true,
             ToolKind::Edit
             | ToolKind::Delete
             | ToolKind::Write
@@ -122,6 +130,8 @@ impl ToolKind {
             | ToolKind::AssetUpload
             | ToolKind::AssetDelete
             | ToolKind::AssetSetVisibility
+            | ToolKind::AssetDownload
+            | ToolKind::AssetJobCancel
             | ToolKind::Other => false,
             ToolKind::SearchModels => true,
         }
