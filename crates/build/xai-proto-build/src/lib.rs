@@ -106,10 +106,14 @@ impl XaiProtoBuilder {
         let includes = Vec::from_iter(includes);
 
         if let Some(protoc) = protoc {
-            println!(
-                "cargo:rerun-if-changed={}",
-                protoc.to_str().context("protoc path not UTF-8")?
-            );
+            match Self::protoc_rerun_path(protoc)? {
+                Some(path) => println!("cargo:rerun-if-changed={path}"),
+                None => eprintln!(
+                    "note: `{}` is not resolvable relative to the package root; \
+                     not watched (changes to it will not re-run this build script)",
+                    protoc.display()
+                ),
+            }
         }
 
         // Can only process one input file when using --dependency_out=FILE.
@@ -197,6 +201,25 @@ impl XaiProtoBuilder {
         }
 
         Ok(())
+    }
+
+    /// `cargo:rerun-if-changed` value for the protoc binary, or `None` when
+    /// cargo would not be able to resolve it.
+    ///
+    /// Cargo resolves an emitted watch path against the package root (which is
+    /// also the build script's cwd). A bare `protoc` taken from `$PATH`
+    /// therefore points at `<package>/protoc`, which does not exist — and a
+    /// missing watched file pins the build script dirty on every run.
+    /// `find_protoc` returns an absolute path for that case; this is the
+    /// defensive half of the pair, and it also covers the working
+    /// package-relative `bin/protoc` DotSlash wrapper.
+    fn protoc_rerun_path(protoc: &Path) -> anyhow::Result<Option<String>> {
+        if !protoc.try_exists().unwrap_or(false) {
+            return Ok(None);
+        }
+        Ok(Some(
+            protoc.to_str().context("protoc path not UTF-8")?.to_owned(),
+        ))
     }
 
     pub fn compile_protos(
@@ -312,5 +335,53 @@ pub fn configure() -> XaiProtoBuilder {
         pbjson_ignore_unknown_fields: false,
         pbjson_preserve_proto_field_names: false,
         file_descriptor_set_path: None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn protoc_rerun_path_returns_none_for_unresolvable_bare_name() {
+        // The regression this guards: `find_protoc` used to return the bare
+        // `protoc` on the PATH fallback. Cargo resolves it against the package
+        // root, where no `protoc` file exists, so the build script re-ran on
+        // every single build.
+        let bare = Path::new("protoc");
+
+        // Guard against a stray `./protoc` in the crate dir invalidating the
+        // premise of this test.
+        assert!(!bare.try_exists().unwrap_or(false), "unexpected ./protoc");
+
+        assert_eq!(
+            XaiProtoBuilder::protoc_rerun_path(bare).expect("no error"),
+            None
+        );
+    }
+
+    #[test]
+    fn protoc_rerun_path_returns_path_for_existing_file() {
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let protoc = dir.path().join("protoc");
+        fs::write(&protoc, b"stub").expect("write stub");
+
+        let emitted = XaiProtoBuilder::protoc_rerun_path(&protoc)
+            .expect("no error")
+            .expect("path emitted");
+
+        assert_eq!(emitted, protoc.to_str().expect("utf8"));
+    }
+
+    #[test]
+    fn protoc_rerun_path_returns_none_for_missing_absolute_path() {
+        let missing = std::env::temp_dir()
+            .join("xai-proto-build-does-not-exist")
+            .join("protoc");
+
+        assert_eq!(
+            XaiProtoBuilder::protoc_rerun_path(&missing).expect("no error"),
+            None
+        );
     }
 }

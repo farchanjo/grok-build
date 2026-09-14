@@ -1,5 +1,6 @@
 use anyhow::{Context, bail};
 use std::env;
+use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -22,6 +23,44 @@ fn check_protoc_good(protoc: &Path) -> anyhow::Result<()> {
 
 fn is_github_actions() -> bool {
     env::var_os("GITHUB_ACTIONS").is_some()
+}
+
+/// Resolve an executable name against a `PATH`-style value.
+///
+/// Returns the first existing candidate as an **absolute** path. The caller
+/// emits the result as `cargo:rerun-if-changed`, and cargo resolves a relative
+/// watch path against the package root (the build script's cwd) — where a bare
+/// `protoc` from `$PATH` does not exist. Returning the absolute path keeps the
+/// build script fresh instead of dirty on every run.
+///
+/// `anchor` resolves relative `PATH` entries (legal, if rare); callers pass the
+/// current directory.
+fn find_on_path(name: &str, path_var: Option<&OsStr>, anchor: &Path) -> Option<PathBuf> {
+    let path_var = path_var?;
+    // Accept both the bare name and the platform-suffixed one so callers can
+    // look up non-executable files in tests without special-casing Windows.
+    let names = [
+        name.to_string(),
+        format!("{name}{}", env::consts::EXE_SUFFIX),
+    ];
+
+    for dir in env::split_paths(path_var) {
+        if dir.as_os_str().is_empty() {
+            continue;
+        }
+        for candidate_name in &names {
+            let candidate = dir.join(candidate_name);
+            if !candidate.is_file() {
+                continue;
+            }
+            return Some(if candidate.is_absolute() {
+                candidate
+            } else {
+                anchor.join(candidate)
+            });
+        }
+    }
+    None
 }
 
 /// Find `protoc` command.
@@ -77,9 +116,15 @@ pub fn find_protoc() -> anyhow::Result<Option<PathBuf>> {
         dir_rel.push("..");
     }
 
-    // 3. Try protoc from PATH (system install or other tooling).
-    if check_protoc_good(Path::new("protoc")).is_ok() {
-        return Ok(Some(PathBuf::from("protoc")));
+    // 3. Try protoc from PATH (system install or other tooling). Returned as an
+    //    absolute path; see `find_on_path` for why that matters.
+    if let Some(protoc) = find_on_path(
+        "protoc",
+        env::var_os("PATH").as_deref(),
+        &env::current_dir()?,
+    ) && check_protoc_good(&protoc).is_ok()
+    {
+        return Ok(Some(protoc));
     }
 
     // 4. Not found anywhere.
@@ -90,4 +135,92 @@ pub fn find_protoc() -> anyhow::Result<Option<PathBuf>> {
     }
     eprintln!("`protoc` not found; likely it is missing in docker image");
     Ok(None)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    /// A dir holding a stub `protoc`, so tests never depend on the host's real
+    /// protoc install or on the repository layout.
+    fn dir_with_protoc() -> tempfile::TempDir {
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        fs::write(
+            dir.path()
+                .join(format!("protoc{}", env::consts::EXE_SUFFIX)),
+            b"stub",
+        )
+        .expect("write stub");
+        dir
+    }
+
+    fn path_var(dirs: &[&Path]) -> std::ffi::OsString {
+        env::join_paths(dirs.iter().map(|d| d.as_os_str())).expect("join PATH")
+    }
+
+    #[test]
+    fn find_on_path_returns_absolute_path() {
+        let dir = dir_with_protoc();
+        let var = path_var(&[dir.path()]);
+        let anchor = env::current_dir().expect("cwd");
+
+        let found = find_on_path("protoc", Some(&var), &anchor).expect("protoc found on PATH");
+
+        assert!(found.is_absolute(), "got non-absolute path: {found:?}");
+        assert!(found.is_file(), "found path does not exist: {found:?}");
+    }
+
+    #[test]
+    fn find_on_path_skips_dirs_without_the_executable() {
+        let empty = tempfile::TempDir::new().expect("temp dir");
+        let with = dir_with_protoc();
+        let var = path_var(&[empty.path(), with.path()]);
+        let anchor = env::current_dir().expect("cwd");
+
+        let found = find_on_path("protoc", Some(&var), &anchor).expect("found in second entry");
+
+        assert!(found.starts_with(with.path()), "got {found:?}");
+    }
+
+    #[test]
+    fn find_on_path_returns_none_when_absent() {
+        let empty = tempfile::TempDir::new().expect("temp dir");
+        let var = path_var(&[empty.path()]);
+        let anchor = env::current_dir().expect("cwd");
+
+        assert!(find_on_path("protoc", Some(&var), &anchor).is_none());
+    }
+
+    #[test]
+    fn find_on_path_returns_none_without_path_var() {
+        let anchor = env::current_dir().expect("cwd");
+
+        assert!(find_on_path("protoc", None, &anchor).is_none());
+    }
+
+    #[test]
+    fn find_on_path_ignores_empty_entries() {
+        let with = dir_with_protoc();
+        let mut var = std::ffi::OsString::from("");
+        var.push(env::join_paths([with.path()]).expect("join PATH"));
+        let anchor = env::current_dir().expect("cwd");
+
+        let found = find_on_path("protoc", Some(&var), &anchor).expect("found after empty entry");
+
+        assert!(found.is_absolute(), "got non-absolute path: {found:?}");
+    }
+
+    #[test]
+    fn find_on_path_anchors_relative_entries_to_anchor() {
+        // `src/lib.rs` exists next to this file; using it avoids creating
+        // anything on disk. The test binary's cwd is the package root.
+        let anchor = env::current_dir().expect("cwd");
+
+        let found = find_on_path("lib.rs", Some(OsStr::new("src")), &anchor)
+            .expect("lib.rs found via relative entry");
+
+        assert_eq!(found, anchor.join("src").join("lib.rs"));
+        assert!(found.is_absolute(), "got non-absolute path: {found:?}");
+    }
 }
