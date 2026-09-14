@@ -236,11 +236,22 @@ impl S3AssetStore {
     {
         match tokio::time::timeout(self.request_timeout, fut).await {
             Ok(result) => result,
-            Err(_) => Err(S3Failure::Transient(format!(
-                "timed out after {}s",
-                self.request_timeout.as_secs()
-            ))),
+            Err(_) => Err(self.timeout_failure("call")),
         }
+    }
+
+    /// [`S3Failure::Transient`] naming the call that exceeded
+    /// `request_timeout`.
+    ///
+    /// Used on the multipart path, where the timeout must apply **per SDK
+    /// call**: a single deadline over the whole transfer would cap an upload
+    /// at `request_timeout * throughput` regardless of how healthy the
+    /// connection is.
+    fn timeout_failure(&self, what: &str) -> S3Failure {
+        S3Failure::Transient(format!(
+            "{what} timed out after {}s",
+            self.request_timeout.as_secs()
+        ))
     }
 
     async fn run<T, F>(
@@ -442,13 +453,16 @@ impl S3AssetStore {
         if let Some(acl) = acl {
             create = create.acl(acl);
         }
-        let created = create.send().await.map_err(|e| classify_sdk_error(&e))?;
+        let created = tokio::time::timeout(self.request_timeout, create.send())
+            .await
+            .map_err(|_| self.timeout_failure("create multipart upload"))?
+            .map_err(|e| classify_sdk_error(&e))?;
         let upload_id = match created.upload_id() {
             Some(id) => id.to_owned(),
             None => return Err(S3Failure::Transient("missing upload_id".to_owned())),
         };
 
-        let result: Result<(), S3Failure> = async {
+        let result = async {
             let mut completed: Vec<CompletedPart> = Vec::new();
             let mut offset: u64 = 0;
             let mut part_number: i32 = 1;
@@ -461,18 +475,21 @@ impl S3AssetStore {
                     .build()
                     .await
                     .map_err(|e| S3Failure::Transient(e.to_string()))?;
-                let part = self
-                    .client
-                    .upload_part()
-                    .bucket(&self.bucket)
-                    .key(&physical)
-                    .upload_id(&upload_id)
-                    .part_number(part_number)
-                    .content_length(length as i64)
-                    .body(body)
-                    .send()
-                    .await
-                    .map_err(|e| classify_sdk_error(&e))?;
+                let part = tokio::time::timeout(
+                    self.request_timeout,
+                    self.client
+                        .upload_part()
+                        .bucket(&self.bucket)
+                        .key(&physical)
+                        .upload_id(&upload_id)
+                        .part_number(part_number)
+                        .content_length(length as i64)
+                        .body(body)
+                        .send(),
+                )
+                .await
+                .map_err(|_| self.timeout_failure(&format!("part {part_number}")))?
+                .map_err(|e| classify_sdk_error(&e))?;
                 let etag = part
                     .e_tag()
                     .ok_or_else(|| S3Failure::Transient("missing part ETag".to_owned()))?
@@ -503,8 +520,11 @@ impl S3AssetStore {
                 .await
                 .map(|_| ())
                 .map_err(|e| classify_sdk_error(&e))
-        }
-        .await;
+        };
+        let result = match tokio::time::timeout(self.request_timeout, result).await {
+            Ok(inner) => inner,
+            Err(_) => Err(self.timeout_failure("complete multipart upload")),
+        };
 
         if result.is_err() {
             // Best effort: never leak an incomplete upload.
@@ -551,15 +571,17 @@ impl S3AssetStore {
             return result;
         }
 
+        // No `run_raw` here: the multipart path applies `request_timeout` per SDK
+        // call, so a large transfer is not capped by one global deadline.
         match self
-            .run_raw(self.put_file_multipart(
+            .put_file_multipart(
                 key,
                 path,
                 size,
                 content_type,
                 self.acl_for(request.visibility),
                 progress,
-            ))
+            )
             .await
         {
             Ok(()) => Ok(()),
@@ -570,12 +592,12 @@ impl S3AssetStore {
                 if let Some(progress) = progress {
                     progress.reset();
                 }
-                self.run(
-                    AssetOperation::PutFile,
-                    Some(key),
-                    self.put_file_multipart(key, path, size, content_type, None, progress),
-                )
-                .await?;
+                // Same as above: no global deadline on the multipart retry either.
+                self.put_file_multipart(key, path, size, content_type, None, progress)
+                    .await
+                    .map_err(|failure| {
+                        self.map_failure(AssetOperation::PutFile, failure, Some(key))
+                    })?;
                 self.record_visibility(key, request.visibility, false).await
             }
             Err(failure) => Err(self.map_failure(AssetOperation::PutFile, failure, Some(key))),
