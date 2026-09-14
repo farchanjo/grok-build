@@ -1927,6 +1927,21 @@ impl MvpAgent {
             Err("session not found".to_string())
         }
     }
+    /// Cancel an in-flight asset transfer job by job_id.
+    ///
+    /// Backs the pager's tasks-pane ✗ on a transfer row (`x.ai/asset_job_cancel`).
+    pub async fn cancel_asset_job(
+        &self,
+        session_id: &str,
+        job_id: &str,
+    ) -> Result<xai_file_utils::assets::jobs::CancelOutcome, String> {
+        let sid = acp::SessionId::new(session_id);
+        if let Some(handle) = self.get_session_handle(&sid) {
+            handle.cancel_asset_job(job_id).await
+        } else {
+            Err("session not found".to_string())
+        }
+    }
     pub async fn delete_scheduled_task(
         &self,
         session_id: &str,

@@ -266,6 +266,47 @@ pub struct MonitorEvent {
     pub raw_text: String,
 }
 
+/// Streaming state/progress event for an async asset transfer job.
+///
+/// Emitted by the asset job registry (and the `asset_job_*` tools) whenever a
+/// job's state changes or it moves bytes. The shell's notification bridge
+/// coalesces these before the ACP hop, so producers may emit as often as the
+/// transfer reports progress. Every field is secret-free: no presigned URL,
+/// no credentials.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AssetJobEvent {
+    /// Registry id (uuid v7).
+    pub job_id: String,
+    /// `upload` or `download`.
+    pub kind: String,
+    /// Store key (or destination path for a download).
+    pub key: String,
+    /// Backend slug: `s3`, `gcs`, `local`, `proxy`.
+    pub backend: String,
+    /// `queued` | `running` | `completed` | `failed` | `cancelled`.
+    pub state: String,
+    pub bytes_transferred: u64,
+    /// Absent until the total size is known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bytes_total: Option<u64>,
+    /// Secret-free failure text; only set for a failed job.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+impl AssetJobEvent {
+    /// True once the job can no longer change state.
+    ///
+    /// Terminal events bypass the bridge's progress coalescing: dropping the
+    /// completion of a throttled job would leave its TUI row spinning.
+    pub fn is_terminal(&self) -> bool {
+        matches!(
+            self.state.as_str(),
+            "completed" | "done" | "failed" | "cancelled" | "canceled"
+        )
+    }
+}
+
 /// Snapshot of a background task's state. Identical shape to the Grok
 /// Build `TaskSnapshot` so subscribers can decode without per-source
 /// adapters.
@@ -339,6 +380,7 @@ pub enum ToolNotification {
     ScheduledTaskRemoved(ScheduledTaskRemoved),
     ScheduledTaskCreated(ScheduledTaskCreated),
     MonitorEvent(MonitorEvent),
+    AssetJobEvent(AssetJobEvent),
 }
 
 impl ToolNotification {
@@ -365,6 +407,7 @@ impl ToolNotification {
             Self::ScheduledTaskRemoved(_) => "ScheduledTaskRemoved",
             Self::ScheduledTaskCreated(_) => "ScheduledTaskCreated",
             Self::MonitorEvent(_) => "MonitorEvent",
+            Self::AssetJobEvent(_) => "AssetJobEvent",
         }
     }
 }
@@ -526,5 +569,12 @@ impl ToolNotificationHandle {
     /// a Monitor background process, ready for conversation injection.
     pub fn send_monitor_event(&self, event: MonitorEvent) {
         self.send(ToolNotification::MonitorEvent(event));
+    }
+
+    /// Send a [`ToolNotification::AssetJobEvent`]: an async asset transfer job
+    /// changed state or moved bytes. The shell's notification bridge coalesces
+    /// progress before the ACP hop, so producers may send freely.
+    pub fn send_asset_job_event(&self, event: AssetJobEvent) {
+        self.send(ToolNotification::AssetJobEvent(event));
     }
 }

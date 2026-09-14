@@ -17,7 +17,9 @@ use std::hash::{Hash, Hasher};
 use std::time::{Instant, SystemTime};
 use unicode_width::UnicodeWidthStr;
 
-use crate::app::agent::{BgTaskState, BgTaskStatus, ScheduledTaskInfo};
+use crate::app::agent::{
+    BgTaskState, BgTaskStatus, ScheduledTaskInfo, TransferState, TransferStatus,
+};
 use crate::app::subagent::{SubagentInfo, format_context_badge, format_subagent_label};
 use crate::appearance::LayoutConfig;
 use crate::scrollback::layout::HorizontalLayout;
@@ -161,6 +163,30 @@ fn format_line_count_badge(count: usize, truncated: bool) -> String {
 }
 
 // ---------------------------------------------------------------------------
+// Byte count formatting
+// ---------------------------------------------------------------------------
+
+/// Format a byte count with a binary unit suffix, truncated (never rounded up)
+/// so a row never overstates how much has moved: `999 B`, `1.0 KiB`, `4.2 MiB`.
+fn format_byte_count(bytes: u64) -> String {
+    const KIB: u64 = 1 << 10;
+    const MIB: u64 = 1 << 20;
+    const GIB: u64 = 1 << 30;
+
+    let (unit, scale) = if bytes >= GIB {
+        ("GiB", GIB)
+    } else if bytes >= MIB {
+        ("MiB", MIB)
+    } else if bytes >= KIB {
+        ("KiB", KIB)
+    } else {
+        return format!("{bytes} B");
+    };
+    let tenths = (bytes as u128 * 10) / scale as u128;
+    format!("{}.{} {unit}", tenths / 10, tenths % 10)
+}
+
+// ---------------------------------------------------------------------------
 // TaskEntryId — identifies which entry a button belongs to
 // ---------------------------------------------------------------------------
 
@@ -170,6 +196,9 @@ pub enum TaskEntryId {
     Agent(String),
     Scheduled(String),
     Workflow(String),
+    /// Async asset transfer job (`asset_upload` / `asset_download`). The kill
+    /// button dispatches `asset_job_cancel` for this id.
+    Transfer(String),
 }
 
 /// Logical group a [`TaskEntry`] belongs to. Drives both the sort order (so
@@ -183,9 +212,12 @@ pub enum GroupKind {
     /// tasks share one section. They stay contiguous (monitors first, then
     /// loops) via [`TaskEntry::type_order`].
     Watchers,
+    /// Async asset transfer jobs. Sorted after every other group so a burst of
+    /// uploads never displaces the tasks the user is watching.
+    Transfers,
 }
 
-const GROUP_KIND_COUNT: usize = 4;
+const GROUP_KIND_COUNT: usize = 5;
 
 impl GroupKind {
     /// Display label shown in the group header.
@@ -195,6 +227,7 @@ impl GroupKind {
             GroupKind::Subagents => "Subagents",
             GroupKind::Tasks => "Tasks",
             GroupKind::Watchers => "Watchers",
+            GroupKind::Transfers => "Transfers",
         }
     }
 
@@ -204,6 +237,7 @@ impl GroupKind {
             GroupKind::Subagents => 1,
             GroupKind::Tasks => 2,
             GroupKind::Watchers => 3,
+            GroupKind::Transfers => 4,
         }
     }
 }
@@ -252,6 +286,17 @@ pub enum TaskEntry {
         styled: Line<'static>,
         running: bool,
         stoppable: bool,
+        started_at: Instant,
+    },
+    /// Async asset transfer job row. `label` carries the searchable text
+    /// (`Upload photo.png · s3 · 42%`); the styled line adds the tag color and
+    /// the byte/percent detail.
+    Transfer {
+        id: u64,
+        job_id: String,
+        label: String,
+        styled: Line<'static>,
+        running: bool,
         started_at: Instant,
     },
     /// Collapsible group header row (e.g. `▾ Subagents 2`). Not a task —
@@ -595,7 +640,7 @@ impl TaskEntry {
         };
         let label = format!(
             "{} {} \u{b7} {}{}",
-            tag_display, info.human_schedule, &prompt_preview, &suffix
+            tag_display, info.human_schedule, prompt_preview, suffix
         );
 
         // Only the tag (e.g. `Loop`) carries color — the blue system accent.
@@ -634,6 +679,91 @@ impl TaskEntry {
         }
     }
 
+    /// Build a transfer row: `Upload photo.png · s3 · 42% · 4.2 MiB / 10.0 MiB`.
+    ///
+    /// Terminal rows keep their hue (green / red / grey) but blend toward the
+    /// background, matching how finished subagents and bg tasks recede.
+    fn from_transfer(transfer: &TransferState) -> Self {
+        let theme = Theme::current();
+        let running = transfer.status.is_live();
+        let raw_tag_color = if transfer.pending_kill {
+            theme.accent_error
+        } else if running {
+            theme.accent_running
+        } else if transfer.status == TransferStatus::Done {
+            theme.accent_success
+        } else {
+            theme.accent_error
+        };
+        let tag_color = if running {
+            raw_tag_color
+        } else {
+            crate::render::color::blend_color(theme.bg_base, raw_tag_color, 0.45)
+                .unwrap_or(raw_tag_color)
+        };
+        let name_style = if running {
+            Style::default().fg(theme.text_primary)
+        } else {
+            Style::default().fg(theme.gray_bright)
+        };
+        let detail_style = Style::default().fg(theme.gray);
+
+        let tag = if transfer.kind == "download" {
+            "Download"
+        } else {
+            "Upload"
+        };
+        let target = transfer.key.replace('\n', " ");
+
+        // `42% · 4.2 MiB / 10.0 MiB`; the percent is omitted until the total is
+        // known (streaming downloads learn it from the response headers).
+        let mut detail = String::new();
+        if let Some(pct) = transfer.percent() {
+            detail.push_str(&format!("{pct}% \u{b7} "));
+        }
+        detail.push_str(&format_byte_count(transfer.bytes_transferred));
+        if let Some(total) = transfer.bytes_total {
+            detail.push_str(&format!(" / {}", format_byte_count(total)));
+        }
+        if !transfer.backend.is_empty() {
+            detail.push_str(&format!(" \u{b7} {}", transfer.backend));
+        }
+
+        let suffix = if transfer.pending_kill {
+            " (cancelling\u{2026})".to_string()
+        } else if transfer.status.is_terminal() {
+            format!(" ({})", transfer.status.label())
+        } else {
+            String::new()
+        };
+
+        let mut spans = vec![
+            Span::styled(format!("{tag} "), Style::default().fg(tag_color)),
+            Span::styled(target.clone(), name_style),
+        ];
+        if !detail.is_empty() {
+            spans.push(Span::styled(format!(" \u{b7} {detail}"), detail_style));
+        }
+        if !suffix.is_empty() {
+            spans.push(Span::styled(suffix.clone(), detail_style));
+        }
+
+        let label = format!("{tag} {target} \u{b7} {detail}{suffix}");
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        "transfer:".hash(&mut hasher);
+        transfer.job_id.hash(&mut hasher);
+        let id = hasher.finish();
+
+        TaskEntry::Transfer {
+            id,
+            job_id: transfer.job_id.clone(),
+            label,
+            styled: Line::from(spans),
+            running,
+            started_at: transfer.started_at,
+        }
+    }
+
     /// Build a collapsible group header row, e.g. `▾ Subagents 2` (expanded)
     /// or `▸ Subagents 2` (collapsed). The chevron + count are baked into the
     /// styled line; the label aligns with item labels (the `chevron + space`
@@ -666,6 +796,7 @@ impl TaskEntry {
             } => GroupKind::Watchers,
             TaskEntry::Scheduled { .. } => GroupKind::Watchers,
             TaskEntry::Workflow { .. } => GroupKind::Workflows,
+            TaskEntry::Transfer { .. } => GroupKind::Transfers,
             TaskEntry::Header { group, .. } => *group,
         }
     }
@@ -674,7 +805,8 @@ impl TaskEntry {
         match self {
             TaskEntry::BgTask { running, .. }
             | TaskEntry::Agent { running, .. }
-            | TaskEntry::Workflow { running, .. } => *running,
+            | TaskEntry::Workflow { running, .. }
+            | TaskEntry::Transfer { running, .. } => *running,
             TaskEntry::Scheduled { .. } => true,
             TaskEntry::Header { .. } => false,
         }
@@ -682,9 +814,9 @@ impl TaskEntry {
 
     /// Fine-grained sort rank, distinct per task kind so each renders as a
     /// contiguous block: subagents (0) → one-shot bg tasks (1) → monitors
-    /// (2) → scheduled/loops (3). Monitors and loops share the `Watchers`
-    /// group/header but keep distinct ranks so monitors always sort before
-    /// loops within that section.
+    /// (2) → scheduled/loops (3) → transfers (4). Monitors and loops share the
+    /// `Watchers` group/header but keep distinct ranks so monitors always sort
+    /// before loops within that section.
     fn type_order(&self) -> u8 {
         match self {
             TaskEntry::Workflow { .. } => 0,
@@ -696,6 +828,7 @@ impl TaskEntry {
                 is_monitor: true, ..
             } => 3,
             TaskEntry::Scheduled { .. } => 4,
+            TaskEntry::Transfer { .. } => 5,
             // Headers never appear in the sorted `items` list; fall back to
             // the group's coarse order for completeness.
             TaskEntry::Header { group, .. } => group.order(),
@@ -710,6 +843,7 @@ impl ListItem for TaskEntry {
             | TaskEntry::Agent { styled, .. }
             | TaskEntry::Scheduled { styled, .. }
             | TaskEntry::Workflow { styled, .. }
+            | TaskEntry::Transfer { styled, .. }
             | TaskEntry::Header { styled, .. } => styled,
         }
     }
@@ -728,7 +862,8 @@ impl ListItem for TaskEntry {
             TaskEntry::BgTask { id, .. }
             | TaskEntry::Agent { id, .. }
             | TaskEntry::Scheduled { id, .. }
-            | TaskEntry::Workflow { id, .. } => *id,
+            | TaskEntry::Workflow { id, .. }
+            | TaskEntry::Transfer { id, .. } => *id,
             TaskEntry::Header { group, .. } => {
                 let mut hasher = std::collections::hash_map::DefaultHasher::new();
                 "header:".hash(&mut hasher);
@@ -747,7 +882,8 @@ impl ListItem for TaskEntry {
             TaskEntry::BgTask { label, .. }
             | TaskEntry::Agent { label, .. }
             | TaskEntry::Scheduled { label, .. }
-            | TaskEntry::Workflow { label, .. } => label,
+            | TaskEntry::Workflow { label, .. }
+            | TaskEntry::Transfer { label, .. } => label,
             TaskEntry::Header { group, .. } => group.label(),
         }
     }
@@ -763,6 +899,7 @@ enum OverlayEntryData {
     Agent(String, String),
     Scheduled(String, Option<String>),
     Workflow(String),
+    Transfer(String),
 }
 
 const MAX_TASKS_HEIGHT: u16 = 8;
@@ -899,6 +1036,7 @@ impl TasksPane {
 
     // -- Data sync -----------------------------------------------------------
 
+    #[allow(clippy::too_many_arguments)]
     pub fn sync(
         &mut self,
         bg_tasks: &std::collections::BTreeMap<String, BgTaskState>,
@@ -907,6 +1045,7 @@ impl TasksPane {
         current_cron_task_id: Option<&str>,
         queued_cron_ids: &std::collections::HashSet<&str>,
         workflow_runs: &[crate::views::workflows::WorkflowRunSnapshot],
+        transfers: &std::collections::BTreeMap<String, TransferState>,
     ) {
         // Detect theme switch and refresh caches.
         let current_theme = Theme::current_kind();
@@ -961,6 +1100,14 @@ impl TasksPane {
             }
         }
 
+        // Add asset transfer job items. Finished transfers stay listed behind
+        // `h` (show-all) like every other terminal row.
+        for transfer in transfers.values() {
+            if self.show_done || transfer.status.is_live() {
+                self.items.push(TaskEntry::from_transfer(transfer));
+            }
+        }
+
         // Sort: group by type first (subagents → tasks → monitors →
         // scheduled) so each kind is one contiguous block, then running
         // before done within each group, then newest-first, then a stable
@@ -1002,6 +1149,10 @@ impl TasksPane {
                         TaskEntry::Workflow { started_at: a, .. },
                         TaskEntry::Workflow { started_at: b, .. },
                     ) => b.cmp(a),
+                    (
+                        TaskEntry::Transfer { started_at: a, .. },
+                        TaskEntry::Transfer { started_at: b, .. },
+                    ) => b.cmp(a),
                     _ => std::cmp::Ordering::Equal,
                 })
                 // 4. Stable tiebreak so equal-timestamp rows don't reshuffle
@@ -1039,7 +1190,11 @@ impl TasksPane {
                 .filter(|s| s.is_running() && s.workflow_run_id.is_none())
                 .count()
             + scheduled.len()
-            + workflow_runs.iter().filter(|run| run.is_active()).count();
+            + workflow_runs.iter().filter(|run| run.is_active()).count()
+            + transfers
+                .values()
+                .filter(|t| t.status.is_live() && !t.restored_from_replay)
+                .count();
 
         // Auto-show: running went from 0 to N
         if running_count > 0 && self.prev_running_count == 0 {
@@ -1135,6 +1290,7 @@ impl TasksPane {
         subagents: &HashMap<String, SubagentInfo>,
         scheduled: &HashMap<String, ScheduledTaskInfo>,
         workflow_runs: &[crate::views::workflows::WorkflowRunSnapshot],
+        transfers: &std::collections::BTreeMap<String, TransferState>,
     ) -> usize {
         bg_tasks
             .values()
@@ -1146,6 +1302,7 @@ impl TasksPane {
                 .count()
             + scheduled.len()
             + workflow_runs.iter().filter(|run| run.is_active()).count()
+            + transfers.values().filter(|t| t.status.is_live()).count()
     }
 
     // -- Visibility ----------------------------------------------------------
@@ -1272,6 +1429,14 @@ impl TasksPane {
         }
     }
 
+    /// Get the job_id if the selected entry is an asset transfer.
+    pub fn selected_transfer_id(&self) -> Option<&str> {
+        match self.selected_entry()? {
+            TaskEntry::Transfer { job_id, .. } => Some(job_id),
+            _ => None,
+        }
+    }
+
     // -- Rendering -----------------------------------------------------------
 
     fn content_area(area: Rect, layout_cfg: &LayoutConfig) -> Rect {
@@ -1295,6 +1460,7 @@ impl TasksPane {
         bg_tasks: &std::collections::BTreeMap<String, BgTaskState>,
         subagents: &HashMap<String, SubagentInfo>,
         scheduled: &HashMap<String, ScheduledTaskInfo>,
+        transfers: &std::collections::BTreeMap<String, TransferState>,
     ) {
         let inner = Self::content_area(area, layout_cfg);
         if self.entries.is_empty() {
@@ -1407,7 +1573,7 @@ impl TasksPane {
             height: list_area.height.saturating_sub(bar_height),
             ..list_area
         };
-        self.render_overlay(overlay_area, buf, bg_tasks, subagents, scheduled);
+        self.render_overlay(overlay_area, buf, bg_tasks, subagents, scheduled, transfers);
     }
 
     fn render_overlay(
@@ -1417,6 +1583,7 @@ impl TasksPane {
         bg_tasks: &std::collections::BTreeMap<String, BgTaskState>,
         subagents: &HashMap<String, SubagentInfo>,
         _scheduled: &HashMap<String, ScheduledTaskInfo>,
+        transfers: &std::collections::BTreeMap<String, TransferState>,
     ) {
         let theme = Theme::current();
         let scroll_offset = self.list_state.scroll_offset();
@@ -1445,6 +1612,9 @@ impl TasksPane {
                         ..
                     } => OverlayEntryData::Scheduled(task_id.clone(), linked_subagent.clone()),
                     TaskEntry::Workflow { name, .. } => OverlayEntryData::Workflow(name.clone()),
+                    TaskEntry::Transfer { job_id, .. } => {
+                        OverlayEntryData::Transfer(job_id.clone())
+                    }
                     // Group headers have no kill/view buttons; they still
                     // occupy a row (vis_row is enumerated before this filter),
                     // so the y offsets for following items stay correct.
@@ -1485,8 +1655,90 @@ impl TasksPane {
                     };
                     self.render_workflow_overlay(area, buf, y, &run, &theme);
                 }
+                OverlayEntryData::Transfer(ref job_id) => {
+                    let Some(transfer) = transfers.get(job_id) else {
+                        continue;
+                    };
+                    self.render_transfer_overlay(area, buf, y, job_id, transfer, &theme);
+                }
             }
         }
+    }
+
+    /// Right-hand overlay for a transfer row: spinner / terminal glyph, the
+    /// elapsed time, and the kill button (`asset_job_cancel`).
+    ///
+    /// The percent + byte counts live in the label (left side) so the row
+    /// reads as progress rather than as a bare duration.
+    fn render_transfer_overlay(
+        &mut self,
+        area: Rect,
+        buf: &mut Buffer,
+        y: u16,
+        job_id: &str,
+        transfer: &TransferState,
+        theme: &Theme,
+    ) {
+        let live = transfer.status.is_live();
+        let (icon, icon_style) = if transfer.pending_kill {
+            let frames = crate::glyphs::dot_spinner_frames();
+            let frame_idx = (self.tick / SPINNER_DIVISOR) as usize % frames.len();
+            (frames[frame_idx], Style::default().fg(theme.accent_error))
+        } else if live {
+            let frames = crate::glyphs::dot_spinner_frames();
+            let frame_idx = (self.tick / SPINNER_DIVISOR) as usize % frames.len();
+            (frames[frame_idx], Style::default().fg(theme.accent_running))
+        } else if transfer.status == TransferStatus::Done {
+            (
+                crate::glyphs::check_mark(),
+                Style::default().fg(theme.accent_success),
+            )
+        } else {
+            (
+                crate::glyphs::ballot_x(),
+                Style::default().fg(theme.accent_error),
+            )
+        };
+
+        let right_text = format!("{} ", format_duration(transfer.elapsed()));
+        let right_style = if transfer.pending_kill {
+            Style::default().fg(theme.accent_error)
+        } else {
+            Style::default().fg(theme.gray)
+        };
+
+        buf.set_span(area.x, y, &Span::styled(icon, icon_style), 2);
+
+        let right_text_w = right_text.width() as u16;
+        let kill_w: u16 = if live { 3 } else { 0 };
+        clear_overlay_area(buf, area, y, kill_w + right_text_w + 1);
+
+        let mut rx = area.x + area.width;
+        if live {
+            rx = rx.saturating_sub(3);
+            let is_hovered = matches!(
+                &self.hovered_kill,
+                Some(TaskEntryId::Transfer(id)) if id == job_id
+            );
+            let kill_style = if is_hovered {
+                Style::default().fg(theme.accent_error)
+            } else {
+                Style::default().fg(theme.gray)
+            };
+            buf.set_span(
+                rx,
+                y,
+                &Span::styled(crate::glyphs::ballot_x_button(), kill_style),
+                3,
+            );
+            self.kill_button_rects.push((
+                TaskEntryId::Transfer(job_id.to_string()),
+                Rect::new(rx, y, 3, 1),
+            ));
+        }
+
+        rx = rx.saturating_sub(right_text_w);
+        buf.set_span(rx, y, &Span::styled(right_text, right_style), right_text_w);
     }
 
     fn render_workflow_overlay(
@@ -2237,6 +2489,7 @@ mod tests {
             bg_tasks,
             &HashMap::new(),
             &HashMap::new(),
+            &BTreeMap::new(),
         );
         (0..height)
             .map(|y| {
@@ -2269,6 +2522,7 @@ mod tests {
             None,
             &HashSet::new(),
             &[],
+            &BTreeMap::new(),
         );
 
         // 12+ rows so `desired_height` is non-zero; wide enough that the
@@ -2302,6 +2556,7 @@ mod tests {
             None,
             &HashSet::new(),
             &[],
+            &BTreeMap::new(),
         );
         assert!(
             !pane.is_visible(),
@@ -2320,6 +2575,7 @@ mod tests {
             None,
             &HashSet::new(),
             &[],
+            &BTreeMap::new(),
         );
         assert!(
             pane.is_visible(),
@@ -2346,6 +2602,7 @@ mod tests {
             None,
             &HashSet::new(),
             &[],
+            &BTreeMap::new(),
         );
 
         let lines = render_pane_to_strings(&mut pane, &bg_tasks, 80, 16);
@@ -2374,6 +2631,7 @@ mod tests {
             None,
             &HashSet::new(),
             &[],
+            &BTreeMap::new(),
         );
 
         let lines = render_pane_to_strings(&mut pane, &bg_tasks, 80, 16);
@@ -2414,6 +2672,7 @@ mod tests {
             None,
             &HashSet::new(),
             &[],
+            &BTreeMap::new(),
         );
 
         // Press `/` to open the search bar.
@@ -2474,6 +2733,7 @@ mod tests {
             None,
             &HashSet::new(),
             &[],
+            &BTreeMap::new(),
         );
 
         // Tall enough that all entries fit without scrolling.
@@ -2529,6 +2789,7 @@ mod tests {
             None,
             &HashSet::new(),
             &[],
+            &BTreeMap::new(),
         );
 
         // One header + one loop row in a tall pane ⇒ not scrollable.
@@ -2543,6 +2804,7 @@ mod tests {
             &BTreeMap::new(),
             &HashMap::new(),
             &scheduled,
+            &BTreeMap::new(),
         );
 
         // Locate the `✗` kill glyph; every cell past the closing `]` must be
@@ -2589,6 +2851,7 @@ mod tests {
             None,
             &HashSet::new(),
             &[],
+            &BTreeMap::new(),
         );
 
         // A short panel forces the list to overflow; at the top of the list a
@@ -2621,6 +2884,7 @@ mod tests {
             None,
             &HashSet::new(),
             &[],
+            &BTreeMap::new(),
         );
 
         // Establish the viewport, then scroll to the very bottom.
@@ -2662,6 +2926,7 @@ mod tests {
             None,
             &HashSet::new(),
             &[],
+            &BTreeMap::new(),
         );
 
         assert!(pane.items.len() >= 2);
@@ -2690,6 +2955,7 @@ mod tests {
             None,
             &HashSet::new(),
             &[],
+            &BTreeMap::new(),
         );
 
         assert_eq!(pane.items.len(), 2);
@@ -2726,6 +2992,7 @@ mod tests {
             None,
             &HashSet::new(),
             &[],
+            &BTreeMap::new(),
         );
 
         assert_eq!(pane.items.len(), 3);
@@ -2780,6 +3047,7 @@ mod tests {
             None,
             &HashSet::new(),
             &[],
+            &BTreeMap::new(),
         );
 
         // items: monitor first, then loop.
@@ -2835,6 +3103,7 @@ mod tests {
             None,
             &HashSet::new(),
             &[],
+            &BTreeMap::new(),
         );
 
         assert_eq!(pane.items.len(), 1, "only running tasks shown by default");
@@ -2856,6 +3125,7 @@ mod tests {
             None,
             &HashSet::new(),
             &[],
+            &BTreeMap::new(),
         );
 
         // Display list interleaves a header before each group's items:
@@ -2901,6 +3171,7 @@ mod tests {
             None,
             &HashSet::new(),
             &[],
+            &BTreeMap::new(),
         );
 
         // Expanded: header + item.
@@ -2938,6 +3209,7 @@ mod tests {
             None,
             &HashSet::new(),
             &[],
+            &BTreeMap::new(),
         );
         assert_eq!(pane.entries.len(), 2);
 
@@ -2972,6 +3244,7 @@ mod tests {
             None,
             &HashSet::new(),
             &[],
+            &BTreeMap::new(),
         );
 
         pane.toggle_group(GroupKind::Subagents);
@@ -2985,6 +3258,7 @@ mod tests {
             None,
             &HashSet::new(),
             &[],
+            &BTreeMap::new(),
         );
         assert!(!pane.collapsed_groups.contains(&GroupKind::Subagents));
 
@@ -3001,6 +3275,7 @@ mod tests {
             None,
             &HashSet::new(),
             &[],
+            &BTreeMap::new(),
         );
         assert_eq!(pane.entries.len(), 2);
         assert!(matches!(&pane.entries[1], TaskEntry::Agent { .. }));
@@ -3028,6 +3303,7 @@ mod tests {
             None,
             &HashSet::new(),
             &[],
+            &BTreeMap::new(),
         );
 
         // Ordered by agent type alphabetically: Explore before Plan.
@@ -3185,6 +3461,7 @@ mod tests {
             None,
             &HashSet::new(),
             &[],
+            &BTreeMap::new(),
         );
         let label = match &pane.items[0] {
             TaskEntry::Scheduled { label, .. } => label,
@@ -3211,6 +3488,7 @@ mod tests {
             Some("cron1"),
             &HashSet::new(),
             &[],
+            &BTreeMap::new(),
         );
         let label = match &pane.items[0] {
             TaskEntry::Scheduled { label, .. } => label,
@@ -3237,6 +3515,7 @@ mod tests {
             None,
             &HashSet::new(),
             &[],
+            &BTreeMap::new(),
         );
         let label = match &pane.items[0] {
             TaskEntry::Scheduled { label, .. } => label,
@@ -3265,6 +3544,7 @@ mod tests {
             None,
             &queued,
             &[],
+            &BTreeMap::new(),
         );
         let label = match &pane.items[0] {
             TaskEntry::Scheduled { label, .. } => label,
@@ -3292,6 +3572,7 @@ mod tests {
             None,
             &HashSet::new(),
             &[],
+            &BTreeMap::new(),
         );
         let label = match &pane.items[0] {
             TaskEntry::Scheduled { label, .. } => label,
@@ -3319,6 +3600,7 @@ mod tests {
             None,
             &HashSet::new(),
             &[],
+            &BTreeMap::new(),
         );
         let entry = &pane.items[0];
         let label = match entry {
@@ -3347,6 +3629,7 @@ mod tests {
             None,
             &HashSet::new(),
             &[],
+            &BTreeMap::new(),
         );
         let label = match &pane.items[0] {
             TaskEntry::Scheduled { label, .. } => label,
@@ -3377,6 +3660,7 @@ mod tests {
             None,
             &HashSet::new(),
             &[],
+            &BTreeMap::new(),
         );
         let label = match &pane.items[0] {
             TaskEntry::Scheduled { label, .. } => label,
@@ -3426,6 +3710,7 @@ mod tests {
             None,
             &HashSet::new(),
             &runs,
+            &BTreeMap::new(),
         );
 
         let labels: Vec<&str> = pane.entries.iter().map(|e| e.search_text()).collect();
@@ -3463,6 +3748,7 @@ mod tests {
             None,
             &HashSet::new(),
             &runs,
+            &BTreeMap::new(),
         );
         assert!(
             pane.items
@@ -3470,7 +3756,13 @@ mod tests {
                 .all(|e| !matches!(e, TaskEntry::Agent { .. }))
         );
         assert_eq!(
-            pane.running_count(&BTreeMap::new(), &subagents, &HashMap::new(), &runs),
+            pane.running_count(
+                &BTreeMap::new(),
+                &subagents,
+                &HashMap::new(),
+                &runs,
+                &BTreeMap::new(),
+            ),
             1
         );
     }
@@ -3531,5 +3823,233 @@ mod tests {
             }
             _ => panic!("expected a workflow entry"),
         }
+    }
+
+    // -- Asset transfers ----------------------------------------------------
+
+    fn make_transfer(
+        job_id: &str,
+        status: TransferStatus,
+        bytes_transferred: u64,
+        bytes_total: Option<u64>,
+    ) -> TransferState {
+        let mut transfer = TransferState::new(
+            job_id.to_string(),
+            "upload".to_string(),
+            "uploads/photo.png".to_string(),
+            "s3".to_string(),
+        );
+        transfer.apply(status, bytes_transferred, bytes_total, None);
+        transfer
+    }
+
+    fn transfers_with(
+        entries: Vec<(&str, TransferStatus, u64, Option<u64>)>,
+    ) -> BTreeMap<String, TransferState> {
+        entries
+            .into_iter()
+            .map(|(id, status, sent, total)| {
+                (id.to_string(), make_transfer(id, status, sent, total))
+            })
+            .collect()
+    }
+
+    fn render_with_transfers(
+        pane: &mut TasksPane,
+        transfers: &BTreeMap<String, TransferState>,
+    ) -> Vec<String> {
+        let area = Rect::new(0, 0, 90, 14);
+        let mut buf = Buffer::empty(area);
+        let layout = crate::appearance::LayoutConfig::default();
+        pane.render(
+            area,
+            &mut buf,
+            false,
+            &layout,
+            &BTreeMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            transfers,
+        );
+        (0..area.height)
+            .map(|y| {
+                (0..area.width)
+                    .filter_map(|x| buf.cell((x, y)).map(|c| c.symbol().to_string()))
+                    .collect::<String>()
+            })
+            .collect()
+    }
+
+    fn sync_with_transfers(pane: &mut TasksPane, transfers: &BTreeMap<String, TransferState>) {
+        pane.sync(
+            &BTreeMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            None,
+            &HashSet::new(),
+            &[],
+            transfers,
+        );
+    }
+
+    /// Live transfers must reach the status-bar counter, and finished ones must
+    /// stop counting — otherwise the spinner latches on forever.
+    #[test]
+    fn running_count_includes_live_transfers() {
+        let pane = TasksPane::new();
+        let live = transfers_with(vec![
+            ("job-1", TransferStatus::Running, 10, Some(100)),
+            ("job-2", TransferStatus::Queued, 0, None),
+        ]);
+        assert_eq!(
+            pane.running_count(
+                &BTreeMap::new(),
+                &HashMap::new(),
+                &HashMap::new(),
+                &[],
+                &live
+            ),
+            2
+        );
+
+        let mut mixed = live;
+        mixed.insert(
+            "job-3".to_string(),
+            make_transfer("job-3", TransferStatus::Done, 100, Some(100)),
+        );
+        mixed.insert(
+            "job-4".to_string(),
+            make_transfer("job-4", TransferStatus::Failed, 3, Some(100)),
+        );
+        assert_eq!(
+            pane.running_count(
+                &BTreeMap::new(),
+                &HashMap::new(),
+                &HashMap::new(),
+                &[],
+                &mixed
+            ),
+            2,
+            "terminal transfers must drop out of the counter"
+        );
+    }
+
+    /// The row must carry the kind, the percent, the byte counts and the
+    /// backend — the whole point of surfacing transfers in the pane.
+    #[test]
+    fn transfer_row_renders_kind_percent_and_bytes() {
+        let mut pane = TasksPane::new();
+        // 4 MiB of 10 MiB ⇒ exactly 40%.
+        let transfers = transfers_with(vec![(
+            "job-1",
+            TransferStatus::Running,
+            4 * 1024 * 1024,
+            Some(10 * 1024 * 1024),
+        )]);
+        sync_with_transfers(&mut pane, &transfers);
+
+        let joined = render_with_transfers(&mut pane, &transfers).join("\n");
+        assert!(
+            joined.contains("Transfers"),
+            "group header missing:\n{joined}"
+        );
+        assert!(joined.contains("Upload"), "kind tag missing:\n{joined}");
+        assert!(joined.contains("40%"), "percent missing:\n{joined}");
+        assert!(
+            joined.contains("4.0 MiB / 10.0 MiB"),
+            "byte counts missing:\n{joined}"
+        );
+        assert!(joined.contains("s3"), "backend missing:\n{joined}");
+    }
+
+    /// The kill button on a transfer row must be registered against the job id
+    /// so a click can be routed to `asset_job_cancel`.
+    #[test]
+    fn transfer_row_registers_a_kill_button() {
+        let mut pane = TasksPane::new();
+        let transfers = transfers_with(vec![("job-1", TransferStatus::Running, 1, Some(10))]);
+        sync_with_transfers(&mut pane, &transfers);
+
+        // The row is selectable, and the selection resolves back to the job id
+        // so `x` can cancel the transfer the user highlighted. `select_by_id`
+        // only latches the id — the index resolves on the next layout pass.
+        let entry_id = pane
+            .entries
+            .iter()
+            .find_map(|entry| match entry {
+                TaskEntry::Transfer { id, job_id, .. } if job_id == "job-1" => Some(*id),
+                _ => None,
+            })
+            .expect("a transfer entry must be present in the display list");
+        pane.list_state.select_by_id(entry_id);
+        render_with_transfers(&mut pane, &transfers);
+
+        assert!(
+            pane.kill_button_rects
+                .iter()
+                .any(|(id, _)| matches!(id, TaskEntryId::Transfer(job) if job == "job-1")),
+            "transfer rows must expose the kill button"
+        );
+        assert_eq!(pane.selected_transfer_id(), Some("job-1"));
+    }
+
+    /// A finished transfer keeps its terminal suffix but is hidden behind `h`
+    /// like every other terminal row.
+    #[test]
+    fn finished_transfer_is_hidden_until_show_done() {
+        let mut pane = TasksPane::new();
+        let transfers = transfers_with(vec![("job-1", TransferStatus::Done, 100, Some(100))]);
+        sync_with_transfers(&mut pane, &transfers);
+        assert!(pane.entries.is_empty(), "terminal rows hide by default");
+
+        pane.show_done = true;
+        sync_with_transfers(&mut pane, &transfers);
+        let joined = render_with_transfers(&mut pane, &transfers).join("\n");
+        assert!(
+            joined.contains("Upload"),
+            "shown once h is pressed:\n{joined}"
+        );
+        assert!(
+            joined.contains("(done)"),
+            "terminal suffix missing:\n{joined}"
+        );
+    }
+
+    /// `pending_kill` swaps the row's elapsed time for the cancelling marker,
+    /// mirroring bg tasks and subagents.
+    #[test]
+    fn pending_kill_transfer_shows_cancelling_suffix() {
+        let mut pane = TasksPane::new();
+        let mut transfers = transfers_with(vec![("job-1", TransferStatus::Running, 1, Some(10))]);
+        transfers.get_mut("job-1").unwrap().pending_kill = true;
+        sync_with_transfers(&mut pane, &transfers);
+
+        let joined = render_with_transfers(&mut pane, &transfers).join("\n");
+        assert!(
+            joined.contains("(cancelling"),
+            "cancelling suffix missing:\n{joined}"
+        );
+    }
+
+    /// The `Transfers` group must sort after every other group so a burst of
+    /// uploads never displaces the tasks the user is watching.
+    #[test]
+    fn transfers_group_sorts_last() {
+        assert_eq!(
+            GroupKind::Transfers.order(),
+            4,
+            "Transfers must sort after Watchers"
+        );
+        assert_eq!(GroupKind::Transfers.label(), "Transfers");
+    }
+
+    #[test]
+    fn byte_count_truncates_rather_than_rounds() {
+        assert_eq!(format_byte_count(0), "0 B");
+        assert_eq!(format_byte_count(999), "999 B");
+        assert_eq!(format_byte_count(1024), "1.0 KiB");
+        assert_eq!(format_byte_count(1536), "1.5 KiB");
+        assert_eq!(format_byte_count(10 * 1024 * 1024), "10.0 MiB");
+        assert_eq!(format_byte_count(1024 * 1024 * 1024), "1.0 GiB");
     }
 }

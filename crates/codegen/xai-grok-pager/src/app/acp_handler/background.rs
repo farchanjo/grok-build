@@ -280,6 +280,125 @@ pub(super) fn handle_monitor_event(notif: &acp::ExtNotification, app: &mut AppVi
     is_active
 }
 
+/// Handle `x.ai/asset_job_event` — an async asset transfer job changed state
+/// or moved bytes.
+///
+/// The shell coalesces progress before the ACP hop (token bucket, 500 ms /
+/// capacity 10), so every event that lands here is already worth a state
+/// update: no additional pager-side throttling is needed. Rows are keyed by
+/// `job_id` and reused across events, mirroring how `handle_monitor_event`
+/// feeds the bg-task store.
+///
+/// Unknown jobs are inserted on first sight rather than dropped, so a
+/// mid-flight event after a warm reconnect still produces a row.
+pub(super) fn handle_asset_job_event(notif: &acp::ExtNotification, app: &mut AppView) -> bool {
+    let Ok(session_notif) = serde_json::from_str::<SessionNotification>(notif.params.get()) else {
+        tracing::warn!("Failed to parse x.ai/asset_job_event");
+        return false;
+    };
+    let (job_id, kind, key, backend, state, bytes_transferred, bytes_total, error) =
+        match session_notif.update {
+            XaiSessionUpdate::AssetJobEvent {
+                job_id,
+                kind,
+                key,
+                backend,
+                state,
+                bytes_transferred,
+                bytes_total,
+                error,
+            } => (
+                job_id,
+                kind,
+                key,
+                backend,
+                state,
+                bytes_transferred,
+                bytes_total,
+                error,
+            ),
+            _ => return false,
+        };
+
+    let (matched, is_active, agent) = match resolve_notif_agent(app, &session_notif.session_id) {
+        Some(t) => t,
+        None => return false,
+    };
+
+    let child_sid: &str = session_notif.session_id.0.as_ref();
+    let session = if matches!(matched, SessionMatch::Child(_)) {
+        match agent.subagent_views.get_mut(child_sid) {
+            Some(child_view) => &mut child_view.session,
+            None => return false,
+        }
+    } else {
+        &mut agent.session
+    };
+
+    let status = TransferStatus::parse(&state);
+    let restored_from_replay =
+        NotificationMeta::from_json(session_notif.meta.as_ref().and_then(|v| v.as_object()))
+            .is_replay;
+
+    let entry = session.transfers.entry(job_id.clone()).or_insert_with(|| {
+        let mut fresh =
+            TransferState::new(job_id.clone(), kind.clone(), key.clone(), backend.clone());
+        fresh.restored_from_replay = restored_from_replay;
+        fresh
+    });
+
+    // Identity fields are refreshed only when the event carries them, so a
+    // progress-only frame from a partial producer cannot blank a known row.
+    if !kind.is_empty() {
+        entry.kind = kind;
+    }
+    if !key.is_empty() {
+        entry.key = key;
+    }
+    if !backend.is_empty() {
+        entry.backend = backend;
+    }
+
+    entry.apply(status, bytes_transferred, bytes_total, error.clone());
+
+    // Append the frame to the capped progress buffer (mirrors the bg-task
+    // stdout buffer, including the `truncated` flag on overflow).
+    entry.append_progress(&format_transfer_progress(
+        status,
+        bytes_transferred,
+        bytes_total,
+        error.as_deref(),
+    ));
+
+    tracing::debug!(
+        job_id = %entry.job_id,
+        state = %status.label(),
+        bytes_transferred,
+        "Asset transfer job event"
+    );
+
+    is_active
+}
+
+/// One-line, secret-free progress frame for the transfer's capped buffer.
+fn format_transfer_progress(
+    status: TransferStatus,
+    bytes_transferred: u64,
+    bytes_total: Option<u64>,
+    error: Option<&str>,
+) -> String {
+    let bytes = match bytes_total {
+        Some(total) => format!("{} / {}", bytes_transferred, total),
+        None => format!("{bytes_transferred}"),
+    };
+    match error {
+        Some(error) if status == TransferStatus::Failed => {
+            format!("{} {bytes} — {error}", status.label())
+        }
+        _ => format!("{} {bytes}", status.label()),
+    }
+}
+
 pub(super) fn handle_scheduled_task_created(
     notif: &acp::ExtNotification,
     app: &mut AppView,

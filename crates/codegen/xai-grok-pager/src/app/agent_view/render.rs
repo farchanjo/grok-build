@@ -1031,6 +1031,16 @@ impl AgentView {
                     info.kill_requested_at = None;
                 }
             }
+            // Asset transfers share the same retry window: a lost cancel
+            // response must not latch the row in "cancelling…" forever.
+            for transfer in self.session.transfers.values_mut() {
+                if let Some(requested) = transfer.kill_requested_at
+                    && now.duration_since(requested).as_secs() >= PENDING_KILL_TIMEOUT_SECS
+                {
+                    transfer.pending_kill = false;
+                    transfer.kill_requested_at = None;
+                }
+            }
         }
         let queued_cron_ids: HashSet<&str> = self
             .session
@@ -1046,6 +1056,7 @@ impl AgentView {
             self.cron_task_id.as_deref(),
             &queued_cron_ids,
             &self.workflow_runs,
+            &self.session.transfers,
         );
         if self.active_pane == ActivePane::Tasks && !self.tasks.is_visible() {
             self.active_pane = ActivePane::Scrollback;
@@ -1252,6 +1263,7 @@ impl AgentView {
             &self.subagent_sessions,
             &self.session.scheduled_tasks,
             &self.workflow_runs,
+            &self.session.transfers,
         );
         if running_count > 0 {
             let spinner_frames = crate::glyphs::dot_spinner_frames();
@@ -1758,6 +1770,7 @@ impl AgentView {
                 &self.session.bg_tasks,
                 &self.subagent_sessions,
                 &self.session.scheduled_tasks,
+                &self.session.transfers,
             );
             let close_rect = agent::render_todo_chrome(
                 buf,

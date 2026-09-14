@@ -453,6 +453,8 @@ pub enum Action {
     KillBgTask(String),
     /// Kill (cancel) a subagent by subagent_id.
     KillSubagent(String),
+    /// Cancel an async asset transfer job by job_id (`asset_job_cancel`).
+    CancelAssetJob(String),
     CancelScheduledTask(String),
     /// Demote the currently running execute tool to a background task.
     DemoteToBackground,
@@ -1842,6 +1844,11 @@ pub enum Effect {
         session_id: acp::SessionId,
         subagent_id: String,
     },
+    /// Cancel an asset transfer job via `x.ai/asset_job_cancel`.
+    CancelAssetJob {
+        session_id: acp::SessionId,
+        job_id: String,
+    },
     DeleteScheduledTask {
         session_id: acp::SessionId,
         task_id: String,
@@ -2735,6 +2742,19 @@ pub enum TaskResult {
         session_id: acp::SessionId,
         subagent_id: String,
         outcome: SubagentKillOutcome,
+    },
+    /// `x.ai/asset_job_cancel` was accepted. The row keeps its `pending_kill`
+    /// spinner until the job's terminal `x.ai/asset_job_event` lands.
+    AssetJobCancelRequested {
+        session_id: acp::SessionId,
+        job_id: String,
+    },
+    /// `x.ai/asset_job_cancel` failed (unknown job, RPC error). Clears
+    /// `pending_kill` so the user can retry instead of watching a spinner.
+    AssetJobCancelFailed {
+        session_id: acp::SessionId,
+        job_id: String,
+        error: String,
     },
     PreferredModelPersisted {
         result: Result<(), String>,

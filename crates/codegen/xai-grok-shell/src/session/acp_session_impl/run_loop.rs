@@ -1279,6 +1279,15 @@ pub(super) async fn run_session(
                                 .await;
                             let _ = respond_to.send(result);
                         }
+                        SessionCommand::CancelAssetJob { job_id, respond_to } => {
+                            let outcome = session
+                                .agent
+                                .borrow()
+                                .tool_bridge()
+                                .cancel_asset_job(&job_id)
+                                .await;
+                            let _ = respond_to.send(outcome);
+                        }
                         SessionCommand::GetHooksList { respond_to } => {
                             use crate::extensions::hooks::hook_spec_to_info;
 

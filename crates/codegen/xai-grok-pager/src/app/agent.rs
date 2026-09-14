@@ -278,6 +278,200 @@ impl BgTaskState {
         self.stdout_line_count = self.stdout.lines().count();
     }
 }
+/// Maximum in-memory progress log per asset transfer job (64 KiB).
+///
+/// Transfers report progress, not stdout, so the cap is far below
+/// [`BG_TASK_MAX_STDOUT`]: a row only ever needs the newest lines.
+pub const TRANSFER_MAX_PROGRESS: usize = 64 * 1024;
+
+/// Lifecycle of an async asset transfer job.
+///
+/// Mirrors the shell's `JobState` wire values; [`Self::parse`] is total so an
+/// unknown state from a newer shell degrades to [`Self::Running`] instead of
+/// terminating the row early.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TransferStatus {
+    /// Accepted, not yet moving bytes.
+    Queued,
+    /// Bytes are moving.
+    Running,
+    /// Finished successfully.
+    Done,
+    /// Finished with an error.
+    Failed,
+    /// Cancelled by the user (or the shell on shutdown).
+    Cancelled,
+}
+
+impl TransferStatus {
+    /// Parse a wire `state` string. Unknown values stay non-terminal.
+    pub fn parse(raw: &str) -> Self {
+        match raw {
+            "queued" => Self::Queued,
+            "running" => Self::Running,
+            "completed" | "done" => Self::Done,
+            "failed" => Self::Failed,
+            "cancelled" | "canceled" => Self::Cancelled,
+            _ => Self::Running,
+        }
+    }
+
+    /// True once the job has reached a final state.
+    pub fn is_terminal(self) -> bool {
+        matches!(self, Self::Done | Self::Failed | Self::Cancelled)
+    }
+
+    /// True while the job still counts as live activity.
+    pub fn is_live(self) -> bool {
+        !self.is_terminal()
+    }
+
+    /// Human label for the row's status suffix.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Queued => "queued",
+            Self::Running => "running",
+            Self::Done => "done",
+            Self::Failed => "failed",
+            Self::Cancelled => "cancelled",
+        }
+    }
+}
+
+/// Central state for a single async asset transfer job.
+///
+/// Stored in `AgentSession::transfers` keyed by `job_id`. Mirrors
+/// [`BgTaskState`] (status, capped progress buffer with a `truncated` flag,
+/// `pending_kill`) so the tasks pane, the kill button and the status-bar
+/// counter reuse the existing plumbing unchanged.
+#[derive(Debug, Clone)]
+pub struct TransferState {
+    pub job_id: String,
+    /// `upload` or `download`.
+    pub kind: String,
+    /// Store key (or destination path for downloads) the job moves.
+    pub key: String,
+    /// Backend slug (`s3`, `gcs`, `local`, `proxy`).
+    pub backend: String,
+    pub status: TransferStatus,
+    pub bytes_transferred: u64,
+    /// `None` until the total size is known (streaming downloads).
+    pub bytes_total: Option<u64>,
+    pub started_at: Instant,
+    pub ended_at: Option<Instant>,
+    /// Secret-free failure text.
+    pub error: Option<String>,
+    /// Progress log lines. Mutate via [`Self::append_progress`] so
+    /// `progress_line_count` and `truncated` stay in sync.
+    pub progress: String,
+    /// Cached `progress.lines().count()`.
+    pub progress_line_count: usize,
+    /// Whether the rolling buffer has dropped data. Once `true`, stays `true`.
+    pub truncated: bool,
+    /// Cancel request sent, awaiting the terminal event.
+    pub pending_kill: bool,
+    /// When the cancel request was sent; auto-cleared after
+    /// [`PENDING_KILL_TIMEOUT_SECS`] so the user can retry.
+    pub kill_requested_at: Option<Instant>,
+    /// True when the job was restored from a `session/load` replay.
+    pub restored_from_replay: bool,
+}
+
+impl TransferState {
+    /// Build a fresh row from the first event seen for `job_id`.
+    pub fn new(job_id: String, kind: String, key: String, backend: String) -> Self {
+        Self {
+            job_id,
+            kind,
+            key,
+            backend,
+            status: TransferStatus::Queued,
+            bytes_transferred: 0,
+            bytes_total: None,
+            started_at: Instant::now(),
+            ended_at: None,
+            error: None,
+            progress: String::new(),
+            progress_line_count: 0,
+            truncated: false,
+            pending_kill: false,
+            kill_requested_at: None,
+            restored_from_replay: false,
+        }
+    }
+
+    /// Elapsed duration (from start to end, or start to now if still live).
+    pub fn elapsed(&self) -> Duration {
+        let end = self.ended_at.unwrap_or_else(Instant::now);
+        end.saturating_duration_since(self.started_at)
+    }
+
+    /// Whole-percent completion, or `None` when the total is unknown or zero.
+    pub fn percent(&self) -> Option<u8> {
+        let total = self.bytes_total.filter(|t| *t > 0)?;
+        let pct = (self.bytes_transferred.min(total) as u128 * 100) / total as u128;
+        Some(pct.min(100) as u8)
+    }
+
+    /// Append one progress line, trimming the head past
+    /// [`TRANSFER_MAX_PROGRESS`] and flipping `truncated` when it does.
+    pub fn append_progress(&mut self, line: &str) {
+        if line.is_empty() {
+            return;
+        }
+        if !self.progress.is_empty() {
+            self.progress.push('\n');
+        }
+        self.progress.push_str(line);
+        if self.progress.len() > TRANSFER_MAX_PROGRESS {
+            let want_start = self.progress.len() - TRANSFER_MAX_PROGRESS;
+            let mut start = want_start;
+            while start < self.progress.len() && !self.progress.is_char_boundary(start) {
+                start += 1;
+            }
+            self.progress = self.progress[start..].to_string();
+            self.truncated = true;
+        }
+        self.progress_line_count = self.progress.lines().count();
+    }
+
+    /// Apply one wire event in place.
+    ///
+    /// Terminal transitions stamp `ended_at`, clear `pending_kill` (the cancel
+    /// landed), and are never overwritten by a later non-terminal state.
+    pub fn apply(
+        &mut self,
+        status: TransferStatus,
+        bytes_transferred: u64,
+        bytes_total: Option<u64>,
+        error: Option<String>,
+    ) {
+        if self.status.is_terminal() && !status.is_terminal() {
+            // A trailing progress event after completion keeps the terminal
+            // state; bytes may still be reported for a coalesced final frame.
+            self.bytes_transferred = bytes_transferred;
+            if bytes_total.is_some() {
+                self.bytes_total = bytes_total;
+            }
+            return;
+        }
+
+        self.status = status;
+        self.bytes_transferred = bytes_transferred;
+        if bytes_total.is_some() {
+            self.bytes_total = bytes_total;
+        }
+        if error.is_some() {
+            self.error = error;
+        }
+        if status.is_terminal() {
+            self.ended_at = Some(Instant::now());
+            self.pending_kill = false;
+            self.kill_requested_at = None;
+        }
+    }
+}
+
 /// State for a scheduled (loop) task, displayed in the tasks pane.
 #[derive(Debug, Clone)]
 pub struct ScheduledTaskInfo {
@@ -712,6 +906,12 @@ pub struct AgentSession {
     pub bg_tool_call_to_task: HashMap<String, String>,
     /// Active scheduled tasks, keyed by task_id.
     pub scheduled_tasks: HashMap<String, ScheduledTaskInfo>,
+    /// Async asset transfer jobs, keyed by job_id.
+    ///
+    /// Populated from `x.ai/asset_job_event` (already coalesced shell-side) and
+    /// rendered by the tasks pane's `Transfers` group; live jobs also feed the
+    /// status bar's activity counter.
+    pub transfers: BTreeMap<String, TransferState>,
     /// Plain-text prompt currently in flight, captured at send time and
     /// cleared as soon as the server emits any activity (chunk, tool call,
     /// retry, etc.). Used by `do_cancel_turn` to "rewind" a prompt back to
@@ -1564,6 +1764,7 @@ mod tests {
             bg_tasks: BTreeMap::new(),
             bg_tool_call_to_task: HashMap::new(),
             scheduled_tasks: HashMap::new(),
+            transfers: BTreeMap::new(),
             in_flight_prompt: None,
             compact_held_prompt: None,
             current_prompt_id: None,

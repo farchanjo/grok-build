@@ -1809,6 +1809,33 @@ pub(crate) fn execute(
                     }
                 });
         }
+        Effect::CancelAssetJob { session_id, job_id } => {
+            let tx = acp_tx.clone();
+            tasks
+                .spawn(async move {
+                    let params = serde_json::json!({
+                        "sessionId": session_id.0.to_string(),
+                        "jobId": &job_id,
+                    });
+                    let req = acp::ExtRequest::new(
+                        "x.ai/asset_job_cancel",
+                        serde_json::value::to_raw_value(&params)
+                            .expect("serialize asset job cancel params")
+                            .into(),
+                    );
+                    match acp_send(req, &tx).await {
+                        Ok(_) => TaskResult::AssetJobCancelRequested { session_id, job_id },
+                        Err(e) => {
+                            tracing::warn!(job_id, "Failed to cancel asset job: {e}");
+                            TaskResult::AssetJobCancelFailed {
+                                session_id,
+                                job_id,
+                                error: sanitize_user_error(&e.to_string()),
+                            }
+                        }
+                    }
+                });
+        }
         Effect::DeleteScheduledTask { session_id, task_id } => {
             let tx = acp_tx.clone();
             tasks

@@ -484,6 +484,11 @@ impl AgentView {
                                             )),
                                         );
                                     }
+                                    TaskEntryId::Transfer(job_id) => {
+                                        return InputOutcome::Action(Action::CancelAssetJob(
+                                            job_id.clone(),
+                                        ));
+                                    }
                                 }
                             }
                         }
@@ -553,6 +558,7 @@ impl AgentView {
                                         }
                                     }
                                     TaskEntryId::Workflow(_) => {}
+                                    TaskEntryId::Transfer(_) => {}
                                 }
                             }
                         }

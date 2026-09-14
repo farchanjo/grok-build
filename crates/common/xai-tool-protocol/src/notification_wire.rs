@@ -65,6 +65,7 @@ pub const KNOWN_NOTIFICATION_KINDS: &[&str] = &[
     "ScheduledTaskRemoved",
     "ScheduledTaskCreated",
     "MonitorEvent",
+    "AssetJobEvent",
 ];
 
 pub const fn known_notification_kinds() -> &'static [&'static str] {

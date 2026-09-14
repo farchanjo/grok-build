@@ -2451,6 +2451,7 @@ pub(crate) mod test_fixtures {
             None,
             &std::collections::HashSet::new(),
             &agent.workflow_runs,
+            &agent.session.transfers,
         );
     }
     pub fn add_running_execute(agent: &mut AgentView) {
@@ -2503,6 +2504,7 @@ pub(crate) mod test_fixtures {
             bg_tasks: std::collections::BTreeMap::new(),
             bg_tool_call_to_task: std::collections::HashMap::new(),
             scheduled_tasks: std::collections::HashMap::new(),
+            transfers: std::collections::BTreeMap::new(),
             in_flight_prompt: None,
             compact_held_prompt: None,
             current_prompt_id: None,
@@ -2569,6 +2571,7 @@ pub(crate) mod test_fixtures {
                 bg_tasks: std::collections::BTreeMap::new(),
                 bg_tool_call_to_task: std::collections::HashMap::new(),
                 scheduled_tasks: std::collections::HashMap::new(),
+                transfers: std::collections::BTreeMap::new(),
                 in_flight_prompt: None,
                 compact_held_prompt: None,
                 current_prompt_id: None,
@@ -3400,6 +3403,7 @@ pub(crate) fn test_agent_view(session_id: Option<&str>, cwd: std::path::PathBuf)
             bg_tasks: std::collections::BTreeMap::new(),
             bg_tool_call_to_task: std::collections::HashMap::new(),
             scheduled_tasks: std::collections::HashMap::new(),
+            transfers: std::collections::BTreeMap::new(),
             in_flight_prompt: None,
             compact_held_prompt: None,
             current_prompt_id: None,

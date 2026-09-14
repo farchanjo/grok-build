@@ -413,6 +413,7 @@ pub(super) fn handle_session_notification(notif: &acp::ExtNotification, app: &mu
                 bg_tasks: std::collections::BTreeMap::new(),
                 bg_tool_call_to_task: std::collections::HashMap::new(),
                 scheduled_tasks: std::collections::HashMap::new(),
+                transfers: std::collections::BTreeMap::new(),
                 available_commands: Vec::new(),
                 available_commands_generation: 0,
                 available_tools: None,

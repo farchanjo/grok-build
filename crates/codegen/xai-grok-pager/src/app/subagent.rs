@@ -574,6 +574,7 @@ mod tests {
             bg_tasks: BTreeMap::new(),
             bg_tool_call_to_task: HashMap::new(),
             scheduled_tasks: HashMap::new(),
+            transfers: std::collections::BTreeMap::new(),
             in_flight_prompt: None,
             compact_held_prompt: None,
             current_prompt_id: None,

@@ -548,6 +548,12 @@ pub enum SessionCommand {
         task_id: String,
         respond_to: oneshot::Sender<Result<bool, String>>,
     },
+    /// Cancel an in-flight asset transfer job by job_id.
+    /// Routes through the ToolBridge to the session's asset job registry.
+    CancelAssetJob {
+        job_id: String,
+        respond_to: oneshot::Sender<xai_file_utils::assets::jobs::CancelOutcome>,
+    },
     /// List all background tasks.
     /// Routes through the ToolBridge's TerminalBackend.
     ListTasks {

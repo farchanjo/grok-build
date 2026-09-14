@@ -372,6 +372,9 @@ impl AgentView {
                     }
                 }
                 Some(TaskEntry::Scheduled { .. }) => {}
+                // Transfers have no dedicated viewer; Enter is a no-op like
+                // scheduled rows (the progress lives on the row itself).
+                Some(TaskEntry::Transfer { .. }) => {}
                 Some(TaskEntry::Workflow { name, .. }) => {
                     let name = name.clone();
                     self.open_workflow_detail(&name);
@@ -404,6 +407,17 @@ impl AgentView {
                 }
                 Some(TaskEntry::Scheduled { task_id, .. }) => {
                     return InputOutcome::Action(Action::CancelScheduledTask(task_id.clone()));
+                }
+                Some(TaskEntry::Transfer { job_id, .. }) => {
+                    let job_id = job_id.clone();
+                    if self
+                        .session
+                        .transfers
+                        .get(&job_id)
+                        .is_some_and(|t| t.status.is_live() && !t.pending_kill)
+                    {
+                        return InputOutcome::Action(Action::CancelAssetJob(job_id));
+                    }
                 }
                 Some(TaskEntry::Workflow {
                     name, stoppable, ..

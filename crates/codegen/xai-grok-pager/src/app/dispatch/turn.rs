@@ -521,6 +521,30 @@ pub(super) fn dispatch_kill_bg_task(app: &mut AppView, task_id: String) -> Vec<E
     }]
 }
 
+/// Cancel an async asset transfer job (`asset_job_cancel`).
+///
+/// Marks the row `pending_kill` optimistically — the shell's terminal
+/// `x.ai/asset_job_event` (state `cancelled`) clears it, and a failed RPC
+/// clears it through `TaskResult::AssetJobCancelFailed`.
+pub(super) fn dispatch_cancel_asset_job(app: &mut AppView, job_id: String) -> Vec<Effect> {
+    let ActiveView::Agent(id) = app.active_view else {
+        return vec![];
+    };
+    let Some(agent) = app.agents.get_mut(&id) else {
+        return vec![];
+    };
+    let Some(session_id) = agent.session.session_id.clone() else {
+        return vec![];
+    };
+
+    if let Some(transfer) = agent.session.transfers.get_mut(&job_id) {
+        transfer.pending_kill = true;
+        transfer.kill_requested_at = Some(Instant::now());
+    }
+
+    vec![Effect::CancelAssetJob { session_id, job_id }]
+}
+
 pub(super) fn dispatch_kill_subagent(app: &mut AppView, subagent_id: String) -> Vec<Effect> {
     let ActiveView::Agent(id) = app.active_view else {
         return vec![];

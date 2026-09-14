@@ -740,6 +740,31 @@ pub enum SessionUpdate {
         /// Raw event text (NOT XML-wrapped -- for pager stdout display).
         event_text: String,
     },
+    /// An async asset transfer job changed state or moved bytes.
+    ///
+    /// Emitted from the notification bridge on `x.ai/asset_job_event`, already
+    /// coalesced shell-side (token bucket, 500 ms / capacity 10) so a fast
+    /// upload cannot flood the ACP channel. `state` is the snake_case job
+    /// state; the pager renders a row per `job_id` and counts live jobs in the
+    /// status bar. Every field is secret-free (no signed URLs).
+    AssetJobEvent {
+        job_id: String,
+        /// `upload` or `download`.
+        kind: String,
+        /// Store key (or destination path for a download).
+        key: String,
+        /// Backend slug: `s3`, `gcs`, `local`, `proxy`.
+        backend: String,
+        /// `queued` | `running` | `completed` | `failed` | `cancelled`.
+        state: String,
+        bytes_transferred: u64,
+        /// Absent until the total size is known.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        bytes_total: Option<u64>,
+        /// Secret-free failure text; only set for a failed job.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
+    },
     /// The session's model was auto-switched because the persisted model
     /// is no longer available for this user.
     ModelAutoSwitched {

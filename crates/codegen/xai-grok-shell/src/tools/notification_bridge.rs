@@ -9,11 +9,69 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::{Mutex as TokioMutex, mpsc};
 use xai_acp_lib::AcpAgentGatewaySender as GatewaySender;
-use xai_grok_tools::notification::types::{ToolNotification, ToolNotificationHandle};
+use xai_grok_tools::notification::types::{
+    AssetJobEvent, ToolNotification, ToolNotificationHandle,
+};
+// `TokenBucket` lives in `xai-file-utils` and is re-exported by the monitor
+// module; importing through the monitor keeps this path stable whether or not
+// the shared limiter module is present in a given checkout.
+use xai_grok_tools::implementations::grok_build::monitor::rate_limiter::TokenBucket;
 use xai_grok_tools::types::output::{BashOutput, ToolOutput};
 use xai_grok_workspace::session::file_state::FileStateTracker;
 use xai_hunk_tracker::HunkTrackerHandle;
 const TASK_WAKE_ADMISSION_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(250);
+
+/// How many `x.ai/asset_job_event` frames may pass before the coalescer starts
+/// dropping progress frames.
+const ASSET_JOB_COALESCE_CAPACITY: u32 = 10;
+/// Refill interval for the asset-job coalescer's token bucket.
+const ASSET_JOB_COALESCE_REFILL_MS: u64 = 500;
+
+/// Per-session mutable state for the notification bridge.
+///
+/// Bundled so a new coalescer does not grow `handle_notification`'s arity on
+/// every feature; the bridge owns exactly one instance per session.
+#[derive(Default)]
+struct BridgeState {
+    /// Byte offsets per tool_call_id for incremental bash output.
+    offsets: HashMap<String, usize>,
+    /// Progress coalescer for asset transfer jobs.
+    asset_jobs: AssetJobCoalescer,
+}
+
+/// Shell-side throttle for `x.ai/asset_job_event`.
+///
+/// Coalescing happens **here, before the ACP hop**, so a fast upload cannot
+/// flood the channel; the pager renders only what it receives. Each job gets
+/// its own [`TokenBucket`] (500 ms refill, capacity 10) — one bucket per job
+/// so a burst on one transfer cannot starve another.
+///
+/// Terminal frames always pass and drop their bucket: a throttled completion
+/// would otherwise leave the pager row spinning forever.
+#[derive(Default)]
+struct AssetJobCoalescer {
+    buckets: HashMap<String, TokenBucket>,
+}
+
+impl AssetJobCoalescer {
+    /// Whether this frame should reach the client.
+    fn admit(&mut self, event: &AssetJobEvent) -> bool {
+        if event.is_terminal() {
+            self.forget(&event.job_id);
+            return true;
+        }
+        let bucket = self.buckets.entry(event.job_id.clone()).or_insert_with(|| {
+            TokenBucket::new(ASSET_JOB_COALESCE_CAPACITY, ASSET_JOB_COALESCE_REFILL_MS)
+        });
+        bucket.try_consume()
+    }
+
+    /// Forget the bucket for `job_id` (used by tests and on terminal frames
+    /// that arrive out of band).
+    fn forget(&mut self, job_id: &str) {
+        self.buckets.remove(job_id);
+    }
+}
 
 /// Outcome of the actor-side admission handshake for a synthetic
 /// task-completion wake. Drives the fail-safe so a wake that never becomes a
@@ -222,7 +280,7 @@ async fn handle_scheduled_task_removed(
 pub fn spawn_notification_bridge(config: NotificationBridgeConfig) -> ToolNotificationHandle {
     let (handle, mut rx) = ToolNotificationHandle::acknowledged_channel();
     tokio::task::spawn_local(async move {
-        let mut offsets: HashMap<String, usize> = HashMap::new();
+        let mut state = BridgeState::default();
         while let Some(delivery) = rx.recv().await {
             let acknowledgement = delivery.acknowledgement;
             match delivery.notification {
@@ -234,7 +292,7 @@ pub fn spawn_notification_bridge(config: NotificationBridgeConfig) -> ToolNotifi
                     }
                 }
                 notification => {
-                    handle_notification(&config, notification, &mut offsets).await;
+                    handle_notification(&config, notification, &mut state).await;
                     if let Some(acknowledgement) = acknowledgement {
                         let _ = acknowledgement.send(Ok(()));
                     }
@@ -268,8 +326,9 @@ async fn emit_current_mode_update(
 async fn handle_notification(
     config: &NotificationBridgeConfig,
     notification: ToolNotification,
-    offsets: &mut HashMap<String, usize>,
+    state: &mut BridgeState,
 ) {
+    let offsets = &mut state.offsets;
     match notification {
         ToolNotification::BashOutputChunk(chunk) => {
             let (output, output_delta) = if config.incremental_bash_output {
@@ -857,6 +916,42 @@ async fn handle_notification(
                 tracing::warn!(%error, "Failed to handle scheduled task removal");
             }
         }
+        ToolNotification::AssetJobEvent(event) => {
+            // Coalesce progress before the ACP hop: the pager renders only what
+            // reaches it, so a fast transfer must not flood the channel.
+            if !state.asset_jobs.admit(&event) {
+                tracing::trace!(
+                    job_id = %event.job_id,
+                    state = %event.state,
+                    "asset job progress coalesced"
+                );
+                return;
+            }
+            let notification = crate::extensions::notification::SessionNotification {
+                session_id: config.session_id.clone(),
+                update: crate::extensions::notification::SessionUpdate::AssetJobEvent {
+                    job_id: event.job_id.clone(),
+                    kind: event.kind,
+                    key: event.key,
+                    backend: event.backend,
+                    state: event.state,
+                    bytes_transferred: event.bytes_transferred,
+                    bytes_total: event.bytes_total,
+                    error: event.error,
+                },
+                meta: None,
+            };
+            if let Ok(params) = serde_json::to_value(&notification)
+                .and_then(|v| serde_json::value::to_raw_value(&v))
+            {
+                config
+                    .gateway
+                    .forward_fire_and_forget(acp::ExtNotification::new(
+                        "x.ai/asset_job_event",
+                        params.into(),
+                    ));
+            }
+        }
         ToolNotification::ScheduledTaskCreated(created) => {
             tracing::info!(task_id = %created.task_id, "Scheduled task created");
             let mut meta = None;
@@ -897,11 +992,11 @@ mod tests {
     async fn handle_notification_with_admission(
         config: &NotificationBridgeConfig,
         notification: ToolNotification,
-        offsets: &mut HashMap<String, usize>,
+        state: &mut BridgeState,
         cmd_rx: &mut mpsc::UnboundedReceiver<SessionCommand>,
         accepted: bool,
     ) {
-        let notification = handle_notification(config, notification, offsets);
+        let notification = handle_notification(config, notification, state);
         tokio::pin!(notification);
         let mut command = tokio::select! {
             _ = &mut notification => panic!("notification completed before requesting admission"),
@@ -1013,8 +1108,8 @@ mod tests {
             .expect("slot is fresh in this test fixture");
         let snapshot = make_task_snapshot("bg-123", TaskKind::Bash);
         let notification = ToolNotification::TaskCompleted(snapshot);
-        let mut offsets = HashMap::new();
-        handle_notification_with_admission(&config, notification, &mut offsets, &mut cmd_rx, true)
+        let mut state = BridgeState::default();
+        handle_notification_with_admission(&config, notification, &mut state, &mut cmd_rx, true)
             .await;
         let command = cmd_rx.try_recv().expect("expected Prompt");
         match command {
@@ -1071,11 +1166,11 @@ mod tests {
             .goal_loop_active
             .store(true, std::sync::atomic::Ordering::Relaxed);
         let snapshot = make_task_snapshot("bg-goal", TaskKind::Bash);
-        let mut offsets = HashMap::new();
+        let mut state = BridgeState::default();
         handle_notification(
             &config,
             ToolNotification::TaskCompleted(snapshot),
-            &mut offsets,
+            &mut state,
         )
         .await;
         match cmd_rx
@@ -1122,11 +1217,11 @@ mod tests {
             .set(Some("get_command_or_subagent_output".to_string()))
             .expect("slot is fresh in this test fixture");
         let snapshot = make_task_snapshot("bg-normal", TaskKind::Bash);
-        let mut offsets = HashMap::new();
+        let mut state = BridgeState::default();
         handle_notification_with_admission(
             &config,
             ToolNotification::TaskCompleted(snapshot),
-            &mut offsets,
+            &mut state,
             &mut cmd_rx,
             true,
         )
@@ -1172,11 +1267,11 @@ mod tests {
             .synthetic_trace_tx
             .lock()
             .unwrap_or_else(|e| e.into_inner()) = Some(trace_tx);
-        let mut offsets = HashMap::new();
+        let mut state = BridgeState::default();
         handle_notification_with_admission(
             &config,
             ToolNotification::TaskCompleted(make_task_snapshot("bg-wake", TaskKind::Bash)),
-            &mut offsets,
+            &mut state,
             &mut cmd_rx,
             true,
         )
@@ -1204,11 +1299,11 @@ mod tests {
             .synthetic_trace_tx
             .lock()
             .unwrap_or_else(|e| e.into_inner()) = Some(trace_tx);
-        let mut offsets = HashMap::new();
+        let mut state = BridgeState::default();
         handle_notification_with_admission(
             &config,
             ToolNotification::TaskCompleted(make_task_snapshot("bg-declined", TaskKind::Bash)),
-            &mut offsets,
+            &mut state,
             &mut cmd_rx,
             false,
         )
@@ -1258,11 +1353,11 @@ mod tests {
             .task_output_tool_name
             .set(Some("get_command_or_subagent_output".to_string()))
             .expect("slot is fresh in this test fixture");
-        let mut offsets = HashMap::new();
+        let mut state = BridgeState::default();
         let notification = handle_notification(
             &config,
             ToolNotification::TaskCompleted(make_task_snapshot("bg-stalled", TaskKind::Bash)),
-            &mut offsets,
+            &mut state,
         );
         tokio::pin!(notification);
         tokio::select! {
@@ -1299,11 +1394,11 @@ mod tests {
             .task_output_tool_name
             .set(Some("get_command_or_subagent_output".to_string()))
             .expect("slot is fresh in this test fixture");
-        let mut offsets = HashMap::new();
+        let mut state = BridgeState::default();
         let notification = handle_notification(
             &config,
             ToolNotification::TaskCompleted(make_task_snapshot("mon-timeout", TaskKind::Monitor)),
-            &mut offsets,
+            &mut state,
         );
         tokio::pin!(notification);
         let prompt = tokio::select! {
@@ -1358,11 +1453,11 @@ mod tests {
         config
             .task_completion_reservations
             .reserve("bg-dead".into());
-        let mut offsets = HashMap::new();
+        let mut state = BridgeState::default();
         handle_notification(
             &config,
             ToolNotification::TaskCompleted(make_task_snapshot("bg-dead", TaskKind::Bash)),
-            &mut offsets,
+            &mut state,
         )
         .await;
         assert_eq!(
@@ -1387,11 +1482,11 @@ mod tests {
             .goal_loop_active
             .store(true, std::sync::atomic::Ordering::Relaxed);
         let snapshot = make_task_snapshot("bg-disabled-goal", TaskKind::Bash);
-        let mut offsets = HashMap::new();
+        let mut state = BridgeState::default();
         handle_notification(
             &config,
             ToolNotification::TaskCompleted(snapshot),
-            &mut offsets,
+            &mut state,
         )
         .await;
         match cmd_rx
@@ -1426,11 +1521,11 @@ mod tests {
         snapshot.display_command = Some("[monitor] watch deploy".into());
         snapshot.command = "tail -f deploy.log".into();
         snapshot.exit_code = Some(0);
-        let mut offsets = HashMap::new();
+        let mut state = BridgeState::default();
         handle_notification_with_admission(
             &config,
             ToolNotification::TaskCompleted(snapshot),
-            &mut offsets,
+            &mut state,
             &mut cmd_rx,
             true,
         )
@@ -1489,11 +1584,11 @@ mod tests {
             .task_output_tool_name
             .set(Some("get_command_or_subagent_output".to_string()))
             .expect("slot is fresh in this test fixture");
-        let mut offsets = HashMap::new();
+        let mut state = BridgeState::default();
         handle_notification_with_admission(
             &config,
             ToolNotification::TaskCompleted(make_task_snapshot("mon-declined", TaskKind::Monitor)),
-            &mut offsets,
+            &mut state,
             &mut cmd_rx,
             false,
         )
@@ -1533,7 +1628,7 @@ mod tests {
         config
             .task_completion_reservations
             .reserve("mon-done".into());
-        let mut offsets = HashMap::new();
+        let mut state = BridgeState::default();
         handle_notification(
             &config,
             ToolNotification::MonitorEvent(xai_grok_tools::notification::types::MonitorEvent {
@@ -1543,7 +1638,7 @@ mod tests {
                 raw_text: "done".into(),
                 owner_session_id: Some("test-session".into()),
             }),
-            &mut offsets,
+            &mut state,
         )
         .await;
         assert!(
@@ -1558,11 +1653,11 @@ mod tests {
         let (config, mut cmd_rx) = make_test_config();
         let mut snapshot = make_task_snapshot("mon-killed", TaskKind::Monitor);
         snapshot.explicitly_killed = true;
-        let mut offsets = HashMap::new();
+        let mut state = BridgeState::default();
         handle_notification(
             &config,
             ToolNotification::TaskCompleted(snapshot),
-            &mut offsets,
+            &mut state,
         )
         .await;
         match cmd_rx
@@ -1590,11 +1685,11 @@ mod tests {
             .goal_loop_active
             .store(true, std::sync::atomic::Ordering::Relaxed);
         let snapshot = make_task_snapshot("mon-goal", TaskKind::Monitor);
-        let mut offsets = HashMap::new();
+        let mut state = BridgeState::default();
         handle_notification(
             &config,
             ToolNotification::TaskCompleted(snapshot),
-            &mut offsets,
+            &mut state,
         )
         .await;
         match cmd_rx
@@ -1627,8 +1722,8 @@ mod tests {
                 revision: 1,
             },
         );
-        let mut offsets = HashMap::new();
-        handle_notification(&config, notification, &mut offsets).await;
+        let mut state = BridgeState::default();
+        handle_notification(&config, notification, &mut BridgeState::default()).await;
         let msg = persistence_rx
             .try_recv()
             .expect("scheduled_task_created must be persisted");
@@ -1674,8 +1769,8 @@ mod tests {
                 },
             },
         );
-        let mut offsets = HashMap::new();
-        handle_notification(&config, notification, &mut offsets).await;
+        let mut state = BridgeState::default();
+        handle_notification(&config, notification, &mut BridgeState::default()).await;
         let persisted_id = match persistence_rx.try_recv().expect("chunk must be persisted") {
             PersistenceMsg::Update(crate::session::storage::SessionUpdate::Acp(notif)) => notif
                 .meta
@@ -1799,8 +1894,8 @@ mod tests {
                 description: None,
             },
         );
-        let mut offsets = HashMap::new();
-        handle_notification(&config, notification, &mut offsets).await;
+        let mut state = BridgeState::default();
+        handle_notification(&config, notification, &mut BridgeState::default()).await;
         match persistence_rx.try_recv().expect("must persist") {
             PersistenceMsg::Update(crate::session::storage::SessionUpdate::Xai(notif)) => {
                 assert!(xai_persisted_event_id(&notif).is_some());
@@ -1812,11 +1907,11 @@ mod tests {
     async fn task_completed_persisted_line_is_stamped() {
         let (config, _gateway_rx, mut persistence_rx, _cmd_rx) = make_test_config_full();
         let snapshot = make_task_snapshot("mon-1", TaskKind::Monitor);
-        let mut offsets = HashMap::new();
+        let mut state = BridgeState::default();
         handle_notification(
             &config,
             ToolNotification::TaskCompleted(snapshot),
-            &mut offsets,
+            &mut state,
         )
         .await;
         match persistence_rx.try_recv().expect("must persist") {
@@ -1878,8 +1973,8 @@ mod tests {
                 revision: 3,
             },
         );
-        let mut offsets = HashMap::new();
-        handle_notification(&config, notification, &mut offsets).await;
+        let mut state = BridgeState::default();
+        handle_notification(&config, notification, &mut BridgeState::default()).await;
         assert!(
             persistence_rx.try_recv().is_err(),
             "scheduled_task_fired must NOT be persisted (recurring \u{2192} unbounded log growth)"
@@ -1907,8 +2002,8 @@ mod tests {
     async fn cross_session_monitor_event_is_dropped() {
         let (config, mut gateway_rx, _persistence_rx, mut cmd_rx) = make_test_config_full();
         let notification = make_monitor_event_notification("mon-foreign", Some("other-session"));
-        let mut offsets = HashMap::new();
-        handle_notification(&config, notification, &mut offsets).await;
+        let mut state = BridgeState::default();
+        handle_notification(&config, notification, &mut BridgeState::default()).await;
         assert!(
             cmd_rx.try_recv().is_err(),
             "cross-session monitor event must not be injected into this session"
@@ -1927,8 +2022,8 @@ mod tests {
     async fn same_session_monitor_event_is_injected() {
         let (config, mut cmd_rx) = make_test_config();
         let notification = make_monitor_event_notification("mon-own", Some("test-session"));
-        let mut offsets = HashMap::new();
-        handle_notification(&config, notification, &mut offsets).await;
+        let mut state = BridgeState::default();
+        handle_notification(&config, notification, &mut BridgeState::default()).await;
         match cmd_rx
             .try_recv()
             .expect("own-session monitor event must be injected")
@@ -1946,8 +2041,8 @@ mod tests {
     async fn legacy_monitor_event_without_owner_is_injected() {
         let (config, mut cmd_rx) = make_test_config();
         let notification = make_monitor_event_notification("mon-legacy", None);
-        let mut offsets = HashMap::new();
-        handle_notification(&config, notification, &mut offsets).await;
+        let mut state = BridgeState::default();
+        handle_notification(&config, notification, &mut BridgeState::default()).await;
         assert!(
             matches!(
                 cmd_rx
@@ -1967,8 +2062,8 @@ mod tests {
         let mut snapshot = make_task_snapshot("bg-waited", TaskKind::Bash);
         snapshot.block_waited = true;
         let notification = ToolNotification::TaskCompleted(snapshot);
-        let mut offsets = HashMap::new();
-        handle_notification(&config, notification, &mut offsets).await;
+        let mut state = BridgeState::default();
+        handle_notification(&config, notification, &mut BridgeState::default()).await;
         match cmd_rx
             .try_recv()
             .expect("expected DispatchNotificationHook for task_complete")
@@ -2003,8 +2098,8 @@ mod tests {
         let mut snapshot = make_task_snapshot("bg-killed", TaskKind::Bash);
         snapshot.explicitly_killed = true;
         let notification = ToolNotification::TaskCompleted(snapshot);
-        let mut offsets = HashMap::new();
-        handle_notification(&config, notification, &mut offsets).await;
+        let mut state = BridgeState::default();
+        handle_notification(&config, notification, &mut BridgeState::default()).await;
         match cmd_rx
             .try_recv()
             .expect("expected DispatchNotificationHook for task_complete")
@@ -2043,8 +2138,8 @@ mod tests {
             .expect("slot is fresh in this test fixture");
         let snapshot = make_task_snapshot("bg-disabled", TaskKind::Bash);
         let notification = ToolNotification::TaskCompleted(snapshot);
-        let mut offsets = HashMap::new();
-        handle_notification(&config, notification, &mut offsets).await;
+        let mut state = BridgeState::default();
+        handle_notification(&config, notification, &mut BridgeState::default()).await;
         let cmd = cmd_rx.try_recv().expect("expected InjectNotification");
         match cmd {
             SessionCommand::InjectNotification {
@@ -2093,8 +2188,8 @@ mod tests {
         let (config, mut cmd_rx) = make_test_config();
         let snapshot = make_task_snapshot("unique-id-789", TaskKind::Bash);
         let notification = ToolNotification::TaskCompleted(snapshot);
-        let mut offsets = HashMap::new();
-        handle_notification_with_admission(&config, notification, &mut offsets, &mut cmd_rx, true)
+        let mut state = BridgeState::default();
+        handle_notification_with_admission(&config, notification, &mut state, &mut cmd_rx, true)
             .await;
         let cmd = cmd_rx.try_recv().unwrap();
         if let SessionCommand::Prompt { prompt_id, .. } = cmd {
@@ -2127,8 +2222,8 @@ mod tests {
                 plan_content: Some("- step 1".into()),
                 plan_file_path: "/tmp/test-session/plan.md".into(),
             });
-        let mut offsets = HashMap::new();
-        handle_notification(&config, notification, &mut offsets).await;
+        let mut state = BridgeState::default();
+        handle_notification(&config, notification, &mut BridgeState::default()).await;
         let mut gateway_modes = Vec::new();
         while let Ok(msg) = gateway_rx.try_recv() {
             if let xai_acp_lib::AcpClientMessage::SessionNotification(args) = msg
@@ -2177,8 +2272,8 @@ mod tests {
                 plan_content: Some("- step 1".into()),
                 plan_file_path: "/tmp/test-session/plan.md".into(),
             });
-        let mut offsets = HashMap::new();
-        handle_notification(&config, notification, &mut offsets).await;
+        let mut state = BridgeState::default();
+        handle_notification(&config, notification, &mut BridgeState::default()).await;
         assert!(
             !config.plan_mode.lock().has_pending_exit_reminder(),
             "approved exit must not arm the deferred exit reminder"
@@ -2216,8 +2311,8 @@ mod tests {
                 plan_content: Some("- step 1".into()),
                 plan_file_path: "/tmp/test-session/plan.md".into(),
             });
-        let mut offsets = HashMap::new();
-        handle_notification(&config, notification, &mut offsets).await;
+        let mut state = BridgeState::default();
+        handle_notification(&config, notification, &mut BridgeState::default()).await;
         assert!(
             config.plan_mode.lock().has_pending_exit_reminder(),
             "gated approved exit must arm the next-turn exit reminder"
@@ -2246,8 +2341,8 @@ mod tests {
                 tool_call_id: "tc-enter-1".into(),
             },
         );
-        let mut offsets = HashMap::new();
-        handle_notification(&config, notification, &mut offsets).await;
+        let mut state = BridgeState::default();
+        handle_notification(&config, notification, &mut BridgeState::default()).await;
         let mut gateway_modes = Vec::new();
         while let Ok(msg) = gateway_rx.try_recv() {
             if let xai_acp_lib::AcpClientMessage::SessionNotification(args) = msg
@@ -2330,11 +2425,11 @@ mod tests {
             .set(Some("read_file".to_string()))
             .expect("fresh slot");
         let snapshot = make_large_bash_snapshot("bg-disk-1", output_file.clone());
-        let mut offsets = HashMap::new();
+        let mut state = BridgeState::default();
         handle_notification_with_admission(
             &config_auto,
             ToolNotification::TaskCompleted(snapshot),
-            &mut offsets,
+            &mut state,
             &mut cmd_rx_auto,
             true,
         )
@@ -2363,11 +2458,11 @@ mod tests {
             .set(Some("read_file".to_string()))
             .expect("fresh slot");
         let snapshot = make_large_bash_snapshot("bg-disk-2", output_file.clone());
-        let mut offsets = HashMap::new();
+        let mut state = BridgeState::default();
         handle_notification(
             &config_no_wake,
             ToolNotification::TaskCompleted(snapshot),
-            &mut offsets,
+            &mut state,
         )
         .await;
         let prompt = inject_notification_prompt_text(&mut cmd_rx_no_wake);
@@ -2406,11 +2501,11 @@ mod tests {
         drop(cmd_rx);
 
         let snapshot = make_task_snapshot("bg-send-failed", TaskKind::Bash);
-        let mut offsets = HashMap::new();
+        let mut state = BridgeState::default();
         handle_notification(
             &config,
             ToolNotification::TaskCompleted(snapshot),
-            &mut offsets,
+            &mut state,
         )
         .await;
 
@@ -2420,5 +2515,172 @@ mod tests {
                 .contains("bg-send-failed"),
             "a send-failed wake must release its reminder-suppression reservation"
         );
+    }
+
+    // -- Asset transfer jobs ------------------------------------------------
+
+    fn make_asset_job_event(job_id: &str, state: &str, bytes: u64) -> AssetJobEvent {
+        AssetJobEvent {
+            job_id: job_id.to_string(),
+            kind: "upload".to_string(),
+            key: "uploads/photo.png".to_string(),
+            backend: "s3".to_string(),
+            state: state.to_string(),
+            bytes_transferred: bytes,
+            bytes_total: Some(10_000),
+            error: None,
+        }
+    }
+
+    /// Every `x.ai/asset_job_event` the bridge put on the wire, decoded.
+    fn forwarded_asset_job_events(
+        gateway_rx: &mut mpsc::UnboundedReceiver<xai_acp_lib::AcpClientMessage>,
+    ) -> Vec<serde_json::Value> {
+        let mut out = Vec::new();
+        while let Ok(msg) = gateway_rx.try_recv() {
+            if let xai_acp_lib::AcpClientMessage::ExtNotification(args) = msg
+                && args.request.method.as_ref() == "x.ai/asset_job_event"
+            {
+                if let Ok(value) = serde_json::from_str(args.request.params.get()) {
+                    out.push(value);
+                }
+            }
+        }
+        out
+    }
+
+    /// The pager renders only what reaches it, so a burst of progress frames
+    /// must collapse before the ACP hop — otherwise a fast upload floods the
+    /// channel and the TUI with one frame per chunk.
+    #[tokio::test]
+    async fn asset_job_progress_is_coalesced_before_the_acp_hop() {
+        let (config, mut gateway_rx, _persistence_rx, _cmd_rx) = make_test_config_full();
+        let mut state = BridgeState::default();
+
+        for step in 1..=100u64 {
+            handle_notification(
+                &config,
+                ToolNotification::AssetJobEvent(make_asset_job_event(
+                    "job-1",
+                    "running",
+                    step * 10,
+                )),
+                &mut state,
+            )
+            .await;
+        }
+
+        let forwarded = forwarded_asset_job_events(&mut gateway_rx);
+        assert!(
+            forwarded.len() < 100,
+            "100 progress frames must coalesce, got {}",
+            forwarded.len()
+        );
+        assert!(
+            forwarded.len() <= ASSET_JOB_COALESCE_CAPACITY as usize,
+            "the token bucket must cap the burst at its capacity, got {}",
+            forwarded.len()
+        );
+        assert!(!forwarded.is_empty(), "the first frame must always pass");
+
+        let first = &forwarded[0];
+        assert_eq!(first["sessionId"].as_str(), Some("test-session"));
+        // The variant is `snake_case`-tagged and its fields keep snake_case
+        // names — the payload the pager's `handle_asset_job_event` parses.
+        assert_eq!(first["update"]["job_id"].as_str(), Some("job-1"));
+        assert_eq!(first["update"]["kind"].as_str(), Some("upload"));
+        assert_eq!(first["update"]["backend"].as_str(), Some("s3"));
+        assert_eq!(first["update"]["state"].as_str(), Some("running"));
+    }
+
+    /// Coalescing must never swallow a terminal frame: a dropped completion
+    /// leaves the pager row spinning forever.
+    #[tokio::test]
+    async fn asset_job_terminal_frame_always_reaches_the_client() {
+        let (config, mut gateway_rx, _persistence_rx, _cmd_rx) = make_test_config_full();
+        let mut state = BridgeState::default();
+
+        for step in 1..=100u64 {
+            handle_notification(
+                &config,
+                ToolNotification::AssetJobEvent(make_asset_job_event(
+                    "job-1",
+                    "running",
+                    step * 10,
+                )),
+                &mut state,
+            )
+            .await;
+        }
+        // Emitted while the bucket is still empty.
+        handle_notification(
+            &config,
+            ToolNotification::AssetJobEvent(make_asset_job_event("job-1", "completed", 10_000)),
+            &mut state,
+        )
+        .await;
+
+        let forwarded = forwarded_asset_job_events(&mut gateway_rx);
+        let last = forwarded.last().expect("terminal frame must be forwarded");
+        assert_eq!(last["update"]["state"].as_str(), Some("completed"));
+        assert_eq!(last["update"]["bytes_transferred"].as_u64(), Some(10_000));
+    }
+
+    /// One bucket per job: a burst on one transfer must not starve another.
+    #[tokio::test]
+    async fn asset_job_coalescing_is_per_job() {
+        let (config, mut gateway_rx, _persistence_rx, _cmd_rx) = make_test_config_full();
+        let mut state = BridgeState::default();
+
+        for step in 1..=50u64 {
+            handle_notification(
+                &config,
+                ToolNotification::AssetJobEvent(make_asset_job_event(
+                    "job-1",
+                    "running",
+                    step * 10,
+                )),
+                &mut state,
+            )
+            .await;
+        }
+        handle_notification(
+            &config,
+            ToolNotification::AssetJobEvent(make_asset_job_event("job-2", "running", 7)),
+            &mut state,
+        )
+        .await;
+
+        let forwarded = forwarded_asset_job_events(&mut gateway_rx);
+        assert!(
+            forwarded
+                .iter()
+                .any(|v| v["update"]["job_id"].as_str() == Some("job-2")),
+            "job-2's first frame must pass despite job-1's burst"
+        );
+    }
+
+    /// The coalescer is a plain data structure: assert the admit/forget
+    /// contract without the async plumbing.
+    #[test]
+    fn asset_job_coalescer_admits_capacity_then_drops_and_frees_on_terminal() {
+        let mut coalescer = AssetJobCoalescer::default();
+        let admitted = (1..=100u64)
+            .filter(|n| coalescer.admit(&make_asset_job_event("job-1", "running", *n)))
+            .count();
+        assert_eq!(admitted, ASSET_JOB_COALESCE_CAPACITY as usize);
+
+        assert!(
+            coalescer.admit(&make_asset_job_event("job-1", "failed", 100)),
+            "a terminal frame bypasses the bucket"
+        );
+        assert!(
+            coalescer.buckets.is_empty(),
+            "a terminal frame frees the job's bucket"
+        );
+
+        coalescer.admit(&make_asset_job_event("job-1", "running", 1));
+        coalescer.forget("job-1");
+        assert!(coalescer.buckets.is_empty());
     }
 }

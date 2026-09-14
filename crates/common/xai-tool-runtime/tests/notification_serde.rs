@@ -7,11 +7,11 @@ use std::time::{Duration, SystemTime};
 use serde_json::{Value, json};
 
 use xai_tool_runtime::{
-    BashExecutionBackgrounded, BashExecutionComplete, BashExecutionFailed, BashExecutionTimeout,
-    BashNotificationBase, BashOutputChunk, FileWritten, LspServerCrashed, LspServerFailed,
-    LspServerReady, LspServerRetrying, LspServerStarting, MonitorEvent, PlanModeEntered,
-    PlanModeExited, ScheduledTaskCreated, ScheduledTaskFired, ScheduledTaskRemoved, TaskKind,
-    TaskSnapshot, ToolNotification, UserQuestionAsked,
+    AssetJobEvent, BashExecutionBackgrounded, BashExecutionComplete, BashExecutionFailed,
+    BashExecutionTimeout, BashNotificationBase, BashOutputChunk, FileWritten, LspServerCrashed,
+    LspServerFailed, LspServerReady, LspServerRetrying, LspServerStarting, MonitorEvent,
+    PlanModeEntered, PlanModeExited, ScheduledTaskCreated, ScheduledTaskFired,
+    ScheduledTaskRemoved, TaskKind, TaskSnapshot, ToolNotification, UserQuestionAsked,
 };
 
 fn base() -> BashNotificationBase {
@@ -351,15 +351,25 @@ fn variant_count_matches_variant_name() {
             event_text: String::new(),
             raw_text: String::new(),
         }),
+        ToolNotification::AssetJobEvent(AssetJobEvent {
+            job_id: String::new(),
+            kind: String::new(),
+            key: String::new(),
+            backend: String::new(),
+            state: String::new(),
+            bytes_transferred: 0,
+            bytes_total: None,
+            error: None,
+        }),
     ];
     let names: std::collections::HashSet<_> =
         all_variants.iter().map(|n| n.variant_name()).collect();
     assert_eq!(
         names.len(),
-        19,
-        "expected 19 distinct variant names; if you added a notification, extend the test list and `variant_name`"
+        20,
+        "expected 20 distinct variant names; if you added a notification, extend the test list and `variant_name`"
     );
-    assert_eq!(all_variants.len(), 19);
+    assert_eq!(all_variants.len(), 20);
 }
 
 #[test]

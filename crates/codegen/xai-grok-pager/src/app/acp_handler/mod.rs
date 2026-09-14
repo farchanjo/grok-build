@@ -24,7 +24,7 @@ use crate::acp::tracker::AcpUpdateTracker;
 use crate::acp::tracker::TurnActivity;
 use crate::app::agent::{
     AgentId, AgentSession, AgentState, BgTaskState, BgTaskStatus, GoalDisplayPhase,
-    GoalDisplayState, GoalDisplayStatus,
+    GoalDisplayState, GoalDisplayStatus, TransferState, TransferStatus,
 };
 use crate::notifications::{NotificationEvent, NotificationEventKind};
 use crate::scrollback::block::RenderBlock;
@@ -82,8 +82,8 @@ pub(crate) use queue::PendingRunningAdoption;
 use queue::{handle_prompt_complete, handle_queue_changed};
 
 use background::{
-    derive_child_cwd, handle_git_head_changed, handle_monitor_event, handle_scheduled_task_created,
-    handle_scheduled_task_deleted, handle_scheduled_task_fired,
+    derive_child_cwd, handle_asset_job_event, handle_git_head_changed, handle_monitor_event,
+    handle_scheduled_task_created, handle_scheduled_task_deleted, handle_scheduled_task_fired,
     handle_scheduled_task_inject_prompt, handle_task_backgrounded, handle_task_completed,
     route_bg_task_stdout,
 };
@@ -751,6 +751,7 @@ fn handle_ext_notification(notif: &acp::ExtNotification, app: &mut AppView) -> b
         "x.ai/session/prompt_complete" => handle_prompt_complete(notif, app),
         "x.ai/session/interjection" => handle_interjection(notif, app),
         "x.ai/monitor_event" => handle_monitor_event(notif, app),
+        "x.ai/asset_job_event" => handle_asset_job_event(notif, app),
         "x.ai/scheduled_task_created" => handle_scheduled_task_created(notif, app),
         "x.ai/scheduled_task_fired" => handle_scheduled_task_fired(notif, app),
         "x.ai/scheduled_task_deleted" => handle_scheduled_task_deleted(notif, app),

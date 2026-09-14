@@ -224,6 +224,28 @@ impl SessionHandle {
         }
         rx.await.unwrap_or(Err("session actor died".to_string()))
     }
+    /// Cancel an in-flight asset transfer job by job_id.
+    ///
+    /// Returns the typed outcome (cancelled / already finished / not found) so
+    /// the caller can distinguish "we stopped it" from "it was already gone".
+    pub async fn cancel_asset_job(
+        &self,
+        job_id: &str,
+    ) -> Result<xai_file_utils::assets::jobs::CancelOutcome, String> {
+        let (tx, rx) = oneshot::channel();
+        if self
+            .cmd_tx
+            .send(SessionCommand::CancelAssetJob {
+                job_id: job_id.to_string(),
+                respond_to: tx,
+            })
+            .is_err()
+        {
+            return Err("session not found".to_string());
+        }
+        rx.await.map_err(|_| "session actor died".to_string())
+    }
+
     pub async fn delete_scheduled_task(&self, task_id: &str) -> Result<bool, String> {
         let (tx, rx) = oneshot::channel();
         if self

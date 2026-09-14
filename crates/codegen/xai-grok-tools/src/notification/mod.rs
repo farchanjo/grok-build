@@ -8,6 +8,7 @@ pub use handle::NotificationAcknowledgementError;
 pub use handle::PerCallNotificationSink;
 pub use handle::ToolNotificationHandle;
 pub use types::ALL_NOTIFICATION_TAGS;
+pub use types::AssetJobEvent;
 pub use types::BashExecutionBackgrounded;
 pub use types::BashExecutionComplete;
 pub use types::BashExecutionFailed;

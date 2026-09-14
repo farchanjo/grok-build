@@ -547,6 +547,30 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             result,
             prev_model_id,
         } => handle_switch_model_complete(app, agent_id, model_id, effort, result, prev_model_id),
+        TaskResult::AssetJobCancelRequested { session_id, job_id } => {
+            tracing::info!(
+                session_id = %session_id.0,
+                job_id = %job_id,
+                "Asset job cancel requested"
+            );
+            // Stay in `pending_kill`: the job's terminal
+            // `x.ai/asset_job_event` (state `cancelled`) clears it.
+            vec![]
+        }
+        TaskResult::AssetJobCancelFailed {
+            session_id,
+            job_id,
+            error,
+        } => {
+            tracing::warn!(job_id = %job_id, error = %error, "Failed to cancel asset job");
+            if let Some(agent) = find_agent_by_session_id(&mut app.agents, session_id.0.as_ref())
+                && let Some(transfer) = agent.session.transfers.get_mut(&job_id)
+            {
+                transfer.pending_kill = false;
+                transfer.kill_requested_at = None;
+            }
+            vec![]
+        }
         TaskResult::BgTaskKilled {
             session_id,
             task_id,

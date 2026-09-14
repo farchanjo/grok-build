@@ -36,6 +36,29 @@ pub struct KillTaskResponse {
     pub outcome: KillOutcome,
 }
 
+/// Wire DTO for the `x.ai/asset_job_cancel` ext request.
+///
+/// `pub` (with both serde directions) so ACP clients build the request from
+/// the same type the agent parses.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CancelAssetJobRequest {
+    pub session_id: String,
+    pub job_id: String,
+}
+
+/// Wire DTO for the `x.ai/asset_job_cancel` ext response payload.
+///
+/// `outcome` is the registry's stable snake_case verdict (`cancelled`,
+/// `already_finished`, `not_found`); the pager keys its optimistic
+/// pending-kill state on the request succeeding, not on this value.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CancelAssetJobResponse {
+    pub job_id: String,
+    pub outcome: String,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct ListTasksRequest {
@@ -346,6 +369,17 @@ pub async fn handle(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
                 .await
                 .ok_or_else(|| "session not found or no terminal backend".to_string())
                 .map(|tasks| ListTasksResponse { tasks });
+            respond(result)
+        }
+        "x.ai/asset_job_cancel" => {
+            let req: CancelAssetJobRequest = parse(args)?;
+            let result = agent
+                .cancel_asset_job(&req.session_id, &req.job_id)
+                .await
+                .map(|outcome| CancelAssetJobResponse {
+                    job_id: req.job_id,
+                    outcome: outcome.as_str().to_string(),
+                });
             respond(result)
         }
         _ => Err(acp::Error::method_not_found()),

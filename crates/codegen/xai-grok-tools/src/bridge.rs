@@ -594,6 +594,29 @@ impl ToolBridge {
         }
     }
 
+    /// Cancel an in-flight asset transfer job.
+    ///
+    /// The registry lives in `Resources`, built once per session beside the
+    /// store. A session without one reports `NotFound` (rather than failing
+    /// the RPC) so the pager clears its pending-kill state either way.
+    pub async fn cancel_asset_job(
+        &self,
+        job_id: &str,
+    ) -> xai_file_utils::assets::jobs::CancelOutcome {
+        use xai_file_utils::assets::jobs::{AssetJobRegistry, CancelOutcome};
+
+        let res = self.registry.resources.lock().await;
+        if let Some(registry) = res.get::<Arc<AssetJobRegistry>>() {
+            return registry.cancel(job_id).await;
+        }
+        if let Some(registry) = res.get::<AssetJobRegistry>() {
+            return registry.cancel(job_id).await;
+        }
+        CancelOutcome::NotFound {
+            job_id: job_id.to_string(),
+        }
+    }
+
     /// Snapshot the session's scheduled tasks; empty when no scheduler is
     /// registered or the actor has stopped.
     pub async fn list_scheduled_tasks(

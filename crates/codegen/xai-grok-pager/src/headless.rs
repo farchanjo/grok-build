@@ -1480,7 +1480,10 @@ fn track_background_lifecycle(
                 completed_before_bg.insert(key);
             }
         }
-        ExtEvent::MonitorEvent | ExtEvent::StreamingAttemptReset | ExtEvent::None => {}
+        ExtEvent::MonitorEvent
+        | ExtEvent::AssetJobEvent
+        | ExtEvent::StreamingAttemptReset
+        | ExtEvent::None => {}
     }
 }
 
@@ -1655,6 +1658,8 @@ enum ExtEvent {
     /// Monitor emitted a line (or ended streaming). Does not complete the task;
     /// completion still arrives via `TaskCompleted`.
     MonitorEvent,
+    /// An async asset transfer job changed state or moved bytes.
+    AssetJobEvent,
     /// Native language-envelope attempt was discarded; rewind the text buffer.
     StreamingAttemptReset,
 }
@@ -1726,6 +1731,10 @@ fn handle_ext_notification(
 
     if method == "x.ai/monitor_event" {
         return ExtEvent::MonitorEvent;
+    }
+
+    if method == "x.ai/asset_job_event" {
+        return ExtEvent::AssetJobEvent;
     }
 
     match method {

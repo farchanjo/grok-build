@@ -368,6 +368,53 @@ pub struct MonitorEvent {
     pub owner_session_id: Option<String>,
 }
 
+/// A streaming state/progress event for an async asset transfer job.
+///
+/// Emitted by the asset job registry whenever a job changes state or moves
+/// bytes. Secret-free by construction: no presigned URL, no credentials.
+#[derive(Debug, Clone, PartialEq, Eq, schemars::JsonSchema)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct AssetJobEvent {
+    /// Registry id (uuid v7).
+    pub job_id: String,
+    /// `upload` or `download`.
+    pub kind: String,
+    /// Store key (or destination path for a download).
+    pub key: String,
+    /// Backend slug: `s3`, `gcs`, `local`, `proxy`.
+    pub backend: String,
+    /// `queued` | `running` | `completed` | `failed` | `cancelled`.
+    pub state: String,
+    /// Bytes moved so far.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub bytes_transferred: u64,
+    /// Absent until the total size is known.
+    #[cfg_attr(
+        feature = "serde",
+        serde(default, skip_serializing_if = "Option::is_none")
+    )]
+    pub bytes_total: Option<u64>,
+    /// Secret-free failure text; only set for a failed job.
+    #[cfg_attr(
+        feature = "serde",
+        serde(default, skip_serializing_if = "Option::is_none")
+    )]
+    pub error: Option<String>,
+}
+
+impl AssetJobEvent {
+    /// True once the job can no longer change state.
+    ///
+    /// Terminal events bypass the bridge's progress coalescing: dropping a
+    /// throttled job's completion would leave its TUI row spinning forever.
+    pub fn is_terminal(&self) -> bool {
+        matches!(
+            self.state.as_str(),
+            "completed" | "done" | "failed" | "cancelled" | "canceled"
+        )
+    }
+}
+
 /// A notification emitted by a tool during or after execution.
 /// These are sent to external consumers (TUI, logging, etc.) to provide
 /// real-time visibility into tool execution.
@@ -431,6 +478,13 @@ pub enum ToolNotification {
 
     /// A streaming event from a monitor background process.
     MonitorEvent(MonitorEvent),
+
+    /// An async asset transfer job changed state or moved bytes.
+    ///
+    /// The shell's notification bridge coalesces progress before the ACP hop
+    /// (token bucket, 500 ms / capacity 10), so a fast upload cannot flood the
+    /// channel. Terminal events always pass.
+    AssetJobEvent(AssetJobEvent),
 }
 
 /// Single source of truth for the `(variant tag => payload type)` mapping of
@@ -492,6 +546,7 @@ notification_variants! {
     ScheduledTaskRemoved => ScheduledTaskRemoved,
     ScheduledTaskCreated => ScheduledTaskCreated,
     MonitorEvent => MonitorEvent,
+    AssetJobEvent => AssetJobEvent,
 }
 
 #[cfg(test)]

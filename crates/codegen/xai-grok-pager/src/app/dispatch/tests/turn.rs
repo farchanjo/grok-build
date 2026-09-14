@@ -2,6 +2,54 @@
 
 use super::*;
 
+/// The tasks-pane ✗ on a transfer row must reach `x.ai/asset_job_cancel` —
+/// not the bg-task or subagent cancel — and mark the row pending so the
+/// "cancelling…" spinner shows while the request is in flight.
+#[test]
+fn cancel_asset_job_dispatch_marks_pending_and_emits_the_effect() {
+    use crate::app::agent::{TransferState, TransferStatus};
+
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    {
+        let session = &mut app.agents.get_mut(&id).unwrap().session;
+        let mut transfer = TransferState::new(
+            "job-1".to_string(),
+            "upload".to_string(),
+            "uploads/a.png".to_string(),
+            "s3".to_string(),
+        );
+        transfer.apply(TransferStatus::Running, 10, Some(100), None);
+        session.transfers.insert("job-1".to_string(), transfer);
+    }
+
+    let effects = dispatch(Action::CancelAssetJob("job-1".to_string()), &mut app);
+    assert!(
+        matches!(
+            effects.as_slice(),
+            [Effect::CancelAssetJob { session_id, job_id }]
+                if session_id.0.as_ref() == "test-session" && job_id == "job-1"
+        ),
+        "unexpected effects: {effects:?}"
+    );
+
+    let transfer = app.agents[&id].session.transfers.get("job-1").unwrap();
+    assert!(transfer.pending_kill, "row must show the cancel in flight");
+    assert!(transfer.kill_requested_at.is_some());
+}
+
+/// Cancelling an unknown job is a no-op that still emits the effect, so a row
+/// that vanished between render and click cannot wedge the pane.
+#[test]
+fn cancel_asset_job_dispatch_tolerates_an_unknown_job() {
+    let mut app = test_app_with_agent();
+    let effects = dispatch(Action::CancelAssetJob("ghost".to_string()), &mut app);
+    assert!(matches!(
+        effects.as_slice(),
+        [Effect::CancelAssetJob { job_id, .. }] if job_id == "ghost"
+    ));
+}
+
 #[test]
 fn demote_dispatch_keeps_turn_session_and_execute_guards() {
     let mut app = test_app_with_agent();
