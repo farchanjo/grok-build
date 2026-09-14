@@ -176,11 +176,19 @@ pub(crate) fn kind_allowed(mode: CapabilityMode, kind: ToolKind) -> bool {
             matches!(mode, M::Execute)
         }
 
-        // Integration dispatch.
-        UseTool => matches!(mode, M::ReadWrite | M::Execute),
+        // Integration dispatch. `use_tool` is a dispatcher: whether the
+        // call mutates depends on the target tool, not on this one, so
+        // every partial mode keeps it. Without it a read-only child has
+        // no way to invoke anything outside its own static toolset.
+        UseTool => matches!(mode, M::ReadOnly | M::ReadWrite | M::Execute),
 
-        // Catch-all -- only `All` mode keeps it (early-return above).
-        Other => false,
+        // Extension tools: MCP servers and hub tools register with no
+        // static kind (`ToolConfig::from_id` / `McpErasedTool` report
+        // `Other`), so this arm is the only thing standing between them
+        // and every partial mode. Dropping them here severed MCP for
+        // every subagent whose `capabilityMode` was not `all` — six
+        // connected servers, zero reachable tools.
+        Other => true,
     }
 }
 
@@ -243,18 +251,23 @@ mod tests {
         };
 
         let ro = CapabilityMode::ReadOnly.filter(&cfg);
-        assert_eq!(names(&ro), vec!["read", "search", "inspect", "plan", "ask"]);
+        assert_eq!(
+            names(&ro),
+            vec!["read", "search", "inspect", "plan", "ask", "other"]
+        );
 
         let rw = CapabilityMode::ReadWrite.filter(&cfg);
         assert_eq!(
             names(&rw),
-            vec!["read", "search", "inspect", "edit", "write", "plan", "ask"]
+            vec![
+                "read", "search", "inspect", "edit", "write", "plan", "ask", "other"
+            ]
         );
 
         let ex = CapabilityMode::Execute.filter(&cfg);
         assert_eq!(
             names(&ex),
-            vec!["read", "search", "inspect", "bash", "bg", "plan", "ask"]
+            vec!["read", "search", "inspect", "bash", "bg", "plan", "ask", "other"]
         );
 
         let all = CapabilityMode::All.filter(&cfg);
