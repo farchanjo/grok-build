@@ -2165,10 +2165,16 @@ async fn credential_gone_mid_fetch_writes_no_marker() {
     let home_for_clear = home.clone();
     let clearer = std::thread::spawn(move || {
         // Wait until the mock has accepted a request, then drop the key.
-        for _ in 0..50 {
-            if *count.lock().unwrap() > 0 {
-                break;
-            }
+        //
+        // The bound must clear a slow first `load_effective_config`, which is
+        // about a second when idle and can exceed ten under a fully parallel
+        // suite on a loaded host: clearing the key before `fetch_for_principal`
+        // reads it turns the scenario into "no principal", the fetch never
+        // happens, and the positive control below fails with a misleading
+        // message. The mock's response delay keeps the fetch in flight while
+        // the key disappears, which is the scenario under test.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        while *count.lock().unwrap() == 0 && std::time::Instant::now() < deadline {
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
         std::fs::write(
