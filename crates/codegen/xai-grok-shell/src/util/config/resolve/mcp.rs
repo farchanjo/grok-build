@@ -251,6 +251,67 @@ fn resolve_mcp_startup_timeout_precedence(
         .unwrap_or(DEFAULT_MCP_STARTUP_TIMEOUT_SECS)
 }
 
+// ── MCP first-prompt wait budget (non-interactive only) ─────────────────────
+
+/// Default budget for the non-interactive first-prompt MCP wait, in ms.
+///
+/// A non-interactive run (`grok -p`, subagents) has a single turn, so it waits
+/// for the handshakes rather than racing them — but a hung server would
+/// otherwise hold the first request for its per-server init budget
+/// (`startup_timeout * 2 + 5`, so 65 s at the 30 s default). The budget caps
+/// that wait; on expiry the run proceeds with the tools that registered and the
+/// "still connecting" reminder explains the rest.
+pub const DEFAULT_MCP_PROMPT_WAIT_MS: u64 = 5_000;
+
+/// Env override for the first-prompt MCP wait budget, in milliseconds.
+const ENV_MCP_PROMPT_WAIT_MS: &str = "GROK_MCP_PROMPT_WAIT_MS";
+
+/// Resolve the non-interactive first-prompt MCP wait budget. Precedence: env
+/// (`GROK_MCP_PROMPT_WAIT_MS` ms) > effective `config.toml [mcp].prompt_wait_ms`
+/// > [`DEFAULT_MCP_PROMPT_WAIT_MS`].
+///
+/// `None` means "wait without a budget" — the historical behavior, selected by
+/// setting the value to `0`.
+pub fn resolve_mcp_prompt_wait_budget() -> Option<std::time::Duration> {
+    fn extract(v: &toml::Value) -> Option<u64> {
+        let raw = v.get("mcp")?.get("prompt_wait_ms")?.as_integer()?;
+        u64::try_from(raw).ok()
+    }
+    let env = std::env::var(ENV_MCP_PROMPT_WAIT_MS)
+        .ok()
+        .and_then(|s| s.trim().parse::<u64>().ok());
+    let config = crate::config::load_effective_config()
+        .ok()
+        .as_ref()
+        .and_then(extract);
+    prompt_wait_budget_from(env, config)
+}
+
+/// Pure precedence for [`resolve_mcp_prompt_wait_budget`].
+fn prompt_wait_budget_from(env: Option<u64>, config: Option<u64>) -> Option<std::time::Duration> {
+    match env.or(config).unwrap_or(DEFAULT_MCP_PROMPT_WAIT_MS) {
+        0 => None,
+        ms => Some(std::time::Duration::from_millis(ms)),
+    }
+}
+
+#[cfg(test)]
+mod mcp_prompt_wait_tests {
+    use super::{DEFAULT_MCP_PROMPT_WAIT_MS, prompt_wait_budget_from as f};
+    use std::time::Duration;
+
+    #[test]
+    fn precedence_env_config_default_and_zero_is_unbounded() {
+        assert_eq!(
+            f(None, None),
+            Some(Duration::from_millis(DEFAULT_MCP_PROMPT_WAIT_MS))
+        );
+        assert_eq!(f(Some(7), Some(9)), Some(Duration::from_millis(7))); // env wins
+        assert_eq!(f(None, Some(9)), Some(Duration::from_millis(9))); // config
+        assert_eq!(f(Some(0), Some(9)), None); // 0 = unbounded
+    }
+}
+
 #[cfg(test)]
 mod mcp_startup_timeout_tests {
     use super::{DEFAULT_MCP_STARTUP_TIMEOUT_SECS, resolve_mcp_startup_timeout_precedence as r};

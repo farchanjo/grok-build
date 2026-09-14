@@ -17,6 +17,42 @@ impl SessionActor {
         }
         self.ensure_mcp_tools_initialized().await;
     }
+
+    /// Bounded variant of [`Self::wait_for_mcp_initialized`], for
+    /// non-interactive runs.
+    ///
+    /// Same drain semantics, but gives up after `budget` and proceeds with the
+    /// tools that registered. Without a budget, one hung server holds the first
+    /// inference request for its whole per-server init budget
+    /// (`startup_timeout * 2 + 5`), which is 65 s at the 30 s default — a lot
+    /// for a single-turn `grok -p`. The "still connecting" reminder is injected
+    /// so the model knows why some tools are missing.
+    pub(super) async fn wait_for_mcp_initialized_bounded(&self, budget: std::time::Duration) {
+        let started = std::time::Instant::now();
+        let deadline = started + budget;
+        loop {
+            {
+                let mcp_state = self.mcp_state.lock().await;
+                if mcp_state.is_initialized() {
+                    break;
+                }
+                if !mcp_state.is_initializing() {
+                    break;
+                }
+            }
+            if std::time::Instant::now() >= deadline {
+                tracing::info!(
+                    budget_ms = budget.as_millis() as u64,
+                    elapsed_ms = started.elapsed().as_millis() as u64,
+                    "MCP handshakes exceeded the prompt budget; proceeding without them"
+                );
+                self.maybe_inject_mcp_connecting_reminder().await;
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        self.ensure_mcp_tools_initialized().await;
+    }
     /// If managed tokens are near expiry, swap clients using the agent-level cache.
     pub(super) async fn refresh_managed_mcp_if_stale(&self) {
         use crate::session::managed_mcp::ManagedMcpCache;

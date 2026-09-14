@@ -136,10 +136,30 @@ impl SessionActor {
         match self.mcp_strategy {
             McpInitStrategy::Blocking => {
                 if !self.mcp_state.lock().await.is_initialized() {
-                    tracing::info!(
-                        "Blocking strategy: waiting for MCP initialization before first prompt..."
-                    );
-                    self.wait_for_mcp_initialized().await;
+                    // Non-interactive runs get a budget: they have one turn, so
+                    // waiting is right, but a hung server must not hold the
+                    // first request for its whole init budget. `None` (value
+                    // `0`) restores the historical unbounded wait.
+                    match self
+                        .startup_hints
+                        .non_interactive
+                        .then(crate::util::config::resolve_mcp_prompt_wait_budget)
+                        .flatten()
+                    {
+                        Some(budget) => {
+                            tracing::info!(
+                                budget_ms = budget.as_millis() as u64,
+                                "Blocking strategy: waiting for MCP initialization before first prompt (bounded)..."
+                            );
+                            self.wait_for_mcp_initialized_bounded(budget).await;
+                        }
+                        None => {
+                            tracing::info!(
+                                "Blocking strategy: waiting for MCP initialization before first prompt..."
+                            );
+                            self.wait_for_mcp_initialized().await;
+                        }
+                    }
                 }
             }
             McpInitStrategy::Progressive => {}

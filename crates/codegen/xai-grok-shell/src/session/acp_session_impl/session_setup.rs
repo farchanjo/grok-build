@@ -95,9 +95,20 @@ impl SessionActor {
         let start = std::time::Instant::now();
         if matches!(self.mcp_strategy, McpInitStrategy::Blocking) {
             use xai_grok_agent::prompt::user_message::UserMessageTemplate;
-            let mcp_wait = match self.agent.borrow().definition().user_message_template {
+            let template_wait = match self.agent.borrow().definition().user_message_template {
                 UserMessageTemplate::Default => std::time::Duration::from_secs(15),
                 _ => std::time::Duration::from_secs(60),
+            };
+            // A non-interactive run has a single turn, so it waits for the
+            // handshakes — but a hung server must not hold the first request for
+            // the whole template bound. The resolved budget caps it; `None`
+            // (value `0`) keeps the template bound.
+            let mcp_wait = match (
+                self.startup_hints.non_interactive,
+                crate::util::config::resolve_mcp_prompt_wait_budget(),
+            ) {
+                (true, Some(budget)) => budget.min(template_wait),
+                _ => template_wait,
             };
             self.wait_for_mcp_handshakes_bounded(mcp_wait).await;
         }

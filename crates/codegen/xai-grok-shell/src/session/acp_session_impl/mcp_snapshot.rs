@@ -352,6 +352,12 @@ impl SessionActor {
             elapsed_ms = start.elapsed().as_millis() as u64,
             "wait_for_mcp_handshakes_bounded: done"
         );
+
+        // On a timeout the run proceeds with a partial tool list; tell the model
+        // which servers are still missing so it can defer instead of guessing.
+        if outcome == "timed_out" {
+            self.maybe_inject_mcp_connecting_reminder().await;
+        }
     }
 
     /// Re-register MCP tools onto a freshly-built `ToolBridge` after a
