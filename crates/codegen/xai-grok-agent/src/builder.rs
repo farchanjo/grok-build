@@ -94,6 +94,10 @@ pub struct AgentBuilder {
     /// registered as local Function tools.
     backend_search: bool,
     web_fetch_config: xai_grok_tools::implementations::grok_build::web_fetch::WebFetchConfig,
+    /// `[assets]` / `[assets_providers.<id>]`. The `asset_*` tools are always
+    /// registered: the local backend keeps the store total when no remote
+    /// backend is configured.
+    assets_settings: xai_grok_config_types::AssetsSettings,
     lsp: Option<std::sync::Arc<dyn xai_grok_tools::implementations::lsp::LspBackend>>,
     image_gen_config: xai_grok_tools::implementations::grok_build::image_gen::ImageGenConfig,
     video_gen_config: xai_grok_tools::implementations::grok_build::video_gen::VideoGenConfig,
@@ -259,6 +263,7 @@ impl AgentBuilder {
             web_search_config: Default::default(),
             backend_search: false,
             web_fetch_config: Default::default(),
+            assets_settings: Default::default(),
             lsp: None,
             image_gen_config: Default::default(),
             video_gen_config: Default::default(),
@@ -515,6 +520,16 @@ impl AgentBuilder {
         config: xai_grok_tools::implementations::grok_build::image_gen::ImageGenConfig,
     ) -> Self {
         self.image_gen_config = config;
+        self
+    }
+    /// Set the `[assets]` / `[assets_providers.<id>]` configuration backing the
+    /// `asset_*` tools. The tools are registered regardless; this only decides
+    /// which backend the store resolves to.
+    pub fn with_assets_settings(
+        mut self,
+        settings: xai_grok_config_types::AssetsSettings,
+    ) -> Self {
+        self.assets_settings = settings;
         self
     }
     /// Set the video generation configuration.
@@ -806,6 +821,25 @@ impl AgentBuilder {
                 tool_config.tools.push(
                     (&xai_grok_tools::implementations::grok_build::ReferenceToVideoTool).into(),
                 );
+            }
+            // Assets: always registered. The store falls back to the local
+            // backend, so the tools stay useful with no remote config.
+            {
+                use xai_grok_tools::implementations::grok_build as gb;
+                for tool in [
+                    (&gb::AssetUploadTool).into(),
+                    (&gb::AssetDownloadTool).into(),
+                    (&gb::AssetShareTool).into(),
+                    (&gb::AssetListTool).into(),
+                    (&gb::AssetDeleteTool).into(),
+                    (&gb::AssetSetVisibilityTool).into(),
+                    (&gb::AssetJobStatusTool).into(),
+                    (&gb::AssetJobListTool).into(),
+                    (&gb::AssetJobCancelTool).into(),
+                    (&gb::AssetJobSubscribeTool).into(),
+                ] {
+                    tool_config.tools.push(tool);
+                }
             }
             let has_write_tool = tool_config
                 .tools
@@ -1108,7 +1142,7 @@ impl AgentBuilder {
                 attribution_callback: self.attribution_callback,
                 web_search_attribution_callback: self.web_search_attribution_callback,
                 system_reminder_tag: self.system_reminder_tag,
-                assets_settings: Default::default(),
+                assets_settings: self.assets_settings.clone(),
                 asset_runtime_context:
                     xai_grok_tools::registry::types::AssetRuntimeContext::from_process(),
             },

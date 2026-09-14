@@ -33,3 +33,14 @@ pub use xai_grok_config_types::{
     CampaignOverride, ContextualHintsRemote, DisplayRefreshSettings, DoomLoopRecoverySettings,
     GoalRoleModel, RemoteSettings, WorktreeAutoGcSettings, WorktreeKindMaxAge,
 };
+
+/// `[assets]` + `[assets_providers.<id>]` from the effective config.
+///
+/// A malformed section degrades to defaults instead of failing session
+/// construction: the `asset_*` tools stay usable against the local backend.
+pub fn assets_settings_from_effective_config() -> xai_grok_config_types::AssetsSettings {
+    load_effective_config()
+        .ok()
+        .and_then(|root| root.try_into().ok())
+        .unwrap_or_default()
+}

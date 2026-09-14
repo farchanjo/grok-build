@@ -267,6 +267,7 @@ impl AgentRebuildSpec {
         .with_web_search_config(web_search_config.clone())
         .with_backend_search(*backend_search)
         .with_image_gen_config(image_gen_config.clone())
+        .with_assets_settings(crate::util::config::assets_settings_from_effective_config())
         .with_video_gen_config(video_gen_config.clone())
         .with_app_builder_deployer_config(app_builder_deployer_config.clone())
         .with_web_fetch_config(web_fetch_config.clone())
