@@ -24,6 +24,7 @@ use xai_grok_shell::inference::types::{
     REASONING_EFFORT_META_KEY, parse_canonical_effort_token, reasoning_effort_meta_value,
 };
 use xai_grok_shell::util::config as cli_config;
+use xai_grok_tools::types::compat::CompatConfig;
 
 use crate::acp::model_state::{EffortTokenError, ModelState};
 use crate::acp::spawn::spawn_grok_shell;
@@ -596,12 +597,14 @@ async fn open_session(
     cwd: &Path,
     session_id_flag: Option<&str>,
     restore_code: Option<bool>,
+    compat: CompatConfig,
 ) -> anyhow::Result<OpenedSession> {
-    // Pager opens sessions before the agent resolves per-vendor compat;
-    // default (all-on) preserves existing behavior — the agent applies
-    // the resolved config once the session is live.
-    let mcp_servers =
-        cli_config::load_mcp_servers(cwd, &xai_grok_tools::types::compat::CompatConfig::default());
+    // The session request carries the MCP server list, so the per-vendor compat
+    // cells have to be resolved here: the agent applies its own resolved config
+    // only after the session is live, which is too late to filter this list.
+    // `compat` comes from the caller's `AgentConfig::compat_resolved`
+    // (env > config.toml > remote > default-on).
+    let mcp_servers = cli_config::load_mcp_servers(cwd, &compat);
 
     if let Some(sid) = session_id_flag {
         let try_load: Result<acp::LoadSessionResponse, _> = acp_send(
@@ -644,13 +647,13 @@ async fn resume_session(
     session_id: &str,
     standard_resume_available: bool,
     restore_code: Option<bool>,
+    compat: CompatConfig,
 ) -> anyhow::Result<OpenedSession> {
     if !standard_resume_available || restore_code == Some(true) {
-        return open_session(acp_tx, cwd, Some(session_id), restore_code).await;
+        return open_session(acp_tx, cwd, Some(session_id), restore_code, compat).await;
     }
 
-    let mcp_servers =
-        cli_config::load_mcp_servers(cwd, &xai_grok_tools::types::compat::CompatConfig::default());
+    let mcp_servers = cli_config::load_mcp_servers(cwd, &compat);
     let response: acp::ResumeSessionResponse = acp_send(
         acp::ResumeSessionRequest::new(
             acp::SessionId::new(session_id.to_string()),
@@ -671,11 +674,11 @@ async fn open_session_with_id(
     acp_tx: &AcpAgentTx,
     cwd: &Path,
     session_id: &str,
+    compat: CompatConfig,
 ) -> anyhow::Result<OpenedSession> {
     let cwd_str = cwd.to_string_lossy();
     crate::app::session_startup::ensure_session_id_available(session_id, &cwd_str)?;
-    let mcp_servers =
-        cli_config::load_mcp_servers(cwd, &xai_grok_tools::types::compat::CompatConfig::default());
+    let mcp_servers = cli_config::load_mcp_servers(cwd, &compat);
     let new_resp: acp::NewSessionResponse = acp_send(
         acp::NewSessionRequest::new(cwd.to_path_buf())
             .mcp_servers(mcp_servers)
@@ -700,6 +703,7 @@ async fn fork_then_open(
     parent_cwd: Option<&Path>,
     new_id: Option<&str>,
     restore_code: Option<bool>,
+    compat: CompatConfig,
 ) -> anyhow::Result<OpenedSession> {
     use crate::app::session_startup::{
         effective_fork_new_cwd, ensure_session_id_available, fork_response_error,
@@ -727,7 +731,7 @@ async fn fork_then_open(
     }
     let child = fork_response_new_session_id(resp.0.get())
         .ok_or_else(|| anyhow::anyhow!("fork response missing newSessionId"))?;
-    match open_session(acp_tx, &write_cwd, Some(&child), restore_code).await {
+    match open_session(acp_tx, &write_cwd, Some(&child), restore_code, compat).await {
         Ok(opened) => Ok(opened),
         Err(e) => Err(anyhow::anyhow!(
             "fork succeeded as {child} but load failed: {e}"
@@ -885,6 +889,13 @@ pub async fn run_single_turn(
 
     let mut emitter = HeadlessEmitter::new(options.output_format, options.json_schema.is_some());
 
+    // Launch the models + remote-settings prefetch before the config work below
+    // so its network round trip overlaps it. Without this, the shell's
+    // `resolve_config` fallback starts the very same prefetch and joins it
+    // immediately, serializing the whole fetch (measured 0.27 s warm and 1.2 s
+    // with a cold DNS entry, entirely before the session could spawn).
+    let prefetch = xai_grok_shell::agent::models::start_early_prefetch(None);
+
     // Load config and spawn agent
     let t_spawn = Instant::now();
     let raw_config = xai_grok_shell::config::load_effective_config()
@@ -903,9 +914,21 @@ pub async fn run_single_turn(
         agent_config.default_model_override = Some(model.clone());
     }
 
+    // Join the prefetch here: late enough that it overlapped the config work
+    // above, early enough that the settings feed `resolve_runtime_fields` and
+    // reach the shell as `remote_settings`, which makes its own
+    // start-and-join fallback a no-op.
+    let remote_settings = prefetch
+        .and_then(|handle| handle.join().ok())
+        .and_then(|result| result.settings);
+    if let Some(settings) = remote_settings.as_ref() {
+        cli_config::set_remote_campaigns_from_settings(Some(settings));
+    }
+    agent_config.remote_settings = remote_settings.clone();
+
     agent_config.resolve_runtime_fields(&xai_grok_shell::agent::config::RuntimeResolutionContext {
         raw_config: &raw_config,
-        remote_settings: None,
+        remote_settings: remote_settings.as_ref(),
         is_headless: true,
         cli_subagents: None,
         cli_web_search_model: None,
@@ -960,6 +983,10 @@ pub async fn run_single_turn(
 
     let cancel = CancellationToken::new();
     let memory_config = agent_config.memory_config.clone();
+    // Captured before the move below: the session request carries the MCP server
+    // list, and the compat cells that filter it must match what the agent
+    // resolved (env > config.toml > remote > default-on).
+    let compat = agent_config.compat_resolved;
     let spawned = match spawn_grok_shell(agent_config, &cancel, memory_config).await {
         Ok(s) => s,
         Err(e) => {
@@ -1049,9 +1076,9 @@ pub async fn run_single_turn(
     let restore_code = options.restore_code.then_some(true);
     let t_session = Instant::now();
     let opened = match materialized {
-        MaterializedStartup::NewAuto => open_session(&acp_tx, &cwd, None, None).await,
+        MaterializedStartup::NewAuto => open_session(&acp_tx, &cwd, None, None, compat).await,
         MaterializedStartup::NewWithId { session_id } => {
-            open_session_with_id(&acp_tx, &cwd, &session_id).await
+            open_session_with_id(&acp_tx, &cwd, &session_id, compat).await
         }
         MaterializedStartup::Resume {
             session_id,
@@ -1065,6 +1092,7 @@ pub async fn run_single_turn(
                 session_id.as_str(),
                 standard_resume_available,
                 restore_code,
+                compat,
             )
             .await
         }
@@ -1081,6 +1109,7 @@ pub async fn run_single_turn(
                 parent_cwd.as_deref(),
                 new_session_id.as_deref(),
                 restore_code,
+                compat,
             )
             .await
         }

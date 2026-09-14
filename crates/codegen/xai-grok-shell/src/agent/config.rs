@@ -789,6 +789,25 @@ fn resolve_compat_config(
     }
     resolved
 }
+
+/// Resolve the per-vendor compat cells from env + `config.toml` alone.
+///
+/// For clients that must build an ACP session request before an agent (and thus
+/// an `AgentConfig`) exists — the pager loads the session's MCP server list, and
+/// `CompatConfig::default()` is all-on, which ignores `GROK_*_MCPS_ENABLED` and
+/// would ship servers the agent has compat-disabled.
+///
+/// Remote-settings-driven cells are not consulted (the caller has no prefetch
+/// result here); the agent resolves them again with the real settings.
+pub fn resolve_compat_from_disk() -> CompatConfig {
+    match crate::config::load_effective_config()
+        .ok()
+        .and_then(|raw| Config::new_from_toml_cfg(&raw).ok())
+    {
+        Some(cfg) => resolve_compat_config(&cfg.compat, None),
+        None => CompatConfig::default(),
+    }
+}
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum CompatConfigCellError {
     Unavailable,

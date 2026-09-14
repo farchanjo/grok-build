@@ -228,6 +228,12 @@ async fn connect_grok_shell(
 
     apply_config_writes(&flags);
 
+    // The caller already launched and joined the startup prefetch; hand the
+    // result to the agent so `resolve_config` skips its own start-and-join
+    // fallback (a second, fully serialized fetch). Mirrors the leader path
+    // below, which needs the same field for `resolve_telemetry_mode`.
+    agent_config.remote_settings = flags.remote_settings.clone();
+
     // Spawn the agent
     let memory_config = agent_config.memory_config.clone();
     let spawned = spawn::spawn_grok_shell(agent_config, cancel, memory_config).await?;

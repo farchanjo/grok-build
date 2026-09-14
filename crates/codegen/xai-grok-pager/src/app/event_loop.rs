@@ -2633,7 +2633,7 @@ pub(crate) async fn run(
                                     // (all-on) preserves existing behavior.
                                     let mcp_servers = xai_grok_shell::util::config::load_mcp_servers(
                                         &plan.cwd,
-                                        &xai_grok_tools::types::compat::CompatConfig::default(),
+                                        &xai_grok_shell::agent::config::resolve_compat_from_disk(),
                                     );
                                     let load_req = acp::LoadSessionRequest::new(plan.session_id, plan.cwd).mcp_servers(mcp_servers).meta(plan.meta.as_object().cloned());
                                     match acp_send(load_req, &acp_tx).await {

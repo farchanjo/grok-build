@@ -223,3 +223,39 @@ pub fn update_telemetry_config(config: &AgentConfig, auth_manager: &AuthManager)
         crate::http::shared_client(),
     );
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::Path;
+
+    /// A client that already launched and joined the startup prefetch must not
+    /// pay for a second one. `resolve_config` keeps the caller's settings
+    /// instead of taking the `start_early_prefetch(...).join()` fallback, which
+    /// serializes a fresh models + settings fetch before the session can spawn.
+    ///
+    /// The sentinel field is what makes this meaningful: a fallback that
+    /// succeeded would overwrite the whole struct with freshly fetched values
+    /// (and one that failed would leave `None`).
+    #[test]
+    fn resolve_config_keeps_caller_provided_remote_settings() {
+        let cfg = AgentConfig {
+            remote_settings: Some(crate::util::config::RemoteSettings {
+                max_upload_file_bytes: Some(4242),
+                ..Default::default()
+            }),
+            ..AgentConfig::default()
+        };
+        let auth_manager = AuthManager::new(
+            Path::new("/tmp/grok-init-test"),
+            cfg.grok_com_config.clone(),
+        );
+
+        let resolved = resolve_config(&cfg, &auth_manager);
+
+        let settings = resolved
+            .remote_settings
+            .expect("caller-provided settings must survive resolve_config");
+        assert_eq!(settings.max_upload_file_bytes, Some(4242));
+    }
+}

@@ -248,7 +248,7 @@ pub(crate) fn execute(
             chat_kind,
         } => {
             let tx = acp_tx.clone();
-            let compat = xai_grok_tools::types::compat::CompatConfig::default();
+            let compat = xai_grok_shell::agent::config::resolve_compat_from_disk();
             let mcp_servers = xai_grok_shell::util::config::load_mcp_servers(
                 &session_cwd,
                 &compat,
@@ -592,7 +592,7 @@ pub(crate) fn execute(
                     }
                     let mcp_servers = xai_grok_shell::util::config::load_mcp_servers(
                         &session_cwd,
-                        &xai_grok_tools::types::compat::CompatConfig::default(),
+                        &xai_grok_shell::agent::config::resolve_compat_from_disk(),
                     );
                     let result = acp_send(
                             acp::NewSessionRequest::new(session_cwd.clone())
@@ -640,7 +640,7 @@ pub(crate) fn execute(
             let mcp_started = std::time::Instant::now();
             let mcp_servers = xai_grok_shell::util::config::load_mcp_servers(
                 &cwd,
-                &xai_grok_tools::types::compat::CompatConfig::default(),
+                &xai_grok_shell::agent::config::resolve_compat_from_disk(),
             );
             tracing::info!(
                 elapsed_ms = mcp_started.elapsed().as_millis() as u64,
