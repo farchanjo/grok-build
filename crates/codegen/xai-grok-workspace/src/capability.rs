@@ -110,6 +110,11 @@ pub(crate) const ALL_TOOL_KINDS: &[ToolKind] = &[
     ToolKind::AssetList,
     ToolKind::AssetDelete,
     ToolKind::AssetSetVisibility,
+    ToolKind::AssetDownload,
+    ToolKind::AssetJobStatus,
+    ToolKind::AssetJobList,
+    ToolKind::AssetJobCancel,
+    ToolKind::AssetJobSubscribe,
     ToolKind::Other,
 ];
 
@@ -151,12 +156,16 @@ pub(crate) fn kind_allowed(mode: CapabilityMode, kind: ToolKind) -> bool {
         // Inspect class.
         Lsp | ListDir | List => matches!(mode, M::ReadOnly | M::ReadWrite | M::Execute),
 
-        // Asset reads: a share URL and a listing mutate nothing.
-        AssetShare | AssetList => matches!(mode, M::ReadOnly | M::ReadWrite | M::Execute),
+        // Asset reads: a share URL, a listing, a job status, and a job
+        // subscription mutate nothing.
+        AssetShare | AssetList | AssetJobStatus | AssetJobList | AssetJobSubscribe => {
+            matches!(mode, M::ReadOnly | M::ReadWrite | M::Execute)
+        }
 
         // Edit class.
         Edit | Write | Delete | Move | ImageGen | VideoGen | ImageToVideo | ReferenceToVideo
-        | DeployApp | AssetUpload | AssetDelete | AssetSetVisibility => {
+        | DeployApp | AssetUpload | AssetDelete | AssetSetVisibility | AssetDownload
+        | AssetJobCancel => {
             matches!(mode, M::ReadWrite)
         }
 

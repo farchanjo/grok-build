@@ -37,6 +37,7 @@ use super::error::{AssetError, AssetOperation};
 use super::gcs_store::GcsAssetStore;
 use super::key::{AssetKey, AssetPrefix, ContentType};
 use super::local_store::LocalAssetStore;
+use super::progress::ProgressHandle;
 use super::s3_store::S3AssetStore;
 use super::value::{
     AssetMeta, DeleteOutcome, ListPage, ListQuery, PresignedUrl, PutRequest, Visibility,
@@ -636,7 +637,12 @@ impl AssetStore for StubAssetStore {
         Err(self.gate(AssetOperation::Get))
     }
 
-    async fn download_to(&self, _key: &AssetKey, _dest: &Path) -> Result<AssetMeta, AssetError> {
+    async fn download_to(
+        &self,
+        _key: &AssetKey,
+        _dest: &Path,
+        _progress: Option<ProgressHandle>,
+    ) -> Result<AssetMeta, AssetError> {
         Err(self.gate(AssetOperation::DownloadTo))
     }
 

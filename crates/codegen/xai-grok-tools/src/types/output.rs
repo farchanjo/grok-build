@@ -708,6 +708,11 @@ pub enum ToolOutput {
     AssetList(crate::implementations::grok_build::assets::AssetListOutput),
     AssetDelete(crate::implementations::grok_build::assets::AssetDeleteOutput),
     AssetSetVisibility(crate::implementations::grok_build::assets::AssetSetVisibilityOutput),
+    AssetDownload(crate::implementations::grok_build::assets::AssetDownloadOutput),
+    AssetJobStatus(crate::implementations::grok_build::assets::AssetJobStatusOutput),
+    AssetJobList(crate::implementations::grok_build::assets::AssetJobListOutput),
+    AssetJobCancel(crate::implementations::grok_build::assets::AssetJobCancelOutput),
+    AssetJobSubscribe(crate::implementations::grok_build::assets::AssetJobSubscribeOutput),
     /// Dynamic output for runtime-registered tools (MCP, test tools, etc.)
     Dynamic(DynamicOutput),
     /// Generic text output for tools that produce simple formatted text
@@ -748,6 +753,13 @@ impl ToolOutput {
             ToolOutput::Skill(s) => !s.success,
             ToolOutput::WebFetch(WebFetchOutput::Content(_)) => false,
             ToolOutput::WebFetch(_) => true,
+            // A transfer that failed is a logical failure; a still-running job
+            // is not, and neither is a job listing.
+            ToolOutput::AssetUpload(o) => o.state == "failed",
+            ToolOutput::AssetDownload(o) => o.state == "failed",
+            ToolOutput::AssetJobStatus(o) => o.state == "failed",
+            ToolOutput::AssetJobSubscribe(o) => o.state == "failed",
+            ToolOutput::AssetJobList(_) | ToolOutput::AssetJobCancel(_) => false,
             ToolOutput::ApplyPatch(ApplyPatchOutput::Success { .. }) => false,
             ToolOutput::ApplyPatch(_) => true,
             ToolOutput::CodexGrepFiles(CodexGrepFilesOutput::Error(_)) => true,
@@ -1052,6 +1064,11 @@ impl ToolOutput {
             ToolOutput::AssetList(o) => o.text.clone(),
             ToolOutput::AssetDelete(o) => o.text.clone(),
             ToolOutput::AssetSetVisibility(o) => o.text.clone(),
+            ToolOutput::AssetDownload(o) => o.text.clone(),
+            ToolOutput::AssetJobStatus(o) => o.text.clone(),
+            ToolOutput::AssetJobList(o) => o.text.clone(),
+            ToolOutput::AssetJobCancel(o) => o.text.clone(),
+            ToolOutput::AssetJobSubscribe(o) => o.text.clone(),
             ToolOutput::Dynamic(v) => serde_json::to_string_pretty(&v.value).unwrap_or_default(),
             ToolOutput::Text(text) => text.text.clone(),
             ToolOutput::ImageGen(m) => m.prompt_text("Image generated"),

@@ -27,6 +27,7 @@ use tokio::io::AsyncWriteExt;
 use super::error::{AssetError, AssetOperation};
 use super::factory::AssetStoreSource;
 use super::key::{AssetKey, AssetPrefix, ContentType, RESERVED_META_SEGMENT};
+use super::progress::{ProgressHandle, copy_with_progress};
 use super::value::{
     AssetMeta, DeleteOutcome, ListCursor, ListPage, ListQuery, PresignMethod, PresignedUrl,
     PutRequest, PutSource, Visibility,
@@ -208,8 +209,14 @@ impl LocalAssetStore {
         }
     }
 
-    /// Stream `source` to `dest` atomically. Neither side is buffered whole.
-    async fn stream_file_atomic(&self, dest: &Path, source: &Path) -> Result<u64, AssetError> {
+    /// Stream `source` to `dest` atomically. Neither side is buffered whole, and
+/// every copied chunk is reported into `progress`.
+    async fn stream_file_atomic(
+        &self,
+        dest: &Path,
+        source: &Path,
+        progress: Option<&ProgressHandle>,
+    ) -> Result<u64, AssetError> {
         self.ensure_parent(dest).await?;
         let temp = self.temp_path(dest);
 
@@ -217,10 +224,17 @@ impl LocalAssetStore {
             let mut reader = tokio::fs::File::open(source)
                 .await
                 .map_err(|e| AssetError::io("open", &e))?;
+            // The local backend knows the size up front, so the total is exact
+            // from the first byte rather than unknown.
+            if let Some(progress) = progress
+                && let Ok(metadata) = reader.metadata().await
+            {
+                progress.set_total(metadata.len());
+            }
             let mut writer = tokio::fs::File::create(&temp)
                 .await
                 .map_err(|e| AssetError::io("create", &e))?;
-            let copied = tokio::io::copy(&mut reader, &mut writer)
+            let copied = copy_with_progress(&mut reader, &mut writer, progress)
                 .await
                 .map_err(|e| AssetError::io("copy", &e))?;
             writer
@@ -391,6 +405,12 @@ impl AssetStore for LocalAssetStore {
         };
         self.check_size(&request.key, Some(bytes.len() as u64))?;
         self.write_bytes_atomic(&dest, &bytes).await?;
+        // Buffered path: the payload is already in memory, so one report is the
+        // honest granularity.
+        if let Some(progress) = &request.progress {
+            progress.set_total(bytes.len() as u64);
+            progress.add(bytes.len() as u64);
+        }
         self.write_visibility(&request.key, request.visibility)
             .await?;
         self.meta_for(&request.key).await
@@ -404,6 +424,10 @@ impl AssetStore for LocalAssetStore {
             PutSource::Bytes(bytes) => {
                 self.check_size(&request.key, Some(bytes.len() as u64))?;
                 self.write_bytes_atomic(&dest, bytes).await?;
+                if let Some(progress) = &request.progress {
+                    progress.set_total(bytes.len() as u64);
+                    progress.add(bytes.len() as u64);
+                }
             }
             PutSource::File(path) => {
                 let len = tokio::fs::metadata(path)
@@ -411,7 +435,8 @@ impl AssetStore for LocalAssetStore {
                     .map(|m| m.len())
                     .map_err(|e| AssetError::io("metadata", &e))?;
                 self.check_size(&request.key, Some(len))?;
-                self.stream_file_atomic(&dest, path).await?;
+                self.stream_file_atomic(&dest, path, request.progress.as_ref())
+                    .await?;
             }
         }
         // The requested visibility is recorded, not enforced. Recording on
@@ -435,7 +460,12 @@ impl AssetStore for LocalAssetStore {
         }
     }
 
-    async fn download_to(&self, key: &AssetKey, dest: &Path) -> Result<AssetMeta, AssetError> {
+    async fn download_to(
+        &self,
+        key: &AssetKey,
+        dest: &Path,
+        progress: Option<ProgressHandle>,
+    ) -> Result<AssetMeta, AssetError> {
         self.capabilities()
             .require(BackendKind::Local, AssetOperation::DownloadTo)?;
         let source = self.object_path(key);
@@ -444,7 +474,8 @@ impl AssetStore for LocalAssetStore {
                 key: key.to_string(),
             });
         }
-        self.stream_file_atomic(dest, &source).await?;
+        self.stream_file_atomic(dest, &source, progress.as_ref())
+            .await?;
         self.meta_for(key).await
     }
 
@@ -730,20 +761,46 @@ mod tests {
         assert_eq!(meta.size_bytes, payload.len() as u64);
 
         let dest = dir.path().join("nested/deeper/out.bin");
+        let progress = ProgressHandle::new();
         let meta = store
-            .download_to(&key("uploads/big.bin"), &dest)
+            .download_to(&key("uploads/big.bin"), &dest, Some(progress.clone()))
             .await
             .unwrap();
         assert_eq!(meta.size_bytes, payload.len() as u64);
         assert_eq!(std::fs::read(&dest).unwrap(), payload);
+        // The adapter reports every copied chunk and knows the exact total.
+        assert_eq!(progress.transferred(), payload.len() as u64);
+        assert_eq!(progress.total(), Some(payload.len() as u64));
+        assert_eq!(progress.fraction(), Some(1.0));
 
         let missing = dir.path().join("nested/missing.bin");
         assert!(
             store
-                .download_to(&key("uploads/nope.bin"), &missing)
+                .download_to(&key("uploads/nope.bin"), &missing, None)
                 .await
                 .is_err()
         );
+    }
+
+    #[tokio::test]
+    async fn put_file_reports_progress_for_a_file_source() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store(&dir);
+        let source = dir.path().join("source.bin");
+        let payload: Vec<u8> = vec![9u8; 200 * 1024];
+        std::fs::write(&source, &payload).unwrap();
+
+        let progress = ProgressHandle::new();
+        store
+            .put_file(
+                PutRequest::from_file(key("uploads/p.bin"), source, ContentType::default())
+                    .with_progress(progress.clone()),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(progress.transferred(), payload.len() as u64);
+        assert_eq!(progress.total(), Some(payload.len() as u64));
     }
 
     #[tokio::test]

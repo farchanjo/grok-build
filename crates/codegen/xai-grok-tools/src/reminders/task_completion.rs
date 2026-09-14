@@ -607,6 +607,11 @@ pub fn consumed_completion_ids(output: &ToolOutput) -> Vec<&str> {
         | ToolOutput::AssetList(_)
         | ToolOutput::AssetDelete(_)
         | ToolOutput::AssetSetVisibility(_)
+        | ToolOutput::AssetDownload(_)
+        | ToolOutput::AssetJobStatus(_)
+        | ToolOutput::AssetJobList(_)
+        | ToolOutput::AssetJobCancel(_)
+        | ToolOutput::AssetJobSubscribe(_)
         | ToolOutput::Dynamic(_) => {}
     }
     ids

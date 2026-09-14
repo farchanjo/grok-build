@@ -22,6 +22,7 @@ pub mod assets;
 pub mod events;
 pub mod gcs;
 pub mod queue;
+pub mod rate_limiter;
 pub mod s3;
 pub mod storage_client;
 pub mod trace_context;

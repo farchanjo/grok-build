@@ -13,11 +13,10 @@ pub const DEBOUNCE_MS: u64 = 200;
 /// Token bucket capacity.
 pub const RATE_LIMIT_CAPACITY: u32 = 10;
 
-/// Token bucket refill interval in milliseconds.
-pub const RATE_LIMIT_REFILL_MS: u64 = 2_000;
-
-/// Auto-kill after this many ms of continuous rate-limit violations.
-pub const AUTO_KILL_THRESHOLD_MS: u64 = 30_000;
+// The limiter constants live with the limiter (shared with asset transfer
+// jobs); re-exported here so `monitor::types::RATE_LIMIT_REFILL_MS` and
+// friends keep resolving for the tool and its tests.
+pub use xai_file_utils::rate_limiter::{AUTO_KILL_THRESHOLD_MS, RATE_LIMIT_REFILL_MS};
 
 /// Default monitor timeout (non-persistent). 10 hours to avoid short
 /// unexpected cutoffs for monitors the model starts without an explicit deadline.

@@ -134,6 +134,11 @@ pub fn canonical_input(input: &ToolInput) -> Option<serde_json::Value> {
         | ToolInput::AssetList(_)
         | ToolInput::AssetDelete(_)
         | ToolInput::AssetSetVisibility(_)
+        | ToolInput::AssetDownload(_)
+        | ToolInput::AssetJobStatus(_)
+        | ToolInput::AssetJobList(_)
+        | ToolInput::AssetJobCancel(_)
+        | ToolInput::AssetJobSubscribe(_)
         | ToolInput::Dynamic(_) => return None,
     })
 }

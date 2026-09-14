@@ -13301,6 +13301,7 @@ dependencies = [
  "tracing-opentelemetry",
  "tracing-subscriber",
  "url",
+ "uuid",
  "xai-circuit-breaker",
  "xai-grok-auth",
  "xai-grok-config-types",

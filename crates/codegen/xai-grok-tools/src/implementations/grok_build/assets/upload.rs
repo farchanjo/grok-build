@@ -1,20 +1,25 @@
-//! `asset_upload` — stream a local file into the session asset store.
+//! `asset_upload` — start a background upload job for a local file.
 //!
-//! The object is uploaded with [`AssetStore::put_file`] so a multi-gigabyte
-//! artifact is never materialized in memory (contract §9). The destination key
-//! defaults to the sanitized file name, optionally under a caller prefix, and
-//! an explicit `key` always wins.
+//! The object is uploaded with [`AssetStore::put_file`] on a spawned task, so a
+//! multi-gigabyte artifact neither blocks the turn nor lands in memory
+//! (contract §9, §12). The tool returns a `job_id` immediately; `wait_secs`
+//! lets a small file finish inline.
 //!
-//! Overwriting is deliberate and reported: `put` is idempotent, so uploading a
-//! second file to the same key replaces the first and the output says so.
+//! The destination key defaults to the sanitized file name, optionally under a
+//! caller prefix, and an explicit `key` always wins. Overwriting is deliberate
+//! and reported: `put` is idempotent, so uploading a second file to the same
+//! key replaces the first and the output says so.
 
 use std::path::{Path, PathBuf};
 
-use xai_file_utils::assets::{AssetKey, AssetOperation, AssetPrefix, ContentType, PutRequest};
+use xai_file_utils::assets::{
+    AssetKey, AssetOperation, AssetPrefix, BackendKind, ContentType, JobSnapshot, JobState,
+    ProgressHandle, PutRequest, TransferKind,
+};
 
 use super::{
-    parse_key, parse_visibility, project_asset_error, require_capability, require_store,
-    visibility_hint,
+    parse_key, parse_visibility, parse_wait_secs, project_asset_error, require_capability,
+    require_jobs, require_store, state_note, visibility_hint, wait_for_job,
 };
 use crate::types::output::ToolOutput;
 use crate::types::requirements::{Expr, ToolRequirement};
@@ -51,25 +56,43 @@ pub struct AssetUploadInput {
     #[serde(default)]
     #[schemars(description = "`private` (default) or `public`. Public is always explicit.")]
     pub visibility: Option<String>,
+
+    #[serde(default)]
+    #[schemars(
+        description = "Wait up to this many seconds for the upload to finish inline (0..=600). Omit to return as soon as the job is started; a large file is still running when the tool returns."
+    )]
+    pub wait_secs: Option<u64>,
 }
 
-/// Structured result of one upload.
+/// Structured result of one upload job.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct AssetUploadOutput {
+    /// Job handle for `asset_job_status`, `asset_job_cancel`, `asset_job_subscribe`.
+    pub job_id: String,
+    /// `queued`, `running`, `completed`, `failed`, or `cancelled`.
+    pub state: String,
     pub key: String,
+    pub backend: String,
+    /// Declared payload size, known before the first byte moves.
     pub size_bytes: u64,
+    /// Bytes actually written so far.
+    pub bytes_transferred: u64,
     pub content_type: String,
     pub visibility: String,
     /// True only when the backend actually enforces the recorded visibility.
     pub visibility_enforced: bool,
-    pub backend: String,
-    /// True when an object already existed at `key` and was replaced.
+    /// True when an object already existed at `key` and is being replaced.
     pub overwritten: bool,
+    /// True when `wait_secs` was supplied, so the state is an outcome.
+    pub waited: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub public_url: Option<String>,
     /// Present when the backend records visibility without enforcing it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hint: Option<String>,
+    /// Secret-free failure detail, present when the job failed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
     /// Pre-formatted model-facing prose.
     pub text: String,
 }
@@ -87,9 +110,10 @@ impl crate::types::tool_metadata::ToolMetadata for AssetUploadTool {
     }
 
     fn description_template(&self) -> &str {
-        "Upload a local file to the session asset store and return its key. \
-         Use `asset_share` to mint a time-limited URL for a stored object. \
-         The key defaults to the file name; an existing object at the same key is replaced."
+        "Upload a local file to the session asset store as a background job and return its \
+         `job_id`. Use `asset_share` to mint a time-limited URL for a stored object. \
+         The key defaults to the file name; an existing object at the same key is replaced. \
+         Pass `wait_secs` to wait for a small file to finish inline."
     }
 
     fn requires_expr(&self) -> Expr<ToolRequirement> {
@@ -168,59 +192,118 @@ impl xai_tool_runtime::Tool for AssetUploadTool {
             _ => ContentType::infer_from_path(&path),
         };
         let visibility = parse_visibility(input.visibility.as_deref())?;
+        let wait = parse_wait_secs(input.wait_secs)?;
 
         require_capability(store.as_ref(), AssetOperation::Exists)?;
+        // Best effort: the job re-checks nothing, so a concurrent writer can
+        // still win the race. The flag is honest about what we observed.
         let overwritten = store.exists(&key).await.map_err(project_asset_error)?;
 
-        let request = PutRequest::from_file(key.clone(), path.clone(), content_type)
+        let progress = ProgressHandle::with_total(metadata.len());
+        let request = PutRequest::from_file(key.clone(), path.clone(), content_type.clone())
             .with_visibility(visibility)
-            .with_expected_size(metadata.len());
-        let meta = store.put_file(request).await.map_err(project_asset_error)?;
+            .with_expected_size(metadata.len())
+            .with_progress(progress);
 
-        let public_url = store.public_url(&key);
-        let hint = visibility_hint(meta.backend, meta.visibility_enforced);
-        let mut text = format!(
-            "Uploaded `{}` ({} bytes, {}) to the {} asset store as {}; visibility {}",
-            meta.key,
-            meta.size_bytes,
-            meta.content_type,
-            meta.backend,
-            if overwritten {
-                "an overwrite"
-            } else {
-                "a new object"
-            },
-            meta.visibility,
-        );
-        if let Some(url) = &public_url {
-            text.push_str(&format!(". Public URL: {url}"));
-        } else {
-            text.push('.');
+        let registry = require_jobs(&resources).await?;
+        let job_id = registry.spawn_upload(store.clone(), request);
+
+        // `wait_secs` absent means "read once, right now": the job is either
+        // queued or already running, and the tool never blocks the turn.
+        let snapshot = match wait {
+            Some(timeout) => wait_for_job(&registry, &job_id, Some(timeout)).await,
+            None => registry.get(&job_id).await,
         }
+        .unwrap_or_else(|| unreachable_snapshot(&job_id, key.clone()));
+
+        let state = snapshot.state;
+        let enforced = store.capabilities().visibility_enforced;
+        let public_url = store.public_url(&key);
+        let hint = visibility_hint(snapshot.backend, enforced);
+        let error = snapshot.error.clone();
+
+        let mut text = if state == JobState::Completed {
+            let mut text = format!(
+                "Uploaded `{key}` ({} bytes, {content_type}) to the {} asset store as {}; \
+                 visibility {visibility} (job `{job_id}`).",
+                metadata.len(),
+                snapshot.backend,
+                if overwritten {
+                    "an overwrite"
+                } else {
+                    "a new object"
+                },
+            );
+            if let Some(url) = &public_url {
+                text.push_str(&format!(" Public URL: {url}"));
+            }
+            text
+        } else {
+            let mut text = format!(
+                "Upload `{key}` ({} bytes, {content_type}) to the {} asset store as {} \
+                 (job `{job_id}`): {}",
+                metadata.len(),
+                snapshot.backend,
+                if overwritten {
+                    "an overwrite"
+                } else {
+                    "a new object"
+                },
+                state_note(state, wait.is_some()),
+            );
+            match &error {
+                Some(error) => text.push_str(&format!(": {error}")),
+                None => text.push_str(". Follow it with `asset_job_status` or `asset_job_subscribe`."),
+            }
+            text
+        };
         if let Some(hint) = &hint {
             text.push(' ');
             text.push_str(hint);
         }
 
         tracing::info!(
-            key = %meta.key,
-            bytes = meta.size_bytes,
-            backend = %meta.backend,
-            "asset uploaded"
+            job = %job_id,
+            key = %key,
+            bytes = metadata.len(),
+            state = %state,
+            "asset upload job started"
         );
 
         Ok(ToolOutput::AssetUpload(AssetUploadOutput {
-            key: meta.key.to_string(),
-            size_bytes: meta.size_bytes,
-            content_type: meta.content_type.to_string(),
-            visibility: meta.visibility.to_string(),
-            visibility_enforced: meta.visibility_enforced,
-            backend: meta.backend.to_string(),
+            job_id,
+            state: state.as_str().to_owned(),
+            key: key.to_string(),
+            backend: snapshot.backend.to_string(),
+            size_bytes: metadata.len(),
+            bytes_transferred: snapshot.bytes_transferred,
+            content_type: content_type.to_string(),
+            visibility: visibility.to_string(),
+            visibility_enforced: enforced,
             overwritten,
+            waited: wait.is_some(),
             public_url,
             hint,
+            error,
             text,
         }))
+    }
+}
+
+/// A snapshot for the pathological case of a job that vanished between spawn
+/// and read; the registry only drops jobs at capacity, so this is a safety net.
+fn unreachable_snapshot(job_id: &str, key: AssetKey) -> JobSnapshot {
+    JobSnapshot {
+        job_id: job_id.to_owned(),
+        kind: TransferKind::Upload,
+        key,
+        backend: BackendKind::Local,
+        state: JobState::Queued,
+        bytes_transferred: 0,
+        bytes_total: None,
+        started_at: chrono::Utc::now(),
+        ended_at: None,
+        error: None,
     }
 }
 
@@ -315,6 +398,7 @@ mod tests {
             prefix: None,
             content_type: None,
             visibility: None,
+            wait_secs: None,
         }
     }
 
@@ -382,7 +466,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn happy_path_streams_the_file_into_the_store() {
+    async fn returns_a_job_id_immediately_and_the_job_finishes() {
         let dir = tempfile::TempDir::new().unwrap();
         let source = dir.path().join("my report.pdf");
         tokio::fs::write(&source, b"%PDF-1.4 body").await.unwrap();
@@ -395,9 +479,9 @@ mod tests {
             input(source.to_str().unwrap()),
         )
         .await
-        .expect("upload succeeds");
+        .expect("upload starts");
 
-        match out {
+        let (job_id, state) = match out {
             ToolOutput::AssetUpload(out) => {
                 assert_eq!(out.key, "my-report.pdf");
                 assert_eq!(out.size_bytes, 13);
@@ -405,13 +489,25 @@ mod tests {
                 assert_eq!(out.visibility, "private");
                 assert!(!out.visibility_enforced);
                 assert!(!out.overwritten);
+                assert!(!out.waited);
                 assert_eq!(out.backend, "local");
                 assert!(out.hint.is_some(), "local records without enforcing");
-                assert!(out.text.contains("Uploaded `my-report.pdf`"));
+                assert!(!out.job_id.is_empty());
+                assert!(out.text.contains("job `"), "{}", out.text);
+                (out.job_id, out.state)
             }
             other => panic!("expected AssetUpload, got {other:?}"),
-        }
+        };
+        assert!(
+            matches!(state.as_str(), "queued" | "running" | "completed"),
+            "state was {state}"
+        );
 
+        // The job runs to completion on its own, and the store really got it.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !mock.was_called(AssetOperation::PutFile) && std::time::Instant::now() < deadline {
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
         assert_eq!(
             &mock
                 .raw(&AssetKey::parse("my-report.pdf").unwrap())
@@ -419,6 +515,52 @@ mod tests {
             b"%PDF-1.4 body"
         );
         assert!(!mock.was_called(AssetOperation::Put), "put_file streams");
+        assert!(!job_id.is_empty());
+    }
+
+    #[tokio::test]
+    async fn wait_secs_completes_small_files_inline() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let source = dir.path().join("a.txt");
+        tokio::fs::write(&source, b"one").await.unwrap();
+
+        let mock = Arc::new(MockAssetStore::new());
+        let mut request = input(source.to_str().unwrap());
+        request.wait_secs = Some(10);
+
+        let out = run(&AssetUploadTool, mock, dir.path(), request)
+            .await
+            .expect("upload");
+
+        match out {
+            ToolOutput::AssetUpload(out) => {
+                assert_eq!(out.state, "completed");
+                assert!(out.waited);
+                assert_eq!(out.bytes_transferred, 3);
+                assert!(out.text.contains("Uploaded `a.txt`"));
+                assert!(out.error.is_none());
+            }
+            other => panic!("expected AssetUpload, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn wait_secs_times_out_on_a_slow_job() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let source = dir.path().join("a.txt");
+        tokio::fs::write(&source, b"one").await.unwrap();
+
+        let mock = Arc::new(MockAssetStore::new());
+        let mut request = input(source.to_str().unwrap());
+        request.wait_secs = Some(0);
+        // `wait_secs: 0` means "no wait", so the state must still be reported.
+        let out = run(&AssetUploadTool, mock, dir.path(), request)
+            .await
+            .unwrap();
+        match out {
+            ToolOutput::AssetUpload(out) => assert!(!out.waited),
+            other => panic!("expected AssetUpload, got {other:?}"),
+        }
     }
 
     #[tokio::test]
@@ -428,26 +570,21 @@ mod tests {
         tokio::fs::write(&source, b"one").await.unwrap();
 
         let mock = Arc::new(MockAssetStore::new());
-        let _ = run(
-            &AssetUploadTool,
-            mock.clone(),
-            dir.path(),
-            input(source.to_str().unwrap()),
-        )
-        .await
-        .unwrap();
+        let mut request = input(source.to_str().unwrap());
+        request.wait_secs = Some(10);
+        let _ = run(&AssetUploadTool, mock.clone(), dir.path(), request.clone())
+            .await
+            .unwrap();
         tokio::fs::write(&source, b"two").await.unwrap();
-        let out = run(
-            &AssetUploadTool,
-            mock.clone(),
-            dir.path(),
-            input(source.to_str().unwrap()),
-        )
-        .await
-        .unwrap();
+        let out = run(&AssetUploadTool, mock.clone(), dir.path(), request)
+            .await
+            .unwrap();
 
         match out {
-            ToolOutput::AssetUpload(out) => assert!(out.overwritten),
+            ToolOutput::AssetUpload(out) => {
+                assert!(out.overwritten);
+                assert_eq!(out.bytes_transferred, 3);
+            }
             other => panic!("expected AssetUpload, got {other:?}"),
         }
     }
@@ -480,6 +617,21 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn wait_secs_out_of_range_is_rejected() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let source = dir.path().join("a.txt");
+        tokio::fs::write(&source, b"x").await.unwrap();
+        let mock = Arc::new(MockAssetStore::new());
+        let mut request = input(source.to_str().unwrap());
+        request.wait_secs = Some(super::super::MAX_WAIT_SECS + 1);
+        let err = run(&AssetUploadTool, mock, dir.path(), request)
+            .await
+            .unwrap_err();
+        assert_eq!(err.kind, xai_tool_runtime::ToolErrorKind::InvalidArguments);
+        assert!(err.detail.contains("`wait_secs` must be 0..=600"));
+    }
+
+    #[tokio::test]
     async fn capability_fast_fails_before_any_call() {
         let dir = tempfile::TempDir::new().unwrap();
         let source = dir.path().join("a.txt");
@@ -509,7 +661,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn store_errors_are_projected_with_the_shared_table() {
+    async fn store_errors_surface_on_the_job_and_inline() {
         let dir = tempfile::TempDir::new().unwrap();
         let source = dir.path().join("a.txt");
         tokio::fs::write(&source, b"x").await.unwrap();
@@ -525,20 +677,21 @@ mod tests {
                 )
                 .build(),
         );
-        let err = run(
-            &AssetUploadTool,
-            mock.clone(),
-            dir.path(),
-            input(source.to_str().unwrap()),
-        )
-        .await
-        .unwrap_err();
+        let mut request = input(source.to_str().unwrap());
+        request.wait_secs = Some(10);
+        let out = run(&AssetUploadTool, mock.clone(), dir.path(), request)
+            .await
+            .unwrap();
 
-        assert_eq!(
-            err.kind,
-            xai_tool_runtime::ToolErrorKind::ServiceUnavailable
-        );
-        assert_eq!(err.details.unwrap()["retryable"], true);
+        match out {
+            ToolOutput::AssetUpload(out) => {
+                assert_eq!(out.state, "failed");
+                let error = out.error.expect("error recorded");
+                assert!(error.contains("503"), "{error}");
+                assert!(out.text.contains("503"));
+            }
+            other => panic!("expected AssetUpload, got {other:?}"),
+        }
     }
 
     #[tokio::test]

@@ -50,7 +50,10 @@ reflink-copy = { workspace = true }
 tracing-opentelemetry = { workspace = true }
 url = { workspace = true }
 tokio-stream = { workspace = true }
-tokio-util = { workspace = true, features = ["io"] }
+# `rt` carries `CancellationToken`, the cooperative cancel primitive behind
+# `assets::jobs`; `io` is the pre-existing streaming dependency.
+tokio-util = { workspace = true, features = ["io", "rt"] }
+uuid = { workspace = true, features = ["v7"] }
 zstd.workspace = true
 
 

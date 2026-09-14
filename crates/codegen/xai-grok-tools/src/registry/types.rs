@@ -771,6 +771,11 @@ impl ToolRegistryBuilder {
         b.register::<grok_build::AssetListTool>();
         b.register::<grok_build::AssetDeleteTool>();
         b.register::<grok_build::AssetSetVisibilityTool>();
+        b.register::<grok_build::AssetDownloadTool>();
+        b.register::<grok_build::AssetJobStatusTool>();
+        b.register::<grok_build::AssetJobListTool>();
+        b.register::<grok_build::AssetJobCancelTool>();
+        b.register::<grok_build::AssetJobSubscribeTool>();
         b.register::<codex::apply_patch::ApplyPatchTool>();
         b.register::<codex::list_dir::CodexListDirTool>();
         b.register::<codex::grep_files::CodexGrepFilesTool>();
@@ -1143,6 +1148,13 @@ impl ToolRegistryBuilder {
                 resources.insert(local_fallback_store(&ctx.asset_runtime_context));
             }
         }
+        // Transfer-job registry, one per session and beside the store. The
+        // `asset_job_*` tools resolve it from here (and create one lazily if a
+        // session is built without this builder); the host attaches its console
+        // emitter to the same instance.
+        resources.insert(Arc::new(
+            crate::implementations::grok_build::assets::AssetJobRegistry::new(),
+        ));
         let concise_ns = crate::types::tool::ToolNamespace::GrokBuildConcise.to_string();
         let has_concise_tools = config.tools.iter().any(|tc| {
             self.tools
@@ -2203,6 +2215,8 @@ mod tests {
             _consumer: crate::attribution::ToolConsumer,
             _sent_bearer_prefix: Option<&str>,
         ) {
+            // Diagnostic only; reading it keeps the field from going dead.
+            let _ = self.label;
         }
     }
 

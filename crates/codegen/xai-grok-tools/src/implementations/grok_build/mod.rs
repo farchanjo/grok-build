@@ -37,10 +37,14 @@ pub mod web_search;
 pub mod workflow;
 pub use ask_user_question::AskUserQuestionTool;
 pub use assets::{
-    ASSET_DELETE_TOOL_NAME, ASSET_LIST_TOOL_NAME, ASSET_SET_VISIBILITY_TOOL_NAME,
-    ASSET_SHARE_TOOL_NAME, ASSET_UPLOAD_TOOL_NAME, AssetDeleteOutput, AssetDeleteTool,
-    AssetListOutput, AssetListTool, AssetSetVisibilityOutput, AssetSetVisibilityTool,
-    AssetShareOutput, AssetShareTool, AssetUploadOutput, AssetUploadTool,
+    ASSET_DELETE_TOOL_NAME, ASSET_DOWNLOAD_TOOL_NAME, ASSET_JOB_CANCEL_TOOL_NAME,
+    ASSET_JOB_LIST_TOOL_NAME, ASSET_JOB_STATUS_TOOL_NAME, ASSET_JOB_SUBSCRIBE_TOOL_NAME,
+    ASSET_LIST_TOOL_NAME, ASSET_SET_VISIBILITY_TOOL_NAME, ASSET_SHARE_TOOL_NAME,
+    ASSET_UPLOAD_TOOL_NAME, AssetDeleteOutput, AssetDeleteTool, AssetDownloadOutput,
+    AssetDownloadTool, AssetJobCancelOutput, AssetJobCancelTool, AssetJobListOutput,
+    AssetJobListTool, AssetJobStatusOutput, AssetJobStatusTool, AssetJobSubscribeOutput,
+    AssetJobSubscribeTool, AssetListOutput, AssetListTool, AssetSetVisibilityOutput,
+    AssetSetVisibilityTool, AssetShareOutput, AssetShareTool, AssetUploadOutput, AssetUploadTool,
 };
 pub use bash::BashTool;
 pub use create_skill::{CREATE_SKILL_TOOL_NAME, CreateSkillTool, publish_from_fields};

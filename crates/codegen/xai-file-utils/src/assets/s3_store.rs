@@ -33,6 +33,7 @@ use tokio::io::AsyncWriteExt;
 use super::error::{AssetError, AssetOperation};
 use super::factory::AssetStoreSource;
 use super::key::{AssetKey, ContentType, RESERVED_META_SEGMENT};
+use super::progress::{ProgressHandle, copy_with_progress};
 use super::value::{
     AssetMeta, DeleteOutcome, ListCursor, ListPage, ListQuery, PresignMethod, PresignedUrl,
     PutRequest, PutSource, Visibility,
@@ -420,7 +421,8 @@ impl S3AssetStore {
     }
 
     /// Streaming multipart upload: each part is read from disk on demand, so a
-    /// multi-gigabyte file never lands in memory.
+    /// multi-gigabyte file never lands in memory. Every uploaded part is
+    /// reported into `progress`.
     async fn put_file_multipart(
         &self,
         key: &AssetKey,
@@ -428,6 +430,7 @@ impl S3AssetStore {
         size: u64,
         content_type: &str,
         acl: Option<ObjectCannedAcl>,
+        progress: Option<&ProgressHandle>,
     ) -> Result<(), S3Failure> {
         let physical = self.physical(key);
         let mut create = self
@@ -482,6 +485,9 @@ impl S3AssetStore {
                 );
                 offset += length;
                 part_number += 1;
+                if let Some(progress) = progress {
+                    progress.add(length);
+                }
             }
 
             let upload = CompletedMultipartUpload::builder()
@@ -522,9 +528,13 @@ impl S3AssetStore {
     ) -> Result<(), AssetError> {
         let key = &request.key;
         let content_type = request.content_type.as_str();
+        let progress = request.progress.as_ref();
+        if let Some(progress) = progress {
+            progress.set_total(size);
+        }
 
         if size < crate::s3::MULTIPART_THRESHOLD as u64 {
-            return self
+            let result = self
                 .put_body(
                     key,
                     &request.source,
@@ -533,6 +543,12 @@ impl S3AssetStore {
                     request.visibility,
                 )
                 .await;
+            if result.is_ok()
+                && let Some(progress) = progress
+            {
+                progress.add(size);
+            }
+            return result;
         }
 
         match self
@@ -542,16 +558,22 @@ impl S3AssetStore {
                 size,
                 content_type,
                 self.acl_for(request.visibility),
+                progress,
             ))
             .await
         {
             Ok(()) => Ok(()),
             Err(S3Failure::AclNotSupported) => {
                 self.degrade_acl(key);
+                // The retry restarts the multipart upload, so the byte count
+                // restarts with it.
+                if let Some(progress) = progress {
+                    progress.reset();
+                }
                 self.run(
                     AssetOperation::PutFile,
                     Some(key),
-                    self.put_file_multipart(key, path, size, content_type, None),
+                    self.put_file_multipart(key, path, size, content_type, None, progress),
                 )
                 .await?;
                 self.record_visibility(key, request.visibility, false).await
@@ -651,6 +673,11 @@ impl AssetStore for S3AssetStore {
             request.visibility,
         )
         .await?;
+        // Buffered path: the whole payload is already in memory.
+        if let (Some(progress), Some(length)) = (&request.progress, length) {
+            progress.set_total(length);
+            progress.add(length);
+        }
         self.meta_for(&request.key).await
     }
 
@@ -676,6 +703,10 @@ impl AssetStore for S3AssetStore {
                     request.visibility,
                 )
                 .await?;
+                if let Some(progress) = &request.progress {
+                    progress.set_total(bytes.len() as u64);
+                    progress.add(bytes.len() as u64);
+                }
             }
         }
         self.meta_for(&request.key).await
@@ -692,7 +723,12 @@ impl AssetStore for S3AssetStore {
         .await
     }
 
-    async fn download_to(&self, key: &AssetKey, dest: &Path) -> Result<AssetMeta, AssetError> {
+    async fn download_to(
+        &self,
+        key: &AssetKey,
+        dest: &Path,
+        progress: Option<ProgressHandle>,
+    ) -> Result<AssetMeta, AssetError> {
         self.capabilities()
             .require(BackendKind::S3, AssetOperation::DownloadTo)?;
         let output = self
@@ -703,6 +739,15 @@ impl AssetStore for S3AssetStore {
             )
             .await?;
 
+        // `Content-Length` is the honest total; a chunked response leaves it
+        // unknown and the snapshot reports that.
+        if let Some(progress) = &progress
+            && let Some(length) = output.content_length
+            && length > 0
+        {
+            progress.set_total(length as u64);
+        }
+
         if let Some(parent) = dest.parent() {
             tokio::fs::create_dir_all(parent)
                 .await
@@ -710,12 +755,11 @@ impl AssetStore for S3AssetStore {
         }
         let temp = temp_sibling(dest);
         let mut reader = output.body.into_async_read();
-        tokio::pin!(reader);
         let write = async {
             let mut file = tokio::fs::File::create(&temp)
                 .await
                 .map_err(|e| AssetError::io("create", &e))?;
-            tokio::io::copy(&mut reader, &mut file)
+            copy_with_progress(&mut reader, &mut file, progress.as_ref())
                 .await
                 .map_err(|e| AssetError::io("copy", &e))?;
             file.flush()
@@ -1256,7 +1300,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let dest = dir.path().join("nested/out.bin");
         let meta = store
-            .download_to(&key("uploads/blob.bin"), &dest)
+            .download_to(&key("uploads/blob.bin"), &dest, None)
             .await
             .unwrap();
         assert_eq!(meta.size_bytes, payload.len() as u64);

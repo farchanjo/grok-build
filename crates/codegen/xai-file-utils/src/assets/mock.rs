@@ -17,11 +17,21 @@ use bytes::Bytes;
 
 use super::error::{AssetError, AssetOperation};
 use super::key::{AssetKey, AssetPrefix, ContentType};
+use super::progress::ProgressHandle;
 use super::value::{
     AssetMeta, DeleteOutcome, ListCursor, ListPage, ListQuery, PresignMethod, PresignedUrl,
     PutRequest, PutSource, Visibility,
 };
 use super::{AssetStore, BackendCapabilities, BackendKind, StoreStatus, validate_ttl};
+
+/// The mock buffers, so it reports the whole payload in one step — with the
+/// total known, so a snapshot still shows an exact percentage.
+fn report_progress(progress: &Option<ProgressHandle>, bytes: u64) {
+    if let Some(progress) = progress {
+        progress.set_total(bytes);
+        progress.add(bytes);
+    }
+}
 
 #[derive(Debug, Default)]
 struct State {
@@ -39,6 +49,9 @@ pub struct MockAssetStore {
     public_base_url: Option<String>,
     key_prefix: String,
     max_object_bytes: Option<u64>,
+    /// When set, a write reports progress in this many steps, sleeping between
+    /// them — enough for a subscriber to observe a job that is still running.
+    progress_steps: Option<(u64, Duration)>,
     state: Mutex<State>,
 }
 
@@ -108,6 +121,30 @@ impl MockAssetStore {
         }
     }
 
+    /// Report `total` bytes as one step, or as `steps` paced steps when the
+    /// builder asked for them.
+    async fn report(&self, progress: &Option<ProgressHandle>, total: u64) {
+        let Some(progress) = progress else {
+            return;
+        };
+        progress.set_total(total);
+        match self.progress_steps {
+            None => progress.add(total),
+            Some((steps, pause)) => {
+                let steps = steps.max(1);
+                let chunk = total.div_ceil(steps);
+                let mut remaining = total;
+                for _ in 0..steps {
+                    let take = chunk.min(remaining);
+                    progress.add(take);
+                    remaining -= take;
+                    tokio::task::yield_now().await;
+                    tokio::time::sleep(pause).await;
+                }
+            }
+        }
+    }
+
     fn physical(&self, key: &AssetKey) -> String {
         format!("{}{key}", self.key_prefix)
     }
@@ -168,6 +205,7 @@ pub struct MockAssetStoreBuilder {
     public_base_url: Option<String>,
     key_prefix: String,
     max_object_bytes: Option<u64>,
+    progress_steps: Option<(u64, Duration)>,
     failures: Vec<(AssetOperation, AssetError)>,
 }
 
@@ -205,6 +243,14 @@ impl MockAssetStoreBuilder {
         self
     }
 
+    /// Pace progress reporting: a transfer reports `steps` increments with
+    /// `pause` between them, so a subscriber (or a status poll) can observe a
+    /// job that is genuinely still running instead of one already finished.
+    pub fn progress_steps(mut self, steps: u64, pause: Duration) -> Self {
+        self.progress_steps = Some((steps, pause));
+        self
+    }
+
     pub fn build(self) -> MockAssetStore {
         let backend = self.backend.unwrap_or(BackendKind::Local);
         let capabilities = self.capabilities.unwrap_or_else(|| {
@@ -222,6 +268,7 @@ impl MockAssetStoreBuilder {
             public_base_url: self.public_base_url,
             key_prefix: self.key_prefix,
             max_object_bytes: self.max_object_bytes,
+            progress_steps: self.progress_steps,
             state: Mutex::new(State {
                 failures: self.failures.into_iter().collect(),
                 ..State::default()
@@ -252,15 +299,18 @@ impl AssetStore for MockAssetStore {
             ),
         };
         self.check_size(&request.key, bytes.len() as u64)?;
-        let mut state = self.state.lock().expect("mock state poisoned");
-        state.objects.insert(
-            self.physical(&request.key),
-            (bytes.clone(), request.content_type.clone()),
-        );
-        state
-            .visibility
-            .insert(self.physical(&request.key), request.visibility);
-        drop(state);
+        {
+            // Scoped so the non-`Send` guard is gone before the paced report.
+            let mut state = self.state.lock().expect("mock state poisoned");
+            state.objects.insert(
+                self.physical(&request.key),
+                (bytes.clone(), request.content_type.clone()),
+            );
+            state
+                .visibility
+                .insert(self.physical(&request.key), request.visibility);
+        }
+        self.report(&request.progress, bytes.len() as u64).await;
         Ok(self.meta(&request.key, bytes.len() as u64, request.content_type))
     }
 
@@ -276,15 +326,17 @@ impl AssetStore for MockAssetStore {
             ),
         };
         self.check_size(&request.key, bytes.len() as u64)?;
-        let mut state = self.state.lock().expect("mock state poisoned");
-        state.objects.insert(
-            self.physical(&request.key),
-            (bytes.clone(), request.content_type.clone()),
-        );
-        state
-            .visibility
-            .insert(self.physical(&request.key), request.visibility);
-        drop(state);
+        {
+            let mut state = self.state.lock().expect("mock state poisoned");
+            state.objects.insert(
+                self.physical(&request.key),
+                (bytes.clone(), request.content_type.clone()),
+            );
+            state
+                .visibility
+                .insert(self.physical(&request.key), request.visibility);
+        }
+        self.report(&request.progress, bytes.len() as u64).await;
         Ok(self.meta(&request.key, bytes.len() as u64, request.content_type))
     }
 
@@ -296,7 +348,12 @@ impl AssetStore for MockAssetStore {
         })
     }
 
-    async fn download_to(&self, key: &AssetKey, dest: &Path) -> Result<AssetMeta, AssetError> {
+    async fn download_to(
+        &self,
+        key: &AssetKey,
+        dest: &Path,
+        progress: Option<ProgressHandle>,
+    ) -> Result<AssetMeta, AssetError> {
         self.gate(AssetOperation::DownloadTo)?;
         self.record(AssetOperation::DownloadTo)?;
         let bytes = self.raw(key).ok_or_else(|| AssetError::NotFound {
@@ -310,6 +367,7 @@ impl AssetStore for MockAssetStore {
         tokio::fs::write(dest, &bytes)
             .await
             .map_err(|e| AssetError::io("write", &e))?;
+        self.report(&progress, bytes.len() as u64).await;
         Ok(self.meta(key, bytes.len() as u64, ContentType::infer_from_path(dest)))
     }
 
@@ -630,6 +688,19 @@ mod tests {
                 .await
                 .is_err()
         );
+    }
+
+    #[tokio::test]
+    async fn progress_steps_pace_a_write_for_subscribers() {
+        let store = MockAssetStore::builder()
+            .progress_steps(4, Duration::from_millis(1))
+            .build();
+        let progress = ProgressHandle::new();
+        let request = put_request("uploads/a.txt", b"0123456789")
+            .with_progress(progress.clone());
+        store.put_file(request).await.unwrap();
+        assert_eq!(progress.transferred(), 10);
+        assert_eq!(progress.total(), Some(10));
     }
 
     #[tokio::test]

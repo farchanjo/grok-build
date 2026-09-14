@@ -33,6 +33,7 @@ use tokio_util::io::ReaderStream;
 use super::error::{AssetError, AssetOperation};
 use super::factory::AssetStoreSource;
 use super::key::{AssetKey, ContentType, RESERVED_META_SEGMENT};
+use super::progress::ProgressHandle;
 use super::value::{
     AssetMeta, DeleteOutcome, ListCursor, ListPage, ListQuery, PresignMethod, PresignedUrl,
     PutRequest, PutSource, Visibility,
@@ -512,6 +513,7 @@ impl AssetStore for GcsAssetStore {
                 .map_err(|e| AssetError::io("read", &e))?,
         };
         self.check_size(&request.key, Some(bytes.len() as u64))?;
+        let uploaded = bytes.len() as u64;
         self.run(
             AssetOperation::Put,
             Some(&request.key),
@@ -522,6 +524,10 @@ impl AssetStore for GcsAssetStore {
             ),
         )
         .await?;
+        if let Some(progress) = &request.progress {
+            progress.set_total(uploaded);
+            progress.add(uploaded);
+        }
         self.meta_for(&request.key).await
     }
 
@@ -532,6 +538,7 @@ impl AssetStore for GcsAssetStore {
             PutSource::File(path) => path.clone(),
             PutSource::Bytes(bytes) => {
                 self.check_size(&request.key, Some(bytes.len() as u64))?;
+                let uploaded = bytes.len() as u64;
                 self.run(
                     AssetOperation::PutFile,
                     Some(&request.key),
@@ -542,6 +549,10 @@ impl AssetStore for GcsAssetStore {
                     ),
                 )
                 .await?;
+                if let Some(progress) = &request.progress {
+                    progress.set_total(uploaded);
+                    progress.add(uploaded);
+                }
                 return self.meta_for(&request.key).await;
             }
         };
@@ -551,6 +562,9 @@ impl AssetStore for GcsAssetStore {
             .map(|m| m.len())
             .map_err(|e| AssetError::io("metadata", &e))?;
         self.check_size(&request.key, Some(size))?;
+        if let Some(progress) = &request.progress {
+            progress.set_total(size);
+        }
 
         let object = self.physical(&request.key);
         let content_type = request.content_type.as_str();
@@ -576,6 +590,11 @@ impl AssetStore for GcsAssetStore {
                 .map_err(|e| classify(&e))
         })
         .await?;
+        // The GCS SDK streams the body itself, so the payload is reported as
+        // one completed unit once the upload returns.
+        if let Some(progress) = &request.progress {
+            progress.add(size);
+        }
         self.meta_for(&request.key).await
     }
 
@@ -592,7 +611,12 @@ impl AssetStore for GcsAssetStore {
         Ok(Bytes::from(bytes))
     }
 
-    async fn download_to(&self, key: &AssetKey, dest: &Path) -> Result<AssetMeta, AssetError> {
+    async fn download_to(
+        &self,
+        key: &AssetKey,
+        dest: &Path,
+        progress: Option<ProgressHandle>,
+    ) -> Result<AssetMeta, AssetError> {
         self.capabilities()
             .require(BackendKind::Gcs, AssetOperation::DownloadTo)?;
         if let Some(parent) = dest.parent() {
@@ -628,6 +652,9 @@ impl AssetStore for GcsAssetStore {
                 file.write_all(&chunk)
                     .await
                     .map_err(|e| AssetError::io("write", &e))?;
+                if let Some(progress) = &progress {
+                    progress.add(chunk.len() as u64);
+                }
             }
             file.flush()
                 .await
@@ -1193,7 +1220,7 @@ mod tests {
 
         let dest = dir.path().join("out.bin");
         let meta = store
-            .download_to(&key("uploads/blob.bin"), &dest)
+            .download_to(&key("uploads/blob.bin"), &dest, None)
             .await
             .unwrap();
         assert_eq!(meta.size_bytes, payload.len() as u64);

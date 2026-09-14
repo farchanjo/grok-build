@@ -116,6 +116,16 @@ pub enum ToolKind {
     AssetDelete,
     /// Record (and, where the backend can, enforce) asset visibility.
     AssetSetVisibility,
+    /// Start a background download job for a stored object.
+    AssetDownload,
+    /// Inspect one transfer job.
+    AssetJobStatus,
+    /// List transfer jobs.
+    AssetJobList,
+    /// Cancel a transfer job.
+    AssetJobCancel,
+    /// Follow a transfer job's progress as a stream of events.
+    AssetJobSubscribe,
     #[serde(other)]
     Other,
 }

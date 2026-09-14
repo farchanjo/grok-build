@@ -11,6 +11,7 @@ use chrono::{DateTime, Utc};
 
 use super::error::AssetError;
 use super::key::{AssetKey, AssetPrefix, ContentType};
+use super::progress::ProgressHandle;
 use super::{BackendKind, MAX_LIST_LIMIT, MIN_LIST_LIMIT};
 
 /// Whether an object is publicly readable.
@@ -248,6 +249,8 @@ pub struct PutRequest {
     pub visibility: Visibility,
     /// Size the caller already knows; lets a backend reject early.
     pub expected_size: Option<u64>,
+    /// Byte sink the adapter reports copied chunks into, when anyone listens.
+    pub progress: Option<ProgressHandle>,
 }
 
 impl PutRequest {
@@ -259,6 +262,7 @@ impl PutRequest {
             content_type,
             visibility: Visibility::default(),
             expected_size: None,
+            progress: None,
         }
     }
 
@@ -269,6 +273,7 @@ impl PutRequest {
             content_type,
             visibility: Visibility::default(),
             expected_size: None,
+            progress: None,
         }
     }
 
@@ -279,6 +284,13 @@ impl PutRequest {
 
     pub fn with_expected_size(mut self, size: u64) -> Self {
         self.expected_size = Some(size);
+        self
+    }
+
+    /// Attach a progress sink. The handle also carries the payload total when
+    /// the caller already knows it.
+    pub fn with_progress(mut self, progress: ProgressHandle) -> Self {
+        self.progress = Some(progress);
         self
     }
 
@@ -440,9 +452,18 @@ mod tests {
         assert_eq!(request.visibility, Visibility::Private);
         assert_eq!(request.known_size(), Some(5));
         assert!(!request.source.is_file());
+        assert!(request.progress.is_none());
 
         let request = request.with_visibility(Visibility::Public);
         assert!(request.visibility.is_public());
+
+        let handle = ProgressHandle::with_total(5);
+        let request = request.with_progress(handle.clone());
+        handle.add(5);
+        assert_eq!(
+            request.progress.as_ref().map(ProgressHandle::transferred),
+            Some(5)
+        );
 
         let file = PutRequest::from_file(key(), "/tmp/a.png", ContentType::default());
         assert!(file.source.is_file());

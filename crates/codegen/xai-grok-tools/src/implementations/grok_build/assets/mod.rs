@@ -1,12 +1,20 @@
 //! `asset_*` tools — the model-facing surface of the session asset store.
 //!
-//! Five tools, one backend contract:
+//! Eleven tools, one backend contract. Five are synchronous store operations:
 //!
-//! - [`upload`] — `asset_upload`, stream a local file into the store.
 //! - [`share`] — `asset_share`, mint a time-limited read URL.
 //! - [`list`] — `asset_list`, page through stored objects.
 //! - [`delete`] — `asset_delete`, remove an object (idempotent).
 //! - [`set_visibility`] — `asset_set_visibility`, flip private/public.
+//!
+//! and six drive the async transfer-job registry:
+//!
+//! - [`upload`] — `asset_upload`, start a background upload and return a `job_id`.
+//! - [`download`] — `asset_download`, start a background download and return a `job_id`.
+//! - [`job_status`] — `asset_job_status`, inspect one job.
+//! - [`job_list`] — `asset_job_list`, list tracked jobs.
+//! - [`job_cancel`] — `asset_job_cancel`, cancel a job.
+//! - [`job_subscribe`] — `asset_job_subscribe`, stream coalesced progress events.
 //!
 //! The store itself lives in `xai_file_utils::assets`; the tools never talk to
 //! a backend directly. Every tool:
@@ -16,7 +24,7 @@
 //! 2. consults [`BackendCapabilities`] through [`require_capability`] so an
 //!    unsupported operation fails *before* any network or filesystem call, and
 //! 3. projects every [`AssetError`] through the single [`project_asset_error`]
-//!    table, so `details.code` is stable across the five tools.
+//!    table, so `details.code` is stable across the tools.
 //!
 //! Nothing here blocks: the store's futures are `Send` and the tools `await`
 //! them directly. No `block_on`.
@@ -24,12 +32,33 @@
 //! [`BackendCapabilities`]: xai_file_utils::assets::BackendCapabilities
 
 pub mod delete;
+pub mod download;
+pub mod job_cancel;
+pub mod job_list;
+pub mod job_status;
+pub mod job_subscribe;
 pub mod list;
 pub mod set_visibility;
 pub mod share;
 pub mod upload;
 
 pub use delete::{ASSET_DELETE_TOOL_NAME, AssetDeleteInput, AssetDeleteOutput, AssetDeleteTool};
+pub use download::{
+    ASSET_DOWNLOAD_TOOL_NAME, AssetDownloadInput, AssetDownloadOutput, AssetDownloadTool,
+};
+pub use job_cancel::{
+    ASSET_JOB_CANCEL_TOOL_NAME, AssetJobCancelInput, AssetJobCancelOutput, AssetJobCancelTool,
+};
+pub use job_list::{
+    ASSET_JOB_LIST_TOOL_NAME, AssetJobListInput, AssetJobListOutput, AssetJobListTool,
+};
+pub use job_status::{
+    ASSET_JOB_STATUS_TOOL_NAME, AssetJobStatusInput, AssetJobStatusOutput, AssetJobStatusTool,
+};
+pub use job_subscribe::{
+    ASSET_JOB_SUBSCRIBE_TOOL_NAME, AssetJobSubscribeInput, AssetJobSubscribeOutput,
+    AssetJobSubscribeTool,
+};
 pub use list::{
     ASSET_LIST_TOOL_NAME, AssetListInput, AssetListItem, AssetListOutput, AssetListTool,
 };
@@ -40,15 +69,20 @@ pub use set_visibility::{
 pub use share::{ASSET_SHARE_TOOL_NAME, AssetShareInput, AssetShareOutput, AssetShareTool};
 pub use upload::{ASSET_UPLOAD_TOOL_NAME, AssetUploadInput, AssetUploadOutput, AssetUploadTool};
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use xai_file_utils::assets::{
-    AssetError, AssetKey, AssetOperation, AssetStore, BackendKind, SharedAssetStore, Visibility,
-    validate_ttl,
+    AssetError, AssetKey, AssetOperation, AssetStore, BackendKind, JobSnapshot, JobState,
+    SharedAssetStore, Visibility, validate_ttl,
 };
 use xai_tool_runtime::{ToolError, ToolErrorKind};
 
 use crate::types::resources::SharedResources;
+
+/// Re-exported so a host can name the registry (and insert its own instance
+/// into `Resources`) without depending on `xai-file-utils` directly.
+pub use xai_file_utils::assets::AssetJobRegistry;
 
 /// Resolve the session asset store from `Resources`.
 ///
@@ -167,6 +201,155 @@ pub(crate) fn visibility_hint(backend: BackendKind, enforced: bool) -> Option<St
         "`{backend}` records visibility without enforcing it: the stored value is a hint, \
          not an access-control guarantee."
     ))
+}
+
+// ---------------------------------------------------------------------------
+// Transfer jobs
+// ---------------------------------------------------------------------------
+
+/// Longest inline wait `wait_secs` may ask for.
+pub const MAX_WAIT_SECS: u64 = 600;
+
+/// Resolve the session transfer-job registry, creating it on first use.
+///
+/// The registry belongs beside the store: one per session, shared through
+/// `Resources`, so a job started by `asset_upload` is visible to
+/// `asset_job_status` in a later turn. A host may pre-install one
+/// (`resources.insert(Arc<AssetJobRegistry>)`) — the shell does, to attach the
+/// console emitter — but the tools stay total when it has not.
+pub(crate) async fn require_jobs(
+    resources: &SharedResources,
+) -> Result<Arc<AssetJobRegistry>, ToolError> {
+    let mut res = resources.lock().await;
+    if let Some(registry) = res.get::<Arc<AssetJobRegistry>>() {
+        return Ok(Arc::clone(registry));
+    }
+    let registry = Arc::new(AssetJobRegistry::new());
+    res.insert(Arc::clone(&registry));
+    Ok(registry)
+}
+
+/// Parse `wait_secs`: absent (or `0`) means "return immediately".
+pub(crate) fn parse_wait_secs(raw: Option<u64>) -> Result<Option<Duration>, ToolError> {
+    match raw {
+        None | Some(0) => Ok(None),
+        Some(secs) if secs <= MAX_WAIT_SECS => Ok(Some(Duration::from_secs(secs))),
+        Some(secs) => Err(ToolError::invalid_arguments(format!(
+            "`wait_secs` must be 0..={MAX_WAIT_SECS}, got {secs}"
+        ))),
+    }
+}
+
+/// Resolve a job id argument, rejecting an empty one.
+pub(crate) fn parse_job_id(raw: &str) -> Result<String, ToolError> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err(ToolError::invalid_arguments("`job_id` must not be empty"));
+    }
+    Ok(trimmed.to_owned())
+}
+
+/// Unknown job id, in the same shape as every other asset argument error.
+pub(crate) fn unknown_job(job_id: &str) -> ToolError {
+    ToolError::new(
+        ToolErrorKind::NotFound,
+        format!("no transfer job `{job_id}` is tracked in this session"),
+    )
+    .with_details(serde_json::json!({ "code": "asset_job_not_found" }))
+}
+
+/// Wire view of one job, shared by every `asset_job_*` tool.
+///
+/// Deliberately plain data (owned strings, no store types) so the shape is
+/// stable on the tool boundary and matches the `JobEvent` payload the shell
+/// forwards to the console.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct TransferJobView {
+    pub job_id: String,
+    pub kind: String,
+    pub key: String,
+    pub backend: String,
+    pub state: String,
+    pub bytes_transferred: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bytes_total: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub percent: Option<u8>,
+    pub elapsed_ms: u64,
+    pub bytes_per_sec: u64,
+    pub terminal: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+impl TransferJobView {
+    pub(crate) fn from_snapshot(snapshot: &JobSnapshot) -> Self {
+        Self {
+            job_id: snapshot.job_id.clone(),
+            kind: snapshot.kind.as_str().to_owned(),
+            key: snapshot.key.to_string(),
+            backend: snapshot.backend.as_str().to_owned(),
+            state: snapshot.state.as_str().to_owned(),
+            bytes_transferred: snapshot.bytes_transferred,
+            bytes_total: snapshot.bytes_total,
+            percent: snapshot
+                .fraction()
+                .map(|fraction| (fraction * 100.0).round() as u8),
+            elapsed_ms: (snapshot.duration_secs() * 1000.0).round() as u64,
+            bytes_per_sec: snapshot.bytes_per_sec().round() as u64,
+            terminal: snapshot.is_terminal(),
+            error: snapshot.error.clone(),
+        }
+    }
+
+    /// One-line, secret-free rendering.
+    pub fn line(&self) -> String {
+        let progress = match self.bytes_total {
+            Some(total) => format!(
+                "{} / {} ({}%)",
+                format_bytes(self.bytes_transferred),
+                format_bytes(total),
+                self.percent.unwrap_or(0)
+            ),
+            None => format_bytes(self.bytes_transferred),
+        };
+        let mut line = format!(
+            "`{}` {} {} [{}] — {}",
+            self.job_id, self.kind, self.key, self.state, progress
+        );
+        if let Some(error) = &self.error {
+            line.push_str(&format!(": {error}"));
+        }
+        line
+    }
+}
+
+/// Human-readable byte count (binary units, one decimal).
+///
+/// Re-exported from the registry so the tool prose and a `JobSnapshot`'s own
+/// summary render byte counts identically.
+pub use xai_file_utils::assets::jobs::format_bytes;
+
+/// Wait for a job to finish, bounded by `timeout`.
+///
+/// Returns `None` for an unknown id, so callers can raise a precise error.
+pub(crate) async fn wait_for_job(
+    registry: &AssetJobRegistry,
+    job_id: &str,
+    timeout: Option<Duration>,
+) -> Option<JobSnapshot> {
+    registry.wait_for_completion(job_id, timeout).await
+}
+
+/// Short, model-facing description of a job state, used in tool prose.
+pub(crate) fn state_note(state: JobState, waited: bool) -> &'static str {
+    match (state, waited) {
+        (JobState::Completed, _) => "finished",
+        (JobState::Failed, _) => "failed",
+        (JobState::Cancelled, _) => "was cancelled",
+        (_, true) => "is still running after the inline wait",
+        (_, false) => "is running in the background",
+    }
 }
 
 #[cfg(test)]
@@ -381,7 +564,7 @@ mod tests {
 
         assert_eq!(
             properties::<upload::AssetUploadInput>(),
-            ["content_type", "key", "path", "prefix", "visibility"]
+            ["content_type", "key", "path", "prefix", "visibility", "wait_secs"]
         );
         assert_eq!(properties::<share::AssetShareInput>(), ["key", "ttl_secs"]);
         assert_eq!(
@@ -393,16 +576,70 @@ mod tests {
             properties::<set_visibility::AssetSetVisibilityInput>(),
             ["key", "visibility"]
         );
+        assert_eq!(
+            properties::<download::AssetDownloadInput>(),
+            ["dest", "key", "wait_secs"]
+        );
+        assert_eq!(
+            properties::<job_status::AssetJobStatusInput>(),
+            ["job_id", "wait_secs"]
+        );
+        assert_eq!(
+            properties::<job_list::AssetJobListInput>(),
+            ["only_active"]
+        );
+        assert_eq!(
+            properties::<job_cancel::AssetJobCancelInput>(),
+            ["job_id", "wait_secs"]
+        );
+        assert_eq!(
+            properties::<job_subscribe::AssetJobSubscribeInput>(),
+            [
+                "buffer_bytes",
+                "capacity",
+                "interval_ms",
+                "job_id",
+                "max_events",
+                "timeout_secs",
+                "until_complete"
+            ]
+        );
 
         // Only the genuinely required fields are required.
         let upload_schema = crate::registry::types::generate_schema::<upload::AssetUploadInput>();
         assert_eq!(upload_schema["required"], serde_json::json!(["path"]));
+        let download_schema =
+            crate::registry::types::generate_schema::<download::AssetDownloadInput>();
+        assert_eq!(download_schema["required"], serde_json::json!(["key"]));
+        let status_schema =
+            crate::registry::types::generate_schema::<job_status::AssetJobStatusInput>();
+        assert_eq!(status_schema["required"], serde_json::json!(["job_id"]));
 
         // Printed under `--nocapture` so the registered schemas can be reviewed.
         for (name, schema) in [
             (
                 upload::ASSET_UPLOAD_TOOL_NAME,
                 crate::registry::types::generate_schema::<upload::AssetUploadInput>(),
+            ),
+            (
+                download::ASSET_DOWNLOAD_TOOL_NAME,
+                crate::registry::types::generate_schema::<download::AssetDownloadInput>(),
+            ),
+            (
+                job_status::ASSET_JOB_STATUS_TOOL_NAME,
+                crate::registry::types::generate_schema::<job_status::AssetJobStatusInput>(),
+            ),
+            (
+                job_list::ASSET_JOB_LIST_TOOL_NAME,
+                crate::registry::types::generate_schema::<job_list::AssetJobListInput>(),
+            ),
+            (
+                job_cancel::ASSET_JOB_CANCEL_TOOL_NAME,
+                crate::registry::types::generate_schema::<job_cancel::AssetJobCancelInput>(),
+            ),
+            (
+                job_subscribe::ASSET_JOB_SUBSCRIBE_TOOL_NAME,
+                crate::registry::types::generate_schema::<job_subscribe::AssetJobSubscribeInput>(),
             ),
             (
                 share::ASSET_SHARE_TOOL_NAME,
@@ -427,7 +664,8 @@ mod tests {
     }
 
     /// The full local round trip through the real adapter over a tempdir:
-    /// upload → share → list → delete, with no mock in the path.
+    /// upload (as a job, waiting inline) → share → download → list → delete,
+    /// with no mock in the path.
     #[tokio::test]
     async fn local_store_end_to_end_round_trip() {
         use super::test_support::resources_with_store;
@@ -439,7 +677,10 @@ mod tests {
         let root = tempfile::TempDir::new().unwrap();
         let workspace = tempfile::TempDir::new().unwrap();
         let source = workspace.path().join("quarterly report.txt");
-        tokio::fs::write(&source, b"revenue").await.unwrap();
+        // Large enough to cross several progress chunks, so the job path is
+        // exercised end to end rather than trivially completing.
+        let payload: Vec<u8> = (0..(300 * 1024)).map(|i| (i % 251) as u8).collect();
+        tokio::fs::write(&source, &payload).await.unwrap();
 
         let store: SharedAssetStore =
             Arc::new(LocalAssetStore::new(root.path()).with_public_base_url("https://cdn.test"));
@@ -449,7 +690,8 @@ mod tests {
             test_ctx_with_call_id(ctx_resources, call_id)
         };
 
-        // 1. upload
+        // 1. upload — a job that is waited on inline, so the assertions below
+        //    are about a finished transfer.
         let uploaded = xai_tool_runtime::Tool::run(
             &upload::AssetUploadTool,
             call(resources.clone(), "call-upload"),
@@ -459,19 +701,47 @@ mod tests {
                 prefix: Some("reports/".into()),
                 content_type: None,
                 visibility: Some("public".into()),
+                wait_secs: Some(30),
             },
         )
         .await
         .expect("upload");
-        let key = match uploaded {
+        let job_id = match uploaded {
             ToolOutput::AssetUpload(out) => {
+                assert_eq!(out.state, "completed");
                 assert_eq!(out.key, "reports/quarterly-report.txt");
-                assert_eq!(out.size_bytes, 7);
-                out.key
+                assert_eq!(out.size_bytes, payload.len() as u64);
+                assert_eq!(out.bytes_transferred, payload.len() as u64);
+                assert!(out.waited);
+                out.job_id
             }
             other => panic!("expected AssetUpload, got {other:?}"),
         };
-        assert!(root.path().join("reports/quarterly-report.txt").exists());
+        let key = "reports/quarterly-report.txt".to_owned();
+        assert_eq!(
+            std::fs::read(root.path().join(&key)).unwrap(),
+            payload,
+            "the object really landed in the store"
+        );
+
+        // 1b. the job is still observable afterwards.
+        let status = xai_tool_runtime::Tool::run(
+            &job_status::AssetJobStatusTool,
+            call(resources.clone(), "call-job-status"),
+            job_status::AssetJobStatusInput {
+                job_id: job_id.clone(),
+                wait_secs: None,
+            },
+        )
+        .await
+        .expect("job status");
+        match status {
+            ToolOutput::AssetJobStatus(out) => {
+                assert_eq!(out.state, "completed");
+                assert_eq!(out.key, key);
+            }
+            other => panic!("expected AssetJobStatus, got {other:?}"),
+        }
 
         // 2. share
         let shared = xai_tool_runtime::Tool::run(
@@ -494,7 +764,32 @@ mod tests {
             other => panic!("expected AssetShare, got {other:?}"),
         }
 
-        // 3. list
+        // 3. download the object back through the real adapter.
+        let downloaded = xai_tool_runtime::Tool::run(
+            &download::AssetDownloadTool,
+            call(resources.clone(), "call-download"),
+            download::AssetDownloadInput {
+                key: key.clone(),
+                dest: Some("restored/report.txt".into()),
+                wait_secs: Some(30),
+            },
+        )
+        .await
+        .expect("download");
+        match downloaded {
+            ToolOutput::AssetDownload(out) => {
+                assert_eq!(out.state, "completed");
+                assert_eq!(out.bytes_transferred, payload.len() as u64);
+                assert_eq!(out.size_bytes, Some(payload.len() as u64));
+            }
+            other => panic!("expected AssetDownload, got {other:?}"),
+        }
+        assert_eq!(
+            std::fs::read(workspace.path().join("restored/report.txt")).unwrap(),
+            payload
+        );
+
+        // 4. list
         let listed = xai_tool_runtime::Tool::run(
             &list::AssetListTool,
             call(resources.clone(), "call-list"),
@@ -516,7 +811,7 @@ mod tests {
             other => panic!("expected AssetList, got {other:?}"),
         }
 
-        // 4. delete
+        // 5. delete
         let deleted = xai_tool_runtime::Tool::run(
             &delete::AssetDeleteTool,
             call(resources.clone(), "call-delete"),

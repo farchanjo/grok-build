@@ -23,10 +23,12 @@
 pub mod error;
 pub mod factory;
 pub mod gcs_store;
+pub mod jobs;
 pub mod key;
 pub mod local_store;
 #[cfg(any(test, feature = "test-support"))]
 pub mod mock;
+pub mod progress;
 pub mod s3_store;
 pub mod value;
 
@@ -36,10 +38,15 @@ pub use factory::{
     resolve_asset_store, resolve_asset_store_source,
 };
 pub use gcs_store::GcsAssetStore;
+pub use jobs::{
+    AssetJobRegistry, CancelOutcome, JobError, JobEvent, JobId, JobOutcome, JobSnapshot, JobState,
+    JobSubscription, SubscribeOptions, TransferKind,
+};
 pub use key::{AssetKey, AssetPrefix, ContentType, ContentTypeError, KeyError};
 pub use local_store::LocalAssetStore;
 #[cfg(any(test, feature = "test-support"))]
 pub use mock::{MockAssetStore, MockAssetStoreBuilder};
+pub use progress::{PROGRESS_CHUNK_BYTES, ProgressHandle};
 pub use s3_store::S3AssetStore;
 pub use value::{
     AssetMeta, DeleteOutcome, ListCursor, ListPage, ListQuery, PresignMethod, PresignedUrl,
@@ -310,16 +317,28 @@ pub trait AssetStore: Send + Sync {
     fn capabilities(&self) -> BackendCapabilities;
 
     /// Buffer-then-write upload. Use [`Self::put_file`] for large payloads.
+    ///
+    /// Reports progress through [`PutRequest::progress`] when set.
     async fn put(&self, request: PutRequest) -> Result<AssetMeta, AssetError>;
 
     /// Streaming upload. Must not materialize the whole object in memory.
+    ///
+    /// Reports progress through [`PutRequest::progress`] when set.
     async fn put_file(&self, request: PutRequest) -> Result<AssetMeta, AssetError>;
 
     /// Read the whole object into memory.
     async fn get(&self, key: &AssetKey) -> Result<Bytes, AssetError>;
 
     /// Stream the object to `dest`, creating parent directories.
-    async fn download_to(&self, key: &AssetKey, dest: &Path) -> Result<AssetMeta, AssetError>;
+    ///
+    /// `progress`, when active, receives one report per copied chunk; the whole
+    /// object is never materialized.
+    async fn download_to(
+        &self,
+        key: &AssetKey,
+        dest: &Path,
+        progress: Option<ProgressHandle>,
+    ) -> Result<AssetMeta, AssetError>;
 
     /// Cheap existence probe.
     async fn exists(&self, key: &AssetKey) -> Result<bool, AssetError>;

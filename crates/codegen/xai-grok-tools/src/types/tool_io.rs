@@ -17,7 +17,9 @@ use crate::implementations::codex::list_dir::tool::CodexListDirInput;
 use crate::implementations::codex::read_file::tool::CodexReadFileInput;
 use crate::implementations::grok_build::ask_user_question::AskUserQuestionInput;
 use crate::implementations::grok_build::assets::{
-    AssetDeleteInput, AssetListInput, AssetSetVisibilityInput, AssetShareInput, AssetUploadInput,
+    AssetDeleteInput, AssetDownloadInput, AssetJobCancelInput, AssetJobListInput,
+    AssetJobStatusInput, AssetJobSubscribeInput, AssetListInput, AssetSetVisibilityInput,
+    AssetShareInput, AssetUploadInput,
 };
 use crate::implementations::grok_build::enter_plan_mode::EnterPlanModeInput;
 use crate::implementations::grok_build::exit_plan_mode::ExitPlanModeInput;
@@ -104,6 +106,11 @@ pub enum ToolInput {
     AssetList(AssetListInput),
     AssetDelete(AssetDeleteInput),
     AssetSetVisibility(AssetSetVisibilityInput),
+    AssetDownload(AssetDownloadInput),
+    AssetJobStatus(AssetJobStatusInput),
+    AssetJobList(AssetJobListInput),
+    AssetJobCancel(AssetJobCancelInput),
+    AssetJobSubscribe(AssetJobSubscribeInput),
     /// Dynamic input for runtime-registered tools (MCP, etc.)
     Dynamic(serde_json::Value),
 }
