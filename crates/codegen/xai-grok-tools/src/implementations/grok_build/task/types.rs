@@ -283,6 +283,14 @@ impl SubagentCapabilityModeExt for SubagentCapabilityMode {
                 ToolKind::ExitPlan,
                 ToolKind::AskUser,
                 ToolKind::Skill,
+                // MCP access: `search_tool` discovers, `use_tool` invokes.
+                // Without both, a child in a partial mode can only call an
+                // MCP tool whose exact name it already knows.
+                ToolKind::SearchTool,
+                ToolKind::UseTool,
+                ToolKind::SearchModels,
+                // Extension tools register with no static kind.
+                ToolKind::Other,
             ],
             Self::ReadWrite => &[
                 ToolKind::Read,
@@ -310,6 +318,14 @@ impl SubagentCapabilityModeExt for SubagentCapabilityMode {
                 ToolKind::ExitPlan,
                 ToolKind::AskUser,
                 ToolKind::Skill,
+                // MCP access: `search_tool` discovers, `use_tool` invokes.
+                // Without both, a child in a partial mode can only call an
+                // MCP tool whose exact name it already knows.
+                ToolKind::SearchTool,
+                ToolKind::UseTool,
+                ToolKind::SearchModels,
+                // Extension tools register with no static kind.
+                ToolKind::Other,
             ],
             Self::Execute => &[
                 ToolKind::Read,
@@ -330,6 +346,14 @@ impl SubagentCapabilityModeExt for SubagentCapabilityMode {
                 ToolKind::ExitPlan,
                 ToolKind::AskUser,
                 ToolKind::Skill,
+                // MCP access: `search_tool` discovers, `use_tool` invokes.
+                // Without both, a child in a partial mode can only call an
+                // MCP tool whose exact name it already knows.
+                ToolKind::SearchTool,
+                ToolKind::UseTool,
+                ToolKind::SearchModels,
+                // Extension tools register with no static kind.
+                ToolKind::Other,
             ],
             Self::All => &[
                 ToolKind::Read,
@@ -358,6 +382,14 @@ impl SubagentCapabilityModeExt for SubagentCapabilityMode {
                 ToolKind::ExitPlan,
                 ToolKind::AskUser,
                 ToolKind::Skill,
+                // MCP access: `search_tool` discovers, `use_tool` invokes.
+                // Without both, a child in a partial mode can only call an
+                // MCP tool whose exact name it already knows.
+                ToolKind::SearchTool,
+                ToolKind::UseTool,
+                ToolKind::SearchModels,
+                // Extension tools register with no static kind.
+                ToolKind::Other,
             ],
         }
     }
@@ -989,6 +1021,45 @@ mod tests {
         let mut c = ToolConfig::from_id(id);
         c.kind = Some(kind);
         c
+    }
+
+    /// MCP access needs both dispatchers under every partial mode: without
+    /// `search_tool` a child cannot discover an MCP tool, and without
+    /// `use_tool` it cannot invoke one. A `read-write` child used to lose
+    /// both while still listing `search_models`, leaving six connected
+    /// servers reachable only by exact name.
+    #[test]
+    fn partial_modes_keep_mcp_dispatchers() {
+        for mode in [
+            SubagentCapabilityMode::ReadOnly,
+            SubagentCapabilityMode::ReadWrite,
+            SubagentCapabilityMode::Execute,
+        ] {
+            let mut config = ToolServerConfig {
+                tools: vec![
+                    tc("GrokBuild:search_tool", ToolKind::SearchTool),
+                    tc("GrokBuild:use_tool", ToolKind::UseTool),
+                    tc("GrokBuild:search_models", ToolKind::SearchModels),
+                    tc("GrokBuild:read_file", ToolKind::Read),
+                    // Extension tool: registered with no static kind.
+                    ToolConfig::from_id("obscura__browser_count"),
+                ],
+                behavior_preset: None,
+            };
+            mode.filter_tool_config(&mut config);
+            let ids: Vec<&str> = config.tools.iter().map(|t| t.id.as_str()).collect();
+            for expected in [
+                "GrokBuild:search_tool",
+                "GrokBuild:use_tool",
+                "GrokBuild:search_models",
+                "obscura__browser_count",
+            ] {
+                assert!(
+                    ids.contains(&expected),
+                    "{mode:?} dropped {expected}; kept {ids:?}"
+                );
+            }
+        }
     }
 
     #[test]
