@@ -49,7 +49,12 @@ _grok_resolve_symlinks() {
 # through a symlink, from an arbitrary cwd, or with a symlinked directory
 # component in the path. `_GROK_*` variables are internal and intentionally
 # not exported to child processes.
-_GROK_DEV_ENV_SELF="${BASH_SOURCE[0]}"
+#
+# `BASH_SOURCE` is unset outside bash (zsh sets `$0` to the sourced file
+# instead). The fallback keeps `set -u` from aborting the whole script when a
+# caller does `source ./grok-dev-env.sh` from zsh, which would otherwise skip
+# every export below it — including `CARGO_TARGET_DIR`.
+_GROK_DEV_ENV_SELF="${BASH_SOURCE[0]:-$0}"
 if [[ -L "${_GROK_DEV_ENV_SELF}" ]]; then
     _GROK_DEV_ENV_SELF="$(_grok_resolve_symlinks "${_GROK_DEV_ENV_SELF}")" || return 1
 fi
