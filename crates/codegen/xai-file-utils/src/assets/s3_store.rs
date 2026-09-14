@@ -254,6 +254,19 @@ impl S3AssetStore {
         ))
     }
 
+    /// Budget for `CompleteMultipartUpload`.
+    ///
+    /// The call does not stream: the server assembles the object from the
+    /// already-uploaded parts, and that takes longer than one part upload
+    /// (measured: >30s for 25 parts on R2). Reusing the per-request timeout
+    /// here fails a transfer whose bytes all landed. Four times the request
+    /// timeout, floored at 2 minutes.
+    fn complete_timeout(&self) -> std::time::Duration {
+        self.request_timeout
+            .saturating_mul(4)
+            .max(std::time::Duration::from_secs(120))
+    }
+
     async fn run<T, F>(
         &self,
         operation: AssetOperation,
@@ -521,9 +534,12 @@ impl S3AssetStore {
                 .map(|_| ())
                 .map_err(|e| classify_sdk_error(&e))
         };
-        let result = match tokio::time::timeout(self.request_timeout, result).await {
+        let result = match tokio::time::timeout(self.complete_timeout(), result).await {
             Ok(inner) => inner,
-            Err(_) => Err(self.timeout_failure("complete multipart upload")),
+            Err(_) => Err(S3Failure::Transient(format!(
+                "complete multipart upload timed out after {}s",
+                self.complete_timeout().as_secs()
+            ))),
         };
 
         if result.is_err() {
