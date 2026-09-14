@@ -81,11 +81,6 @@ deploy-binary: build
 	$(CODESIGN) --verify --strict --verbose=2 "$$staged"; \
 	"$$staged" --version; \
 	$(SUDO) $(INSTALL) -d -m 0755 -o root -g wheel "$(DEPLOY_DIR)"; \
-	if $(SUDO) test -e "$(DEPLOY_BINARY)"; then \
-		backup="$(DEPLOY_BINARY).backup.$$(date -u +%Y%m%d-%H%M%S).$$$$"; \
-		$(SUDO) /bin/cp -p "$(DEPLOY_BINARY)" "$$backup"; \
-		echo "Backup created: $$backup"; \
-	fi; \
 	deploy_tmp="$(DEPLOY_BINARY).new.$$$$"; \
 	$(SUDO) $(INSTALL) -m 0755 -o root -g wheel "$$staged" "$$deploy_tmp"; \
 	$(SUDO) /bin/mv -f "$$deploy_tmp" "$(DEPLOY_BINARY)"; \
@@ -120,11 +115,6 @@ deploy-wrapper:
 	$(INSTALL) -m 0755 "$(WRAPPER_SOURCE)" "$$staged"; \
 	$(BASH) -n "$$staged"; \
 	$(SUDO) $(INSTALL) -d -m 0755 -o root -g wheel "$(DEPLOY_DIR)"; \
-	if $(SUDO) test -e "$(DEPLOY_WRAPPER)"; then \
-		backup="$(DEPLOY_WRAPPER).backup.$$(date -u +%Y%m%d-%H%M%S).$$$$"; \
-		$(SUDO) /bin/cp -p "$(DEPLOY_WRAPPER)" "$$backup"; \
-		echo "Backup created: $$backup"; \
-	fi; \
 	deploy_tmp="$(DEPLOY_WRAPPER).new.$$$$"; \
 	$(SUDO) $(INSTALL) -m 0755 -o root -g wheel "$$staged" "$$deploy_tmp"; \
 	$(SUDO) /bin/mv -f "$$deploy_tmp" "$(DEPLOY_WRAPPER)"; \
