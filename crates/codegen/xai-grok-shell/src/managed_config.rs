@@ -464,15 +464,33 @@ fn deployment_key_fingerprint(key: &str) -> String {
     blake3::hash(key.as_bytes()).to_hex().to_string()
 }
 
-/// Whether managed config fetching is enabled (env > config.toml > default true).
-/// Callers doing auto-fetch should check this; explicit user actions (grok setup) skip it.
+/// Whether managed config fetching is enabled: the `[features] managed_config`
+/// gate (env `GROK_MANAGED_CONFIG` > config.toml > default true) AND the xAI
+/// switch (`GROK_XAI_ENABLED` > `[xai] enabled` > enabled). Callers doing
+/// auto-fetch should check this; explicit user actions (grok setup) skip it.
+///
+/// The switch arm is what keeps an off-xAI run from dialing `cli-chat-proxy`
+/// for deployment config, and it wins over `managed_config = true`: the feature
+/// gate says *what* to sync, the switch says *whether xAI is reachable*. The
+/// enforcement gate ([`managed_policy_gate`]) is unaffected — an on-disk policy
+/// still applies, it is only the fetch that goes quiet.
+///
+/// Resolved from the env/config here rather than from the process flag: the
+/// startup prefetch thread decides whether to sync before the agent entry
+/// points apply the switch, so a flag read there would race the apply.
 pub fn is_fetch_enabled() -> bool {
+    let root = crate::config::load_effective_config().ok();
+    // An off-xAI run must not fetch deployment config from xAI.
+    if !crate::util::resolve_xai_enabled_from(
+        root.as_ref()
+            .and_then(|cfg| cfg.get("xai")?.get("enabled")?.as_bool()),
+    ) {
+        return false;
+    }
     if let Some(v) = crate::agent::config::env_bool("GROK_MANAGED_CONFIG") {
         return v;
     }
-    crate::config::load_effective_config()
-        .ok()
-        .and_then(|cfg| cfg.get("features")?.get("managed_config")?.as_bool())
+    root.and_then(|cfg| cfg.get("features")?.get("managed_config")?.as_bool())
         .unwrap_or(true)
 }
 

@@ -533,6 +533,7 @@ mod xai_switch_tests {
     /// genuine xAI session read as "not xAI" — that is the whole point of the
     /// switch.
     #[test]
+    #[serial_test::serial]
     fn xai_switch_forces_is_xai_auth_false() {
         let auth = xai_session();
         crate::util::set_xai_enabled(true);

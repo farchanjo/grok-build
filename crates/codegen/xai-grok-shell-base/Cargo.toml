@@ -39,6 +39,9 @@ pprof = { workspace = true }
 windows = { workspace = true }
 
 [dev-dependencies]
+# Process-global switch flags are flipped by several tests; `#[serial]` keeps
+# them from observing each other's intermediate state.
+serial_test = { workspace = true }
 tempfile = { workspace = true }
 # `cfg(test)` in this crate does not enable features on dependencies, so the
 # tests' `EnvVarGuard` re-export needs the feature turned on explicitly.

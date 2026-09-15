@@ -323,6 +323,10 @@ path = "tests/test_stop_hook_e2e.rs"
 name = "test_subagent_orphan_reconcile"
 path = "tests/test_subagent_orphan_reconcile.rs"
 
+[[test]]
+name = "xai_switch_relay_e2e"
+path = "tests/xai_switch_relay_e2e.rs"
+
 [lints]
 workspace = true
 [build-dependencies]

@@ -55,19 +55,27 @@ fn matches_trusted_base_url(candidate: &str, trusted_base: &str) -> bool {
 }
 /// True for cli-chat-proxy URLs (production, plus local-dev hosts when the
 /// optional non-production feature is enabled). When that feature is on,
-/// runtime env overrides can extend this trust set. Loopback is always
-/// accepted (unit tests and local mock servers on arbitrary ports).
+/// runtime env overrides can extend this trust set. Loopback is accepted
+/// (unit tests and local mock servers on arbitrary ports) unless
+/// [`first_party_loopback_enabled`] turned it off.
 pub fn is_cli_chat_proxy_url(url: &str) -> bool {
     if matches_trusted_base_url(url, crate::env::PROD_CLI_CHAT_PROXY_BASE_URL) {
         return true;
     }
-    if let Ok(u) = reqwest::Url::parse(url)
-        && let Some(h) = u.host_str()
-        && (h == "localhost" || h == "127.0.0.1" || h == "::1")
-    {
+    if first_party_loopback_enabled() && is_loopback_url(url) {
         return true;
     }
     false
+}
+
+/// `true` when `url` is loopback (`localhost`, `127.0.0.0/8`, `::1`). Safe
+/// against invalid URLs and non-loopback hostnames that merely contain the
+/// string (`localhost.example.com`).
+fn is_loopback_url(url: &str) -> bool {
+    match reqwest::Url::parse(url) {
+        Ok(parsed) => is_loopback_host(&parsed),
+        Err(_) => false,
+    }
 }
 /// True for xAI-operated endpoints (`*.x.ai`, cli-chat-proxy, and optional
 /// non-production xAI hosts when that feature is enabled).
@@ -118,6 +126,49 @@ pub fn resolve_xai_enabled() -> bool {
 /// surfaces and an org can pin the switch in `config.toml` without an env var.
 pub fn resolve_xai_enabled_from(config_value: Option<bool>) -> bool {
     xai_grok_config::env_bool(XAI_ENABLED_ENV)
+        .or(config_value)
+        .unwrap_or(true)
+}
+
+/// Opt-out switch for treating loopback endpoints as first-party.
+///
+/// `http://localhost:<port>/v1` is deliberately first-party by default (local
+/// mock servers keep behaving like the cli-chat-proxy), but a real local
+/// gateway (vLLM, LiteLLM, Ollama) is a *custom* endpoint that should not
+/// receive first-party `x-grok-*` / `X-XAI-Token-Auth` headers. `=0` makes
+/// every loopback URL resolve as custom.
+///
+/// The same switch is configurable as `[endpoints] first_party_loopback = false`
+/// in `config.toml`; the env var wins when both are set
+/// ([`resolve_first_party_loopback_from`]).
+pub const FIRST_PARTY_LOOPBACK_ENV: &str = "GROK_FIRST_PARTY_LOOPBACK";
+
+static FIRST_PARTY_LOOPBACK: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(true);
+
+/// Whether loopback URLs are treated as first-party (cli-chat-proxy-like).
+pub fn first_party_loopback_enabled() -> bool {
+    FIRST_PARTY_LOOPBACK.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Override [`first_party_loopback_enabled`]. Called at agent init from the
+/// resolved config/env.
+pub fn set_first_party_loopback(enabled: bool) {
+    FIRST_PARTY_LOOPBACK.store(enabled, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Resolve the opt-out from the environment; defaults to first-party. Strict
+/// parsing, so a typo cannot silently flip the identity of a local endpoint.
+pub fn resolve_first_party_loopback() -> bool {
+    resolve_first_party_loopback_from(None)
+}
+
+/// Resolve the opt-out from the environment and a `config.toml` tier value.
+///
+/// Precedence: `GROK_FIRST_PARTY_LOOPBACK` (strict) > `config_value` (the
+/// effective `[endpoints] first_party_loopback` key) > `true`.
+pub fn resolve_first_party_loopback_from(config_value: Option<bool>) -> bool {
+    xai_grok_config::env_bool(FIRST_PARTY_LOOPBACK_ENV)
         .or(config_value)
         .unwrap_or(true)
 }
@@ -310,6 +361,7 @@ mod tests {
         ));
     }
     #[test]
+    #[serial_test::serial]
     fn test_is_xai_api_url() {
         assert!(is_xai_api_url("https://api.x.ai/v1"));
         assert!(is_xai_api_url("https://api.x.ai/v1/chat/completions"));
@@ -328,6 +380,91 @@ mod tests {
         assert!(is_xai_api_url("http://api.x.ai/v1"));
         assert!(is_xai_api_url("http://localhost:11434/v1"));
     }
+
+    /// The loopback opt-out is off by default (a local mock server stays
+    /// first-party, `a8c4d2ea`) and, when on, must move loopback out of the
+    /// first-party trust set without touching the real proxy host.
+    ///
+    /// `first_party_loopback_enabled` is process-wide, so every test that flips
+    /// it restores the default.
+    #[test]
+    #[serial_test::serial]
+    fn first_party_loopback_opt_out_moves_loopback_to_custom() {
+        for loopback in [
+            "http://localhost:8000/v1",
+            "http://127.0.0.1:8000/v1",
+            "http://[::1]:8000/v1",
+        ] {
+            set_first_party_loopback(true);
+            assert!(
+                is_cli_chat_proxy_url(loopback),
+                "{loopback} is first-party by default"
+            );
+
+            set_first_party_loopback(false);
+            assert!(
+                !is_cli_chat_proxy_url(loopback),
+                "{loopback} must resolve as a custom endpoint when opted out"
+            );
+            assert!(
+                !is_xai_api_url(loopback),
+                "{loopback} must stop deriving a first-party identity"
+            );
+
+            // The production proxy host is never affected by the opt-out.
+            assert!(is_cli_chat_proxy_url(
+                "https://cli-chat-proxy.grok.com/v1/chat/completions"
+            ));
+            assert!(is_xai_api_url("https://api.x.ai/v1"));
+        }
+        set_first_party_loopback(true);
+    }
+
+    /// A non-loopback hostname that merely contains `localhost` stays custom
+    /// either way, and the opt-out must not widen the trust set.
+    #[test]
+    #[serial_test::serial]
+    fn first_party_loopback_opt_out_leaves_other_hosts_alone() {
+        set_first_party_loopback(false);
+        assert!(!is_cli_chat_proxy_url("http://localhost.example.com:8000/v1"));
+        assert!(!is_cli_chat_proxy_url("http://192.168.1.10:8000/v1"));
+        assert!(!is_cli_chat_proxy_url("not-a-url"));
+        set_first_party_loopback(true);
+    }
+
+    /// Env beats config, config beats the default, and a blank/junk env value
+    /// falls through — the same strict-parsing contract as `GROK_XAI_ENABLED`.
+    ///
+    /// One `EnvVarGuard` at a time: it holds a process-wide env lock, so
+    /// nesting guards would deadlock.
+    #[test]
+    #[serial_test::serial]
+    fn resolve_first_party_loopback_precedence() {
+        {
+            let _unset = xai_grok_env::EnvVarGuard::remove(FIRST_PARTY_LOOPBACK_ENV);
+            assert!(
+                resolve_first_party_loopback_from(None),
+                "default is first-party"
+            );
+            assert!(!resolve_first_party_loopback_from(Some(false)));
+        }
+        {
+            let env = xai_grok_env::EnvVarGuard::set(FIRST_PARTY_LOOPBACK_ENV, "0");
+            assert!(
+                !resolve_first_party_loopback_from(Some(true)),
+                "env must beat the config tier"
+            );
+            env.set_value("maybe");
+            assert!(
+                !resolve_first_party_loopback_from(Some(false)),
+                "a junk env value must fall through to the config tier"
+            );
+            env.set_value("1");
+            assert!(resolve_first_party_loopback_from(Some(false)));
+            assert!(resolve_first_party_loopback());
+        }
+    }
+
     #[test]
     fn test_is_xai_api_bearer_url() {
         assert!(is_xai_api_bearer_url("https://api.x.ai/v1"));

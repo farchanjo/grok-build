@@ -1196,10 +1196,41 @@ mod xai_switch_relay_tests {
         auth
     }
 
-    /// The leader and headless paths pick the relay *before* `bootstrap`, which
-    /// is why `apply_xai_switch` is hoisted into them. If that hoist is ever
-    /// dropped, this is the test that catches it.
+    /// The gate reads `is_xai_auth`, which is only correct once the switch has
+    /// been applied — and the leader / headless entry points build the relay
+    /// *before* `bootstrap`, which is why `apply_xai_switch` is hoisted into
+    /// them. This replays that order with the switch read from the env, so a
+    /// dropped hoist fails here: the first assertion shows that the gate alone
+    /// still relays a present grok.com session, the second that the switch
+    /// applied at the entry point wins over it.
     #[test]
+    #[serial_test::serial]
+    fn relay_gate_loses_to_the_switch_applied_at_the_entry_points() {
+        let ctx = GrokComConfig::default();
+        let session = xai_session();
+        let _env =
+            xai_grok_test_support::EnvGuard::set(crate::util::XAI_ENABLED_ENV, "0");
+        // Start from the un-applied default, exactly like a fresh process whose
+        // entry point has not run its hoist yet.
+        crate::util::set_xai_enabled(true);
+        assert!(
+            RelayConfig::for_session(&session, &ctx, None, None).is_some(),
+            "precondition: with the switch unapplied, a present session relays"
+        );
+
+        crate::agent::init::apply_xai_switch(&crate::agent::config::Config::default());
+        assert!(
+            RelayConfig::for_session(&session, &ctx, None, None).is_none(),
+            "the switch applied at the entry point must keep the grok.com websocket closed"
+        );
+
+        crate::util::set_xai_enabled(true);
+    }
+
+    /// The gate honors the process flag in both directions (the apply is a
+    /// separate concern, covered above).
+    #[test]
+    #[serial_test::serial]
     fn relay_is_off_when_the_xai_switch_is_disabled() {
         let ctx = GrokComConfig::default();
         crate::util::set_xai_enabled(true);

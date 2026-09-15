@@ -147,8 +147,13 @@ fn resolve_config(cfg: &AgentConfig, auth_manager: &AuthManager) -> AgentConfig 
 
 /// Initialize process-level singletons (deployment sync, built-in metadata,
 /// telemetry). `Once`-guarded: only the first call takes effect.
-/// Apply the process-wide xAI switch (`GROK_XAI_ENABLED` env > `[xai] enabled`
-/// config > enabled).
+/// Apply the process-wide xAI-surface switches:
+///
+/// * the xAI kill switch (`GROK_XAI_ENABLED` env > `[xai] enabled` config >
+///   enabled), and
+/// * the loopback first-party opt-out (`GROK_FIRST_PARTY_LOOPBACK` env >
+///   `[endpoints] first_party_loopback` config > first-party), which decides
+///   whether `http://localhost:*` derives a first-party identity.
 ///
 /// Idempotent, and callable before `bootstrap`: consumers of `is_xai_auth` run
 /// *earlier* than `init_process` on the leader and headless paths (the relay
@@ -157,11 +162,21 @@ fn resolve_config(cfg: &AgentConfig, auth_manager: &AuthManager) -> AgentConfig 
 /// the pre-switch value.
 pub fn apply_xai_switch(cfg: &AgentConfig) {
     crate::util::set_xai_enabled(crate::util::resolve_xai_enabled_from(cfg.xai.enabled));
+    crate::util::set_first_party_loopback(
+        crate::util::resolve_first_party_loopback_from(cfg.endpoints.first_party_loopback),
+    );
     if !crate::util::xai_enabled() {
         tracing::info!(
             env = crate::util::XAI_ENABLED_ENV,
             config = ?cfg.xai.enabled,
             "xAI surfaces disabled"
+        );
+    }
+    if !crate::util::first_party_loopback_enabled() {
+        tracing::info!(
+            env = crate::util::FIRST_PARTY_LOOPBACK_ENV,
+            config = ?cfg.endpoints.first_party_loopback,
+            "loopback endpoints resolve as custom, not first-party"
         );
     }
 }
@@ -292,6 +307,7 @@ mod xai_switch_apply_tests {
     /// The switch has to be readable from both tiers, with the env winning, and
     /// it must land on the process flag (which is what `is_xai_auth` consults).
     #[test]
+    #[serial_test::serial]
     fn apply_xai_switch_env_beats_config_and_lands_on_the_flag() {
         let cfg = |enabled: Option<bool>| AgentConfig {
             xai: config::XaiConfig { enabled },
@@ -317,6 +333,7 @@ mod xai_switch_apply_tests {
 
     /// With no env override the config tier decides.
     #[test]
+    #[serial_test::serial]
     fn apply_xai_switch_honors_config_without_env() {
         let _unset = EnvGuard::unset(crate::util::XAI_ENABLED_ENV);
         let cfg = AgentConfig {
@@ -328,6 +345,43 @@ mod xai_switch_apply_tests {
         apply_xai_switch(&cfg);
         assert!(!crate::util::xai_enabled());
 
+        crate::util::set_xai_enabled(true);
+    }
+
+    /// The loopback first-party opt-out rides the same apply, so every entry
+    /// point that hoists `apply_xai_switch` also decides the identity of a
+    /// local endpoint: env > `[endpoints] first_party_loopback` > first-party.
+    #[test]
+    #[serial_test::serial]
+    fn apply_xai_switch_lands_the_loopback_opt_out_on_the_flag() {
+        let cfg = |off: Option<bool>| AgentConfig {
+            endpoints: config::EndpointsConfig {
+                first_party_loopback: off,
+                ..config::EndpointsConfig::default()
+            },
+            ..AgentConfig::default()
+        };
+
+        let _unset = EnvGuard::unset(crate::util::FIRST_PARTY_LOOPBACK_ENV);
+        apply_xai_switch(&cfg(Some(false)));
+        assert!(
+            !crate::util::first_party_loopback_enabled(),
+            "the config tier must be able to opt out"
+        );
+        apply_xai_switch(&cfg(None));
+        assert!(
+            crate::util::first_party_loopback_enabled(),
+            "an unset key keeps loopback first-party"
+        );
+
+        let _off = EnvGuard::set(crate::util::FIRST_PARTY_LOOPBACK_ENV, "0");
+        apply_xai_switch(&cfg(Some(true)));
+        assert!(
+            !crate::util::first_party_loopback_enabled(),
+            "env must beat a config that says first-party"
+        );
+
+        crate::util::set_first_party_loopback(true);
         crate::util::set_xai_enabled(true);
     }
 }

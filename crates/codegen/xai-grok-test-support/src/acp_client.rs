@@ -465,7 +465,18 @@ impl RawStdioClient {
     /// runs under a leader (standalone it exits 2), so a caller that needs the
     /// surviving entrypoint passes `["agent", "--no-leader", "headless"]`.
     pub async fn spawn_with_args(server: &MockInferenceServer, cwd: &Path, args: &[&str]) -> Self {
-        let mut sandbox = TestSandbox::new();
+        Self::spawn_with_args_in_sandbox(server, cwd, args, TestSandbox::new()).await
+    }
+
+    /// Like [`Self::spawn_with_args`], but in a caller-prepared sandbox — the
+    /// supported seam for seeding a credential (`GROK_AUTH` / `auth.json`) or
+    /// adding env overrides before the child starts.
+    pub async fn spawn_with_args_in_sandbox(
+        server: &MockInferenceServer,
+        cwd: &Path,
+        args: &[&str],
+        mut sandbox: TestSandbox,
+    ) -> Self {
         let mut process =
             spawn_agent_process_with_subcommand(&mut sandbox, server, cwd, &[], &[], args);
 

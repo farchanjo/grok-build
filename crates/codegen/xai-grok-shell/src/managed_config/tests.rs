@@ -15,6 +15,48 @@ fn gate_blocks_only_managed_principal_with_compromised_policy() {
     assert!(managed_policy_gate_decision(false, false).is_ok());
 }
 
+/// The xAI switch disarms the auto-fetch: an off-xAI run with no managed config
+/// on disk must not dial `cli-chat-proxy` for deployment config, and an explicit
+/// `managed_config = true` must not re-arm it. With the switch on, the
+/// `[features] managed_config` gate decides exactly as before.
+///
+/// The gate itself is not disarmed — `managed_policy_gate` keeps failing closed
+/// on an on-disk policy (see `gate_blocks_only_managed_principal_with_compromised_policy`).
+#[test]
+#[serial_test::serial]
+fn is_fetch_enabled_is_disarmed_by_the_xai_switch() {
+    use xai_grok_test_support::EnvGuard;
+
+    {
+        let _off = EnvGuard::set(crate::util::XAI_ENABLED_ENV, "0");
+        let _feature_on = EnvGuard::set("GROK_MANAGED_CONFIG", "1");
+        assert!(
+            !is_fetch_enabled(),
+            "GROK_XAI_ENABLED=0 must win over managed_config = true"
+        );
+    }
+
+    {
+        let _on = EnvGuard::set(crate::util::XAI_ENABLED_ENV, "1");
+        let _feature_on = EnvGuard::set("GROK_MANAGED_CONFIG", "1");
+        assert!(is_fetch_enabled(), "the switch on leaves the feature gate in charge");
+    }
+
+    {
+        let _on = EnvGuard::set(crate::util::XAI_ENABLED_ENV, "1");
+        let _feature_off = EnvGuard::set("GROK_MANAGED_CONFIG", "0");
+        assert!(!is_fetch_enabled(), "the feature gate still disarms on its own");
+    }
+
+    // A junk env value falls through to the config tier/default, so a typo
+    // cannot silently disarm the fetch.
+    {
+        let _junk = EnvGuard::set(crate::util::XAI_ENABLED_ENV, "maybe");
+        let _feature_on = EnvGuard::set("GROK_MANAGED_CONFIG", "1");
+        assert!(is_fetch_enabled());
+    }
+}
+
 /// Writes both artifacts and overwrites in place on re-fetch.
 #[test]
 fn apply_writes_and_overwrites_artifacts() {

@@ -249,6 +249,12 @@ pub struct EndpointsConfig {
     /// Env: `GROK_ASSET_SERVER_URL`.
     #[serde(default = "default_asset_server_url")]
     pub asset_server_url: String,
+    /// Opt out of treating loopback endpoints (`localhost`, `127.0.0.0/8`,
+    /// `::1`) as first-party cli-chat-proxy-like hosts. Env:
+    /// `GROK_FIRST_PARTY_LOOPBACK`. `None` = unset (loopback is first-party).
+    /// Applied process-wide by `agent::init::apply_xai_switch`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub first_party_loopback: Option<bool>,
     /// Read by `load_management_api_key_sync()`. Declared for `serde_ignored`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub management_api_key: Option<String>,
@@ -590,6 +596,9 @@ impl Default for EndpointsConfig {
             otel_exporter_otlp_timeout: env_string("OTEL_EXPORTER_OTLP_TIMEOUT")
                 .and_then(|s| s.parse().ok()),
             asset_server_url: default_asset_server_url(),
+            // `None` = unset: the env/config resolver in `apply_xai_switch`
+            // decides, and the process default stays first-party.
+            first_party_loopback: None,
             management_api_key: None,
             gcs_service_account_key: None,
         }
@@ -7597,6 +7606,43 @@ reasoning_effort = "low"
         );
     }
 
+    /// `[endpoints] first_party_loopback` is the config tier of the loopback
+    /// opt-out; an absent section (or key) must stay `None` so the env/default
+    /// still decide.
+    #[test]
+    fn new_from_toml_cfg_parses_first_party_loopback() {
+        let empty: toml::Value = toml::Value::Table(toml::map::Map::new());
+        assert_eq!(
+            Config::new_from_toml_cfg(&empty)
+                .unwrap()
+                .endpoints
+                .first_party_loopback,
+            None,
+            "absent [endpoints] must not pin the opt-out"
+        );
+
+        let section_without_key: toml::Value = toml::from_str(
+            "[endpoints]\nxai_api_base_url = \"https://api.x.ai/v1\"\n",
+        )
+        .unwrap();
+        assert_eq!(
+            Config::new_from_toml_cfg(&section_without_key)
+                .unwrap()
+                .endpoints
+                .first_party_loopback,
+            None
+        );
+
+        let off: toml::Value = toml::from_str("[endpoints]\nfirst_party_loopback = false\n").unwrap();
+        assert_eq!(
+            Config::new_from_toml_cfg(&off)
+                .unwrap()
+                .endpoints
+                .first_party_loopback,
+            Some(false)
+        );
+    }
+
     #[test]
     fn hidden_default_web_search_resolution_is_explicit_and_responses_only() {
         let endpoints = EndpointsConfig::default();
@@ -9790,6 +9836,7 @@ reasoning_effort = "low"
     /// endpoint. Assuming xAI would stamp `x-grok-*` headers and xAI-only
     /// request extensions onto a local or third-party gateway.
     #[test]
+    #[serial_test::serial]
     fn provider_identity_without_model_provider_follows_the_base_url() {
         let xai = test_model_entry("grok-4.5", "https://api.x.ai/v1", None, None, None);
         assert_eq!(provider_identity_for_model(&xai), ProviderIdentity::Xai);
@@ -9835,6 +9882,59 @@ reasoning_effort = "low"
             ProviderIdentity::Custom,
             "a third-party gateway must not be treated as first-party"
         );
+    }
+
+    /// The loopback opt-out moves a local gateway out of the first-party
+    /// identity (no `x-grok-*` / `X-XAI-Token-Auth` headers) and the default
+    /// keeps today's behavior. The flag is process-wide, so the test restores
+    /// it; `provider_identity_without_model_provider_follows_the_base_url`
+    /// asserts the default-on arm.
+    #[test]
+    #[serial_test::serial]
+    fn provider_identity_for_loopback_follows_the_first_party_opt_out() {
+        let loopback = test_model_entry("qwen3", "http://localhost:8000/v1", None, None, None);
+
+        crate::util::set_first_party_loopback(true);
+        assert_eq!(
+            provider_identity_for_model(&loopback),
+            ProviderIdentity::Xai,
+            "loopback is first-party unless the user opts out"
+        );
+
+        crate::util::set_first_party_loopback(false);
+        assert_eq!(
+            provider_identity_for_model(&loopback),
+            ProviderIdentity::Custom,
+            "opting out must stop deriving a first-party identity from loopback"
+        );
+
+        crate::util::set_first_party_loopback(true);
+    }
+
+    /// The user-visible half of the opt-out: the URL-derived first-party
+    /// headers (`X-XAI-Token-Auth`, `x-authenticateresponse`, client mode) must
+    /// stop being injected into a loopback endpoint.
+    #[test]
+    #[serial_test::serial]
+    fn url_derived_headers_follow_the_first_party_opt_out() {
+        let mut headers = IndexMap::new();
+        crate::util::set_first_party_loopback(true);
+        inject_url_derived_headers(&mut headers, None, "http://localhost:8000/v1");
+        assert!(
+            headers.contains_key("X-XAI-Token-Auth"),
+            "loopback is first-party by default, got {headers:?}"
+        );
+        assert!(headers.contains_key("x-authenticateresponse"));
+
+        headers.clear();
+        crate::util::set_first_party_loopback(false);
+        inject_url_derived_headers(&mut headers, None, "http://localhost:8000/v1");
+        assert!(
+            headers.is_empty(),
+            "an opted-out local gateway must get no first-party headers, got {headers:?}"
+        );
+
+        crate::util::set_first_party_loopback(true);
     }
 
     /// DashScope keeps a real 1:1 provider identity, and its thinking knobs
@@ -15430,6 +15530,12 @@ default = "grok-4.5"
     }
     #[test]
     fn resolve_model_list_prefetch_visibility_matches_auth_and_server_list() {
+        // Empty provider home + no provider credential env: the exact counts
+        // below describe the prefetch-driven base, not the ambient preset rows
+        // that `install_model_presets_into` adds on top of it.
+        let home = tempfile::tempdir().unwrap();
+        crate::agent::providers::set_stored_key_home_for_tests(Some(home.path().to_path_buf()));
+        let _env = provider_credential_env_guard();
         let cfg = Config::default();
         let dm = crate::models::default_model();
         let mut defs = default_model_entries(&EndpointsConfig::default());
@@ -15448,6 +15554,20 @@ default = "grok-4.5"
             .collect();
         assert_eq!(sess.len(), 1);
         assert_eq!(api.len(), 1);
+        crate::agent::providers::set_stored_key_home_for_tests(None);
+    }
+    /// Unset the provider credential env vars for the guard's lifetime.
+    ///
+    /// `ProviderManager::api_key` falls back to `<PROVIDER>_API_KEY`, and a
+    /// set key is enough for `install_model_presets_into` to admit that
+    /// provider's static presets — which would otherwise leak ambient rows
+    /// into a test that counts catalog entries exactly.
+    fn provider_credential_env_guard() -> [xai_grok_test_support::EnvGuard; 3] {
+        [
+            xai_grok_test_support::EnvGuard::unset("ANTHROPIC_API_KEY"),
+            xai_grok_test_support::EnvGuard::unset("OPENAI_API_KEY"),
+            xai_grok_test_support::EnvGuard::unset("OPENROUTER_API_KEY"),
+        ]
     }
     #[test]
     fn resolve_model_list_keeps_prefetch_only_entries_and_prunes_defaults() {
@@ -15473,9 +15593,23 @@ default = "grok-4.5"
     }
     #[test]
     fn resolve_model_list_empty_prefetch_yields_empty_base() {
+        // Pin an empty provider home and clear the provider credential env:
+        // `resolve_model_list` unconditionally injects provider presets on top
+        // of the base catalog, so either an ambient key (env) or a cached
+        // catalog (home) would otherwise decide whether this catalog is empty.
+        // The property under test is the *base*: an empty prefetch must not
+        // leave the bundled xAI catalog behind.
+        let home = tempfile::tempdir().unwrap();
+        crate::agent::providers::set_stored_key_home_for_tests(Some(home.path().to_path_buf()));
+        let _env = provider_credential_env_guard();
         let cfg = Config::default();
         let resolved = resolve_model_list(&cfg, Some(IndexMap::new()));
-        assert!(resolved.is_empty());
+        assert!(
+            resolved.is_empty(),
+            "unexpected base entries: {:?}",
+            resolved.keys().collect::<Vec<_>>()
+        );
+        crate::agent::providers::set_stored_key_home_for_tests(None);
     }
     /// Regression: enterprise managed config overlays env_key on an oauth-only
     /// catalog entry. BYOK must force visibility for API-key users so a
