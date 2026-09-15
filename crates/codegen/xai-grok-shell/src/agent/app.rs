@@ -453,6 +453,20 @@ pub async fn run_stdio_agent(
     result
 }
 
+/// Whether this run holds a credential that does not depend on a grok.com
+/// session: a bearer in `GROK_API_KEY` / `XAI_API_KEY` with no external auth
+/// provider command configured.
+///
+/// Two call sites depend on it. A run like this must not block on the
+/// interactive browser login (nothing can complete it headless), and it must
+/// keep working when the relay is unavailable, since the relay is
+/// session-authenticated. With an `auth_provider_command` set, that command —
+/// not the env var — is the intended source of the session, so a failed one
+/// still falls through to the login flow.
+fn has_sessionless_bearer(ctx: &crate::auth::GrokComConfig) -> bool {
+    crate::agent::auth_method::has_xai_api_key_env() && ctx.auth_provider_command.is_none()
+}
+
 pub async fn run_headless(
     agent_config: &AgentConfig,
     reauthenticate: bool,
@@ -485,9 +499,10 @@ async fn run_headless_inner(
     use crate::agent::relay::spawn_relay_connection_with_callback;
     use tokio_util::sync::CancellationToken;
 
-    // Headless's only transport is the relay (no IPC fallback), so a session is required.
-    const HEADLESS_NO_SESSION: &str = "Headless mode requires a grok.com session. \
-        Connect xAI in /providers to sign in, or use `grok agent stdio` for API-key access.";
+    // A grok.com session is optional. It only gates the relay (the transport
+    // remote clients reach the agent through); without one the agent is served
+    // over stdio instead, so a bare bearer (`GROK_API_KEY` / `XAI_API_KEY`,
+    // usually with `GROK_MODELS_BASE_URL`) completes turns with no xAI account.
 
     // Clean up orphaned upload queue temp files from previous sessions (best-effort).
     // Uses DEFAULT_MAX_AGE to stay in sync with the upload queue's retry policy.
@@ -500,11 +515,13 @@ async fn run_headless_inner(
     agent_config.mode = crate::agent::config::AgentMode::Headless;
 
     let ctx = &agent_config.grok_com_config;
-    let (mut auth, did_browser_flow) = if no_browser {
+    let (mut auth, did_browser_flow): (Option<GrokAuth>, bool) = if no_browser {
         // No-browser mode: only use cached credentials, skip OAuth flow
         let auth_manager = agent_config.create_auth_manager();
         match auth_manager.current() {
-            Some(auth) => (auth, false),
+            Some(auth) => (Some(auth), false),
+            // A bearer env var is a credential on its own; no session to miss.
+            None if has_sessionless_bearer(ctx) => (None, false),
             None if auth_manager.is_expired() => {
                 anyhow::bail!(
                     "Session expired. Connect xAI in /providers (or run `grok provider connect xai`)."
@@ -514,7 +531,7 @@ async fn run_headless_inner(
         }
     } else if reauthenticate {
         let auth_manager = Arc::new(AuthManager::new(&grok_home::grok_home(), ctx.clone()));
-        run_auth_flow(
+        let (auth, did_browser_flow) = run_auth_flow(
             &auth_manager,
             ctx,
             true,
@@ -523,34 +540,43 @@ async fn run_headless_inner(
             None,
             crate::auth::LoginTransportOverride::None,
         )
-        .await?
+        .await?;
+        (Some(auth), did_browser_flow)
     } else {
         // Don't pre-resolve via try_ensure_session_noninteractive: run_auth_flow below
         // already mints external/devbox creds, so it would run the provider twice.
         let auth_manager = Arc::new(AuthManager::new(&grok_home::grok_home(), ctx.clone()));
-        if crate::agent::auth_method::has_xai_api_key_env()
-            && ctx.auth_provider_command.is_none()
-            && crate::auth::try_ensure_fresh_auth(ctx).await.is_none()
-        {
-            anyhow::bail!("{HEADLESS_NO_SESSION}");
+        if has_sessionless_bearer(ctx) && crate::auth::try_ensure_fresh_auth(ctx).await.is_none() {
+            // A bearer with no external provider command and nothing cached:
+            // the interactive browser login is all `run_auth_flow` could still
+            // add, and a headless run cannot complete it. Proceed session-less
+            // instead of failing — the relay is skipped below and the bearer
+            // carries the run on its own.
+            (None, false)
+        } else {
+            let (auth, did_browser_flow) = run_auth_flow(
+                &auth_manager,
+                ctx,
+                false,
+                None,
+                None,
+                None,
+                crate::auth::LoginTransportOverride::None,
+            )
+            .await?;
+            (Some(auth), did_browser_flow)
         }
-        run_auth_flow(
-            &auth_manager,
-            ctx,
-            false,
-            None,
-            None,
-            None,
-            crate::auth::LoginTransportOverride::None,
-        )
-        .await?
     };
 
     // Backfill missing user_id / email from proxy (stale cached credentials).
-    if auth.user_id.is_empty() || auth.email.is_none() {
-        auth = Arc::new(agent_config.create_auth_manager())
-            .update(auth.clone())
-            .await?;
+    if let Some(stale) = auth.clone()
+        && (stale.user_id.is_empty() || stale.email.is_none())
+    {
+        auth = Some(
+            Arc::new(agent_config.create_auth_manager())
+                .update(stale)
+                .await?,
+        );
     }
 
     // Prefetch models from the models API before entering the LocalSet.
@@ -560,12 +586,12 @@ async fn run_headless_inner(
         .await;
     let auth_for_prefetch = auth.clone();
     let endpoints_for_prefetch = agent_config.endpoints.clone();
-    // `true` — auth is always established by this point (run_auth_flow above).
-    let fetch_auth_for_prefetch = ModelFetchAuth::resolve(&endpoints_for_prefetch, true);
+    // `auth.is_some()` — a session may be absent on a BYOK run (see above).
+    let fetch_auth_for_prefetch = ModelFetchAuth::resolve(&endpoints_for_prefetch, auth.is_some());
     let prefetched_models = tokio::task::spawn_blocking(move || {
         prefetch_models_blocking(
             &endpoints_for_prefetch,
-            Some(&auth_for_prefetch),
+            auth_for_prefetch.as_ref(),
             fetch_auth_for_prefetch,
         )
     })
@@ -591,9 +617,14 @@ async fn run_headless_inner(
     let shared_auth_manager = Arc::new(agent_config.create_auth_manager());
 
     let Some(relay_config) =
-        relay_config_for_session(Some(&auth), &agent_config, &shared_auth_manager)
+        relay_config_for_session(auth.as_ref(), &agent_config, &shared_auth_manager)
     else {
-        anyhow::bail!("{HEADLESS_NO_SESSION}");
+        // No session, or xAI surfaces are switched off: the relay cannot
+        // connect, but the agent does not need it. Serve the agent over stdio
+        // (the ACP contract the removed `grok agent stdio` had) so a local
+        // client can drive turns against a plain bearer.
+        eprintln!("No xAI session: serving the agent over stdio (ACP); the grok.com relay is off.");
+        return run_stdio_agent(&agent_config, prefetched_models, memory_config).await;
     };
 
     // Capture the grok build URL for the first-connection callback
@@ -1849,6 +1880,42 @@ mod tests {
     }
 
     // ===== relay shared-manager seeding tests =====
+
+    /// A bearer env var with no external provider command is a session-less
+    /// credential: `run_headless_inner` skips the interactive login for it and
+    /// serves the agent over stdio when the relay is off. An external provider
+    /// command outranks the env var, so the session path stays.
+    ///
+    /// One `EnvVarGuard` per test: the guard holds a process-global lock.
+    #[test]
+    fn sessionless_bearer_needs_env_key_and_no_provider_command() {
+        let _key = crate::env::EnvVarGuard::set("GROK_API_KEY", "test-bearer");
+
+        let mut ctx = crate::auth::GrokComConfig::default();
+        ctx.auth_provider_command = None;
+        assert!(
+            has_sessionless_bearer(&ctx),
+            "a bearer env var alone must qualify"
+        );
+
+        ctx.auth_provider_command = Some("printf token".to_string());
+        assert!(
+            !has_sessionless_bearer(&ctx),
+            "an external provider command owns the session, so the env bearer must not qualify"
+        );
+    }
+
+    /// Without a bearer env var the predicate mirrors the reader exactly —
+    /// `XAI_API_KEY` / the legacy name may still be set in the ambient env.
+    #[test]
+    fn sessionless_bearer_mirrors_the_env_reader() {
+        let _key = crate::env::EnvVarGuard::remove("GROK_API_KEY");
+        let ctx = crate::auth::GrokComConfig::default();
+        assert_eq!(
+            has_sessionless_bearer(&ctx),
+            crate::agent::auth_method::has_xai_api_key_env()
+        );
+    }
 
     fn oidc_session(key: &str, create_time: chrono::DateTime<chrono::Utc>) -> GrokAuth {
         GrokAuth {

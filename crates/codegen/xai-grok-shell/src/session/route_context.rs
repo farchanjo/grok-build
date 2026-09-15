@@ -283,6 +283,19 @@ pub fn assert_live_route_usable(
                 id: route.instance_id().to_owned(),
             },
         )?;
+    // A route with no bound incarnation came from the legacy path — its model
+    // carries no `model_provider`, so `legacy_from_config` derived the instance
+    // id from the provider *kind* (`custom`, `openrouter`, ...). The registry
+    // holds a descriptor for the built-in products only, so guarding a `custom`
+    // route fails closed with "provider `custom` is not configured" on every
+    // BYOK / custom-endpoint turn. Structured routes keep the full guard.
+    if route.incarnation().is_none() && service.get(route.instance_id()).is_none() {
+        tracing::debug!(
+            instance_id = route.instance_id(),
+            "live route guard skipped: legacy route with no registry descriptor"
+        );
+        return Ok(());
+    }
     let req = RouteGuardRequest {
         provider_instance_id: route.instance_id(),
         provenance_incarnation: route.incarnation(),

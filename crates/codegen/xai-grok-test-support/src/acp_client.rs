@@ -31,6 +31,27 @@ fn spawn_agent_process(
     extra_env: &[(&str, &str)],
     leading_args: &[&str],
 ) -> TestProcess {
+    spawn_agent_process_with_subcommand(
+        sandbox,
+        server,
+        cwd,
+        extra_env,
+        leading_args,
+        &["agent", "stdio"],
+    )
+}
+
+/// Like [`spawn_agent_process`], with an explicit subcommand instead of
+/// `agent stdio` — the surviving ACP entrypoints (`agent --no-leader headless`)
+/// are not spelled `agent stdio`, which now only runs under a leader.
+fn spawn_agent_process_with_subcommand(
+    sandbox: &mut TestSandbox,
+    server: &MockInferenceServer,
+    cwd: &Path,
+    extra_env: &[(&str, &str)],
+    leading_args: &[&str],
+    subcommand: &[&str],
+) -> TestProcess {
     sandbox.set_mock_url(server.url());
     for (key, value) in extra_env {
         sandbox.set_env(*key, *value);
@@ -38,15 +59,13 @@ fn spawn_agent_process(
 
     let binary = grok_binary();
     let mut cmd = tokio::process::Command::new(&binary);
-    cmd.args(leading_args)
-        .args(["agent", "stdio"])
-        .current_dir(cwd);
+    cmd.args(leading_args).args(subcommand).current_dir(cwd);
 
     TestProcess::spawn(
         cmd,
         sandbox,
         TestProcessConfig::new()
-            .label("grok agent stdio")
+            .label(format!("grok {}", subcommand.join(" ")))
             .stdin(TestStdin::Piped)
             .stdout(TestOutput::Piped),
     )
@@ -439,8 +458,16 @@ pub struct RawStdioClient {
 
 impl RawStdioClient {
     pub async fn spawn(server: &MockInferenceServer, cwd: &Path) -> Self {
+        Self::spawn_with_args(server, cwd, &["agent", "stdio"]).await
+    }
+
+    /// Like [`Self::spawn`], with an explicit subcommand. `agent stdio` only
+    /// runs under a leader (standalone it exits 2), so a caller that needs the
+    /// surviving entrypoint passes `["agent", "--no-leader", "headless"]`.
+    pub async fn spawn_with_args(server: &MockInferenceServer, cwd: &Path, args: &[&str]) -> Self {
         let mut sandbox = TestSandbox::new();
-        let mut process = spawn_agent_process(&mut sandbox, server, cwd, &[], &[]);
+        let mut process =
+            spawn_agent_process_with_subcommand(&mut sandbox, server, cwd, &[], &[], args);
 
         let stdin = process.take_stdin().expect("child stdin missing");
         let child_stdout = process.take_stdout().expect("child stdout missing");

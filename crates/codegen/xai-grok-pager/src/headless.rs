@@ -512,19 +512,21 @@ fn auto_respond_to_permissions(
 
 /// "Not signed in" error message, tailored to the session type.
 ///
-/// Deliberately names the provider-neutral path first: the value read from
-/// `GROK_API_KEY` / `XAI_API_KEY` is a plain bearer, and with
-/// `GROK_MODELS_BASE_URL` set it never reaches xAI at all.
+/// The non-interactive variant leads with the credential that needs no xAI
+/// account at all: `GROK_API_KEY` is read first by
+/// `xai_grok_shell::agent::auth_method::read_xai_api_key_env` (before
+/// `XAI_API_KEY`) and its value is a plain bearer — with `GROK_MODELS_BASE_URL`
+/// set it never reaches xAI. `grok provider connect` is the fallback, since a
+/// headless run cannot complete an interactive login.
 fn auth_required_message(interactive: bool) -> String {
     if interactive {
         "Not signed in. Run `grok provider connect <provider>` (xai, openai, \
          openrouter), or open /providers."
             .to_string()
     } else {
-        "Not signed in. Authenticate without a browser with either:\n  \
-         grok provider connect <provider>\n  \
-         GROK_API_KEY (or XAI_API_KEY) = <bearer for your endpoint>, plus \
-         GROK_MODELS_BASE_URL=<endpoint>/v1 for a non-xAI gateway"
+        "Not signed in. Set GROK_API_KEY=<bearer> (add \
+         GROK_MODELS_BASE_URL=<endpoint>/v1 for a non-xAI gateway), or run \
+         `grok provider connect <provider>`."
             .to_string()
     }
 }
@@ -1892,6 +1894,38 @@ fn handle_ext_notification(
 
 #[cfg(test)]
 mod tests {
+    /// A non-interactive run cannot finish a browser login, so the "not signed
+    /// in" copy must lead with the credential that needs no xAI account:
+    /// `GROK_API_KEY` + `GROK_MODELS_BASE_URL`, with `grok provider connect`
+    /// only as the fallback. Locked by index so a reorder is a failure.
+    #[test]
+    fn non_interactive_auth_message_leads_with_the_env_bearer() {
+        let msg = super::auth_required_message(false);
+        let api_key = msg.find("GROK_API_KEY").expect("names GROK_API_KEY");
+        let base_url = msg
+            .find("GROK_MODELS_BASE_URL")
+            .expect("names GROK_MODELS_BASE_URL");
+        let connect = msg
+            .find("grok provider connect")
+            .expect("keeps the interactive fallback");
+        assert!(api_key < connect, "env bearer must come first: {msg}");
+        assert!(
+            base_url < connect,
+            "endpoint override must come first: {msg}"
+        );
+        assert!(
+            !msg.contains('\n'),
+            "non-interactive copy stays one line: {msg}"
+        );
+    }
+
+    #[test]
+    fn interactive_auth_message_keeps_provider_connect_only() {
+        let msg = super::auth_required_message(true);
+        assert!(msg.contains("grok provider connect"), "{msg}");
+        assert!(!msg.contains("GROK_API_KEY"), "{msg}");
+    }
+
     #[test]
     fn lifecycle_tracking_is_independent_of_wait_flag() {
         let mut pending = std::collections::HashSet::new();

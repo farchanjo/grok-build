@@ -599,7 +599,8 @@ pub enum AgentCmd {
     /// ACP stdio mode was removed. Use the interactive TUI or headless `-p`.
     #[command(hide = true)]
     Stdio,
-    /// Run the agent headlessly over the Grok WebSocket relay
+    /// Run the agent headlessly, over the Grok WebSocket relay when signed in
+    /// to grok.com and over stdio (ACP) otherwise
     Headless(HeadlessArgs),
     /// WebSocket serve mode was removed. Use the interactive TUI or headless `-p`.
     #[command(hide = true)]

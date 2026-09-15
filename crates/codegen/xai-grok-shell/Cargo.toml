@@ -244,6 +244,10 @@ name = "git_contention_e2e"
 path = "tests/git_contention_e2e.rs"
 
 [[test]]
+name = "headless_no_session_e2e"
+path = "tests/headless_no_session_e2e.rs"
+
+[[test]]
 name = "session_load_perf"
 path = "tests/session_load_perf.rs"
 
