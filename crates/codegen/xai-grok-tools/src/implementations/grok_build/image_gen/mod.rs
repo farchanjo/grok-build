@@ -81,6 +81,11 @@ pub struct ImageGenClient {
     /// Wire shape for `/images/*` requests. `Auto`/`Xai` keep the historical
     /// payload byte-for-byte; `OpenAi` drops the xAI-only fields.
     provider: MediaProvider,
+    /// Wire shape for `/images/edits` requests. Kept separate from `provider`
+    /// so `[tools.image_edit] provider` can silence (or reshape) the edit
+    /// surface without touching generation; it is seeded from `provider` when
+    /// the edit surface has no key of its own.
+    edit_provider: MediaProvider,
     writer: super::storage::SessionFileWriter,
     api_key_provider: Option<SharedApiKeyProvider>,
     /// Optional 401-attribution hook. Hosts wire this so a 401 from the
@@ -107,6 +112,7 @@ impl ImageGenClient {
             model_override,
             edit_model_override,
             provider,
+            edit_provider,
             tier_restricted,
             ..
         } = config
@@ -175,6 +181,7 @@ impl ImageGenClient {
             model,
             edit_model,
             provider: *provider,
+            edit_provider: *edit_provider,
             writer: super::storage::SessionFileWriter::new(DEFAULT_IMAGE_DIR, "jpg"),
             api_key_provider,
             attribution_callback: None,
@@ -227,10 +234,22 @@ impl ImageGenClient {
         self.provider
     }
 
+    /// Wire shape for `image_edit` only. Falls back to [`Self::provider`] at
+    /// resolution time when the edit surface has no key of its own, so this is
+    /// already the effective value.
+    pub(crate) fn edit_provider(&self) -> MediaProvider {
+        self.edit_provider
+    }
+
     /// `true` when the configured endpoint is declared not to serve imagine;
     /// the tools return the remedy prose instead of a doomed request.
     pub(crate) fn is_unsupported_endpoint(&self) -> bool {
-        self.provider.is_unsupported()
+        self.provider().is_unsupported()
+    }
+
+    /// Same, for the edit surface (which has its own `provider` key).
+    pub(crate) fn is_unsupported_edit_endpoint(&self) -> bool {
+        self.edit_provider.is_unsupported()
     }
 
     pub(crate) fn http(&self) -> &reqwest::Client {
@@ -440,6 +459,13 @@ pub enum ImageGenConfig {
         /// Wire shape for `/images/*`. `Auto` (default) keeps the historical
         /// xAI payload and additionally accepts the OpenAI response envelope.
         provider: MediaProvider,
+        /// Wire shape for `/images/edits` only. Set from
+        /// `[tools.image_edit] provider` / `GROK_IMAGE_EDIT_PROVIDER`, falling
+        /// back to `provider` when the edit surface has no key of its own — so
+        /// one family-wide setting keeps working while an edit-only
+        /// `provider = "unsupported"` silences just the edit surface (the
+        /// remedy [`super::image_edit`]'s 404/405 message names).
+        edit_provider: MediaProvider,
         /// `true` when the user is on a tier the Imagine server zero-limits
         /// (free / X Basic). The tools stay advertised to the model, but
         /// `image_gen` / `image_edit` short-circuit at call time with the
@@ -670,6 +696,7 @@ mod tests {
             model_override: None,
             edit_model_override: None,
             provider: MediaProvider::Auto,
+            edit_provider: MediaProvider::Auto,
             tier_restricted: false,
         }
     }
@@ -708,6 +735,7 @@ mod tests {
             model_override: Some("grok-imagine-image".into()),
             edit_model_override: None,
             provider: MediaProvider::Auto,
+            edit_provider: MediaProvider::Auto,
             tier_restricted: false,
         };
         assert!(cfg.has_credentials());
@@ -730,6 +758,7 @@ mod tests {
             model_override: model_override.map(String::from),
             edit_model_override: None,
             provider: MediaProvider::Auto,
+            edit_provider: MediaProvider::Auto,
             tier_restricted: false,
         };
         // No override → default quality model.

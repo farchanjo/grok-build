@@ -2264,6 +2264,16 @@ async fn reconstruct_openai_api_vault_model_no_xai_bearer_resolver() {
     local
         .run_until(async {
             let (_dir, am) = auth_manager_with_valid_token("xai-session-jwt-for-resolver");
+            // The route-bound resolver reads the provider credential from the
+            // home (`lookup_route_credential`), while this fixture only put it
+            // on chat-state credentials — so the resolver would be present but
+            // yield `None`. A real run has the key in `auth.json`.
+            crate::auth::store_provider_api_key(
+                am.grok_home(),
+                crate::auth::OPENAI_API_KEY_SCOPE,
+                "openai-api-key-on-wire",
+            )
+            .expect("store the provider key in the home");
             let (actor, _rx) = make_actor_with_method_and_credentials(
                 Some(am),
                 "cached_token",
@@ -2274,6 +2284,13 @@ async fn reconstruct_openai_api_vault_model_no_xai_bearer_resolver() {
 
             let model_slug = "gpt-4o";
             insert_openai_api_vault_model(&actor, model_slug);
+            // The route is resolved for the *selection*, which the fixture
+            // leaves on the catalog-less "test-model": that mints a legacy
+            // route frozen at binding generation 0, and the exact-route lookup
+            // then fails closed against the generation-1 home credential
+            // (`live_gen != expected_generation` ⇒ `None`). Selecting the vault
+            // model is what a real run does.
+            *actor.selection_model_id.borrow_mut() = acp::ModelId::new(model_slug);
             let mut settings = actor
                 .chat_state_handle
                 .get_inference_settings()
@@ -2288,15 +2305,24 @@ async fn reconstruct_openai_api_vault_model_no_xai_bearer_resolver() {
             // a route-scoped resolver (same branch as OpenRouter). It must
             // stay route-bound: the xAI session resolver never governs and the
             // xAI session token never reaches api.openai.com.
+            let resolver = cfg
+                .bearer_resolver
+                .as_ref()
+                .expect("OpenAI platform vault route installs a route-bound bearer_resolver");
             assert!(
-                cfg.bearer_resolver.is_some(),
-                "OpenAI platform vault route installs a route-bound bearer_resolver"
+                format!("{resolver:?}").contains("RouteBoundBearerResolver"),
+                "the installed resolver must be the route-bound one, never the xAI \
+                 session resolver: {resolver:?}"
+            );
+            // `assert_ne!` alone also passes when the resolver yields `None`,
+            // which would silently lose the old `is_none()` proof that the
+            // route actually has a live bearer. Pin presence first.
+            assert!(
+                resolver.current_bearer().is_some(),
+                "route-bound resolver must yield the route credential, not `None`"
             );
             assert_ne!(
-                cfg.bearer_resolver
-                    .as_ref()
-                    .and_then(|r| r.current_bearer())
-                    .as_deref(),
+                resolver.current_bearer().as_deref(),
                 Some("xai-session-jwt-for-resolver"),
                 "xAI session token must never be the live bearer for the OpenAI API"
             );
@@ -2318,6 +2344,13 @@ async fn reconstruct_catalog_miss_openrouter_host_no_xai_bearer_resolver() {
     local
         .run_until(async {
             let (_dir, am) = auth_manager_with_valid_token("xai-session-jwt-for-resolver");
+            // Same home-authoritative provider credential as the vault case.
+            crate::auth::store_provider_api_key(
+                am.grok_home(),
+                crate::auth::OPENROUTER_API_KEY_SCOPE,
+                "or-key",
+            )
+            .expect("store the provider key in the home");
             let (actor, _rx) = make_actor_with_method_and_credentials(
                 Some(am),
                 "cached_token",
@@ -2336,15 +2369,22 @@ async fn reconstruct_catalog_miss_openrouter_host_no_xai_bearer_resolver() {
             actor.chat_state_handle.update_inference_settings(settings);
 
             let cfg = actor.reconstruct_full_config().await.expect("reconstruct");
+            let resolver = cfg
+                .bearer_resolver
+                .as_ref()
+                .expect("legacy OpenRouter ApiKey route installs a route-bound bearer_resolver");
+            // Non-vacuous presence: `assert_ne!` alone also passes on `None`.
+            // The identity is what pins the resolver here — this route is a
+            // catalog miss, so it stays legacy at binding generation 0 and the
+            // exact-route lookup fails closed against the generation-1 home
+            // credential (`current_bearer()` is therefore `None`; the static
+            // `api_key` below is what authenticates).
             assert!(
-                cfg.bearer_resolver.is_some(),
-                "legacy OpenRouter ApiKey route installs a route-bound bearer_resolver"
+                format!("{resolver:?}").contains("RouteBoundBearerResolver"),
+                "the installed resolver must be route-bound, not the xAI session one: {resolver:?}"
             );
             assert_ne!(
-                cfg.bearer_resolver
-                    .as_ref()
-                    .and_then(|r| r.current_bearer())
-                    .as_deref(),
+                resolver.current_bearer().as_deref(),
                 Some("xai-session-jwt-for-resolver"),
                 "route-bound resolver must never surface the xAI session token"
             );
@@ -2363,6 +2403,20 @@ async fn reconstruct_catalog_miss_codex_url_is_openai_not_xai() {
     local
         .run_until(async {
             let (_dir, am) = auth_manager_with_valid_token("xai-session-jwt");
+            // The ChatGPT OAuth arm of `lookup_route_credential` requires the
+            // token in the home (both the auth entry and its binding
+            // generation); the fixture only had it on chat-state credentials.
+            crate::auth::chatgpt_oauth::store_tokens(
+                am.grok_home(),
+                &crate::auth::chatgpt_oauth::ChatGptOAuthTokens {
+                    access_token: "chatgpt-access".into(),
+                    refresh_token: "refresh".into(),
+                    expires_at: chrono::Utc::now() + chrono::Duration::hours(1),
+                    account_id: Some("acc-1".into()),
+                    email: None,
+                },
+            )
+            .expect("store the ChatGPT OAuth token in the home");
             let (actor, _rx) = make_actor_with_method_and_credentials(
                 Some(am),
                 "cached_token",
@@ -2387,15 +2441,19 @@ async fn reconstruct_catalog_miss_codex_url_is_openai_not_xai() {
             // The catalog miss yields a legacy (non-authoritative) OpenAi
             // route; since 118f27b that route is credential-bound, so the
             // resolver is route-scoped and never the xAI session resolver.
+            let resolver = cfg
+                .bearer_resolver
+                .as_ref()
+                .expect("legacy Codex route installs a route-bound bearer_resolver");
+            // Same identity pin as the OpenRouter miss: the legacy route
+            // freezes at generation 0, so `current_bearer()` is `None` and
+            // `assert_ne!` alone would be vacuous.
             assert!(
-                cfg.bearer_resolver.is_some(),
-                "legacy Codex route installs a route-bound bearer_resolver"
+                format!("{resolver:?}").contains("RouteBoundBearerResolver"),
+                "the installed resolver must be route-bound, not the xAI session one: {resolver:?}"
             );
             assert_ne!(
-                cfg.bearer_resolver
-                    .as_ref()
-                    .and_then(|r| r.current_bearer())
-                    .as_deref(),
+                resolver.current_bearer().as_deref(),
                 Some("xai-session-jwt"),
                 "xAI session token must never be the live bearer for Codex"
             );

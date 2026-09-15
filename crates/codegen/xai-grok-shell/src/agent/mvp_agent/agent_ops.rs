@@ -70,20 +70,86 @@ fn resolve_media_provider(
         MediaProvider::Auto
     })
 }
+/// Provider for `surface`, from its own key (env > `[tools.<surface>]`) and
+/// falling back to the surface it inherits from (`image_edit` ← `image_gen`)
+/// when it has no key of its own.
+///
+/// The fallback is why this resolves a *value* instead of concatenating raw
+/// strings: `[tools.image_edit] provider = "unsupported"` must silence the edit
+/// surface (the remedy its 404/405 message names) while a single family-wide
+/// `GROK_IMAGE_PROVIDER` keeps moving both imagine surfaces.
+fn resolve_surface_provider(
+    surface: xai_grok_tools::implementations::grok_build::media_endpoint::MediaSurface,
+    overrides: &MediaToolOverrides,
+) -> xai_grok_tools::implementations::grok_build::media_endpoint::MediaProvider {
+    use xai_grok_tools::implementations::grok_build::media_endpoint::MediaProvider;
+    let env = env_str(surface.provider_env());
+    let config = overrides.get(surface.config_table(), "provider");
+    if env.is_some() || config.is_some() {
+        return resolve_media_provider(surface, env.as_deref(), config.as_deref());
+    }
+    match surface.provider_fallback() {
+        Some(parent) => resolve_surface_provider(parent, overrides),
+        None => MediaProvider::Auto,
+    }
+}
+/// Whether the user pointed `surface` somewhere explicitly: any of `base_url`,
+/// `model`, or `provider` set in the environment or in `[tools.<surface>]`.
+///
+/// Used to decide whether a surface with no bearer is still worth registering —
+/// see the comment in [`MvpAgent::prepare_image_gen_config`].
+fn surface_explicitly_configured(
+    surface: xai_grok_tools::implementations::grok_build::media_endpoint::MediaSurface,
+    overrides: &MediaToolOverrides,
+) -> bool {
+    let env_set = [surface.base_url_env(), surface.model_env(), surface.provider_env()]
+        .iter()
+        .any(|key| env_str(key).is_some_and(|value| !value.trim().is_empty()));
+    let config_set = ["base_url", "model", "provider"].iter().any(|field| {
+        overrides
+            .get(surface.config_table(), field)
+            .is_some_and(|value| !value.trim().is_empty())
+    });
+    env_set || config_set
+}
+/// `true` when `url` is hosted on `x.ai`.
+///
+/// Deliberately host-only (unlike `util::is_xai_api_url`, which also counts
+/// cli-chat-proxy hosts and — by default — loopback): the point of the log below
+/// is "the xAI switch is off and this surface still dials xAI", and a local
+/// gateway is exactly what the switch is meant to leave alone.
+fn is_xai_hosted(url: &str) -> bool {
+    reqwest::Url::parse(url)
+        .ok()
+        .and_then(|parsed| parsed.host_str().map(str::to_owned))
+        .is_some_and(|host| host == "x.ai" || host.ends_with(".x.ai"))
+}
 /// Log a non-default media endpoint so a surprising target is visible at
 /// startup instead of only in the failing request.
+///
+/// Also says so when the xAI switch is off but the surface still resolves to an
+/// xAI host: the switch gates xAI *surfaces* through credential identity, it
+/// does not rewrite a base URL, so an off-xAI run would otherwise dial
+/// `api.x.ai` for imagine without a word. Names the key that moves it.
 fn log_media_endpoint(
     surface: xai_grok_tools::implementations::grok_build::media_endpoint::MediaSurface,
     resolved: &xai_grok_tools::implementations::grok_build::media_endpoint::ResolvedValue,
 ) {
-    if resolved.source
-        != xai_grok_tools::implementations::grok_build::media_endpoint::EndpointSource::Default
-    {
+    use xai_grok_tools::implementations::grok_build::media_endpoint::EndpointSource;
+    if resolved.source != EndpointSource::Default {
         tracing::info!(
             surface = surface.as_str(),
             base_url = %resolved.value,
             source = resolved.source.as_str(),
             "media endpoint overridden"
+        );
+    }
+    if !crate::util::xai_enabled() && is_xai_hosted(&resolved.value) {
+        tracing::info!(
+            surface = surface.as_str(),
+            base_url = %resolved.value,
+            env = surface.base_url_env(),
+            "xAI switch is off but this media surface still resolves to an xAI endpoint"
         );
     }
 }
@@ -1310,6 +1376,14 @@ impl MvpAgent {
     /// today's `[endpoints].xai_api_base_url` default, so imagine can point at
     /// a gateway while chat goes elsewhere. With every key unset the result is
     /// byte-identical to before.
+    ///
+    /// A missing bearer no longer disables the surface *when the user pointed it
+    /// somewhere* (`base_url` / `model` / `provider` for either imagine
+    /// surface, env or `[tools.*]`): without that, `provider = "unsupported"`
+    /// and the 404/405 remedy are unobservable without a credential, and a
+    /// keyless local image server can never be used. Nothing configured still
+    /// means `Disabled`, so the xAI default is not loosened — the xAI path does
+    /// need a key.
     pub(super) fn prepare_image_gen_config(
         &self,
     ) -> xai_grok_tools::implementations::grok_build::image_gen::ImageGenConfig {
@@ -1318,12 +1392,20 @@ impl MvpAgent {
             MediaSurface, resolve_optional_value, resolve_value,
         };
         let inference_config = self.inference_config.borrow();
-        let Some(ref api_key) = inference_config.api_key else {
-            return ImageGenConfig::Disabled;
-        };
         let tier_restricted = self.is_tier_restricted_capability();
         let overrides = MediaToolOverrides::load();
         let cfg = self.cfg.borrow();
+        // Either imagine surface being pointed somewhere keeps the pair
+        // registered: `ImageGenConfig::Enabled` carries both, and the edit
+        // surface inherits the image base URL / model by design.
+        let explicitly_configured =
+            surface_explicitly_configured(MediaSurface::ImageGen, &overrides)
+                || surface_explicitly_configured(MediaSurface::ImageEdit, &overrides);
+        let api_key = match inference_config.api_key.clone() {
+            Some(api_key) => api_key,
+            None if explicitly_configured => String::new(),
+            None => return ImageGenConfig::Disabled,
+        };
         let base_url = resolve_value(
             env_str(MediaSurface::ImageGen.base_url_env()).as_deref(),
             overrides
@@ -1364,13 +1446,12 @@ impl MvpAgent {
             None,
         )
         .or_else(|| explicit_image_model.and(model_override.clone()));
-        let provider = resolve_media_provider(
-            MediaSurface::ImageGen,
-            env_str(MediaSurface::ImageGen.provider_env()).as_deref(),
-            overrides
-                .get(MediaSurface::ImageGen.config_table(), "provider")
-                .as_deref(),
-        );
+        let provider = resolve_surface_provider(MediaSurface::ImageGen, &overrides);
+        // The edit surface honors `[tools.image_edit] provider` /
+        // `GROK_IMAGE_EDIT_PROVIDER` and falls back to the image value, so the
+        // `[tools.image_edit] provider = "unsupported"` the 404/405 remedy
+        // prints is a key that is actually read.
+        let edit_provider = resolve_surface_provider(MediaSurface::ImageEdit, &overrides);
         let version = cfg
             .client_version
             .clone()
@@ -1385,7 +1466,7 @@ impl MvpAgent {
             &base_url.value,
         );
         ImageGenConfig::Enabled {
-            api_key: api_key.clone(),
+            api_key,
             base_url: base_url.value,
             edit_base_url: Some(edit_base_url.value),
             extra_headers: headers,
@@ -1394,6 +1475,7 @@ impl MvpAgent {
             model_override,
             edit_model_override,
             provider,
+            edit_provider,
             tier_restricted,
         }
     }
@@ -1410,6 +1492,10 @@ impl MvpAgent {
     /// `GROK_VIDEO_*` env > `[tools.video_gen]` > `[endpoints].xai_api_base_url`,
     /// and `provider = "unsupported"` turns the surface into a one-line remedy
     /// instead of a 404.
+    ///
+    /// As for imagine, a missing bearer keeps the surface registered when
+    /// `[tools.video_gen]` / `GROK_VIDEO_*` configured it; with nothing set the
+    /// xAI default still requires the key.
     pub(super) fn prepare_video_gen_config(
         &self,
     ) -> xai_grok_tools::implementations::grok_build::video_gen::VideoGenConfig {
@@ -1421,8 +1507,13 @@ impl MvpAgent {
         if !cfg.resolve_video_gen().value {
             return VideoGenConfig::Disabled;
         }
-        let Some(api_key) = self.inference_config.borrow().api_key.clone() else {
-            return VideoGenConfig::Disabled;
+        let overrides = MediaToolOverrides::load();
+        let api_key = match self.inference_config.borrow().api_key.clone() {
+            Some(api_key) => api_key,
+            None if surface_explicitly_configured(MediaSurface::VideoGen, &overrides) => {
+                String::new()
+            }
+            None => return VideoGenConfig::Disabled,
         };
         let tier_restricted = self.is_tier_restricted_capability();
         let zdr_video_output_s3 = cfg
@@ -1434,7 +1525,6 @@ impl MvpAgent {
             tracing::info!("video_gen disabled by tools.disable_zdr_incompatible_tools");
             return VideoGenConfig::Disabled;
         }
-        let overrides = MediaToolOverrides::load();
         let base_url = resolve_value(
             env_str(MediaSurface::VideoGen.base_url_env()).as_deref(),
             overrides
@@ -1443,13 +1533,7 @@ impl MvpAgent {
             &cfg.endpoints.xai_api_base_url,
         );
         log_media_endpoint(MediaSurface::VideoGen, &base_url);
-        let provider = resolve_media_provider(
-            MediaSurface::VideoGen,
-            env_str(MediaSurface::VideoGen.provider_env()).as_deref(),
-            overrides
-                .get(MediaSurface::VideoGen.config_table(), "provider")
-                .as_deref(),
-        );
+        let provider = resolve_surface_provider(MediaSurface::VideoGen, &overrides);
         let model_override = resolve_optional_value(
             env_str(MediaSurface::VideoGen.model_env()).as_deref(),
             overrides

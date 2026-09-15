@@ -18,10 +18,17 @@
 //! GROK_IMAGE_EDIT_BASE_URL > [tools.image_edit].base_url > the resolved image base URL
 //! GROK_IMAGE_EDIT_MODEL    > [tools.image_edit].model    > default
 //! GROK_IMAGE_PROVIDER      > [tools.image_gen].provider  > auto
+//! GROK_IMAGE_EDIT_PROVIDER > [tools.image_edit].provider > the image provider
 //! GROK_VIDEO_BASE_URL      > [tools.video_gen].base_url  > endpoints.xai_api_base_url
 //! GROK_VIDEO_MODEL         > [tools.video_gen].model     > default
 //! GROK_VIDEO_PROVIDER      > [tools.video_gen].provider  > auto
 //! ```
+//!
+//! `image_edit` is the only surface with an inherited *provider*: it follows
+//! the image-generation value when it has no key of its own, so a single
+//! family-wide `[tools.image_gen] provider` keeps working while an edit-only
+//! `provider = "unsupported"` still silences just that surface (the remedy the
+//! 404/405 message names — see [`missing_route_message`]).
 //!
 //! The env tier wins over the config tier for these keys (matching the other
 //! Phase-4 surface resolvers); with every new key unset the resolved values are
@@ -69,8 +76,20 @@ impl MediaSurface {
 
     pub fn provider_env(self) -> &'static str {
         match self {
-            Self::ImageGen | Self::ImageEdit => "GROK_IMAGE_PROVIDER",
+            Self::ImageGen => "GROK_IMAGE_PROVIDER",
+            Self::ImageEdit => "GROK_IMAGE_EDIT_PROVIDER",
             Self::VideoGen => "GROK_VIDEO_PROVIDER",
+        }
+    }
+
+    /// Surface whose *provider* this one inherits when it has no key of its
+    /// own. Only `image_edit` inherits (from `image_gen`), so one family-wide
+    /// setting still covers both imagine surfaces; `None` means "no
+    /// inheritance, the default applies".
+    pub fn provider_fallback(self) -> Option<Self> {
+        match self {
+            Self::ImageEdit => Some(Self::ImageGen),
+            Self::ImageGen | Self::VideoGen => None,
         }
     }
 
@@ -438,5 +457,25 @@ mod tests {
             MediaSurface::ImageGen.base_url_env(),
             MediaSurface::ImageEdit.base_url_env()
         );
+        // The edit surface has its own provider key: the remedy names it, so it
+        // has to be a key that is actually read.
+        assert_eq!(
+            MediaSurface::ImageEdit.provider_env(),
+            "GROK_IMAGE_EDIT_PROVIDER"
+        );
+        assert_ne!(
+            MediaSurface::ImageGen.provider_env(),
+            MediaSurface::ImageEdit.provider_env()
+        );
+    }
+
+    #[test]
+    fn only_image_edit_inherits_a_provider() {
+        assert_eq!(
+            MediaSurface::ImageEdit.provider_fallback(),
+            Some(MediaSurface::ImageGen)
+        );
+        assert_eq!(MediaSurface::ImageGen.provider_fallback(), None);
+        assert_eq!(MediaSurface::VideoGen.provider_fallback(), None);
     }
 }

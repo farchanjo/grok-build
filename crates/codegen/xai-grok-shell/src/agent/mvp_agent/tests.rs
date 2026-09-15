@@ -2654,6 +2654,77 @@ async fn prepare_video_gen_config_sends_client_identifier_header() {
     );
 }
 
+/// The imagine/video/search headers must follow the same first-party predicate
+/// the chat path derives its provider identity from, so a *custom* gateway does
+/// not look first-party to the tools while chat treats it as custom.
+#[test]
+#[serial_test::serial]
+fn inject_proxy_headers_keeps_first_party_headers_off_a_custom_gateway() {
+    let mut headers = indexmap::IndexMap::new();
+    inject_proxy_headers(&mut headers, None, None, "https://gateway.example/v1");
+    assert!(
+        headers.is_empty(),
+        "a third-party gateway must get no x-grok-* / proxy header, got {headers:?}"
+    );
+}
+
+/// `api.x.ai` is first-party (chat sends `x-grok-*` there) but is not the
+/// cli-chat-proxy, so only the identity pair goes out.
+#[test]
+fn inject_proxy_headers_keeps_identity_headers_for_the_xai_api() {
+    let mut headers = indexmap::IndexMap::new();
+    inject_proxy_headers(&mut headers, None, None, "https://api.x.ai/v1");
+    assert_eq!(
+        headers.get("x-grok-client-version").map(String::as_str),
+        Some(xai_grok_version::VERSION),
+        "the xAI API is first-party and keeps the identity pair"
+    );
+    assert!(headers.contains_key("x-grok-client-identifier"));
+    assert!(
+        !headers.contains_key("X-XAI-Token-Auth"),
+        "X-XAI-Token-Auth is cli-chat-proxy middleware, never an api.x.ai header"
+    );
+}
+
+/// `GROK_FIRST_PARTY_LOOPBACK=0` must be total: the opted-out local gateway
+/// stops looking first-party for the tools exactly as it already does for chat.
+/// The default keeps every header byte-identical.
+#[test]
+#[serial_test::serial]
+fn inject_proxy_headers_follow_the_first_party_loopback_opt_out() {
+    let loopback = "http://localhost:8000/v1";
+
+    crate::util::set_first_party_loopback(true);
+    let mut headers = indexmap::IndexMap::new();
+    inject_proxy_headers(&mut headers, None, None, loopback);
+    for name in [
+        "x-grok-client-version",
+        "x-grok-client-identifier",
+        "X-XAI-Token-Auth",
+        "x-authenticateresponse",
+    ] {
+        assert!(
+            headers.contains_key(name),
+            "loopback is first-party by default, so {name} must stay (got {headers:?})"
+        );
+    }
+
+    crate::util::set_first_party_loopback(false);
+    let mut headers = indexmap::IndexMap::new();
+    inject_proxy_headers(&mut headers, None, None, loopback);
+    assert!(
+        headers.is_empty(),
+        "an opted-out local gateway must get no first-party header at all, got {headers:?}"
+    );
+
+    // The opt-out is loopback-scoped: a real xAI host keeps its identity pair.
+    let mut headers = indexmap::IndexMap::new();
+    inject_proxy_headers(&mut headers, None, None, "https://api.x.ai/v1");
+    assert!(headers.contains_key("x-grok-client-version"));
+
+    crate::util::set_first_party_loopback(true);
+}
+
 /// Imagine is its own surface: `GROK_IMAGE_BASE_URL` moves image generation
 /// (and the edit surface that inherits it) without moving chat, and
 /// `GROK_IMAGE_MODEL` pins the model.
@@ -2823,6 +2894,128 @@ async fn prepare_media_configs_default_to_endpoints_base_url() {
     };
     assert_eq!(base_url, expected);
     assert_eq!(provider, MediaProvider::Auto);
+}
+
+/// The 404/405 remedy for `image_edit` prints
+/// `[tools.image_edit] provider = "unsupported"`. That key has to reach the
+/// **edit** surface — the tool-side test sets the field programmatically, so
+/// only this one proves the recipe the message names is actionable.
+#[tokio::test(flavor = "current_thread")]
+#[serial_test::serial]
+async fn edit_provider_key_reaches_the_edit_surface_only() {
+    use xai_grok_test_support::EnvGuard;
+    use xai_grok_tools::implementations::grok_build::MediaProvider;
+    use xai_grok_tools::implementations::grok_build::image_gen::ImageGenConfig;
+    let _edit_provider = EnvGuard::set("GROK_IMAGE_EDIT_PROVIDER", "unsupported");
+    let _provider = EnvGuard::unset("GROK_IMAGE_PROVIDER");
+    let agent = build_minimal_agent_for_tests();
+    agent.inference_config.borrow_mut().api_key = Some("test-key".to_string());
+
+    let ImageGenConfig::Enabled {
+        provider,
+        edit_provider,
+        ..
+    } = agent.prepare_image_gen_config()
+    else {
+        panic!("expected Enabled");
+    };
+    assert_eq!(
+        edit_provider,
+        MediaProvider::Unsupported,
+        "`GROK_IMAGE_EDIT_PROVIDER` must silence the edit surface the remedy names"
+    );
+    assert_eq!(
+        provider,
+        MediaProvider::Auto,
+        "…without silencing image_gen, which has its own key"
+    );
+}
+
+/// `[tools.image_gen] provider` stays the family-wide setting: with no
+/// edit-specific key the edit surface follows it.
+#[tokio::test(flavor = "current_thread")]
+#[serial_test::serial]
+async fn edit_surface_inherits_the_image_provider() {
+    use xai_grok_test_support::EnvGuard;
+    use xai_grok_tools::implementations::grok_build::MediaProvider;
+    use xai_grok_tools::implementations::grok_build::image_gen::ImageGenConfig;
+    let _provider = EnvGuard::set("GROK_IMAGE_PROVIDER", "openai");
+    let _edit_provider = EnvGuard::unset("GROK_IMAGE_EDIT_PROVIDER");
+    let agent = build_minimal_agent_for_tests();
+    agent.inference_config.borrow_mut().api_key = Some("test-key".to_string());
+
+    let ImageGenConfig::Enabled {
+        provider,
+        edit_provider,
+        ..
+    } = agent.prepare_image_gen_config()
+    else {
+        panic!("expected Enabled");
+    };
+    assert_eq!(provider, MediaProvider::OpenAi);
+    assert_eq!(
+        edit_provider,
+        MediaProvider::OpenAi,
+        "one family-wide key must keep covering both imagine surfaces"
+    );
+}
+
+/// A surface the user pointed somewhere is registered even with no bearer:
+/// otherwise `provider = "unsupported"` and the 404 remedy are unobservable
+/// without a credential, and a keyless local image server is unreachable.
+#[tokio::test(flavor = "current_thread")]
+#[serial_test::serial]
+async fn explicitly_configured_surface_registers_without_a_bearer() {
+    use xai_grok_test_support::EnvGuard;
+    use xai_grok_tools::implementations::grok_build::image_gen::ImageGenConfig;
+    let _base = EnvGuard::set("GROK_IMAGE_BASE_URL", "http://localhost:8888/v1");
+    let agent = build_minimal_agent_for_tests();
+    agent.inference_config.borrow_mut().api_key = None;
+
+    let ImageGenConfig::Enabled {
+        base_url, api_key, ..
+    } = agent.prepare_image_gen_config()
+    else {
+        panic!("a configured base URL must register the surface without a bearer");
+    };
+    assert_eq!(base_url, "http://localhost:8888/v1");
+    assert_eq!(
+        api_key, "",
+        "no credential to bake; the call carries `Bearer `"
+    );
+}
+
+/// Control for the case above: nothing configured and no bearer keeps today's
+/// `Disabled`, so the xAI default is not loosened into a doomed `api.x.ai` call.
+#[tokio::test(flavor = "current_thread")]
+#[serial_test::serial]
+async fn unconfigured_surfaces_still_require_a_bearer() {
+    use xai_grok_test_support::EnvGuard;
+    use xai_grok_tools::implementations::grok_build::image_gen::ImageGenConfig;
+    use xai_grok_tools::implementations::grok_build::video_gen::VideoGenConfig;
+    let _guards = [
+        "GROK_IMAGE_BASE_URL",
+        "GROK_IMAGE_EDIT_BASE_URL",
+        "GROK_IMAGE_MODEL",
+        "GROK_IMAGE_EDIT_MODEL",
+        "GROK_IMAGE_PROVIDER",
+        "GROK_IMAGE_EDIT_PROVIDER",
+        "GROK_VIDEO_BASE_URL",
+        "GROK_VIDEO_MODEL",
+        "GROK_VIDEO_PROVIDER",
+    ]
+    .map(EnvGuard::unset);
+    let agent = build_minimal_agent_for_tests();
+    agent.inference_config.borrow_mut().api_key = None;
+
+    assert!(
+        matches!(agent.prepare_image_gen_config(), ImageGenConfig::Disabled),
+        "unconfigured imagine with no bearer must stay Disabled"
+    );
+    assert!(
+        matches!(agent.prepare_video_gen_config(), VideoGenConfig::Disabled),
+        "unconfigured video_gen with no bearer must stay Disabled"
+    );
 }
 #[tokio::test]
 async fn data_collection_enabled_for_normal_user() {

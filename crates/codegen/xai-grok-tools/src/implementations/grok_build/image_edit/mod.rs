@@ -427,8 +427,11 @@ impl xai_tool_runtime::Tool for ImageEditTool {
             ));
         }
 
-        // Endpoint declared not to serve imagine (`provider = "unsupported"`).
-        if client.is_unsupported_endpoint() {
+        // Endpoint declared not to serve imagine (`[tools.image_edit] provider =
+        // "unsupported"` / `GROK_IMAGE_EDIT_PROVIDER=unsupported`). The edit
+        // surface reads its own provider, so silencing edits leaves
+        // `image_gen` untouched.
+        if client.is_unsupported_edit_endpoint() {
             return Ok(ToolOutput::Text(
                 unsupported_surface_message(MediaSurface::ImageEdit, client.edit_base_url()).into(),
             ));
@@ -455,7 +458,7 @@ impl xai_tool_runtime::Tool for ImageEditTool {
         let url = format!("{base}/images/edits");
         let sent_bearer = client.current_bearer().await;
 
-        let mut req = if client.provider().is_openai_shape() {
+        let mut req = if client.edit_provider().is_openai_shape() {
             edit_multipart_request(&client, &url, &input, &refs)?
         } else {
             let data_urls: Vec<String> = refs
@@ -554,16 +557,20 @@ mod tests {
             model_override: None,
             edit_model_override: None,
             provider: MediaProvider::Auto,
+            edit_provider: MediaProvider::Auto,
             tier_restricted: false,
         }
     }
 
+    /// Set the **edit** surface's provider. Generation keeps its own value, so
+    /// a test that only wants to silence/reshape `/images/edits` must land here
+    /// rather than on `provider`.
     fn set_provider(
         config: &mut crate::implementations::grok_build::image_gen::ImageGenConfig,
         provider: MediaProvider,
     ) {
         if let crate::implementations::grok_build::image_gen::ImageGenConfig::Enabled {
-            provider: slot,
+            edit_provider: slot,
             ..
         } = config
         {
@@ -1012,11 +1019,25 @@ mod tests {
         assert!(msg.contains("[tools.image_edit] base_url"), "got: {msg}");
     }
 
-    /// `provider = "unsupported"` returns prose naming the remedy.
+    /// `[tools.image_edit] provider = "unsupported"` — the exact key the 404
+    /// remedy prints — short-circuits with the remedy prose, and leaves the
+    /// generation surface alone.
     #[tokio::test]
-    async fn unsupported_provider_short_circuits_with_remedy() {
+    async fn unsupported_edit_provider_short_circuits_with_remedy() {
         let mut config = cfg("https://gateway.example/v1");
         set_provider(&mut config, MediaProvider::Unsupported);
+
+        let client =
+            crate::implementations::grok_build::image_gen::ImageGenClient::new(&config, None)
+                .unwrap();
+        assert!(
+            client.is_unsupported_edit_endpoint(),
+            "the edit surface must read its own provider"
+        );
+        assert!(
+            !client.is_unsupported_endpoint(),
+            "silencing edits must leave image_gen working"
+        );
 
         let out = run_edit(config, "/nonexistent/ref.jpg", "auto")
             .await

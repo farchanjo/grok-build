@@ -923,7 +923,7 @@ impl ModelOverrideConfig {
 /// disable_zdr_incompatible_tools = true
 /// # [tools.zdr_video_output_s3] — see ZdrVideoOutputS3Config
 /// ```
-#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
 #[serde(default)]
 pub struct ToolsConfig {
     /// When `true`, all tools (including `read_file`) filter gitignored
@@ -940,6 +940,21 @@ pub struct ToolsConfig {
     /// is `true`. Populated from `[tools.zdr_video_output_s3]` in config.
     pub zdr_video_output_s3:
         Option<xai_grok_tools::implementations::grok_build::video_gen::ZdrVideoOutputS3Config>,
+    /// `[tools.image_gen]` (`base_url` / `model` / `provider`). Consumed
+    /// out-of-band from the raw config table by
+    /// `MediaSurface::ImageGen`'s resolver in
+    /// `xai_grok_tools::implementations::grok_build::media_endpoint`, so the
+    /// keys need no typed field here. Absorbed so they aren't flagged as
+    /// unrecognized keys.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image_gen: Option<toml::Value>,
+    /// `[tools.image_edit]` — same contract as [`Self::image_gen`], for the
+    /// `/images/edits` surface.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image_edit: Option<toml::Value>,
+    /// `[tools.video_gen]` — same contract as [`Self::image_gen`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub video_gen: Option<toml::Value>,
 }
 impl ToolsConfig {
     /// Resolve the final tools config, in priority order:
@@ -986,6 +1001,12 @@ impl ToolsConfig {
                         None
                     }
                 }),
+            // Carried through as opaque tables for parity with the deserialized
+            // config. The surface resolvers read the raw document, so nothing
+            // here interprets them.
+            image_gen: tools.and_then(|t| t.get("image_gen")).cloned(),
+            image_edit: tools.and_then(|t| t.get("image_edit")).cloned(),
+            video_gen: tools.and_then(|t| t.get("video_gen")).cloned(),
         };
         match std::env::var("GROK_RESPECT_GITIGNORE").as_deref() {
             Ok("0") | Ok("false") => {

@@ -440,6 +440,17 @@ impl SessionContextFactory for WorkspaceSessionContextFactory {
                 .and_then(toml::Value::as_table),
             xai_route.as_ref(),
         );
+        // The xAI switch gates xAI-hosted *surfaces* through credential
+        // identity; it does not rewrite a base URL. Say so when the default xAI
+        // search route survives it, naming the key that moves search — the
+        // selected `xai` backend speaks the xAI wire shape whatever the URL is.
+        if !xai_grok_shell_base::util::xai_enabled() && search_selection.provider() == "xai" {
+            tracing::info!(
+                provider = search_selection.provider(),
+                env = "GROK_SEARCH_PROVIDER",
+                "xAI switch is off but web_search still resolves to the xAI backend"
+            );
+        }
         let web_search_config = search_selection
             .to_config()
             .unwrap_or_else(|| match &xai_route {
@@ -452,39 +463,41 @@ impl SessionContextFactory for WorkspaceSessionContextFactory {
                 },
                 None => WebSearchConfig::default(),
             });
-        let (image_gen_config, video_gen_config, app_builder_deployer_config) =
-            if let Some(route) = &xai_route {
-                (
-                    ImageGenConfig::Enabled {
-                        api_key: route.api_key.clone().unwrap_or_default(),
-                        base_url: route.base_url.clone().unwrap_or_default(),
-                        edit_base_url: None,
-                        extra_headers: route.extra_headers.clone(),
-                        image_gen_enabled: true,
-                        image_edit_enabled: true,
-                        model_override: None,
-                        edit_model_override: None,
-                        provider: xai_grok_tools::implementations::grok_build::MediaProvider::Auto,
-                        tier_restricted: false,
-                    },
-                    VideoGenConfig::Enabled {
-                        api_key: route.api_key.clone().unwrap_or_default(),
-                        base_url: route.base_url.clone().unwrap_or_default(),
-                        extra_headers: route.extra_headers.clone(),
-                        zdr_video_output_s3: None,
-                        model_override: None,
-                        provider: xai_grok_tools::implementations::grok_build::MediaProvider::Auto,
-                        tier_restricted: false,
-                    },
-                    AppBuilderDeployerConfig::default(),
-                )
-            } else {
-                (
-                    ImageGenConfig::default(),
-                    VideoGenConfig::default(),
-                    AppBuilderDeployerConfig::default(),
-                )
-            };
+        let (image_gen_config, video_gen_config, app_builder_deployer_config) = if let Some(route) =
+            &xai_route
+        {
+            (
+                ImageGenConfig::Enabled {
+                    api_key: route.api_key.clone().unwrap_or_default(),
+                    base_url: route.base_url.clone().unwrap_or_default(),
+                    edit_base_url: None,
+                    extra_headers: route.extra_headers.clone(),
+                    image_gen_enabled: true,
+                    image_edit_enabled: true,
+                    model_override: None,
+                    edit_model_override: None,
+                    provider: xai_grok_tools::implementations::grok_build::MediaProvider::Auto,
+                    edit_provider: xai_grok_tools::implementations::grok_build::MediaProvider::Auto,
+                    tier_restricted: false,
+                },
+                VideoGenConfig::Enabled {
+                    api_key: route.api_key.clone().unwrap_or_default(),
+                    base_url: route.base_url.clone().unwrap_or_default(),
+                    extra_headers: route.extra_headers.clone(),
+                    zdr_video_output_s3: None,
+                    model_override: None,
+                    provider: xai_grok_tools::implementations::grok_build::MediaProvider::Auto,
+                    tier_restricted: false,
+                },
+                AppBuilderDeployerConfig::default(),
+            )
+        } else {
+            (
+                ImageGenConfig::default(),
+                VideoGenConfig::default(),
+                AppBuilderDeployerConfig::default(),
+            )
+        };
         xai_grok_tools::registry::types::SessionContext {
             backend,
             fs,
@@ -527,7 +540,15 @@ impl SessionContextFactory for WorkspaceSessionContextFactory {
     }
 }
 /// Build extra headers for API calls routed through the chat proxy.
-/// Mirrors the shell's `inject_proxy_headers` logic.
+///
+/// Mirrors the shell's `inject_proxy_headers` logic and shares its predicates
+/// instead of a substring match: the `x-grok-*` identity pair is first-party
+/// only (`is_xai_api_url`, which also honors the `GROK_FIRST_PARTY_LOOPBACK`
+/// opt-out) and the proxy auth pair is cli-chat-proxy only
+/// (`is_cli_chat_proxy_url`). The old `contains("chat-proxy")` test both
+/// over-matched (`https://my-chat-proxy.example.com`) and never recognized
+/// loopback, and it left the identity pair unconditional — a half-opted-out
+/// local gateway.
 fn build_proxy_headers(base_url: &str) -> indexmap::IndexMap<String, String> {
     let mut headers = indexmap::IndexMap::new();
     let version = xai_grok_version::VERSION;
@@ -535,12 +556,14 @@ fn build_proxy_headers(base_url: &str) -> indexmap::IndexMap<String, String> {
         "user-agent".to_string(),
         format!("xai-grok-workspace/{version}"),
     );
-    headers.insert("x-grok-client-version".to_string(), version.to_string());
-    headers.insert(
-        "x-grok-client-identifier".to_string(),
-        std::env::var("GROK_CLIENT_NAME").unwrap_or_else(|_| "grok-shell".to_string()),
-    );
-    if base_url.contains("cli-chat-proxy") || base_url.contains("chat-proxy") {
+    if xai_grok_shell_base::util::is_xai_api_url(base_url) {
+        headers.insert("x-grok-client-version".to_string(), version.to_string());
+        headers.insert(
+            "x-grok-client-identifier".to_string(),
+            std::env::var("GROK_CLIENT_NAME").unwrap_or_else(|_| "grok-shell".to_string()),
+        );
+    }
+    if xai_grok_shell_base::util::is_cli_chat_proxy_url(base_url) {
         headers.insert("X-XAI-Token-Auth".to_string(), "xai-grok-cli".to_string());
         headers.insert(
             "x-authenticateresponse".to_string(),
@@ -684,14 +707,69 @@ mod tests {
     fn empty_env() -> Arc<HashMap<String, String>> {
         Arc::new(HashMap::new())
     }
+    /// The hub session's proxy headers must agree with the shell's
+    /// `inject_proxy_headers`: the `x-grok-*` identity pair is first-party only,
+    /// and the proxy auth pair is reserved for cli-chat-proxy. The old substring
+    /// test both over-matched and never recognized loopback.
+    #[test]
+    #[serial_test::serial]
+    fn build_proxy_headers_follow_the_shared_first_party_predicate() {
+        let custom = build_proxy_headers("https://gateway.example/v1");
+        assert_eq!(
+            custom.get("user-agent").map(String::as_str),
+            Some(format!("xai-grok-workspace/{}", xai_grok_version::VERSION).as_str()),
+            "the user-agent is not a first-party header"
+        );
+        assert!(
+            !custom.contains_key("x-grok-client-version"),
+            "a third-party gateway must get no x-grok-* header, got {custom:?}"
+        );
+
+        let proxy = build_proxy_headers(xai_grok_env::PROD_CLI_CHAT_PROXY_BASE_URL);
+        for name in [
+            "x-grok-client-version",
+            "x-grok-client-identifier",
+            "X-XAI-Token-Auth",
+            "x-authenticateresponse",
+        ] {
+            assert!(
+                proxy.contains_key(name),
+                "cli-chat-proxy keeps {name}, got {proxy:?}"
+            );
+        }
+
+        // A substring lookalike must not be mistaken for the proxy.
+        let lookalike = build_proxy_headers("https://my-chat-proxy.example.com/v1");
+        assert!(!lookalike.contains_key("X-XAI-Token-Auth"));
+
+        // Loopback follows the opt-out: first-party by default, total when off.
+        xai_grok_shell_base::util::set_first_party_loopback(true);
+        let loopback = build_proxy_headers("http://localhost:8000/v1");
+        assert!(loopback.contains_key("x-grok-client-identifier"));
+        xai_grok_shell_base::util::set_first_party_loopback(false);
+        let opted_out = build_proxy_headers("http://localhost:8000/v1");
+        assert!(
+            !opted_out.contains_key("x-grok-client-identifier")
+                && !opted_out.contains_key("X-XAI-Token-Auth"),
+            "an opted-out local gateway must get no first-party header, got {opted_out:?}"
+        );
+        xai_grok_shell_base::util::set_first_party_loopback(true);
+    }
     /// Sets `GROK_SEARCH_*` for one test and restores it on drop.
+    ///
+    /// Process env is global, so every test using this guard is
+    /// `#[serial_test::serial]`: under `cargo test` the whole module runs on
+    /// threads in **one** process and two guards would otherwise interleave —
+    /// one test observes the other's value. `cargo nextest` (one process per
+    /// test) hides the race, which is why it went unnoticed.
     struct SearchEnvGuard(Vec<(&'static str, Option<String>)>);
     impl SearchEnvGuard {
         fn set(pairs: &[(&'static str, &str)]) -> Self {
             let mut previous = Vec::new();
             for (key, value) in pairs {
                 previous.push((*key, std::env::var(key).ok()));
-                // SAFETY: tests in this binary do not race on these keys.
+                // SAFETY: every caller holds the `serial_test` lock, so no
+                // other thread is mutating the environment concurrently.
                 unsafe { std::env::set_var(key, value) };
             }
             Self(previous)
@@ -701,7 +779,8 @@ mod tests {
         fn drop(&mut self) {
             for (key, value) in &self.0 {
                 match value {
-                    // SAFETY: same contract as `set`.
+                    // SAFETY: same contract as `set` — the guard drops while
+                    // the test still holds the `serial_test` lock.
                     Some(value) => unsafe { std::env::set_var(key, value) },
                     None => unsafe { std::env::remove_var(key) },
                 }
@@ -711,6 +790,7 @@ mod tests {
     /// A selected non-xAI backend must reach the session context with no xAI
     /// credential in scope, and must count as enabled so the tool registers.
     #[tokio::test]
+    #[serial_test::serial]
     async fn external_search_provider_is_selected_without_xai_auth() {
         let _guard = SearchEnvGuard::set(&[
             ("GROK_SEARCH_PROVIDER", "searxng"),
@@ -740,6 +820,7 @@ mod tests {
     /// Without `GROK_SEARCH_*` (and with no `[search]` table) the historical
     /// path is untouched: no auth in this factory ⇒ no web search.
     #[tokio::test]
+    #[serial_test::serial]
     async fn default_search_selection_keeps_the_xai_route_path() {
         let _guard = SearchEnvGuard::set(&[
             ("GROK_SEARCH_PROVIDER", ""),

@@ -1647,6 +1647,13 @@ pub struct Config {
     /// unrecognized key.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub vector_stores: Option<toml::Value>,
+    /// `[search]` section (`provider` / `base_url` / `api_key_env` / `model`).
+    /// Consumed out-of-band from the effective config by the search-backend
+    /// factory (`xai_grok_tools::implementations::web_search::factory`), which
+    /// reads the raw table so the keys need no typed settings entry. Absorbed
+    /// so they aren't flagged as unrecognized keys.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub search: Option<toml::Value>,
     /// Written and read by the client (privacy banner acknowledgment);
     /// absorbed so it isn't flagged as an unrecognized key.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2098,6 +2105,7 @@ impl Default for Config {
             reranker_models: None,
             prime: None,
             vector_stores: None,
+            search: None,
             privacy: None,
             ui: UiConfig::default(),
             toolset: ShellToolsetConfig::default(),
@@ -13766,6 +13774,20 @@ agent_type = "cursor"
             tool = "bash"
             [tools]
             respect_gitignore = false
+            [tools.image_gen]
+            base_url = "https://imagine.example.com/v1"
+            model = "gpt-image-1"
+            provider = "openai"
+            [tools.image_edit]
+            base_url = "https://edits.example.com/v1"
+            provider = "auto"
+            [tools.video_gen]
+            provider = "unsupported"
+            [search]
+            provider = "searxng"
+            base_url = "http://localhost:8888"
+            api_key_env = "SEARXNG_KEY"
+            model = "search-model"
             [desktop]
             some_key = "value"
             [privacy]
@@ -13792,6 +13814,93 @@ agent_type = "cursor"
         assert!(
             unused.is_empty(),
             "false positive on valid config: {unused:?}"
+        );
+    }
+    /// The Phase-4 `[search]` and `[tools.image_gen|image_edit|video_gen]`
+    /// tables are resolved from the *raw* merged document (see
+    /// `web_search::factory` and `media_endpoint`'s `MediaSurface` resolvers),
+    /// so they need no typed field to work. Without a `toml::Value` sink they
+    /// were reported as unrecognized keys, telling a user who followed the
+    /// recipe that their brand-new working keys are typos.
+    #[test]
+    fn config_accepts_search_and_media_surface_tables() {
+        let unused = unused_keys_from_toml(
+            r#"
+            [search]
+            provider = "searxng"
+            base_url = "http://localhost:8888"
+            api_key_env = "SEARXNG_KEY"
+            model = "search-model"
+            [tools.image_gen]
+            base_url = "https://imagine.example.com/v1"
+            model = "gpt-image-1"
+            provider = "openai"
+            [tools.image_edit]
+            base_url = "https://edits.example.com/v1"
+            provider = "unsupported"
+            [tools.video_gen]
+            provider = "unsupported"
+        "#,
+        );
+        assert!(
+            unused.is_empty(),
+            "the Phase-4 surface tables must not be reported as typos: {unused:?}"
+        );
+    }
+    /// Absorption is whole-table: a typo *inside* one of those tables no longer
+    /// warns on its own, because the table is taken as an opaque `toml::Value`.
+    /// That is the same trade-off `[hints]` and the retrieval sections already
+    /// make — the resolver owns the keys, and an unknown one falls through to
+    /// the surface default instead of failing the run.
+    #[test]
+    fn config_absorbs_surface_tables_whole() {
+        let unused = unused_keys_from_toml(
+            r#"
+            [tools.image_gen]
+            base_urll = "https://imagine.example.com/v1"
+            [search]
+            providr = "searxng"
+        "#,
+        );
+        assert!(unused.is_empty(), "got: {unused:?}");
+    }
+    /// Absorption must not drop the values: the resolver reads the raw document,
+    /// but the typed field is what proves the table survived the merge.
+    #[test]
+    fn absorbed_surface_tables_keep_their_values() {
+        let raw: toml::Value = toml::from_str(
+            r#"
+            [search]
+            provider = "searxng"
+            [tools.image_gen]
+            provider = "openai"
+            [tools.image_edit]
+            provider = "unsupported"
+            [tools.video_gen]
+            provider = "unsupported"
+        "#,
+        )
+        .unwrap();
+        let config = Config::new_from_toml_cfg(&raw).expect("should parse");
+        let provider_of = |value: &Option<toml::Value>| {
+            value
+                .as_ref()
+                .and_then(|v| v.get("provider"))
+                .and_then(toml::Value::as_str)
+                .map(str::to_owned)
+        };
+        assert_eq!(provider_of(&config.search).as_deref(), Some("searxng"));
+        assert_eq!(
+            provider_of(&config.tools.image_gen).as_deref(),
+            Some("openai")
+        );
+        assert_eq!(
+            provider_of(&config.tools.image_edit).as_deref(),
+            Some("unsupported")
+        );
+        assert_eq!(
+            provider_of(&config.tools.video_gen).as_deref(),
+            Some("unsupported")
         );
     }
     #[test]

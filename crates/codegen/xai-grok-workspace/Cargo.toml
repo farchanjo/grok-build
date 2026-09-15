@@ -67,6 +67,10 @@ tree-sitter = "0.25.10"
 tree-sitter-bash = "0.25"
 url = { workspace = true }
 xai-grok-env = { workspace = true }
+# Shared first-party / cli-chat-proxy URL predicates, so the hub session's proxy
+# headers agree with the shell's `inject_proxy_headers` (including the
+# `GROK_FIRST_PARTY_LOOPBACK` opt-out).
+xai-grok-shell-base = { path = "../xai-grok-shell-base" }
 humantime-serde = { workspace = true }
 prometheus = { workspace = true }
 glob = "0.3"
@@ -134,6 +138,10 @@ filetime = { workspace = true }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["test-util"] }
 xai-test-utils = { path = "../../common/xai-test-utils" }
+# The `GROK_SEARCH_*` tests mutate process env; `cargo test` runs the module on
+# threads in one process, so they need to be serialized (nextest's per-test
+# processes would otherwise hide the race).
+serial_test = { workspace = true }
 # Decode tar.gz archives produced by workspace upload helpers in tests.
 flate2 = { workspace = true }
 tar = { workspace = true }
