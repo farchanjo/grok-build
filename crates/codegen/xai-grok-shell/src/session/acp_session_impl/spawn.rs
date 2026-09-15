@@ -558,6 +558,23 @@ pub(crate) async fn spawn_session_actor(
             .and_then(toml::Value::as_table),
         xai_search_route.as_ref(),
     );
+    // A selected non-`xai` backend must stay reachable: server-side (backend)
+    // search only speaks the xAI route, so leaving it on would make the model
+    // call the hosted `WebSearch` tool and never touch the backend the user
+    // selected. The model entry cannot know about the selection, which is why
+    // the gate lives here and not in the catalog. Resolved before
+    // `to_config()` consumes the selection.
+    let local_search_backend_selected = !search_selection.is_xai_backend();
+    if local_search_backend_selected
+        && inference_config.supports_backend_search
+        && backend_tools_enabled
+    {
+        tracing::warn!(
+            search_provider = search_selection.provider(),
+            "search backend selected: backend search is off for this session so \
+             the model reaches the local web_search tool"
+        );
+    }
     let web_search_config = if disable_web_search {
         xai_grok_tools::implementations::WebSearchConfig::Disabled
     } else if let Some(selected) = search_selection.to_config() {
@@ -1855,6 +1872,7 @@ pub(crate) async fn spawn_session_actor(
         pending_interactions: pending_interactions.clone(),
         telemetry_enabled,
         supports_backend_search: std::cell::Cell::new(inference_config.supports_backend_search),
+        local_search_backend_selected: std::cell::Cell::new(local_search_backend_selected),
         tool_overrides: std::cell::RefCell::new(None),
         resolved_tool_overrides: resolved_tool_overrides.clone(),
         compactions_remaining: std::cell::Cell::new(inference_config.compactions_remaining),

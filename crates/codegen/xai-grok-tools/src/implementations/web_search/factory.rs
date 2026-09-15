@@ -112,6 +112,18 @@ impl SearchSelection {
         self.default_xai_route
     }
 
+    /// `true` when the selected backend is the `xai` one, including the
+    /// unset default.
+    ///
+    /// Only the `xai` wire shape shares the model route with server-side
+    /// (backend) search. A session that selected anything else must keep the
+    /// local `web_search` tool reachable, because backend search knows nothing
+    /// about the selected backend: the hosted tool would win the turn and the
+    /// request would never reach it.
+    pub fn is_xai_backend(&self) -> bool {
+        self.provider == SearchProvider::Xai.as_str()
+    }
+
     /// The config to hand to the tool, or `None` for the default xAI route path.
     pub fn to_config(&self) -> Option<WebSearchConfig> {
         if self.default_xai_route {
@@ -242,6 +254,25 @@ mod tests {
         assert_eq!(selection.provider(), "xai");
         assert!(!selection.provider_is_explicit());
         assert_eq!(selection.to_config(), None);
+    }
+
+    /// Only the `xai` selection (explicit or defaulted) shares the model route, so
+    /// only it may be shadowed by server-side search. An unknown provider is
+    /// reported at call time, but it must still keep the local tool reachable.
+    #[test]
+    fn only_the_xai_selection_is_the_xai_backend() {
+        assert!(resolve_search_backend(&MapEnv::new(&[]), None, None).is_xai_backend());
+        assert!(
+            resolve_search_backend(&MapEnv::new(&[(ENV_PROVIDER, "xai")]), None, None)
+                .is_xai_backend()
+        );
+        for provider in ["searxng", "tavily", "brave", "duckduckgo"] {
+            assert!(
+                !resolve_search_backend(&MapEnv::new(&[(ENV_PROVIDER, provider)]), None, None)
+                    .is_xai_backend(),
+                "{provider} must keep the local web_search tool reachable"
+            );
+        }
     }
 
     /// The default route is only preserved when *nothing* is set; a lone base

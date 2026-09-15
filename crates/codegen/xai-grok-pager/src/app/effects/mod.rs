@@ -3642,9 +3642,13 @@ pub(crate) fn execute(
                         Err(e) => {
                             TaskResult::ShareSessionFailed {
                                 agent_id,
-                                error: sanitize_user_error(
-                                    &format!("couldn't share session: {e}"),
-                                ),
+                                // The dispatch arm already prefixes the line
+                                // with `Couldn't share session: `, so a second
+                                // lowercase copy here would read twice. (A
+                                // refusal arrives as `Authentication required:
+                                // "<sentence>"`; `sanitize_user_error` drops the
+                                // prefix and the wire quoting.)
+                                error: sanitize_user_error(&e.to_string()),
                             }
                         }
                     }

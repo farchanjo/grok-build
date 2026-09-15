@@ -1122,11 +1122,23 @@ impl AuthRequestMeta {
 ///  - `x-grok-client-version` -- required by the proxy's version-gate check.
 ///    Uses `client_version` when provided, otherwise falls back to cli-chat-proxy
 ///    compile-time `CARGO_PKG_VERSION`.
+///  - `x-grok-client-identifier` -- scopes the server-side ZDR opt-out to Build
+///    traffic on a direct xAI call (imagine and video gen bypass the proxy).
 ///  - `X-XAI-Token-Auth` / `x-authenticateresponse` -- required by the
 ///    cli-chat-proxy auth middleware when the `base_url` is a known proxy URL.
 ///  - optional extra access header -- only set when the corresponding key is
 ///    `Some` *and* the `base_url` points at a matching non-production host
 ///    (requires the optional non-production feature).
+///
+/// The `x-grok-*` identity pair is first-party-only, gated on the same
+/// predicate the chat path derives its provider identity from
+/// (`provider_identity_for_model` -> `is_xai_api_url`): a custom or
+/// opted-out-loopback gateway must not receive stable Grok client identifiers
+/// the chat request does not send. The proxy auth pair keeps its own, narrower
+/// gate -- `X-XAI-Token-Auth` is cli-chat-proxy middleware, never an `api.x.ai`
+/// header. `GROK_FIRST_PARTY_LOOPBACK=0` therefore removes every first-party
+/// header from a local gateway, chat and tools alike, instead of leaving the
+/// tools looking first-party while chat does not.
 ///
 /// Existing entries are never overwritten so callers can pre-set a value.
 fn inject_proxy_headers(
@@ -1135,16 +1147,18 @@ fn inject_proxy_headers(
     alpha_test_key: Option<&str>,
     base_url: &str,
 ) {
-    headers
-        .entry("x-grok-client-version".to_string())
-        .or_insert_with(|| {
-            client_version
-                .map(String::from)
-                .unwrap_or_else(|| xai_grok_version::VERSION.to_string())
-        });
-    headers
-        .entry("x-grok-client-identifier".to_string())
-        .or_insert_with(crate::http::process_client_identifier);
+    if crate::util::is_xai_api_url(base_url) {
+        headers
+            .entry("x-grok-client-version".to_string())
+            .or_insert_with(|| {
+                client_version
+                    .map(String::from)
+                    .unwrap_or_else(|| xai_grok_version::VERSION.to_string())
+            });
+        headers
+            .entry("x-grok-client-identifier".to_string())
+            .or_insert_with(crate::http::process_client_identifier);
+    }
     if crate::util::is_cli_chat_proxy_url(base_url) {
         headers
             .entry("X-XAI-Token-Auth".to_string())

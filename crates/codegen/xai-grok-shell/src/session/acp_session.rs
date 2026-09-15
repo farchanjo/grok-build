@@ -901,6 +901,12 @@ pub(crate) struct SessionActor {
     /// `is_telemetry_enabled() && !is_zdr()` — ZDR teams always have this false.
     pub(crate) telemetry_enabled: bool,
     pub(crate) supports_backend_search: std::cell::Cell<bool>,
+    /// `true` when this session's `web_search` resolves to a non-`xai` backend
+    /// (`GROK_SEARCH_PROVIDER` / `[search] provider`), resolved once at spawn
+    /// from the search selection. Server-side (backend) search only knows the
+    /// xAI route, so it must not shadow the local tool the user pointed
+    /// elsewhere; see `SessionActor::backend_search_active`.
+    pub(crate) local_search_backend_selected: std::cell::Cell<bool>,
     /// Per-turn override, set at promotion. Not persisted; a reload reverts to the definition seed.
     pub(crate) tool_overrides: std::cell::RefCell<Option<xai_grok_inference_types::ToolOverrides>>,
     /// Configured cutoff a subagent inherits, read off the `SessionHandle` without an actor round-trip.

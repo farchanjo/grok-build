@@ -4063,3 +4063,53 @@ fn skill_regress_done_clears_in_flight_even_when_modal_is_closed() {
         "done must drop the in-flight stash even if Esc already closed the modal"
     );
 }
+
+/// The one-line off-xAI refusals must reach the user as one clean sentence.
+///
+/// The shell returns `acp::Error::auth_required().data(sentence)`; the error's
+/// `Display` renders `data` as JSON, so the raw string arrives as
+/// `Authentication required: "<sentence>"`. Shell-side tests only assert the
+/// `data` payload, so nothing else pins what the user actually reads: the
+/// prefix must be dropped, the JSON quotes must go, and the surface keeps its
+/// single `Billing error: ` / `Couldn't share session: ` prefix.
+#[test]
+fn refusal_sentences_render_as_one_clean_line() {
+    const BILLING: &str =
+        "`/billing` needs a grok.com session: connect xAI in /providers to authenticate.";
+    const SHARE: &str =
+        "`/share` needs a grok.com session: connect xAI in /providers to authenticate.";
+
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    dispatch(
+        Action::TaskComplete(TaskResult::BillingError {
+            agent_id: id,
+            // Exactly what the effects layer hands the dispatch arm.
+            error: crate::app::sanitize_user_error(&format!(
+                "Authentication required: \"{BILLING}\""
+            )),
+            silent: false,
+        }),
+        &mut app,
+    );
+    assert_eq!(
+        last_system_text(&app, id),
+        format!("Billing error: {BILLING}")
+    );
+
+    dispatch(
+        Action::TaskComplete(TaskResult::ShareSessionFailed {
+            agent_id: id,
+            error: crate::app::sanitize_user_error(&format!(
+                "Authentication required: \"{SHARE}\""
+            )),
+        }),
+        &mut app,
+    );
+    let share_line = last_system_text(&app, id);
+    assert_eq!(share_line, format!("Couldn't share session: {SHARE}"));
+    assert!(
+        !share_line.contains('"'),
+        "no wire quoting may survive into the rendered line: {share_line}"
+    );
+}

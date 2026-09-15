@@ -2561,6 +2561,29 @@ fn sanitize_user_error_strips_auth_prefixes() {
             "Login timed out after 10 minutes. Please try again."
         );
 }
+/// An `acp::Error` renders its `data` as JSON, so the off-xAI refusals (which
+/// carry the sentence in `data`) arrive JSON-quoted. The quotes are wire
+/// formatting: they must not reach the user.
+#[test]
+fn sanitize_user_error_strips_the_json_quoting_of_a_refusal() {
+    assert_eq!(
+        sanitize_user_error(
+            "Authentication required: \"`/billing` needs a grok.com session: \
+             connect xAI in /providers to authenticate.\""
+        ),
+        "`/billing` needs a grok.com session: connect xAI in /providers to authenticate."
+    );
+    // Also when the payload is quoted behind the caller's own prefix.
+    assert_eq!(
+        sanitize_user_error("couldn't share session: \"something went wrong\""),
+        "couldn't share session: something went wrong"
+    );
+    // A payload with no quoting is returned unchanged.
+    assert_eq!(
+        sanitize_user_error("unexpected token foo"),
+        "unexpected token foo"
+    );
+}
 #[test]
 fn sanitize_user_error_collapses_disk_full() {
     assert_eq!(

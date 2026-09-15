@@ -133,6 +133,7 @@ pub(super) async fn make_replay_send_update_fixture() -> ReplaySendUpdateFixture
         )),
         telemetry_enabled: false,
         supports_backend_search: std::cell::Cell::new(false),
+        local_search_backend_selected: std::cell::Cell::new(false),
         tool_overrides: std::cell::RefCell::new(None),
         resolved_tool_overrides: std::sync::Arc::new(arc_swap::ArcSwapOption::empty()),
         compactions_remaining: std::cell::Cell::new(None),

@@ -199,7 +199,7 @@ pub(crate) fn sanitize_user_error(raw: &str) -> String {
         ("Authentication required: ", ""),
         ("Authentication failed: ", ""),
     ];
-    let mut result = raw.to_string();
+    let mut result = strip_json_quoted_payload(raw);
     for (pattern, replacement) in REPLACEMENTS {
         result = result.replace(pattern, replacement);
     }
@@ -208,6 +208,30 @@ pub(crate) fn sanitize_user_error(raw: &str) -> String {
         result = format!("{truncated}...");
     }
     result
+}
+
+/// Drop the JSON quoting around the trailing payload of an error string.
+///
+/// `acp::Error`'s `Display` appends its `data` as pretty JSON, and a refusal
+/// carries its sentence *in* `data`, so the wire renders
+/// ``Authentication required: "`/billing` needs a grok.com session: …"``. The
+/// quote pair is wire formatting, not sentence punctuation, and it survives the
+/// prefix replacements below as a stray `"` in a toast or scrollback line.
+///
+/// Only the trailing quoted run is stripped, so a quote inside the sentence
+/// survives; an error with no quoted payload is returned unchanged (bar a
+/// trailing-newline trim).
+fn strip_json_quoted_payload(raw: &str) -> String {
+    let trimmed = raw.trim_end();
+    if !trimmed.ends_with('"') {
+        return trimmed.to_string();
+    }
+    // The opening quote of the run that ends the string; `rfind` on the
+    // closing quote's predecessor keeps a sentence-internal quote intact.
+    match trimmed[..trimmed.len() - 1].rfind('"') {
+        Some(open) => format!("{}{}", &trimmed[..open], &trimmed[open + 1..trimmed.len() - 1]),
+        None => trimmed.to_string(),
+    }
 }
 /// Additive session creation flags passed from CLI → AppView → effects.
 ///

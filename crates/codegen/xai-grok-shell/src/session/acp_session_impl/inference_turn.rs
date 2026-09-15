@@ -221,8 +221,24 @@ impl SessionActor {
         let applied = self.resolve_hosted().1;
         (!applied.is_empty()).then_some(applied)
     }
+    /// Whether server-side (backend) search is active for this session.
+    ///
+    /// All three conjuncts must hold: the agent was built with backend tools,
+    /// the active model entry advertises `supports_backend_search`, and the
+    /// session did not select a non-`xai` search backend.
+    ///
+    /// The last conjunct is what keeps a selected backend reachable. Backend
+    /// search rides the model route and knows nothing about
+    /// `GROK_SEARCH_PROVIDER` / `[search] provider`: with `searxng` (or
+    /// `tavily`, or `brave`) selected *and* a model entry that also advertises
+    /// backend search, the hosted `WebSearch` tool would win and the local
+    /// `web_search` tool would be dropped from the request — so the request
+    /// would never reach the selected backend. The unset selection and the
+    /// explicit `xai` one keep today's wire.
     pub(crate) fn backend_search_active(&self) -> bool {
-        self.agent.borrow().backend_search_enabled() && self.supports_backend_search.get()
+        self.agent.borrow().backend_search_enabled()
+            && self.supports_backend_search.get()
+            && !self.local_search_backend_selected.get()
     }
     /// Set the per-turn override and emit it before any turn runs, so a subagent spawned this turn
     /// inherits it.

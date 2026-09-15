@@ -2084,6 +2084,121 @@ async fn effective_tool_overrides_echoes_and_gates_on_backend_search() {
         .await;
 }
 
+/// Resolve the search backend exactly the way `spawn_session_actor` does, so
+/// these tests exercise the env → selection → session gate path.
+fn resolved_search_selection()
+-> xai_grok_tools::implementations::web_search::factory::SearchSelection {
+    use xai_grok_tools::implementations::web_search::factory;
+    factory::resolve_search_backend(&factory::ProcessEnv, None, None)
+}
+
+/// A *selected* non-`xai` search backend must stay reachable: backend (hosted)
+/// search rides the model route and knows nothing about `GROK_SEARCH_PROVIDER`,
+/// so a model entry that advertises `supports_backend_search` (a custom entry,
+/// or remote settings) would otherwise make the model call the server-side
+/// search and never touch the backend the user selected.
+#[tokio::test]
+#[serial_test::serial]
+async fn a_selected_search_backend_is_not_shadowed_by_backend_search() {
+    let _provider = xai_grok_test_support::EnvGuard::set("GROK_SEARCH_PROVIDER", "searxng");
+    let selection = resolved_search_selection();
+    assert_eq!(
+        selection.provider(),
+        "searxng",
+        "fixture must select a backend"
+    );
+    assert!(!selection.is_xai_backend());
+
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (actor, _rx) = build_actor().await;
+            *actor.agent.borrow_mut() =
+                test_agent_backend_search(vec![xai_grok_inference_types::HostedTool::WebSearch {
+                    options: None,
+                }])
+                .await;
+            // The model entry claims backend search; only the selection vetoes it.
+            actor.supports_backend_search.set(true);
+            // spawn sets this from the same selection the tool factory resolved.
+            actor
+                .local_search_backend_selected
+                .set(!selection.is_xai_backend());
+
+            assert!(
+                !actor.backend_search_active(),
+                "a selected non-xai backend must not be shadowed by backend search"
+            );
+            assert!(
+                actor.hosted_tools_for_turn().is_empty(),
+                "the hosted WebSearch tool must be off, or the model would call it"
+            );
+
+            let defs = vec![ToolDefinition::function(
+                "web_search",
+                None::<String>,
+                serde_json::json!({}),
+            )];
+            let names: Vec<String> = actor
+                .turn_base_tool_specs(&defs)
+                .into_iter()
+                .map(|spec| spec.name)
+                .collect();
+            assert_eq!(
+                names,
+                vec!["web_search".to_string()],
+                "the local web_search function must survive into the request"
+            );
+        })
+        .await;
+}
+
+/// The unset selection stays byte-identical: backend search keeps the hosted
+/// tool and the local `web_search` function is dropped from the request.
+#[tokio::test]
+#[serial_test::serial]
+async fn an_unset_search_selection_keeps_backend_search_byte_identical() {
+    let _provider = xai_grok_test_support::EnvGuard::unset("GROK_SEARCH_PROVIDER");
+    let selection = resolved_search_selection();
+    assert!(selection.is_xai_backend(), "no selection ⇒ the xAI route");
+
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (actor, _rx) = build_actor().await;
+            *actor.agent.borrow_mut() =
+                test_agent_backend_search(vec![xai_grok_inference_types::HostedTool::WebSearch {
+                    options: None,
+                }])
+                .await;
+            actor.supports_backend_search.set(true);
+            actor
+                .local_search_backend_selected
+                .set(!selection.is_xai_backend());
+
+            assert!(
+                actor.backend_search_active(),
+                "an unset selection must leave backend search exactly as it was"
+            );
+            assert_eq!(
+                actor.hosted_tools_for_turn(),
+                vec![xai_grok_inference_types::HostedTool::WebSearch { options: None }],
+                "the hosted tool still goes out on the wire"
+            );
+
+            let defs = vec![ToolDefinition::function(
+                "web_search",
+                None::<String>,
+                serde_json::json!({}),
+            )];
+            assert!(
+                actor.turn_base_tool_specs(&defs).is_empty(),
+                "the local function is still dropped in favor of the hosted tool"
+            );
+        })
+        .await;
+}
+
 /// An agent rebuild (model switch) swaps the definition seed, so it must republish the cutoff cell;
 /// the fixture keeps `supports_backend_search == false` to also pin that publishing isn't gated on
 /// the parent's own search.
