@@ -14,10 +14,23 @@
 //! where `<n>` is a session-scoped counter (1, 2, 3, ... — 1 token each).
 //! The tool returns the absolute path so the model can copy or move the
 //! image into the project working directory when it needs a persistent asset.
+//!
+//! The endpoint is resolved per surface (`GROK_IMAGE_BASE_URL` /
+//! `[tools.image_gen] base_url` for generation, `GROK_IMAGE_EDIT_BASE_URL` /
+//! `[tools.image_edit] base_url` for edits, both defaulting to
+//! `[endpoints].xai_api_base_url`), so imagine can point at a gateway while
+//! chat goes elsewhere. The response decoder accepts the xAI and the OpenAI
+//! envelope; `provider = "openai"` additionally sends the OpenAI request
+//! fields instead of the xAI `aspect_ratio` / `resolution` pair. See
+//! [`super::media_endpoint`].
 
 use base64::Engine as _;
 use reqwest::header::{AUTHORIZATION, CONTENT_TYPE, HeaderValue};
 
+use super::media_endpoint::{
+    MediaProvider, MediaSurface, missing_route_message, openai_size_for_aspect_ratio,
+    status_is_missing_route, unsupported_surface_message,
+};
 use crate::attribution::{SharedAttributionCallback, ToolConsumer};
 use crate::types::SharedApiKeyProvider;
 
@@ -53,11 +66,21 @@ pub(crate) const TIER_RESTRICTED_UPSELL: &str = "Image generation is a SuperGrok
 pub struct ImageGenClient {
     http: reqwest::Client,
     base_url: String,
+    /// Base URL used by `image_edit` (`/images/edits`). Same as `base_url`
+    /// unless `[tools.image_edit] base_url` / `GROK_IMAGE_EDIT_BASE_URL`
+    /// points that surface somewhere else.
+    edit_base_url: String,
     /// Imagine model slug used by `generate()`. Selected at construction
     /// from `ImageGenConfig::model_override` (falling back to
     /// [`XAI_IMAGINE_MODEL`]). `image_edit` uses its own model and is
     /// unaffected.
     model: String,
+    /// Model slug used by `image_edit`; its own default unless
+    /// `[tools.image_edit] model` / `GROK_IMAGE_EDIT_MODEL` overrides it.
+    edit_model: String,
+    /// Wire shape for `/images/*` requests. `Auto`/`Xai` keep the historical
+    /// payload byte-for-byte; `OpenAi` drops the xAI-only fields.
+    provider: MediaProvider,
     writer: super::storage::SessionFileWriter,
     api_key_provider: Option<SharedApiKeyProvider>,
     /// Optional 401-attribution hook. Hosts wire this so a 401 from the
@@ -79,8 +102,11 @@ impl ImageGenClient {
         let ImageGenConfig::Enabled {
             api_key,
             base_url,
+            edit_base_url,
             extra_headers,
             model_override,
+            edit_model_override,
+            provider,
             tier_restricted,
             ..
         } = config
@@ -93,6 +119,14 @@ impl ImageGenClient {
             .clone()
             .filter(|m| !m.trim().is_empty())
             .unwrap_or_else(|| XAI_IMAGINE_MODEL.to_owned());
+        let edit_model = edit_model_override
+            .clone()
+            .filter(|m| !m.trim().is_empty())
+            .unwrap_or_else(|| super::image_edit::XAI_IMAGINE_EDIT_MODEL.to_owned());
+        let edit_base_url = edit_base_url
+            .clone()
+            .filter(|u| !u.trim().is_empty())
+            .unwrap_or_else(|| base_url.clone());
 
         let mut headers = reqwest::header::HeaderMap::new();
         headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
@@ -137,7 +171,10 @@ impl ImageGenClient {
         Ok(Self {
             http,
             base_url: base_url.clone(),
+            edit_base_url,
             model,
+            edit_model,
+            provider: *provider,
             writer: super::storage::SessionFileWriter::new(DEFAULT_IMAGE_DIR, "jpg"),
             api_key_provider,
             attribution_callback: None,
@@ -175,6 +212,27 @@ impl ImageGenClient {
         &self.base_url
     }
 
+    /// Base URL for `image_edit` (`/images/edits`).
+    pub(crate) fn edit_base_url(&self) -> &str {
+        &self.edit_base_url
+    }
+
+    /// Model slug for `image_edit`.
+    pub(crate) fn edit_model(&self) -> &str {
+        &self.edit_model
+    }
+
+    /// Wire shape both imagine surfaces use.
+    pub(crate) fn provider(&self) -> MediaProvider {
+        self.provider
+    }
+
+    /// `true` when the configured endpoint is declared not to serve imagine;
+    /// the tools return the remedy prose instead of a doomed request.
+    pub(crate) fn is_unsupported_endpoint(&self) -> bool {
+        self.provider.is_unsupported()
+    }
+
     pub(crate) fn http(&self) -> &reqwest::Client {
         &self.http
     }
@@ -190,14 +248,7 @@ impl ImageGenClient {
     ) -> Result<Vec<u8>, xai_tool_runtime::ToolError> {
         let url = format!("{}/images/generations", self.base_url.trim_end_matches('/'));
 
-        let payload = serde_json::json!({
-            "model": self.model,
-            "prompt": prompt,
-            "n": 1,
-            "aspect_ratio": aspect_ratio,
-            "resolution": "1k",
-            "response_format": "b64_json",
-        });
+        let payload = generation_payload(&self.model, prompt, aspect_ratio, self.provider);
 
         // Capture the bearer once so the request and the 401-attribution
         // emit see the same value (even if the provider rotates between
@@ -222,9 +273,22 @@ impl ImageGenClient {
             let body = response.text().await.unwrap_or_default();
             let truncated: String = body.chars().take(200).collect();
             tracing::warn!(http_status = %status, "Imagine API error: {truncated}");
+            let detail = if status_is_missing_route(status) {
+                format!(
+                    "{} {truncated}",
+                    missing_route_message(
+                        MediaSurface::ImageGen,
+                        &self.base_url,
+                        status,
+                        "/images/generations"
+                    )
+                )
+            } else {
+                format!("Image generation failed with HTTP {status}: {truncated}")
+            };
             return Err(xai_tool_runtime::ToolError::new(
                 xai_tool_runtime::ToolErrorKind::Custom,
-                format!("Image generation failed with HTTP {status}: {truncated}"),
+                detail,
             )
             .with_details(serde_json::json!({"code": "http_failure", "status": status.as_u16()})));
         }
@@ -235,30 +299,118 @@ impl ImageGenClient {
             ))
         })?;
 
-        let resp_json: ImageGenResponse = serde_json::from_str(&body).map_err(|e| {
-            let preview: String = body.chars().take(500).collect();
-            tracing::warn!("Imagine API returned unparseable body: {preview}");
-            xai_tool_runtime::ToolError::invalid_arguments(format!(
-                "Failed to parse image generation response: {e} — body preview: {preview}"
-            ))
-        })?;
-
-        let b64_data = resp_json.b64_data().unwrap_or("");
-
-        if b64_data.is_empty() {
-            return Err(xai_tool_runtime::ToolError::invalid_arguments(
-                "Image generation returned no image data.",
-            ));
-        }
-
-        base64::engine::general_purpose::STANDARD
-            .decode(b64_data)
-            .map_err(|e| {
-                xai_tool_runtime::ToolError::invalid_arguments(format!(
-                    "Failed to decode base64 image data: {e}"
-                ))
-            })
+        decode_image_response(&self.http, &body, "image generation").await
     }
+}
+
+/// Imagine `/images/generations` payload.
+///
+/// `Auto`/`Xai` is the historical xAI body (`aspect_ratio` + `resolution`);
+/// `OpenAi` swaps those for the OpenAI `size` field so a strict
+/// OpenAI-compatible gateway is not handed unknown keys.
+fn generation_payload(
+    model: &str,
+    prompt: &str,
+    aspect_ratio: &str,
+    provider: MediaProvider,
+) -> serde_json::Value {
+    if provider.is_openai_shape() {
+        serde_json::json!({
+            "model": model,
+            "prompt": prompt,
+            "n": 1,
+            "size": openai_size_for_aspect_ratio(aspect_ratio),
+            "response_format": "b64_json",
+        })
+    } else {
+        serde_json::json!({
+            "model": model,
+            "prompt": prompt,
+            "n": 1,
+            "aspect_ratio": aspect_ratio,
+            "resolution": "1k",
+            "response_format": "b64_json",
+        })
+    }
+}
+
+/// Decode an imagine-family response body into image bytes.
+///
+/// Accepts the xAI and the OpenAI envelope (both are `{"data": [ … ]}`) and,
+/// within an entry, either inline `b64_json` (with or without a `data:` URL
+/// prefix) or a `url` — a `data:` URL is decoded locally, an `http(s)` URL is
+/// fetched. A gateway that ignores `response_format=b64_json` therefore still
+/// works instead of failing with "returned no image data".
+pub(crate) async fn decode_image_response(
+    http: &reqwest::Client,
+    body: &str,
+    surface: &str,
+) -> Result<Vec<u8>, xai_tool_runtime::ToolError> {
+    let resp_json: ImageGenResponse = serde_json::from_str(body).map_err(|e| {
+        let preview: String = body.chars().take(500).collect();
+        tracing::warn!("Imagine API returned unparseable body: {preview}");
+        xai_tool_runtime::ToolError::invalid_arguments(format!(
+            "Failed to parse {surface} response: {e} — body preview: {preview}"
+        ))
+    })?;
+
+    let Some(payload) = resp_json.first_image() else {
+        return Err(xai_tool_runtime::ToolError::invalid_arguments(format!(
+            "{surface} returned no image data."
+        )));
+    };
+
+    match payload {
+        ImagePayload::B64(data) => decode_base64_image(&data),
+        ImagePayload::Url(url) if url.starts_with("data:") => decode_base64_image(&url),
+        ImagePayload::Url(url) => {
+            let response = http.get(&url).send().await.map_err(|e| {
+                xai_tool_runtime::ToolError::invalid_arguments(format!(
+                    "{surface} returned an image URL that could not be fetched: {e}"
+                ))
+            })?;
+            if !response.status().is_success() {
+                return Err(xai_tool_runtime::ToolError::invalid_arguments(format!(
+                    "{surface} returned an image URL that failed with HTTP {}",
+                    response.status()
+                )));
+            }
+            Ok(response
+                .bytes()
+                .await
+                .map_err(|e| {
+                    xai_tool_runtime::ToolError::invalid_arguments(format!(
+                        "{surface} image download failed: {e}"
+                    ))
+                })?
+                .to_vec())
+        }
+    }
+}
+
+/// Decode base64 image data, tolerating a `data:<mime>;base64,` prefix that
+/// some OpenAI-compatible gateways leave on `b64_json`.
+fn decode_base64_image(data: &str) -> Result<Vec<u8>, xai_tool_runtime::ToolError> {
+    let trimmed = data.trim();
+    let b64 = match trimmed.strip_prefix("data:") {
+        Some(rest) => rest
+            .split_once(',')
+            .map(|(_, payload)| payload)
+            .unwrap_or(rest),
+        None => trimmed,
+    };
+    if b64.is_empty() {
+        return Err(xai_tool_runtime::ToolError::invalid_arguments(
+            "image generation returned no image data.",
+        ));
+    }
+    base64::engine::general_purpose::STANDARD
+        .decode(b64.trim())
+        .map_err(|e| {
+            xai_tool_runtime::ToolError::invalid_arguments(format!(
+                "Failed to decode base64 image data: {e}"
+            ))
+        })
 }
 
 /// `Enabled` means credentials are present; each tool has its own gate.
@@ -269,14 +421,25 @@ pub enum ImageGenConfig {
     Enabled {
         api_key: String,
         base_url: String,
+        /// Base URL for `image_edit` (`/images/edits`). `None` = same as
+        /// `base_url`. Set from `[tools.image_edit] base_url` /
+        /// `GROK_IMAGE_EDIT_BASE_URL`.
+        edit_base_url: Option<String>,
         extra_headers: indexmap::IndexMap<String, String>,
         image_gen_enabled: bool,
         image_edit_enabled: bool,
         /// Optional Imagine model override for `image_gen`. When `Some(non-empty)`,
         /// `image_gen` calls that model instead of the default quality model
         /// ([`XAI_IMAGINE_MODEL`]). Driven by the remote
-        /// `image_gen_model_override` config flag. `image_edit` is unaffected.
+        /// `image_gen_model_override` config flag, or by
+        /// `[tools.image_gen] model` / `GROK_IMAGE_MODEL`, which win over it.
         model_override: Option<String>,
+        /// Optional model override for `image_edit` only. `None` keeps
+        /// [`super::image_edit::XAI_IMAGINE_EDIT_MODEL`].
+        edit_model_override: Option<String>,
+        /// Wire shape for `/images/*`. `Auto` (default) keeps the historical
+        /// xAI payload and additionally accepts the OpenAI response envelope.
+        provider: MediaProvider,
         /// `true` when the user is on a tier the Imagine server zero-limits
         /// (free / X Basic). The tools stay advertised to the model, but
         /// `image_gen` / `image_edit` short-circuit at call time with the
@@ -347,15 +510,43 @@ pub struct ImageGenResponse {
     data: Vec<ImageGenData>,
 }
 
+/// One image out of a response entry: either inline base64 or a URL (which may
+/// itself be a `data:` URL). The OpenAI and xAI envelopes both use these keys.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ImagePayload {
+    B64(String),
+    Url(String),
+}
+
 impl ImageGenResponse {
-    pub fn b64_data(&self) -> Option<&str> {
-        self.data.first().and_then(|d| d.b64_json.as_deref())
+    /// Inline base64 or URL of the first usable image, as a string. Kept for
+    /// callers that only need "what came back".
+    pub fn b64_data(&self) -> Option<String> {
+        match self.first_image()? {
+            ImagePayload::B64(data) => Some(data),
+            ImagePayload::Url(url) => Some(url),
+        }
+    }
+
+    /// First usable image in the response, preferring inline base64 over a
+    /// URL (no extra round trip).
+    pub fn first_image(&self) -> Option<ImagePayload> {
+        let entry = self.data.first()?;
+        if let Some(b64) = entry.b64_json.as_deref().filter(|s| !s.trim().is_empty()) {
+            return Some(ImagePayload::B64(b64.to_owned()));
+        }
+        entry
+            .url
+            .as_deref()
+            .filter(|s| !s.trim().is_empty())
+            .map(|url| ImagePayload::Url(url.to_owned()))
     }
 }
 
 #[derive(Debug, serde::Deserialize)]
 struct ImageGenData {
     b64_json: Option<String>,
+    url: Option<String>,
 }
 
 #[derive(Debug, Default)]
@@ -430,6 +621,15 @@ impl xai_tool_runtime::Tool for ImageGenTool {
             return Ok(ToolOutput::Text(TIER_RESTRICTED_UPSELL.into()));
         }
 
+        // The configured endpoint is declared not to serve imagine (`provider
+        // = "unsupported"`): say which key moves it instead of issuing a call
+        // that 404s.
+        if client.is_unsupported_endpoint() {
+            return Ok(ToolOutput::Text(
+                unsupported_surface_message(MediaSurface::ImageGen, client.base_url()).into(),
+            ));
+        }
+
         let image_bytes = client.generate(&input.prompt, &input.aspect_ratio).await?;
 
         let session_folder = {
@@ -458,6 +658,28 @@ mod tests {
     use super::*;
     use crate::types::tool_metadata::test_ctx_with_call_id;
 
+    /// Config with every new field at its default: `[tools.*]` unset.
+    fn cfg(base_url: &str) -> ImageGenConfig {
+        ImageGenConfig::Enabled {
+            api_key: "k".into(),
+            base_url: base_url.into(),
+            edit_base_url: None,
+            extra_headers: indexmap::IndexMap::new(),
+            image_gen_enabled: true,
+            image_edit_enabled: true,
+            model_override: None,
+            edit_model_override: None,
+            provider: MediaProvider::Auto,
+            tier_restricted: false,
+        }
+    }
+
+    fn resources_with_client(client: ImageGenClient) -> crate::types::resources::SharedResources {
+        let mut resources = crate::types::resources::Resources::new();
+        resources.insert(client);
+        resources.into_shared()
+    }
+
     #[test]
     fn tool_name_and_description() {
         let tool = ImageGenTool;
@@ -479,10 +701,13 @@ mod tests {
         let cfg = ImageGenConfig::Enabled {
             api_key: "k".into(),
             base_url: "https://api.x.ai/v1".into(),
+            edit_base_url: None,
             extra_headers: indexmap::IndexMap::new(),
             image_gen_enabled: false,
             image_edit_enabled: true,
             model_override: Some("grok-imagine-image".into()),
+            edit_model_override: None,
+            provider: MediaProvider::Auto,
             tier_restricted: false,
         };
         assert!(cfg.has_credentials());
@@ -498,10 +723,13 @@ mod tests {
         let mk = |model_override: Option<&str>| ImageGenConfig::Enabled {
             api_key: "k".into(),
             base_url: "https://api.x.ai/v1".into(),
+            edit_base_url: None,
             extra_headers: indexmap::IndexMap::new(),
             image_gen_enabled: true,
             image_edit_enabled: true,
             model_override: model_override.map(String::from),
+            edit_model_override: None,
+            provider: MediaProvider::Auto,
             tier_restricted: false,
         };
         // No override → default quality model.
@@ -521,6 +749,34 @@ mod tests {
                 .model,
             "grok-imagine-image"
         );
+    }
+
+    /// The edit surface follows `edit_base_url`/`edit_model_override` and falls
+    /// back to the imagine base URL and the edit default model.
+    #[test]
+    fn client_resolves_edit_surface_independently() {
+        let client = ImageGenClient::new(&cfg("https://api.x.ai/v1"), None).unwrap();
+        assert_eq!(client.base_url(), "https://api.x.ai/v1");
+        assert_eq!(client.edit_base_url(), "https://api.x.ai/v1");
+        assert_eq!(
+            client.edit_model(),
+            crate::implementations::grok_build::image_edit::XAI_IMAGINE_EDIT_MODEL
+        );
+
+        let mut config = cfg("https://imagine.example/v1");
+        if let ImageGenConfig::Enabled {
+            edit_base_url,
+            edit_model_override,
+            ..
+        } = &mut config
+        {
+            *edit_base_url = Some("https://edits.example/v1".into());
+            *edit_model_override = Some("gpt-image-1-edit".into());
+        }
+        let client = ImageGenClient::new(&config, None).unwrap();
+        assert_eq!(client.base_url(), "https://imagine.example/v1");
+        assert_eq!(client.edit_base_url(), "https://edits.example/v1");
+        assert_eq!(client.edit_model(), "gpt-image-1-edit");
     }
 
     #[tokio::test]
@@ -551,21 +807,18 @@ mod tests {
         // prose as a normal result (no HTTP, no error card) so the model can
         // relay it. Only the client is inserted — the short-circuit returns
         // before any other resource (e.g. SessionFolder) is required.
-        let cfg = ImageGenConfig::Enabled {
-            api_key: "k".into(),
-            base_url: "https://api.x.ai/v1".into(),
-            extra_headers: indexmap::IndexMap::new(),
-            image_gen_enabled: true,
-            image_edit_enabled: true,
-            model_override: None,
-            tier_restricted: true,
-        };
-        let mut resources = crate::types::resources::Resources::new();
-        resources.insert(ImageGenClient::new(&cfg, None).unwrap());
+        let mut config = cfg("https://api.x.ai/v1");
+        if let ImageGenConfig::Enabled {
+            tier_restricted, ..
+        } = &mut config
+        {
+            *tier_restricted = true;
+        }
+        let resources = resources_with_client(ImageGenClient::new(&config, None).unwrap());
 
         let result = xai_tool_runtime::Tool::run(
             &ImageGenTool,
-            test_ctx_with_call_id(resources.into_shared(), "test-call"),
+            test_ctx_with_call_id(resources, "test-call"),
             ImageGenInput {
                 prompt: "a cat".into(),
                 aspect_ratio: "auto".into(),
@@ -581,5 +834,219 @@ mod tests {
             }
             other => panic!("expected Text upsell, got {other:?}"),
         }
+    }
+
+    /// `provider = "unsupported"` short-circuits with the key to set, before
+    /// any HTTP call.
+    #[tokio::test]
+    async fn unsupported_provider_short_circuits_with_remedy() {
+        let mut config = cfg("https://gateway.example/v1");
+        if let ImageGenConfig::Enabled { provider, .. } = &mut config {
+            *provider = MediaProvider::Unsupported;
+        }
+        let resources = resources_with_client(ImageGenClient::new(&config, None).unwrap());
+
+        let result = xai_tool_runtime::Tool::run(
+            &ImageGenTool,
+            test_ctx_with_call_id(resources, "test-call"),
+            ImageGenInput {
+                prompt: "a cat".into(),
+                aspect_ratio: "auto".into(),
+            },
+        )
+        .await
+        .expect("unsupported endpoint must return prose, not an error");
+
+        match result {
+            ToolOutput::Text(t) => {
+                assert!(t.text.contains("GROK_IMAGE_BASE_URL"), "got: {}", t.text);
+                assert!(
+                    t.text.contains("[tools.image_gen] base_url"),
+                    "got: {}",
+                    t.text
+                );
+                assert!(t.text.contains("Do not retry"), "got: {}", t.text);
+            }
+            other => panic!("expected Text remedy, got {other:?}"),
+        }
+    }
+
+    // ── wire shape ───────────────────────────────────────────────────
+
+    /// Auto/xai payload is byte-identical to the historical xAI body.
+    #[test]
+    fn auto_payload_keeps_xai_fields() {
+        let payload = generation_payload("m", "a cat", "16:9", MediaProvider::Auto);
+        assert_eq!(payload["model"], "m");
+        assert_eq!(payload["prompt"], "a cat");
+        assert_eq!(payload["n"], 1);
+        assert_eq!(payload["aspect_ratio"], "16:9");
+        assert_eq!(payload["resolution"], "1k");
+        assert_eq!(payload["response_format"], "b64_json");
+        assert!(payload.get("size").is_none());
+        assert_eq!(
+            payload,
+            generation_payload("m", "a cat", "16:9", MediaProvider::Xai)
+        );
+    }
+
+    /// The OpenAI shape swaps `aspect_ratio`/`resolution` for `size`.
+    #[test]
+    fn openai_payload_uses_size_not_xai_fields() {
+        let payload = generation_payload("m", "a cat", "16:9", MediaProvider::OpenAi);
+        assert_eq!(payload["size"], "1536x1024");
+        assert!(payload.get("aspect_ratio").is_none());
+        assert!(payload.get("resolution").is_none());
+        assert_eq!(payload["response_format"], "b64_json");
+    }
+
+    #[test]
+    fn response_prefers_b64_then_url() {
+        let resp: ImageGenResponse =
+            serde_json::from_str(r#"{"data":[{"b64_json":"AAAA","url":"https://x/y.png"}]}"#)
+                .unwrap();
+        assert_eq!(resp.first_image(), Some(ImagePayload::B64("AAAA".into())));
+
+        let resp: ImageGenResponse =
+            serde_json::from_str(r#"{"data":[{"url":"https://x/y.png"}]}"#).unwrap();
+        assert_eq!(
+            resp.first_image(),
+            Some(ImagePayload::Url("https://x/y.png".into()))
+        );
+
+        let resp: ImageGenResponse = serde_json::from_str(r#"{"data":[]}"#).unwrap();
+        assert_eq!(resp.first_image(), None);
+    }
+
+    #[test]
+    fn base64_decode_tolerates_data_url_prefix() {
+        let bytes = decode_base64_image("data:image/png;base64,QUJD").unwrap();
+        assert_eq!(bytes, b"ABC");
+        let bytes = decode_base64_image("QUJD").unwrap();
+        assert_eq!(bytes, b"ABC");
+        assert!(decode_base64_image("data:image/png;base64,").is_err());
+        assert!(decode_base64_image("not base64!").is_err());
+    }
+
+    // ── mock-server contract ─────────────────────────────────────────
+
+    /// End-to-end against an OpenAI-shaped gateway: the request carries the
+    /// OpenAI fields and the response envelope is decoded without a
+    /// translation layer.
+    #[tokio::test]
+    async fn openai_shape_gateway_roundtrip() {
+        use wiremock::matchers::{body_partial_json, header, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/images/generations"))
+            .and(header("Authorization", "Bearer gw-key"))
+            .and(body_partial_json(serde_json::json!({
+                "model": "gpt-image-1",
+                "n": 1,
+                "size": "1536x1024",
+                "response_format": "b64_json",
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "created": 1,
+                "data": [{"b64_json": "QUJD"}],
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let mut config = cfg(&server.uri());
+        if let ImageGenConfig::Enabled {
+            api_key,
+            model_override,
+            provider,
+            ..
+        } = &mut config
+        {
+            *api_key = "gw-key".into();
+            *model_override = Some("gpt-image-1".into());
+            *provider = MediaProvider::OpenAi;
+        }
+        let client = ImageGenClient::new(&config, None).unwrap();
+        let bytes = client.generate("a cat", "16:9").await.expect("roundtrip");
+        assert_eq!(bytes, b"ABC");
+    }
+
+    /// A gateway that ignores `response_format` and answers with a URL still
+    /// yields bytes.
+    #[tokio::test]
+    async fn url_only_response_is_fetched() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/images/generations"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": [{"url": format!("{}/blob.png", server.uri())}],
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/blob.png"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(b"PNGDATA".to_vec()))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let client = ImageGenClient::new(&cfg(&server.uri()), None).unwrap();
+        let bytes = client.generate("a cat", "auto").await.expect("url fetch");
+        assert_eq!(bytes, b"PNGDATA");
+    }
+
+    /// A 404 names the key to set instead of returning a bare status.
+    #[tokio::test]
+    async fn missing_route_reports_remedy() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/images/generations"))
+            .respond_with(ResponseTemplate::new(404).set_body_string("not found"))
+            .mount(&server)
+            .await;
+
+        let client = ImageGenClient::new(&cfg(&server.uri()), None).unwrap();
+        let err = client
+            .generate("a cat", "auto")
+            .await
+            .expect_err("404 must fail");
+        let msg = err.to_string();
+        assert!(msg.contains("HTTP 404"), "got: {msg}");
+        assert!(msg.contains("GROK_IMAGE_BASE_URL"), "got: {msg}");
+        assert!(msg.contains("provider = \"unsupported\""), "got: {msg}");
+    }
+
+    /// A non-route failure keeps the historical wording.
+    #[tokio::test]
+    async fn server_error_keeps_plain_message() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/images/generations"))
+            .respond_with(ResponseTemplate::new(500).set_body_string("boom"))
+            .mount(&server)
+            .await;
+
+        let client = ImageGenClient::new(&cfg(&server.uri()), None).unwrap();
+        let msg = client
+            .generate("a cat", "auto")
+            .await
+            .expect_err("500 must fail")
+            .to_string();
+        assert!(
+            msg.contains("Image generation failed with HTTP 500"),
+            "got: {msg}"
+        );
+        assert!(msg.contains("boom"), "got: {msg}");
     }
 }

@@ -22,6 +22,7 @@ pub mod image_gen;
 pub mod kill_task;
 pub mod list_dir;
 pub mod lsp;
+pub mod media_endpoint;
 pub mod monitor;
 pub mod read_file;
 pub mod scheduler;
@@ -60,6 +61,7 @@ pub use image_gen::{
 pub use kill_task::{KillTaskTool, KillTerminalCommandTool};
 pub use list_dir::ListDirTool;
 pub use lsp::LspTool;
+pub use media_endpoint::{MediaProvider, MediaSurface};
 pub use monitor::tool::MonitorTool;
 pub use read_file::ReadFileTool;
 pub use scheduler::create::{

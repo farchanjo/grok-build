@@ -153,7 +153,9 @@ mod tests {
     use crate::implementations::grok_build::assets::test_support::resources_with_store;
     use crate::types::tool_metadata::test_ctx_with_call_id;
     use std::sync::Arc;
-    use xai_file_utils::assets::{AssetKey, ContentType, MockAssetStore, PutRequest, SharedAssetStore};
+    use xai_file_utils::assets::{
+        AssetKey, ContentType, MockAssetStore, PutRequest, SharedAssetStore,
+    };
 
     async fn run(
         store: SharedAssetStore,
@@ -192,13 +194,9 @@ mod tests {
     async fn empty_session_reports_no_jobs() {
         let dir = tempfile::TempDir::new().unwrap();
         let mock = Arc::new(MockAssetStore::new());
-        let out = run(
-            mock,
-            dir.path(),
-            AssetJobListInput { only_active: false },
-        )
-        .await
-        .unwrap();
+        let out = run(mock, dir.path(), AssetJobListInput { only_active: false })
+            .await
+            .unwrap();
         match out {
             ToolOutput::AssetJobList(out) => {
                 assert!(out.jobs.is_empty());

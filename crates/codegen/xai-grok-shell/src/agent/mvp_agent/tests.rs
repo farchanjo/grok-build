@@ -2653,6 +2653,177 @@ async fn prepare_video_gen_config_sends_client_identifier_header() {
          applies the coding ZDR opt-out to Build traffic"
     );
 }
+
+/// Imagine is its own surface: `GROK_IMAGE_BASE_URL` moves image generation
+/// (and the edit surface that inherits it) without moving chat, and
+/// `GROK_IMAGE_MODEL` pins the model.
+#[tokio::test(flavor = "current_thread")]
+#[serial_test::serial]
+async fn prepare_image_gen_config_honors_image_env_overrides() {
+    use xai_grok_test_support::EnvGuard;
+    use xai_grok_tools::implementations::grok_build::image_gen::ImageGenConfig;
+    let _base = EnvGuard::set("GROK_IMAGE_BASE_URL", "https://imagine.example.com/v1/");
+    let _model = EnvGuard::set("GROK_IMAGE_MODEL", "gpt-image-1");
+    let _edit_model = EnvGuard::set("GROK_IMAGE_EDIT_MODEL", "gpt-image-1-edit");
+    let agent = build_minimal_agent_for_tests();
+    agent.inference_config.borrow_mut().api_key = Some("test-key".to_string());
+
+    let ImageGenConfig::Enabled {
+        base_url,
+        edit_base_url,
+        model_override,
+        edit_model_override,
+        provider,
+        ..
+    } = agent.prepare_image_gen_config()
+    else {
+        panic!("expected Enabled");
+    };
+    assert_eq!(base_url, "https://imagine.example.com/v1");
+    assert_eq!(
+        edit_base_url.as_deref(),
+        Some("https://imagine.example.com/v1"),
+        "image_edit inherits the image base URL when it has no override"
+    );
+    assert_eq!(model_override.as_deref(), Some("gpt-image-1"));
+    assert_eq!(edit_model_override.as_deref(), Some("gpt-image-1-edit"));
+    assert_eq!(
+        provider,
+        xai_grok_tools::implementations::grok_build::MediaProvider::Auto,
+        "no provider key set ⇒ auto"
+    );
+}
+
+/// `GROK_IMAGE_MODEL` also moves the edit surface when it has no model key of
+/// its own: a gateway usually serves one image model, so leaving edits on the
+/// xAI slug would 404 the model.
+#[tokio::test(flavor = "current_thread")]
+#[serial_test::serial]
+async fn image_model_env_also_moves_the_edit_surface() {
+    use xai_grok_test_support::EnvGuard;
+    use xai_grok_tools::implementations::grok_build::image_gen::ImageGenConfig;
+    let _base = EnvGuard::set("GROK_IMAGE_BASE_URL", "https://imagine.example.com/v1");
+    let _model = EnvGuard::set("GROK_IMAGE_MODEL", "gpt-image-1");
+    let _edit_model = EnvGuard::unset("GROK_IMAGE_EDIT_MODEL");
+    let agent = build_minimal_agent_for_tests();
+    agent.inference_config.borrow_mut().api_key = Some("test-key".to_string());
+
+    let ImageGenConfig::Enabled {
+        model_override,
+        edit_model_override,
+        ..
+    } = agent.prepare_image_gen_config()
+    else {
+        panic!("expected Enabled");
+    };
+    assert_eq!(model_override.as_deref(), Some("gpt-image-1"));
+    assert_eq!(edit_model_override.as_deref(), Some("gpt-image-1"));
+}
+
+/// A separate edit endpoint wins over the shared image base URL, and an
+/// unrecognized provider value falls back to `auto` instead of failing.
+#[tokio::test(flavor = "current_thread")]
+#[serial_test::serial]
+async fn prepare_image_gen_config_edit_base_url_and_provider_fallback() {
+    use xai_grok_test_support::EnvGuard;
+    use xai_grok_tools::implementations::grok_build::image_gen::ImageGenConfig;
+    let _base = EnvGuard::set("GROK_IMAGE_BASE_URL", "https://imagine.example.com/v1");
+    let _edit = EnvGuard::set("GROK_IMAGE_EDIT_BASE_URL", "https://edits.example.com/v1");
+    let _provider = EnvGuard::set("GROK_IMAGE_PROVIDER", "openaii");
+    let agent = build_minimal_agent_for_tests();
+    agent.inference_config.borrow_mut().api_key = Some("test-key".to_string());
+
+    let ImageGenConfig::Enabled {
+        base_url,
+        edit_base_url,
+        provider,
+        ..
+    } = agent.prepare_image_gen_config()
+    else {
+        panic!("expected Enabled");
+    };
+    assert_eq!(base_url, "https://imagine.example.com/v1");
+    assert_eq!(
+        edit_base_url.as_deref(),
+        Some("https://edits.example.com/v1")
+    );
+    assert_eq!(
+        provider,
+        xai_grok_tools::implementations::grok_build::MediaProvider::Auto,
+        "an unknown provider value must not disable the surface"
+    );
+}
+
+/// Video is xAI-wire-only: the env tier moves it and `provider =
+/// "unsupported"` reaches the config so the tools can name the remedy.
+#[tokio::test(flavor = "current_thread")]
+#[serial_test::serial]
+async fn prepare_video_gen_config_honors_video_env_overrides() {
+    use xai_grok_test_support::EnvGuard;
+    use xai_grok_tools::implementations::grok_build::video_gen::VideoGenConfig;
+    let _base = EnvGuard::set("GROK_VIDEO_BASE_URL", "https://gateway.example.com/v1");
+    let _provider = EnvGuard::set("GROK_VIDEO_PROVIDER", "unsupported");
+    let _model = EnvGuard::set("GROK_VIDEO_MODEL", "local-video-model");
+    let agent = build_minimal_agent_for_tests();
+    agent.inference_config.borrow_mut().api_key = Some("test-key".to_string());
+
+    let VideoGenConfig::Enabled {
+        base_url,
+        provider,
+        model_override,
+        ..
+    } = agent.prepare_video_gen_config()
+    else {
+        panic!("expected Enabled");
+    };
+    assert_eq!(base_url, "https://gateway.example.com/v1");
+    assert_eq!(
+        provider,
+        xai_grok_tools::implementations::grok_build::MediaProvider::Unsupported
+    );
+    assert_eq!(model_override.as_deref(), Some("local-video-model"));
+}
+
+/// With no media key set, both surfaces keep today's
+/// `[endpoints].xai_api_base_url` and the historical provider.
+#[tokio::test(flavor = "current_thread")]
+#[serial_test::serial]
+async fn prepare_media_configs_default_to_endpoints_base_url() {
+    use xai_grok_test_support::EnvGuard;
+    use xai_grok_tools::implementations::grok_build::MediaProvider;
+    let _image = EnvGuard::unset("GROK_IMAGE_BASE_URL");
+    let _image_edit = EnvGuard::unset("GROK_IMAGE_EDIT_BASE_URL");
+    let _video = EnvGuard::unset("GROK_VIDEO_BASE_URL");
+    let _image_provider = EnvGuard::unset("GROK_IMAGE_PROVIDER");
+    let _video_provider = EnvGuard::unset("GROK_VIDEO_PROVIDER");
+    let agent = build_minimal_agent_for_tests();
+    agent.inference_config.borrow_mut().api_key = Some("test-key".to_string());
+    let expected = agent.cfg.borrow().endpoints.xai_api_base_url.clone();
+
+    let xai_grok_tools::implementations::grok_build::image_gen::ImageGenConfig::Enabled {
+        base_url,
+        edit_base_url,
+        provider,
+        ..
+    } = agent.prepare_image_gen_config()
+    else {
+        panic!("expected Enabled");
+    };
+    assert_eq!(base_url, expected);
+    assert_eq!(edit_base_url.as_deref(), Some(expected.as_str()));
+    assert_eq!(provider, MediaProvider::Auto);
+
+    let xai_grok_tools::implementations::grok_build::video_gen::VideoGenConfig::Enabled {
+        base_url,
+        provider,
+        ..
+    } = agent.prepare_video_gen_config()
+    else {
+        panic!("expected Enabled");
+    };
+    assert_eq!(base_url, expected);
+    assert_eq!(provider, MediaProvider::Auto);
+}
 #[tokio::test]
 async fn data_collection_enabled_for_normal_user() {
     let agent = build_agent_with_auth(crate::auth::GrokAuth::test_default());

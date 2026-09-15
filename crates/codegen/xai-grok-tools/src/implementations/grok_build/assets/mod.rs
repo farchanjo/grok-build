@@ -564,7 +564,14 @@ mod tests {
 
         assert_eq!(
             properties::<upload::AssetUploadInput>(),
-            ["content_type", "key", "path", "prefix", "visibility", "wait_secs"]
+            [
+                "content_type",
+                "key",
+                "path",
+                "prefix",
+                "visibility",
+                "wait_secs"
+            ]
         );
         assert_eq!(properties::<share::AssetShareInput>(), ["key", "ttl_secs"]);
         assert_eq!(
@@ -584,10 +591,7 @@ mod tests {
             properties::<job_status::AssetJobStatusInput>(),
             ["job_id", "wait_secs"]
         );
-        assert_eq!(
-            properties::<job_list::AssetJobListInput>(),
-            ["only_active"]
-        );
+        assert_eq!(properties::<job_list::AssetJobListInput>(), ["only_active"]);
         assert_eq!(
             properties::<job_cancel::AssetJobCancelInput>(),
             ["job_id", "wait_secs"]

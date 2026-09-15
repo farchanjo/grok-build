@@ -15,6 +15,78 @@ fn byok_from_models(
         .or_else(|| models.get(current).and_then(|m| m.own_credential()))
         .or_else(|| models.values().find_map(|m| m.own_credential()))
 }
+/// `[tools.*]` overrides for the media surfaces.
+///
+/// Read from the raw effective config the way `xai-grok-voice` reads
+/// `[voice]`, so a new key needs no typed-config field. A missing or
+/// unreadable config degrades to "no overrides" — the tools then keep their
+/// historical `[endpoints].xai_api_base_url` behavior.
+struct MediaToolOverrides {
+    tools: Option<toml::Value>,
+}
+impl MediaToolOverrides {
+    fn load() -> Self {
+        Self {
+            tools: crate::config::load_effective_config()
+                .ok()
+                .and_then(|root| root.get("tools").cloned()),
+        }
+    }
+    /// `[tools.<table>].<field>` as a string, if present and non-blank.
+    fn get(&self, table: &str, field: &str) -> Option<String> {
+        self.tools
+            .as_ref()?
+            .get(table)?
+            .get(field)?
+            .as_str()
+            .map(str::to_owned)
+    }
+}
+fn env_str(name: &str) -> Option<String> {
+    std::env::var(name).ok()
+}
+/// Env > `[tools.*]` provider value, case-insensitive. An unrecognized value
+/// warns and falls back to `auto` so a typo cannot disable a surface.
+fn resolve_media_provider(
+    surface: xai_grok_tools::implementations::grok_build::media_endpoint::MediaSurface,
+    env: Option<&str>,
+    config: Option<&str>,
+) -> xai_grok_tools::implementations::grok_build::media_endpoint::MediaProvider {
+    use xai_grok_tools::implementations::grok_build::media_endpoint::MediaProvider;
+    let Some(raw) = [env, config]
+        .into_iter()
+        .flatten()
+        .map(str::trim)
+        .find(|v| !v.is_empty())
+    else {
+        return MediaProvider::Auto;
+    };
+    MediaProvider::parse(raw).unwrap_or_else(|| {
+        tracing::warn!(
+            surface = surface.as_str(),
+            value = raw,
+            "unknown media provider; falling back to auto"
+        );
+        MediaProvider::Auto
+    })
+}
+/// Log a non-default media endpoint so a surprising target is visible at
+/// startup instead of only in the failing request.
+fn log_media_endpoint(
+    surface: xai_grok_tools::implementations::grok_build::media_endpoint::MediaSurface,
+    resolved: &xai_grok_tools::implementations::grok_build::media_endpoint::ResolvedValue,
+) {
+    if resolved.source
+        != xai_grok_tools::implementations::grok_build::media_endpoint::EndpointSource::Default
+    {
+        tracing::info!(
+            surface = surface.as_str(),
+            base_url = %resolved.value,
+            source = resolved.source.as_str(),
+            "media endpoint overridden"
+        );
+    }
+}
 impl MvpAgent {
     pub fn reload_skills_all_sessions(&self) -> usize {
         let session_ids: Vec<agent_client_protocol::SessionId> = self
@@ -1232,17 +1304,73 @@ impl MvpAgent {
     /// `inference_config.api_key` carries the OAuth bearer for session users (the
     /// `api_key_provider` refreshes it per request), so IC authenticates and
     /// meters Imagine usage per-user.
+    ///
+    /// Endpoint, model and wire shape are resolved per surface from
+    /// `GROK_IMAGE_*` env > `[tools.image_gen]` / `[tools.image_edit]` >
+    /// today's `[endpoints].xai_api_base_url` default, so imagine can point at
+    /// a gateway while chat goes elsewhere. With every key unset the result is
+    /// byte-identical to before.
     pub(super) fn prepare_image_gen_config(
         &self,
     ) -> xai_grok_tools::implementations::grok_build::image_gen::ImageGenConfig {
         use xai_grok_tools::implementations::grok_build::image_gen::ImageGenConfig;
+        use xai_grok_tools::implementations::grok_build::media_endpoint::{
+            MediaSurface, resolve_optional_value, resolve_value,
+        };
         let inference_config = self.inference_config.borrow();
         let Some(ref api_key) = inference_config.api_key else {
             return ImageGenConfig::Disabled;
         };
         let tier_restricted = self.is_tier_restricted_capability();
+        let overrides = MediaToolOverrides::load();
         let cfg = self.cfg.borrow();
-        let base_url = cfg.endpoints.xai_api_base_url.clone();
+        let base_url = resolve_value(
+            env_str(MediaSurface::ImageGen.base_url_env()).as_deref(),
+            overrides
+                .get(MediaSurface::ImageGen.config_table(), "base_url")
+                .as_deref(),
+            &cfg.endpoints.xai_api_base_url,
+        );
+        log_media_endpoint(MediaSurface::ImageGen, &base_url);
+        let edit_base_url = resolve_value(
+            env_str(MediaSurface::ImageEdit.base_url_env()).as_deref(),
+            overrides
+                .get(MediaSurface::ImageEdit.config_table(), "base_url")
+                .as_deref(),
+            &base_url.value,
+        );
+        log_media_endpoint(MediaSurface::ImageEdit, &edit_base_url);
+        let model_override = resolve_optional_value(
+            env_str(MediaSurface::ImageGen.model_env()).as_deref(),
+            overrides
+                .get(MediaSurface::ImageGen.config_table(), "model")
+                .as_deref(),
+            cfg.resolve_image_gen_model_override().as_deref(),
+        );
+        // `image_edit` has its own model keys. When the user moved imagine with
+        // the *new* keys (`GROK_IMAGE_MODEL` / `[tools.image_gen] model`), the
+        // edit surface follows that model too — pointing imagine at a gateway
+        // and leaving edits on an xAI slug would 404 the model. The legacy
+        // remote `image_gen_model_override` keeps its documented image_gen-only
+        // scope.
+        let explicit_image_model = env_str(MediaSurface::ImageGen.model_env()).or_else(|| {
+            overrides.get(MediaSurface::ImageGen.config_table(), "model")
+        });
+        let edit_model_override = resolve_optional_value(
+            env_str(MediaSurface::ImageEdit.model_env()).as_deref(),
+            overrides
+                .get(MediaSurface::ImageEdit.config_table(), "model")
+                .as_deref(),
+            None,
+        )
+        .or_else(|| explicit_image_model.and(model_override.clone()));
+        let provider = resolve_media_provider(
+            MediaSurface::ImageGen,
+            env_str(MediaSurface::ImageGen.provider_env()).as_deref(),
+            overrides
+                .get(MediaSurface::ImageGen.config_table(), "provider")
+                .as_deref(),
+        );
         let version = cfg
             .client_version
             .clone()
@@ -1254,15 +1382,18 @@ impl MvpAgent {
             &mut headers,
             cfg.client_version.as_deref(),
             alpha_test_key.as_deref(),
-            &base_url,
+            &base_url.value,
         );
         ImageGenConfig::Enabled {
             api_key: api_key.clone(),
-            base_url,
+            base_url: base_url.value,
+            edit_base_url: Some(edit_base_url.value),
             extra_headers: headers,
             image_gen_enabled: cfg.resolve_image_gen().value,
             image_edit_enabled: cfg.resolve_image_edit().value,
-            model_override: cfg.resolve_image_gen_model_override(),
+            model_override,
+            edit_model_override,
+            provider,
             tier_restricted,
         }
     }
@@ -1274,9 +1405,17 @@ impl MvpAgent {
         AppBuilderDeployerConfig::Disabled
     }
     /// Build video generation config. Video tools call the xAI API directly.
+    ///
+    /// Video is xAI-wire-only: the endpoint, model and provider resolve from
+    /// `GROK_VIDEO_*` env > `[tools.video_gen]` > `[endpoints].xai_api_base_url`,
+    /// and `provider = "unsupported"` turns the surface into a one-line remedy
+    /// instead of a 404.
     pub(super) fn prepare_video_gen_config(
         &self,
     ) -> xai_grok_tools::implementations::grok_build::video_gen::VideoGenConfig {
+        use xai_grok_tools::implementations::grok_build::media_endpoint::{
+            MediaSurface, resolve_optional_value, resolve_value,
+        };
         use xai_grok_tools::implementations::grok_build::video_gen::VideoGenConfig;
         let cfg = self.cfg.borrow();
         if !cfg.resolve_video_gen().value {
@@ -1295,7 +1434,29 @@ impl MvpAgent {
             tracing::info!("video_gen disabled by tools.disable_zdr_incompatible_tools");
             return VideoGenConfig::Disabled;
         }
-        let base_url = cfg.endpoints.xai_api_base_url.clone();
+        let overrides = MediaToolOverrides::load();
+        let base_url = resolve_value(
+            env_str(MediaSurface::VideoGen.base_url_env()).as_deref(),
+            overrides
+                .get(MediaSurface::VideoGen.config_table(), "base_url")
+                .as_deref(),
+            &cfg.endpoints.xai_api_base_url,
+        );
+        log_media_endpoint(MediaSurface::VideoGen, &base_url);
+        let provider = resolve_media_provider(
+            MediaSurface::VideoGen,
+            env_str(MediaSurface::VideoGen.provider_env()).as_deref(),
+            overrides
+                .get(MediaSurface::VideoGen.config_table(), "provider")
+                .as_deref(),
+        );
+        let model_override = resolve_optional_value(
+            env_str(MediaSurface::VideoGen.model_env()).as_deref(),
+            overrides
+                .get(MediaSurface::VideoGen.config_table(), "model")
+                .as_deref(),
+            None,
+        );
         let version = cfg
             .client_version
             .clone()
@@ -1307,13 +1468,15 @@ impl MvpAgent {
             &mut headers,
             cfg.client_version.as_deref(),
             alpha_test_key.as_deref(),
-            &base_url,
+            &base_url.value,
         );
         VideoGenConfig::Enabled {
             api_key,
-            base_url,
+            base_url: base_url.value,
             extra_headers: headers,
             zdr_video_output_s3: zdr_video_output_s3.map(Box::new),
+            model_override,
+            provider,
             tier_restricted,
         }
     }

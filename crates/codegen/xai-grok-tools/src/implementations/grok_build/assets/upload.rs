@@ -253,7 +253,9 @@ impl xai_tool_runtime::Tool for AssetUploadTool {
             );
             match &error {
                 Some(error) => text.push_str(&format!(": {error}")),
-                None => text.push_str(". Follow it with `asset_job_status` or `asset_job_subscribe`."),
+                None => {
+                    text.push_str(". Follow it with `asset_job_status` or `asset_job_subscribe`.")
+                }
             }
             text
         };

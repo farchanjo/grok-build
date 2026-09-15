@@ -28,6 +28,10 @@ use serde::Deserialize;
 use crate::attribution::{SharedAttributionCallback, ToolConsumer};
 use crate::types::SharedApiKeyProvider;
 
+use super::media_endpoint::{
+    MediaProvider, MediaSurface, missing_route_message, status_is_missing_route,
+    unsupported_surface_message,
+};
 use crate::types::output::{MediaGenOutput, ToolOutput};
 use crate::types::requirements::{Expr, ToolRequirement};
 use crate::types::resources::SessionFolder;
@@ -140,6 +144,12 @@ pub struct VideoGenClient {
     http: reqwest::Client,
     download_http: reqwest::Client,
     base_url: String,
+    /// Video model used by both video tools when set (`[tools.video_gen] model`
+    /// / `GROK_VIDEO_MODEL`); each tool's own default otherwise.
+    model_override: Option<String>,
+    /// Wire shape for `/videos/*`. `Auto`/`Xai` keep the historical xAI wire;
+    /// `Unsupported` short-circuits with the remedy prose.
+    provider: MediaProvider,
     writer: super::storage::SessionFileWriter,
     zdr_video_output_s3: Option<ZdrVideoOutputS3Config>,
     api_key_provider: Option<SharedApiKeyProvider>,
@@ -164,6 +174,8 @@ impl VideoGenClient {
             base_url,
             extra_headers,
             zdr_video_output_s3,
+            model_override,
+            provider,
             tier_restricted,
         } = config
         else {
@@ -224,6 +236,8 @@ impl VideoGenClient {
             http,
             download_http,
             base_url: base_url.clone(),
+            model_override: model_override.clone().filter(|m| !m.trim().is_empty()),
+            provider: *provider,
             writer: super::storage::SessionFileWriter::new(DEFAULT_VIDEO_DIR, "mp4"),
             zdr_video_output_s3: zdr_video_output_s3
                 .as_ref()
@@ -240,6 +254,16 @@ impl VideoGenClient {
     /// SuperGrok upsell instead of issuing a doomed request.
     pub(crate) fn is_tier_restricted(&self) -> bool {
         self.tier_restricted
+    }
+
+    /// `true` when the configured endpoint is declared not to serve video
+    /// generation (`provider = "unsupported"`).
+    pub(crate) fn is_unsupported_endpoint(&self) -> bool {
+        self.provider.is_unsupported()
+    }
+
+    pub(crate) fn base_url(&self) -> &str {
+        &self.base_url
     }
 
     /// Wire a 401-attribution callback into this client. Idempotent;
@@ -262,7 +286,7 @@ impl VideoGenClient {
 
     pub async fn generate_with_images(
         &self,
-        model: &'static str,
+        default_model: &'static str,
         prompt: &str,
         duration: Option<u32>,
         aspect_ratio: Option<&str>,
@@ -270,6 +294,7 @@ impl VideoGenClient {
         image: Option<String>,
         reference_images: Vec<String>,
     ) -> Result<VideoOutcome, xai_tool_runtime::ToolError> {
+        let model = self.model_override.as_deref().unwrap_or(default_model);
         let start_url = format!("{}/videos/generations", self.base_url.trim_end_matches('/'));
 
         let presigned = match &self.zdr_video_output_s3 {
@@ -317,9 +342,22 @@ impl VideoGenClient {
             let body = response.text().await.unwrap_or_default();
             let truncated: String = body.chars().take(200).collect();
             tracing::warn!(http_status = %status, "Video generation API error: {truncated}");
+            let detail = if status_is_missing_route(status) {
+                format!(
+                    "{} {truncated}",
+                    missing_route_message(
+                        MediaSurface::VideoGen,
+                        &self.base_url,
+                        status,
+                        "/videos/generations"
+                    )
+                )
+            } else {
+                format!("Video generation failed with HTTP {status}: {truncated}")
+            };
             return Err(xai_tool_runtime::ToolError::new(
                 xai_tool_runtime::ToolErrorKind::Custom,
-                format!("Video generation failed with HTTP {status}: {truncated}"),
+                detail,
             )
             .with_details(serde_json::json!({"code": "http_failure", "status": status.as_u16()})));
         }
@@ -389,9 +427,22 @@ impl VideoGenClient {
             if !poll_status.is_success() && poll_status.as_u16() != 202 {
                 let body = poll_response.text().await.unwrap_or_default();
                 let truncated: String = body.chars().take(200).collect();
+                let detail = if status_is_missing_route(poll_status) {
+                    format!(
+                        "{} {truncated}",
+                        missing_route_message(
+                            MediaSurface::VideoGen,
+                            &self.base_url,
+                            poll_status,
+                            "/videos/{id}"
+                        )
+                    )
+                } else {
+                    format!("Video poll failed with HTTP {poll_status}: {truncated}")
+                };
                 return Err(xai_tool_runtime::ToolError::new(
                     xai_tool_runtime::ToolErrorKind::Custom,
-                    format!("Video poll failed with HTTP {poll_status}: {truncated}"),
+                    detail,
                 )
                 .with_details(
                     serde_json::json!({"code": "http_failure", "status": poll_status.as_u16()}),
@@ -680,6 +731,13 @@ pub enum VideoGenConfig {
         base_url: String,
         extra_headers: indexmap::IndexMap<String, String>,
         zdr_video_output_s3: Option<Box<ZdrVideoOutputS3Config>>,
+        /// Video model for both video tools. `None` keeps each tool's own
+        /// default model. Set from `[tools.video_gen] model` / `GROK_VIDEO_MODEL`.
+        model_override: Option<String>,
+        /// Wire shape for `/videos/*`. `Auto` (default) is the historical xAI
+        /// wire; `Unsupported` means the endpoint does not serve video
+        /// generation and the tools return the remedy prose.
+        provider: MediaProvider,
         /// `true` when the user is on a tier the Imagine server zero-limits
         /// (free / X Basic). The video tools stay advertised but short-circuit
         /// at call time with the SuperGrok upsell prose. Set by the host from
@@ -711,7 +769,7 @@ pub enum VideoOutcome {
 
 #[derive(serde::Serialize)]
 struct GenerateVideoPayload<'a> {
-    model: &'static str,
+    model: &'a str,
     prompt: &'a str,
     #[serde(skip_serializing_if = "Option::is_none")]
     image: Option<VideoImageUrl>,
@@ -1041,6 +1099,14 @@ impl xai_tool_runtime::Tool for ImageToVideoTool {
             return Ok(ToolOutput::Text(TIER_RESTRICTED_UPSELL.into()));
         }
 
+        // The endpoint is declared not to serve video (`provider =
+        // "unsupported"`): name the key that moves it instead of 404ing.
+        if client.is_unsupported_endpoint() {
+            return Ok(ToolOutput::Text(
+                unsupported_surface_message(MediaSurface::VideoGen, client.base_url()).into(),
+            ));
+        }
+
         let outcome = client
             .generate_with_images(
                 XAI_VIDEO_QUALITY_MODEL,
@@ -1160,6 +1226,14 @@ impl xai_tool_runtime::Tool for ReferenceToVideoTool {
             return Ok(ToolOutput::Text(TIER_RESTRICTED_UPSELL.into()));
         }
 
+        // The endpoint is declared not to serve video (`provider =
+        // "unsupported"`): name the key that moves it instead of 404ing.
+        if client.is_unsupported_endpoint() {
+            return Ok(ToolOutput::Text(
+                unsupported_surface_message(MediaSurface::VideoGen, client.base_url()).into(),
+            ));
+        }
+
         let outcome = client
             .generate_with_images(
                 XAI_VIDEO_BASE_MODEL,
@@ -1186,6 +1260,33 @@ impl xai_tool_runtime::Tool for ReferenceToVideoTool {
 mod tests {
     use super::*;
     use crate::types::tool_metadata::test_ctx_with_call_id;
+
+    /// Client config with every new field at its default (`[tools.*]` unset).
+    fn test_config(base_url: &str) -> VideoGenConfig {
+        VideoGenConfig::Enabled {
+            api_key: "k".into(),
+            base_url: base_url.into(),
+            extra_headers: indexmap::IndexMap::new(),
+            zdr_video_output_s3: None,
+            model_override: None,
+            provider: MediaProvider::Auto,
+            tier_restricted: false,
+        }
+    }
+
+    fn resources_with_client(config: &VideoGenConfig) -> crate::types::resources::SharedResources {
+        let mut resources = crate::types::resources::Resources::new();
+        resources.insert(VideoGenClient::new(config, None).unwrap());
+        // The tools require the session folder alongside the client; the
+        // system temp dir always exists (no test here saves a video).
+        resources.insert(crate::types::resources::SessionFolder(std::env::temp_dir()));
+        resources.into_shared()
+    }
+
+    /// A tiny inline reference `resolve_image_reference` accepts untouched.
+    fn data_url() -> String {
+        "data:image/png;base64,QUJD".to_owned()
+    }
 
     #[test]
     fn image_to_video_name_and_description() {
@@ -1531,5 +1632,205 @@ mod tests {
         };
         let json = serde_json::to_value(&payload).unwrap();
         assert_eq!(json.get("duration"), Some(&serde_json::Value::from(12)));
+    }
+
+    // ── per-surface endpoint resolution ──────────────────────────────
+
+    /// The configured model override replaces each tool's own default.
+    #[test]
+    fn model_override_wins_over_tool_default() {
+        let mut config = test_config("https://api.x.ai/v1");
+        if let VideoGenConfig::Enabled { model_override, .. } = &mut config {
+            *model_override = Some("local-video-model".into());
+        }
+        let client = VideoGenClient::new(&config, None).unwrap();
+        assert_eq!(
+            client.model_override.as_deref(),
+            Some("local-video-model"),
+            "override must reach the client"
+        );
+        // Blank override is treated as unset.
+        let mut config = test_config("https://api.x.ai/v1");
+        if let VideoGenConfig::Enabled { model_override, .. } = &mut config {
+            *model_override = Some("   ".into());
+        }
+        assert!(
+            VideoGenClient::new(&config, None)
+                .unwrap()
+                .model_override
+                .is_none()
+        );
+    }
+
+    /// `provider = "unsupported"` returns prose naming the key to set.
+    #[tokio::test]
+    async fn unsupported_provider_short_circuits_with_remedy() {
+        let mut config = test_config("https://gateway.example/v1");
+        if let VideoGenConfig::Enabled { provider, .. } = &mut config {
+            *provider = MediaProvider::Unsupported;
+        }
+        let resources = resources_with_client(&config);
+
+        let out = xai_tool_runtime::Tool::run(
+            &ImageToVideoTool,
+            test_ctx_with_call_id(resources, "test-call"),
+            ImageToVideoInput {
+                prompt: Some("animate".into()),
+                image: data_url(),
+                duration: None,
+                resolution_name: DEFAULT_RESOLUTION.into(),
+            },
+        )
+        .await
+        .expect("unsupported endpoint must not error");
+
+        match out {
+            ToolOutput::Text(t) => {
+                assert!(t.text.contains("GROK_VIDEO_BASE_URL"), "got: {}", t.text);
+                assert!(
+                    t.text.contains("[tools.video_gen] base_url"),
+                    "got: {}",
+                    t.text
+                );
+                assert!(t.text.contains("Do not retry"), "got: {}", t.text);
+            }
+            other => panic!("expected Text remedy, got {other:?}"),
+        }
+    }
+
+    // ── mock-server contract ─────────────────────────────────────────
+
+    /// A 404 on the start request names the remedy instead of a bare status.
+    #[tokio::test]
+    async fn start_missing_route_reports_remedy() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/videos/generations"))
+            .respond_with(ResponseTemplate::new(404).set_body_string("not found"))
+            .mount(&server)
+            .await;
+
+        let resources = resources_with_client(&test_config(&server.uri()));
+        let err = xai_tool_runtime::Tool::run(
+            &ImageToVideoTool,
+            test_ctx_with_call_id(resources, "test-call"),
+            ImageToVideoInput {
+                prompt: Some("animate".into()),
+                image: data_url(),
+                duration: None,
+                resolution_name: DEFAULT_RESOLUTION.into(),
+            },
+        )
+        .await
+        .expect_err("404 must fail");
+
+        let msg = err.to_string();
+        assert!(msg.contains("HTTP 404"), "got: {msg}");
+        assert!(msg.contains("GROK_VIDEO_BASE_URL"), "got: {msg}");
+        assert!(msg.contains("provider = \"unsupported\""), "got: {msg}");
+    }
+
+    /// A 404 on the poll request names the remedy too.
+    #[tokio::test]
+    async fn poll_missing_route_reports_remedy() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/videos/generations"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "request_id": "req-1",
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/videos/req-1"))
+            .respond_with(ResponseTemplate::new(405))
+            .mount(&server)
+            .await;
+
+        let resources = resources_with_client(&test_config(&server.uri()));
+        let msg = xai_tool_runtime::Tool::run(
+            &ImageToVideoTool,
+            test_ctx_with_call_id(resources, "test-call"),
+            ImageToVideoInput {
+                prompt: Some("animate".into()),
+                image: data_url(),
+                duration: None,
+                resolution_name: DEFAULT_RESOLUTION.into(),
+            },
+        )
+        .await
+        .expect_err("405 on poll must fail")
+        .to_string();
+
+        assert!(msg.contains("HTTP 405"), "got: {msg}");
+        assert!(msg.contains("GROK_VIDEO_BASE_URL"), "got: {msg}");
+    }
+
+    /// The model override and the resolved base URL reach the wire; the start
+    /// payload keeps the historical xAI field set.
+    #[tokio::test]
+    async fn start_request_uses_override_model_and_base_url() {
+        use wiremock::matchers::{body_partial_json, header, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/videos/generations"))
+            .and(header("Authorization", "Bearer gw-key"))
+            .and(body_partial_json(serde_json::json!({
+                "model": "local-video-model",
+                "prompt": "animate",
+                "resolution": DEFAULT_RESOLUTION,
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "request_id": "req-1",
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/videos/req-1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "status": "failed",
+                "error": "stop here",
+            })))
+            .mount(&server)
+            .await;
+
+        let mut config = test_config(&server.uri());
+        if let VideoGenConfig::Enabled {
+            api_key,
+            model_override,
+            ..
+        } = &mut config
+        {
+            *api_key = "gw-key".into();
+            *model_override = Some("local-video-model".into());
+        }
+        let resources = resources_with_client(&config);
+
+        // The poll reports "failed", which is enough to prove the start request
+        // matched the mock's body/header expectations.
+        let msg = xai_tool_runtime::Tool::run(
+            &ImageToVideoTool,
+            test_ctx_with_call_id(resources, "test-call"),
+            ImageToVideoInput {
+                prompt: Some("animate".into()),
+                image: data_url(),
+                duration: None,
+                resolution_name: DEFAULT_RESOLUTION.into(),
+            },
+        )
+        .await
+        .expect_err("poll reports failed")
+        .to_string();
+
+        assert!(msg.contains("failed on the server"), "got: {msg}");
     }
 }

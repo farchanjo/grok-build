@@ -50,7 +50,9 @@ pub struct AssetJobSubscribeInput {
     pub capacity: Option<u32>,
 
     #[serde(default)]
-    #[schemars(description = "Stop after this many progress events. Default: 50. Range: 1..=1000.")]
+    #[schemars(
+        description = "Stop after this many progress events. Default: 50. Range: 1..=1000."
+    )]
     pub max_events: Option<usize>,
 
     #[serde(default)]
@@ -237,7 +239,9 @@ fn resolve_options(
         buffer_bytes: input
             .buffer_bytes
             .unwrap_or(SubscribeOptions::default().buffer_bytes),
-        capacity: input.capacity.unwrap_or(SubscribeOptions::default().capacity),
+        capacity: input
+            .capacity
+            .unwrap_or(SubscribeOptions::default().capacity),
         max_events: input
             .max_events
             .unwrap_or(SubscribeOptions::default().max_events),

@@ -18,15 +18,21 @@ use base64::Engine as _;
 use image::ImageReader;
 use reqwest::header::AUTHORIZATION;
 
+use super::media_endpoint::{
+    MediaSurface, missing_route_message, openai_size_for_aspect_ratio, status_is_missing_route,
+    unsupported_surface_message,
+};
 use crate::attribution::ToolConsumer;
-use crate::implementations::grok_build::image_gen::{ImageGenClient, ImageGenResponse};
+use crate::implementations::grok_build::image_gen::{ImageGenClient, decode_image_response};
 use crate::types::output::{MediaGenOutput, ToolOutput};
 use crate::types::requirements::{Expr, ToolRequirement};
 use crate::types::resources::SessionFolder;
 use crate::types::tool::{ToolKind, ToolNamespace};
 use crate::util::image_compress::{FilterType, ReEncodeParams, re_encode_under_limit};
 
-const XAI_IMAGINE_MODEL: &str = "grok-imagine-image-quality";
+/// Default Imagine model for `image_edit`. Used unless
+/// `ImageGenConfig::edit_model_override` supplies one.
+pub(crate) const XAI_IMAGINE_EDIT_MODEL: &str = "grok-imagine-image-quality";
 
 /// Size/dimension limits for reference images sent to the Imagine API.
 /// Tighter than the vision path; the backend returns 400 when exceeded.
@@ -110,8 +116,14 @@ fn compress_reference(
 // ---------------------------------------------------------------------------
 
 /// Resolve a reference (filesystem path or `data:image/...;base64,...` URL)
-/// into a compressed data URL for the Imagine API.
-async fn resolve_to_data_url(value: &str) -> Result<String, xai_tool_runtime::ToolError> {
+/// into compressed bytes plus their mime type.
+///
+/// The xAI wire wants a data URL; the OpenAI wire wants the bytes as a
+/// multipart file part, so resolution stops at the bytes and each request
+/// shape encodes from there.
+async fn resolve_to_bytes(
+    value: &str,
+) -> Result<(Vec<u8>, &'static str), xai_tool_runtime::ToolError> {
     let value = value.trim();
     // Accept `file://` URIs (e.g. an attachment's durable URI) by reading
     // the underlying path. Data URLs and bare paths are untouched.
@@ -147,9 +159,91 @@ async fn resolve_to_data_url(value: &str) -> Result<String, xai_tool_runtime::To
         ));
     }
 
-    let (compressed, mime) = compress_reference(raw_bytes)?;
-    let b64 = base64::engine::general_purpose::STANDARD.encode(&compressed);
-    Ok(format!("data:{mime};base64,{b64}"))
+    compress_reference(raw_bytes)
+}
+
+/// Resolve a reference into a compressed data URL for the xAI-shaped request.
+pub async fn resolve_to_data_url(value: &str) -> Result<String, xai_tool_runtime::ToolError> {
+    let (compressed, mime) = resolve_to_bytes(value).await?;
+    Ok(to_data_url(&compressed, mime))
+}
+
+fn to_data_url(bytes: &[u8], mime: &str) -> String {
+    let b64 = base64::engine::general_purpose::STANDARD.encode(bytes);
+    format!("data:{mime};base64,{b64}")
+}
+
+/// xAI-shaped `/images/edits` body: references travel as data URLs.
+///
+/// API: single ref → `image` object; multiple → `images` array. For
+/// single-image edits the API auto-detects the aspect ratio from the input
+/// image and ignores `aspect_ratio`; it is only sent for multi-image edits,
+/// where the API needs an explicit ratio.
+fn edit_payload(
+    model: &str,
+    prompt: &str,
+    aspect_ratio: &str,
+    data_urls: &[String],
+) -> serde_json::Value {
+    let mut payload = serde_json::json!({
+        "model": model,
+        "prompt": prompt,
+        "n": 1,
+        "resolution": "1k",
+        "response_format": "b64_json",
+    });
+    let mut imgs: Vec<serde_json::Value> = data_urls
+        .iter()
+        .map(|u| serde_json::json!({ "url": u }))
+        .collect();
+    if imgs.len() == 1 {
+        payload["image"] = imgs.pop().unwrap();
+    } else {
+        payload["images"] = serde_json::Value::Array(imgs);
+        payload["aspect_ratio"] = serde_json::json!(aspect_ratio);
+    }
+    payload
+}
+
+/// OpenAI-shaped `/images/edits` request: `multipart/form-data` with the
+/// references as file parts (`image` for one, repeated `image[]` for several)
+/// and `size` instead of the xAI `aspect_ratio` / `resolution` pair.
+fn edit_multipart_request(
+    client: &ImageGenClient,
+    url: &str,
+    input: &ImageEditInput,
+    refs: &[(Vec<u8>, &'static str)],
+) -> Result<reqwest::RequestBuilder, xai_tool_runtime::ToolError> {
+    let field = if refs.len() == 1 { "image" } else { "image[]" };
+    let mut form = reqwest::multipart::Form::new()
+        .text("model", client.edit_model().to_owned())
+        .text("prompt", input.prompt.clone())
+        .text("n", "1")
+        .text("response_format", "b64_json");
+    if refs.len() > 1 {
+        form = form.text("size", openai_size_for_aspect_ratio(&input.aspect_ratio));
+    }
+    for (index, (bytes, mime)) in refs.iter().enumerate() {
+        let part = reqwest::multipart::Part::bytes(bytes.clone())
+            .file_name(format!("image-{}.{}", index + 1, extension_for_mime(mime)))
+            .mime_str(mime)
+            .map_err(|e| {
+                xai_tool_runtime::ToolError::invalid_arguments(format!(
+                    "failed to build the image part for the edit request: {e}"
+                ))
+            })?;
+        form = form.part(field, part);
+    }
+    Ok(client.http().post(url).multipart(form))
+}
+
+fn extension_for_mime(mime: &str) -> &'static str {
+    match mime {
+        "image/jpeg" => "jpg",
+        "image/png" => "png",
+        "image/webp" => "webp",
+        _ => "bin",
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -333,6 +427,13 @@ impl xai_tool_runtime::Tool for ImageEditTool {
             ));
         }
 
+        // Endpoint declared not to serve imagine (`provider = "unsupported"`).
+        if client.is_unsupported_endpoint() {
+            return Ok(ToolOutput::Text(
+                unsupported_surface_message(MediaSurface::ImageEdit, client.edit_base_url()).into(),
+            ));
+        }
+
         // Snapshot the per-turn attachment registry so `[Image #N]` tokens
         // resolve to the real attachment (see `resolve_attachment_reference`).
         let attached_images = {
@@ -341,42 +442,33 @@ impl xai_tool_runtime::Tool for ImageEditTool {
                 .cloned()
         };
 
-        // Resolve all references to compressed data URLs.
-        let mut data_urls = Vec::with_capacity(input.image.len());
+        // Resolve all references to compressed bytes; each wire shape encodes
+        // them from here (data URLs for xAI, multipart parts for OpenAI).
+        let mut refs = Vec::with_capacity(input.image.len());
         for r in &input.image {
             let resolved = resolve_attachment_reference(r, attached_images.as_ref())?;
-            data_urls.push(resolve_to_data_url(&resolved).await?);
+            refs.push(resolve_to_bytes(&resolved).await?);
         }
-        tracing::info!(count = data_urls.len(), "resolved image references");
+        tracing::info!(count = refs.len(), "resolved image references");
 
-        let base = client.base_url().trim_end_matches('/');
+        let base = client.edit_base_url().trim_end_matches('/');
         let url = format!("{base}/images/edits");
-
-        let mut payload = serde_json::json!({
-            "model": XAI_IMAGINE_MODEL,
-            "prompt": input.prompt,
-            "n": 1,
-            "resolution": "1k",
-            "response_format": "b64_json",
-        });
-
-        // API: single ref → "image" object; multiple → "images" array.
-        // For single-image edits the API auto-detects aspect ratio from the
-        // input image and ignores the `aspect_ratio` field. Only send it
-        // for multi-image edits where the API needs an explicit ratio.
-        let mut imgs: Vec<serde_json::Value> = data_urls
-            .iter()
-            .map(|u| serde_json::json!({ "url": u }))
-            .collect();
-        if imgs.len() == 1 {
-            payload["image"] = imgs.pop().unwrap();
-        } else {
-            payload["images"] = serde_json::Value::Array(imgs);
-            payload["aspect_ratio"] = serde_json::json!(input.aspect_ratio);
-        }
-
         let sent_bearer = client.current_bearer().await;
-        let mut req = client.http().post(&url).json(&payload);
+
+        let mut req = if client.provider().is_openai_shape() {
+            edit_multipart_request(&client, &url, &input, &refs)?
+        } else {
+            let data_urls: Vec<String> = refs
+                .iter()
+                .map(|(bytes, mime)| to_data_url(bytes, mime))
+                .collect();
+            client.http().post(&url).json(&edit_payload(
+                client.edit_model(),
+                &input.prompt,
+                &input.aspect_ratio,
+                &data_urls,
+            ))
+        };
         if let Some(ref key) = sent_bearer {
             req = req.header(AUTHORIZATION, format!("Bearer {key}"));
         }
@@ -395,9 +487,22 @@ impl xai_tool_runtime::Tool for ImageEditTool {
             let body = response.text().await.unwrap_or_default();
             let truncated: String = body.chars().take(200).collect();
             tracing::warn!(http_status = %status, "Imagine edit API error: {truncated}");
+            let detail = if status_is_missing_route(status) {
+                format!(
+                    "{} {truncated}",
+                    missing_route_message(
+                        MediaSurface::ImageEdit,
+                        client.edit_base_url(),
+                        status,
+                        "/images/edits"
+                    )
+                )
+            } else {
+                format!("Image edit failed with HTTP {status}: {truncated}")
+            };
             return Err(xai_tool_runtime::ToolError::new(
                 xai_tool_runtime::ToolErrorKind::Custom,
-                format!("Image edit failed with HTTP {status}: {truncated}"),
+                detail,
             )
             .with_details(serde_json::json!({"code": "http_failure", "status": status.as_u16()})));
         }
@@ -408,28 +513,7 @@ impl xai_tool_runtime::Tool for ImageEditTool {
             ))
         })?;
 
-        let resp_json: ImageGenResponse = serde_json::from_str(&body).map_err(|e| {
-            let preview: String = body.chars().take(500).collect();
-            tracing::warn!("Imagine edit API returned unparseable body: {preview}");
-            xai_tool_runtime::ToolError::invalid_arguments(format!(
-                "Failed to parse image edit response: {e} — body preview: {preview}"
-            ))
-        })?;
-
-        let b64_data = resp_json.b64_data().unwrap_or("");
-        if b64_data.is_empty() {
-            return Err(xai_tool_runtime::ToolError::invalid_arguments(
-                "Image edit returned no image data.",
-            ));
-        }
-
-        let image_bytes = base64::engine::general_purpose::STANDARD
-            .decode(b64_data)
-            .map_err(|e| {
-                xai_tool_runtime::ToolError::invalid_arguments(format!(
-                    "Failed to decode base64 image data: {e}"
-                ))
-            })?;
+        let image_bytes = decode_image_response(client.http(), &body, "image edit").await?;
 
         let session_folder = {
             let res = resources.lock().await;
@@ -455,7 +539,37 @@ impl xai_tool_runtime::Tool for ImageEditTool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::implementations::grok_build::media_endpoint::MediaProvider;
     use crate::types::tool_metadata::test_ctx_with_call_id;
+
+    /// Config with every new field at its default: `[tools.*]` unset.
+    fn cfg(base_url: &str) -> crate::implementations::grok_build::image_gen::ImageGenConfig {
+        crate::implementations::grok_build::image_gen::ImageGenConfig::Enabled {
+            api_key: "k".into(),
+            base_url: base_url.into(),
+            edit_base_url: None,
+            extra_headers: indexmap::IndexMap::new(),
+            image_gen_enabled: true,
+            image_edit_enabled: true,
+            model_override: None,
+            edit_model_override: None,
+            provider: MediaProvider::Auto,
+            tier_restricted: false,
+        }
+    }
+
+    fn set_provider(
+        config: &mut crate::implementations::grok_build::image_gen::ImageGenConfig,
+        provider: MediaProvider,
+    ) {
+        if let crate::implementations::grok_build::image_gen::ImageGenConfig::Enabled {
+            provider: slot,
+            ..
+        } = config
+        {
+            *slot = provider;
+        }
+    }
 
     #[test]
     fn tool_name_and_description() {
@@ -700,5 +814,223 @@ mod tests {
             .to_string();
         assert!(err.contains("does not match"), "got: {err}");
         assert!(err.contains("[Image #1]"), "should list available: {err}");
+    }
+
+    // ── request shape ────────────────────────────────────────────────
+
+    /// The xAI shape is unchanged: data URLs under `image` / `images`.
+    #[test]
+    fn xai_payload_keeps_data_url_layout() {
+        let urls = vec!["data:image/jpeg;base64,AAA".to_owned()];
+        let payload = edit_payload("m", "make it blue", "auto", &urls);
+        assert_eq!(payload["image"]["url"], urls[0]);
+        assert!(payload.get("images").is_none());
+        assert_eq!(payload["model"], "m");
+        assert_eq!(payload["resolution"], "1k");
+
+        let urls = vec![
+            "data:image/jpeg;base64,AAA".to_owned(),
+            "data:image/jpeg;base64,BBB".to_owned(),
+        ];
+        let payload = edit_payload("m", "blend", "16:9", &urls);
+        assert_eq!(payload["images"].as_array().unwrap().len(), 2);
+        assert_eq!(payload["aspect_ratio"], "16:9");
+        assert!(payload.get("image").is_none());
+    }
+
+    #[test]
+    fn mime_extension_mapping() {
+        assert_eq!(extension_for_mime("image/jpeg"), "jpg");
+        assert_eq!(extension_for_mime("image/png"), "png");
+        assert_eq!(extension_for_mime("application/octet-stream"), "bin");
+    }
+
+    // ── mock-server contract ─────────────────────────────────────────
+
+    async fn run_edit(
+        config: crate::implementations::grok_build::image_gen::ImageGenConfig,
+        reference: &str,
+        aspect_ratio: &str,
+    ) -> Result<ToolOutput, xai_tool_runtime::ToolError> {
+        let session_dir = tempfile::tempdir().unwrap();
+        let mut resources = crate::types::resources::Resources::new();
+        resources.insert(ImageGenClient::new(&config, None).unwrap());
+        resources.insert(crate::types::resources::SessionFolder(
+            session_dir.path().to_path_buf(),
+        ));
+        let resources = resources.into_shared();
+        xai_tool_runtime::Tool::run(
+            &ImageEditTool,
+            test_ctx_with_call_id(resources, "test-call"),
+            ImageEditInput {
+                prompt: "make it blue".into(),
+                image: vec![reference.to_owned()],
+                aspect_ratio: aspect_ratio.to_owned(),
+            },
+        )
+        .await
+    }
+
+    /// xAI-shaped endpoint: JSON body carrying a data URL, OpenAI envelope back.
+    #[tokio::test]
+    async fn xai_shape_gateway_roundtrip() {
+        use wiremock::matchers::{body_partial_json, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/images/edits"))
+            .and(body_partial_json(serde_json::json!({
+                "model": XAI_IMAGINE_EDIT_MODEL,
+                "n": 1,
+                "response_format": "b64_json",
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": [{"b64_json": "QUJD"}],
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ref.jpg");
+        std::fs::write(&path, tiny_jpeg()).unwrap();
+
+        let out = run_edit(cfg(&server.uri()), path.to_str().unwrap(), "auto")
+            .await
+            .expect("xai-shaped edit must succeed");
+        assert!(matches!(out, ToolOutput::ImageEdit(_)), "got: {out:?}");
+    }
+
+    /// `wiremock`'s `body_string_contains` refuses a body that is not valid UTF-8,
+/// and a multipart body carries raw JPEG bytes. Decode lossily instead.
+struct BodyContainsLossy(&'static str);
+
+impl wiremock::Match for BodyContainsLossy {
+    fn matches(&self, request: &wiremock::Request) -> bool {
+        String::from_utf8_lossy(&request.body).contains(self.0)
+    }
+}
+
+/// OpenAI-shaped endpoint: `multipart/form-data` with the image as a file
+    /// part, and the OpenAI `size` field instead of the xAI pair.
+    #[tokio::test]
+    async fn openai_shape_gateway_uses_multipart() {
+        use wiremock::matchers::{header_regex, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/images/edits"))
+            .and(header_regex("content-type", "^multipart/form-data"))
+            .and(BodyContainsLossy("name=\"model\""))
+            .and(BodyContainsLossy("gpt-image-1-edit"))
+            .and(BodyContainsLossy("name=\"image\""))
+            .and(BodyContainsLossy("filename=\"image-1.jpg\""))
+            .and(BodyContainsLossy("name=\"response_format\""))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": [{"b64_json": "QUJD"}],
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ref.jpg");
+        std::fs::write(&path, tiny_jpeg()).unwrap();
+
+        let mut config = cfg(&server.uri());
+        if let crate::implementations::grok_build::image_gen::ImageGenConfig::Enabled {
+            edit_model_override,
+            ..
+        } = &mut config
+        {
+            *edit_model_override = Some("gpt-image-1-edit".into());
+        }
+        set_provider(&mut config, MediaProvider::OpenAi);
+
+        let out = run_edit(config, path.to_str().unwrap(), "16:9")
+            .await
+            .expect("openai-shaped edit must succeed");
+        assert!(matches!(out, ToolOutput::ImageEdit(_)), "got: {out:?}");
+    }
+
+    /// A gateway that answers with a URL instead of inline base64 still works.
+    #[tokio::test]
+    async fn openai_shape_url_response_is_fetched() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/images/edits"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": [{"url": format!("{}/edited.png", server.uri())}],
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/edited.png"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(b"PNGDATA".to_vec()))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ref.jpg");
+        std::fs::write(&path, tiny_jpeg()).unwrap();
+
+        let out = run_edit(cfg(&server.uri()), path.to_str().unwrap(), "auto")
+            .await
+            .expect("url-only edit response must succeed");
+        assert!(matches!(out, ToolOutput::ImageEdit(_)), "got: {out:?}");
+    }
+
+    /// A 404 on `/images/edits` names the key that moves this surface.
+    #[tokio::test]
+    async fn missing_route_reports_remedy() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/images/edits"))
+            .respond_with(ResponseTemplate::new(404).set_body_string("not found"))
+            .mount(&server)
+            .await;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ref.jpg");
+        std::fs::write(&path, tiny_jpeg()).unwrap();
+
+        let msg = run_edit(cfg(&server.uri()), path.to_str().unwrap(), "auto")
+            .await
+            .expect_err("404 must fail")
+            .to_string();
+        assert!(msg.contains("HTTP 404"), "got: {msg}");
+        assert!(msg.contains("GROK_IMAGE_EDIT_BASE_URL"), "got: {msg}");
+        assert!(msg.contains("[tools.image_edit] base_url"), "got: {msg}");
+    }
+
+    /// `provider = "unsupported"` returns prose naming the remedy.
+    #[tokio::test]
+    async fn unsupported_provider_short_circuits_with_remedy() {
+        let mut config = cfg("https://gateway.example/v1");
+        set_provider(&mut config, MediaProvider::Unsupported);
+
+        let out = run_edit(config, "/nonexistent/ref.jpg", "auto")
+            .await
+            .expect("unsupported endpoint must not need a real reference file");
+        match out {
+            ToolOutput::Text(t) => {
+                assert!(
+                    t.text.contains("GROK_IMAGE_EDIT_BASE_URL"),
+                    "got: {}",
+                    t.text
+                );
+                assert!(t.text.contains("Do not retry"), "got: {}", t.text);
+            }
+            other => panic!("expected Text remedy, got {other:?}"),
+        }
     }
 }

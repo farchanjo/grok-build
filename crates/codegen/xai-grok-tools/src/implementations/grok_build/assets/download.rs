@@ -339,10 +339,16 @@ mod tests {
         let job_id = match out {
             ToolOutput::AssetDownload(out) => {
                 assert_eq!(out.key, "uploads/report.pdf");
-                assert_eq!(out.dest, dir.path().join("report.pdf").display().to_string());
+                assert_eq!(
+                    out.dest,
+                    dir.path().join("report.pdf").display().to_string()
+                );
                 assert_eq!(out.backend, "local");
                 assert!(!out.waited);
-                assert!(matches!(out.state.as_str(), "queued" | "running" | "completed"));
+                assert!(matches!(
+                    out.state.as_str(),
+                    "queued" | "running" | "completed"
+                ));
                 assert!(out.text.contains("job `"));
                 out.job_id
             }

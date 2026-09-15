@@ -7,7 +7,9 @@
 
 use xai_file_utils::assets::{CancelOutcome, JobState};
 
-use super::{TransferJobView, parse_job_id, parse_wait_secs, require_jobs, unknown_job, wait_for_job};
+use super::{
+    TransferJobView, parse_job_id, parse_wait_secs, require_jobs, unknown_job, wait_for_job,
+};
 use crate::types::output::ToolOutput;
 use crate::types::requirements::{Expr, ToolRequirement};
 use crate::types::tool::{ToolKind, ToolNamespace};
@@ -115,7 +117,12 @@ impl xai_tool_runtime::Tool for AssetJobCancelTool {
             None if outcome.is_cancelled() => {
                 // A bounded look so a queued job is not reported as running
                 // forever; the task observes the token on its first poll.
-                wait_for_job(&registry, &job_id, Some(std::time::Duration::from_millis(250))).await
+                wait_for_job(
+                    &registry,
+                    &job_id,
+                    Some(std::time::Duration::from_millis(250)),
+                )
+                .await
             }
             None => registry.get(&job_id).await,
         };
@@ -141,9 +148,9 @@ impl xai_tool_runtime::Tool for AssetJobCancelTool {
                 "Cancellation requested for job `{job_id}`; it is still {} — check again with `asset_job_status`.",
                 state
             ),
-            (CancelOutcome::AlreadyFinished { state, .. }, _) => format!(
-                "Job `{job_id}` had already finished as `{state}`; nothing to cancel."
-            ),
+            (CancelOutcome::AlreadyFinished { state, .. }, _) => {
+                format!("Job `{job_id}` had already finished as `{state}`; nothing to cancel.")
+            }
             (CancelOutcome::NotFound { .. }, _) => {
                 format!("No transfer job `{job_id}` in this session.")
             }

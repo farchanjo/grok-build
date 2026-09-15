@@ -408,54 +408,80 @@ impl SessionContextFactory for WorkspaceSessionContextFactory {
         use xai_grok_tools::implementations::grok_build::image_gen::ImageGenConfig;
         use xai_grok_tools::implementations::grok_build::video_gen::VideoGenConfig;
         use xai_grok_tools::implementations::web_search::WebSearchConfig;
+        use xai_grok_tools::implementations::web_search::factory;
         let fs = Arc::new(xai_grok_tools::computer::local::LocalFs)
             as Arc<dyn xai_grok_tools::computer::types::AsyncFileSystem>;
         let notification_handle = xai_grok_tools::notification::ToolNotificationHandle::noop();
-        let (image_gen_config, video_gen_config, web_search_config, app_builder_deployer_config) =
-            if let (Some(auth), Some(url)) = (&self.auth, &self.api_base_url) {
-                let cred = auth.current();
-                match cred {
-                    xai_computer_hub_sdk::AuthCredential::Bearer { token, .. } => {
-                        let headers = build_proxy_headers(url);
-                        (
-                            ImageGenConfig::Enabled {
-                                api_key: token.clone(),
-                                base_url: url.clone(),
-                                extra_headers: headers.clone(),
-                                image_gen_enabled: true,
-                                image_edit_enabled: true,
-                                model_override: None,
-                                tier_restricted: false,
-                            },
-                            VideoGenConfig::Enabled {
-                                api_key: token.clone(),
-                                base_url: url.clone(),
-                                extra_headers: headers.clone(),
-                                zdr_video_output_s3: None,
-                                tier_restricted: false,
-                            },
-                            WebSearchConfig::Enabled {
-                                api_key: token,
-                                base_url: url.clone(),
-                                model: default_web_search_model(),
-                                extra_headers: headers,
-                                alpha_test_key: None,
-                            },
-                            AppBuilderDeployerConfig::default(),
-                        )
-                    }
-                    _ => (
-                        ImageGenConfig::default(),
-                        VideoGenConfig::default(),
-                        WebSearchConfig::default(),
-                        AppBuilderDeployerConfig::default(),
-                    ),
+        // The provider's own endpoint and bearer, when the hub session has one.
+        // Also the fallback the search-backend factory uses for an `xai`
+        // selection that only overrides one setting.
+        let xai_route: Option<factory::XaiRouteFallback> = match (&self.auth, &self.api_base_url) {
+            (Some(auth), Some(url)) => match auth.current() {
+                xai_computer_hub_sdk::AuthCredential::Bearer { token, .. } => {
+                    Some(factory::XaiRouteFallback {
+                        base_url: Some(url.clone()),
+                        api_key: Some(token),
+                        model: Some(default_web_search_model()),
+                        extra_headers: build_proxy_headers(url),
+                    })
                 }
+                _ => None,
+            },
+            _ => None,
+        };
+        // `GROK_SEARCH_PROVIDER` / `[search] provider` selects the backend and
+        // never needs an xAI credential, so a selected non-xAI backend keeps the
+        // tool registered even when the provider has no token at all.
+        let search_selection = factory::resolve_search_backend(
+            &factory::ProcessEnv,
+            xai_grok_config::load_effective_config_disk_only()
+                .ok()
+                .as_ref()
+                .and_then(toml::Value::as_table),
+            xai_route.as_ref(),
+        );
+        let web_search_config = search_selection
+            .to_config()
+            .unwrap_or_else(|| match &xai_route {
+                Some(route) => WebSearchConfig::Enabled {
+                    api_key: route.api_key.clone().unwrap_or_default(),
+                    base_url: route.base_url.clone().unwrap_or_default(),
+                    model: route.model.clone().unwrap_or_default(),
+                    extra_headers: route.extra_headers.clone(),
+                    alpha_test_key: None,
+                },
+                None => WebSearchConfig::default(),
+            });
+        let (image_gen_config, video_gen_config, app_builder_deployer_config) =
+            if let Some(route) = &xai_route {
+                (
+                    ImageGenConfig::Enabled {
+                        api_key: route.api_key.clone().unwrap_or_default(),
+                        base_url: route.base_url.clone().unwrap_or_default(),
+                        edit_base_url: None,
+                        extra_headers: route.extra_headers.clone(),
+                        image_gen_enabled: true,
+                        image_edit_enabled: true,
+                        model_override: None,
+                        edit_model_override: None,
+                        provider: xai_grok_tools::implementations::grok_build::MediaProvider::Auto,
+                        tier_restricted: false,
+                    },
+                    VideoGenConfig::Enabled {
+                        api_key: route.api_key.clone().unwrap_or_default(),
+                        base_url: route.base_url.clone().unwrap_or_default(),
+                        extra_headers: route.extra_headers.clone(),
+                        zdr_video_output_s3: None,
+                        model_override: None,
+                        provider: xai_grok_tools::implementations::grok_build::MediaProvider::Auto,
+                        tier_restricted: false,
+                    },
+                    AppBuilderDeployerConfig::default(),
+                )
             } else {
                 (
                     ImageGenConfig::default(),
                     VideoGenConfig::default(),
-                    WebSearchConfig::default(),
                     AppBuilderDeployerConfig::default(),
                 )
             };
@@ -657,6 +683,81 @@ mod tests {
     }
     fn empty_env() -> Arc<HashMap<String, String>> {
         Arc::new(HashMap::new())
+    }
+    /// Sets `GROK_SEARCH_*` for one test and restores it on drop.
+    struct SearchEnvGuard(Vec<(&'static str, Option<String>)>);
+    impl SearchEnvGuard {
+        fn set(pairs: &[(&'static str, &str)]) -> Self {
+            let mut previous = Vec::new();
+            for (key, value) in pairs {
+                previous.push((*key, std::env::var(key).ok()));
+                // SAFETY: tests in this binary do not race on these keys.
+                unsafe { std::env::set_var(key, value) };
+            }
+            Self(previous)
+        }
+    }
+    impl Drop for SearchEnvGuard {
+        fn drop(&mut self) {
+            for (key, value) in &self.0 {
+                match value {
+                    // SAFETY: same contract as `set`.
+                    Some(value) => unsafe { std::env::set_var(key, value) },
+                    None => unsafe { std::env::remove_var(key) },
+                }
+            }
+        }
+    }
+    /// A selected non-xAI backend must reach the session context with no xAI
+    /// credential in scope, and must count as enabled so the tool registers.
+    #[tokio::test]
+    async fn external_search_provider_is_selected_without_xai_auth() {
+        let _guard = SearchEnvGuard::set(&[
+            ("GROK_SEARCH_PROVIDER", "searxng"),
+            ("GROK_SEARCH_BASE_URL", "http://localhost:8888"),
+        ]);
+        let ctx = WorkspaceSessionContextFactory::new().build_session_context(
+            "sess-search-external",
+            PathBuf::from("/tmp"),
+            empty_env(),
+            Arc::new(xai_grok_tools::computer::local::LocalTerminalBackend::new()),
+        );
+        match &ctx.web_search_config {
+            xai_grok_tools::implementations::web_search::WebSearchConfig::External {
+                provider,
+                base_url,
+                api_key,
+                ..
+            } => {
+                assert_eq!(provider, "searxng");
+                assert_eq!(base_url, "http://localhost:8888");
+                assert!(api_key.is_none());
+            }
+            other => panic!("expected an external backend, got {other:?}"),
+        }
+        assert!(ctx.web_search_config.is_enabled());
+    }
+    /// Without `GROK_SEARCH_*` (and with no `[search]` table) the historical
+    /// path is untouched: no auth in this factory ⇒ no web search.
+    #[tokio::test]
+    async fn default_search_selection_keeps_the_xai_route_path() {
+        let _guard = SearchEnvGuard::set(&[
+            ("GROK_SEARCH_PROVIDER", ""),
+            ("GROK_SEARCH_BASE_URL", ""),
+            ("GROK_SEARCH_API_KEY", ""),
+            ("GROK_SEARCH_MODEL", ""),
+        ]);
+        let ctx = WorkspaceSessionContextFactory::new().build_session_context(
+            "sess-search-default",
+            PathBuf::from("/tmp"),
+            empty_env(),
+            Arc::new(xai_grok_tools::computer::local::LocalTerminalBackend::new()),
+        );
+        assert!(
+            ctx.web_search_config.is_disabled(),
+            "got {:?}",
+            ctx.web_search_config
+        );
     }
     #[tokio::test]
     async fn resolve_session_toolset_empty_mcp_snapshot_is_noop_for_baseline() {
