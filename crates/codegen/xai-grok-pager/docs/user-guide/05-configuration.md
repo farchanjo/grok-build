@@ -697,6 +697,90 @@ disable_plugins = false               # hide hooks/plugins UI entirely
 
 ---
 
+## xAI-hosted surfaces
+
+Grok defaults to xAI for every surface: chat, `web_search`, image and video generation, voice dictation, and the grok.com-only products (`/share`, `/billing`, `/usage`, cloud sandboxes). Each of those can be pointed at your own gateway or switched off.
+
+Two rules govern all of the keys below.
+
+**Precedence is env var > config key > default.** Blank and whitespace-only values fall through to the next tier rather than pinning an empty string, and base URLs are stripped of trailing slashes. `GROK_XAI_ENABLED` and `GROK_FIRST_PARTY_LOOPBACK` are stricter than that: they parse only `1/true/yes/on/enabled` and `0/false/no/off/disabled`, so a typo cannot silently flip them.
+
+**The global switch gates xAI-hosted *surfaces* through credential identity; a per-surface key only selects an endpoint or a wire.** `GROK_XAI_ENABLED=0` makes the credential stop counting as an xAI credential, and every surface that gates on that identity — the relay, share links, billing, usage, cloud sandboxes, Writeback, remote sessions, managed MCP, the managed-config fetch, trace upload and telemetry identity — goes quiet, whether or not an xAI credential is present. A per-surface key never re-arms or disarms the switch: setting `GROK_IMAGE_BASE_URL` does not turn the xAI credential back on, and setting `GROK_XAI_ENABLED=1` does not move an endpoint. The two compose in one direction only — **a surface you explicitly point at an xAI host still dials xAI while the switch is off**, because the switch removes the *identity*, not the address.
+
+### Keys by surface
+
+| Surface | Environment variable | Config key | Precedence | Effect |
+|---------|----------------------|------------|------------|--------|
+| Search | `GROK_SEARCH_PROVIDER` | `[search] provider` | env > config > `xai` | Backend id: `xai`, `searxng`/`searx`, `tavily`, `brave`/`brave-search` (case-insensitive). Naming any non-xAI backend drops the xAI credential and the `[models] web_search` route entirely, so the tool registers with no xAI auth. |
+| Search | `GROK_SEARCH_BASE_URL` | `[search] base_url` | env > config | Backend endpoint. A lone base URL already leaves the default xAI route, so a half-set selection is never silently applied. |
+| Search | `GROK_SEARCH_API_KEY` | `[search] api_key_env` | env > the value of the env var that `api_key_env` names | Backend credential. `api_key_env` holds a *variable name*, not the secret, so no key lands in `config.toml`. SearXNG needs none. |
+| Search | `GROK_SEARCH_MODEL` | `[search] model` | env > config | Model override for the `xai` backend only; ignored by every other backend. |
+| Image generation | `GROK_IMAGE_BASE_URL` | `[tools.image_gen] base_url` | env > config > `[endpoints].xai_api_base_url` | Endpoint serving `/images/generations`. |
+| Image generation | `GROK_IMAGE_MODEL` | `[tools.image_gen] model` | env > config > remote model override | Model sent to that endpoint. |
+| Image generation | `GROK_IMAGE_PROVIDER` | `[tools.image_gen] provider` | env > config > `auto` | Wire policy: `auto`/`xai` (xAI request shape, both response envelopes accepted), `openai` (OpenAI request shape: `size` instead of `aspect_ratio`/`resolution`, multipart edits), `unsupported`/`none`/`off` (skip the surface without an HTTP call). |
+| Image editing | `GROK_IMAGE_EDIT_BASE_URL` | `[tools.image_edit] base_url` | env > config > the resolved image base URL | Endpoint serving `/images/edits`; follows the generation base unless set. |
+| Image editing | `GROK_IMAGE_EDIT_MODEL` | `[tools.image_edit] model` | env > config > the resolved image model | Model for edits; follows the generation model unless set. |
+| Image editing | `GROK_IMAGE_EDIT_PROVIDER` | `[tools.image_edit] provider` | env > config > the image generation provider | Wire policy for edits. One `GROK_IMAGE_PROVIDER` still covers both image surfaces; setting this one alone silences only edits. |
+| Video generation | `GROK_VIDEO_BASE_URL` | `[tools.video_gen] base_url` | env > config > `[endpoints].xai_api_base_url` | Endpoint serving `/videos/generations` and `/videos/{id}`. |
+| Video generation | `GROK_VIDEO_MODEL` | `[tools.video_gen] model` | env > config | Model sent to that endpoint. |
+| Video generation | `GROK_VIDEO_PROVIDER` | `[tools.video_gen] provider` | env > config > `auto` | Wire policy. `openai` is an alias of `auto` here — the OpenAI video API is not implemented. |
+| Voice dictation | `GROK_VOICE_BASE_URL` | `[voice].api_base` | env > `[voice].api_base` > `[endpoints].xai_api_base_url` > built-in default | Base for the `/v1/stt` WebSocket. Must be TLS: a plaintext `http://` or `ws://` base is rejected, because the bearer would cross a cleartext socket. |
+| xAI switch | `GROK_XAI_ENABLED` | `[xai] enabled` | env > config > `true` | Turns every xAI-hosted surface off process-wide. The only consumer is credential identity, which is what makes it cover the grok.com products as well as the relay. |
+| Loopback identity | `GROK_FIRST_PARTY_LOOPBACK` | `[endpoints] first_party_loopback` | env > config > `true` | `0` moves `localhost`, `127.0.0.0/8` and `::1` out of the first-party trust set, so a real local gateway (vLLM, LiteLLM, Ollama) stops receiving `x-grok-*` / `X-XAI-Token-Auth` headers and derives a custom identity. A run that explicitly names the proxy stays first-party. |
+| Fetch | `GROK_REMOTE_FETCH` | `[features] remote_fetch` | env > requirements > managed > user `config.toml` > `true` | Disarms the startup model-catalog and `/v1/settings` fetches. No remote-settings tier on purpose: remote settings are exactly what is unreachable when the key is needed. A custom `GROK_MODELS_BASE_URL` catalog still loads. |
+
+Provider values are case-insensitive, and an unrecognized media `provider` warns and falls back to `auto` rather than disabling the surface. A backend or media endpoint that is missing its base URL or key still constructs, and reports which key to set in the tool result instead of silently disappearing.
+
+### Running without xAI
+
+To run entirely against your own OpenAI-compatible gateway:
+
+```sh
+# 1. A plain bearer for your gateway, and its base URL.
+export GROK_API_KEY='<bearer for your gateway>'
+export GROK_MODELS_BASE_URL='https://gateway.example/v1'
+
+# 2. The two kill switches.
+export GROK_XAI_ENABLED=0
+export GROK_REMOTE_FETCH=0
+```
+
+`GROK_API_KEY` makes the bearer the first-checked credential, so the run needs neither `auth.json` nor a grok.com login; it is sent verbatim as `Authorization: Bearer`. `GROK_MODELS_BASE_URL` turns the endpoint into a custom endpoint: inference goes there, the model list is read from `{base}/models`, and the bundled xAI catalog is skipped.
+
+Optional, for the remaining side channels:
+
+```sh
+export GROK_CHANGELOG_OFFLINE=1
+export GROK_DISABLE_AUTOUPDATER=1
+export GROK_TELEMETRY_ENABLED=false
+export GROK_FEEDBACK_ENABLED=false
+```
+
+If the run uses the auxiliary tools, point them at something that serves them — search has a keyless backend, media and voice usually need their own keys:
+
+```sh
+export GROK_SEARCH_PROVIDER=searxng
+export GROK_SEARCH_BASE_URL='http://localhost:8888'
+export GROK_IMAGE_BASE_URL='https://gateway.example/v1'
+export GROK_VIDEO_PROVIDER=unsupported
+export GROK_VOICE_BASE_URL='https://gateway.example'   # must be https
+export GROK_FIRST_PARTY_LOOPBACK=0                     # a real local gateway is custom
+```
+
+**What stops working.** Anything that needs a grok.com account has no local equivalent: `/share` (the link is built on grok.com), `/billing`, `/usage`, `x.ai/cloud/*` sandboxes, the managed MCP gateway, and managed-config deployment sync. With the switch off they refuse in one sentence instead of failing mid-request, and the session stays usable. A gateway that does not serve `/images/*`, `/videos/*` or the `/stt` WebSocket still fails those tools — but with a message naming the key to set, and with `provider = "unsupported"` as the way to silence a surface you do not use.
+
+**What still happens.** With no credential, no custom endpoint and a model still bound to xAI, the run fails before the first request rather than synthesizing a local endpoint:
+
+```text
+No credential for model `<model>`: set GROK_API_KEY (a plain bearer) together with GROK_MODELS_BASE_URL=<endpoint>/v1 for a non-xAI gateway, or sign in with `grok provider connect xai`
+```
+
+`grok agent headless` also changes shape without a grok.com session: it serves the agent over stdio (ACP) instead of over the relay and exits on stdin EOF, so a harness that closes stdin ends the process. That is a documented fallback, not a failure.
+
+The full story — every surface, every `file:line`, the measurements, and the reproducible battery in [`grok-off-xai-check.sh`](../../../../../grok-off-xai-check.sh) — is in `docs/xai-decoupling.md` in the source tree.
+
+---
+
 ## Environment variables
 
 The key ones. See the README for the complete list.
@@ -718,6 +802,33 @@ The key ones. See the README for the complete list.
 | Variable | Description |
 |----------|-------------|
 | `GROK_CLI_CHAT_PROXY_BASE_URL` | Override API proxy base URL |
+| `GROK_XAI_API_BASE_URL` | Override the xAI API base URL |
+| `GROK_MODELS_BASE_URL` | Use a custom OpenAI-compatible endpoint (inference, plus the model list at `{base}/models`) |
+
+### xAI surfaces and non-xAI endpoints
+
+See [xAI-hosted surfaces](#xai-hosted-surfaces) for the matching config keys, the precedence of each one, and what breaks without xAI.
+
+| Variable | Description |
+|----------|-------------|
+| `GROK_XAI_ENABLED` | Turn every xAI-hosted surface off (`0`) process-wide, credential or not |
+| `GROK_REMOTE_FETCH` | Disarm the startup model-catalog and remote-settings fetches (`0`) |
+| `GROK_FIRST_PARTY_LOOPBACK` | Treat loopback as a custom endpoint rather than first-party (`0`) |
+| `GROK_SEARCH_PROVIDER` | `web_search` backend: `xai` (default), `searxng`, `tavily`, `brave` |
+| `GROK_SEARCH_BASE_URL` | `web_search` backend base URL |
+| `GROK_SEARCH_API_KEY` | `web_search` backend API key |
+| `GROK_SEARCH_MODEL` | Model override for the `xai` search backend only |
+| `GROK_IMAGE_BASE_URL` | Endpoint for image generation |
+| `GROK_IMAGE_MODEL` | Model for image generation |
+| `GROK_IMAGE_PROVIDER` | Image wire policy: `auto`, `openai`, `unsupported` |
+| `GROK_IMAGE_EDIT_BASE_URL` | Endpoint for image editing (follows the generation base by default) |
+| `GROK_IMAGE_EDIT_MODEL` | Model for image editing (follows the generation model by default) |
+| `GROK_IMAGE_EDIT_PROVIDER` | Wire policy for image editing (follows the generation provider by default) |
+| `GROK_VIDEO_BASE_URL` | Endpoint for video generation |
+| `GROK_VIDEO_MODEL` | Model for video generation |
+| `GROK_VIDEO_PROVIDER` | Video wire policy: `auto`, `unsupported` |
+| `GROK_VOICE_BASE_URL` | Base URL for voice STT (TLS only) |
+| `GROK_CHANGELOG_OFFLINE` | Read the local changelog cache instead of the CDN |
 
 ### Features
 

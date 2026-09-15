@@ -26,6 +26,20 @@ Scope and status:
   results were re-measured for this revision and which are quoted from a commit
   message.
 
+## 0. Vocabulary
+
+Phase 4 overloaded a handful of names. They are not synonyms, and reading one
+as the other is the easiest way to misconfigure a run.
+
+| Name | Meaning in one place | Meaning in another | The distinction that matters |
+| --- | --- | --- | --- |
+| `provider` | For search, a **backend id**: `xai`, `searxng`/`searx`, `tavily`, `brave`/`brave-search` | For media, a **wire policy**: `auto`, `xai`, `openai`, `unsupported` | `[search] provider` picks who answers; `[tools.image_gen] provider` picks how the request is shaped and whether the surface runs at all. Neither value set is valid for the other key. |
+| `GROK_SEARCH_MODEL` | Overrides the `[models] web_search` route model, for the `xai` backend **only** | — | A non-xAI backend carries its own model and ignores both this key and the xAI credential. It re-points a model; it does not re-point a route. |
+| `GROK_IMAGE_*` | The imagine surface's endpoint, model and wire: `GROK_IMAGE_BASE_URL`, `GROK_IMAGE_MODEL`, `GROK_IMAGE_PROVIDER` | Two unrelated families under the same prefix: the **enable** flags `GROK_IMAGE_GEN` / `GROK_IMAGE_EDIT` (with `[features] image_gen` as the config twin), and the legacy vision route `GROK_IMAGE_DESCRIPTION_MODEL` | Setting a base URL does not enable anything, and setting the enable flag does not move an endpoint. `GROK_IMAGE_EDIT` defaults to enabled, so absence is not off. |
+| `xai` as a value | In `provider`, the xAI wire shape or backend — **not** "reachable" | `GROK_XAI_ENABLED` gates xAI *identity* | `provider = "xai"` dials whatever the base URL says, so it can point at a non-xAI host and still be labelled `xai`. The switch is the only thing that decides whether xAI is on. |
+| `unsupported` / `off` / `false` | `provider = "unsupported"` (aliases `none`, `off`) silences one media surface before any HTTP call | `GROK_IMAGE_GEN=0` disables the tool; `GROK_XAI_ENABLED=0` gates identity process-wide | Three different blast radii: one surface, one tool, one process. |
+| `base_url` | `[model.<id>] base_url` is a chat endpoint | `[tools.<surface>] base_url` is a media endpoint; `[search] base_url` is a search backend; `[endpoints].xai_api_base_url` is the fallback the xAI-hosted surfaces resolve to | Four scopes, four keys. Moving chat does not move the tools, which is the whole point of the per-surface keys. |
+
 ## 1. The switches
 
 Every key in this section resolves **env > config > default**. Blank and
@@ -387,7 +401,10 @@ Test families named by the Phase 1-3 commits: `settings_fetch_budget`,
 - **The new keys have no settings-registry entry.** `[search]`, `[tools.*]` and
   `[voice].api_base` resolve from the environment and the raw `config.toml`
   table only, so the TUI settings sheet does not list them and `/config` cannot
-  edit them. Deferred to Phase 5 by design.
+  edit them. The tables are absorbed as raw `toml` on the typed config (so they
+  no longer trip `serde_ignored`), but `settings/defs.rs` and
+  `settings/registry.rs` still name none of these keys. Deferred to Phase 5 by
+  design.
 - **`provider = "openai"` on video is a no-op alias of `auto`.** Only the image
   surfaces change wire on `openai`; `MediaProvider::is_openai_shape` is consulted
   by `image_gen` and `image_edit` only, and the OpenAI video API is not
@@ -435,6 +452,43 @@ are committed and reflected above:
    makes the session optional and serves the agent over stdio ACP.
 
 ## 6. How to verify locally
+
+### The committed battery
+
+The battery is in the tree at
+[`grok-off-xai-check.sh`](../grok-off-xai-check.sh). It builds nothing itself;
+give it a fresh binary and it runs five scenarios with xAI blackholed, asserts
+each one, and exits non-zero with a re-listed failure set if any assertion
+regresses:
+
+```sh
+bash -c 'source ./grok-dev-env.sh && cargo build -p xai-grok-pager-bin'
+bash ./grok-off-xai-check.sh                      # skips the session scenarios when no auth.json exists
+bash ./grok-off-xai-check.sh --require-session    # ...or fails instead of skipping
+OFF_XAI_KEEP=1 bash ./grok-off-xai-check.sh       # keep the scratch dir for inspection
+```
+
+Each scenario gets its own scratch `GROK_HOME` under `$TMPDIR`, so the battery
+needs no hand-editing of `~/.grokdev` and leaves no state behind. Scenario 4 is
+a control: it is the only one that asserts the relay *does* connect, which is
+what stops scenario 3 from passing vacuously on a binary that never relays.
+
+Two traps are worth knowing before you edit it, because both cost real time to
+diagnose:
+
+- **Do not write the stub gateway with a here-document.** `cat >file <<EOF`
+  hangs under bash 5.3 — Homebrew's bash, which a bare `bash` resolves to
+  whenever `/opt/homebrew/bin` is ahead of `/bin` in `PATH`. The heredoc arrives
+  empty and `cat` blocks forever on the open pipe. macOS ships bash 3.2, where
+  the identical heredoc is fine, so the failure is machine-dependent. The stub
+  source is emitted with `printf` for that reason.
+- **`--no-leader` belongs to the `agent` subcommand, not the top level.** The
+  agent scenarios run `agent --no-leader headless`; putting a top-level
+  `--no-leader` in front of `agent` aborts with
+  `top-level --no-leader applies to the pager TUI, not the agent subcommand`.
+
+The sections below are the manual equivalents, for when a scenario fails and
+you want to see it by hand.
 
 ### Blackhole technique
 
@@ -495,6 +549,14 @@ substitute older code, and `--no-auto-update` so the check is local:
 ```sh
 ./target-dev/debug/xai-grok-pager --no-leader --no-auto-update \
   -p "Reply with exactly: OK"
+```
+
+On the `-p` path those are top-level flags. On the `agent` subcommand
+`--no-leader` is an *agent* option, so it goes after `agent` — a top-level
+`--no-leader` in front of `agent` is rejected:
+
+```sh
+./target-dev/debug/xai-grok-pager agent --no-leader headless </dev/null
 ```
 
 Headless calls can reach a configured gateway and consume credentials or

@@ -108,6 +108,13 @@ For several models on the same upstream, define the connection once under
 model can add headers or override individual provider keys without dropping
 the others.
 
+Pointing chat at a gateway does not move anything else. `web_search`, image and
+video generation, and voice dictation each resolve their own endpoint, and the
+grok.com-only products (`/share`, `/billing`, `/usage`, cloud sandboxes) keep
+using xAI until you switch them off. See
+[xAI-hosted surfaces](05-configuration.md#xai-hosted-surfaces) for those keys,
+their precedence, and the recipe for a run with no xAI at all.
+
 ### Credential Resolution
 
 Grok resolves credentials in this order:

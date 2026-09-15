@@ -134,7 +134,9 @@ Files: `xai-grok-tools/src/implementations/grok_build/{image_gen,video_gen}/**`,
 ### E — Integration (single owner, after A-D report)
 
 Narrow checks per touched crate, then the off-xAI battery
-(`/tmp/final_check.sh`), then one tmux drive-through. Full-workspace check once.
+(`grok-off-xai-check.sh`, committed in `feat(docs)`; at the time it lived in
+`/tmp` as `final_check.sh`), then one tmux drive-through. Full-workspace check
+once.
 Commits are per workstream, made by each owning agent with explicit pathspecs.
 
 ## 2. Shared rules for every agent
@@ -154,14 +156,43 @@ Commits are per workstream, made by each owning agent with explicit pathspecs.
 
 ## 3. Acceptance for the phase
 
-| Check | Target |
-| --- | --- |
-| `GROK_SEARCH_PROVIDER=searxng` with no xAI credential | `web_search` returns results |
-| `GROK_XAI_ENABLED=0` with a grok.com session present | no `grok.com` WebSocket opened |
-| `GROK_XAI_ENABLED=0`, no managed config on disk | no deployment-config fetch |
-| `/share`, `/billing` with no xAI auth | one-line message, session survives |
-| Off-xAI battery with xAI blackholed | unchanged from Phase 3 (exit 0, ~5 s) |
-| xAI-present path | byte-identical wire for chat, search, and Imagine |
+Each row carries the command that proves it and what that command actually
+printed. Rows marked **measured** were re-run against the committed tree on
+2026-09-15; rows marked **quoted** are taken from the commit message named in
+the row and were not re-measured.
+
+| Check | Target | How it was proved | Observed |
+| --- | --- | --- | --- |
+| `GROK_SEARCH_PROVIDER=searxng` with no xAI credential | `web_search` returns results | **Measured.** `./grok-test.sh -p xai-grok-tools -- web_search` | 69 tests run, 69 passed, 3002 skipped, exit 0. The backends run against `wiremock`, so this proves the wire and the credential-free registration, not a live SearXNG. |
+| `GROK_XAI_ENABLED=0` with a grok.com session present | no `grok.com` WebSocket opened | **Measured.** `bash grok-off-xai-check.sh`, scenarios 3 and 4 | Scenario 3 (session present, switch off) records no `relay_connecting`; scenario 4 is the control (same session, switch on) and does record it, so scenario 3 cannot pass vacuously. |
+| `GROK_XAI_ENABLED=0`, no managed config on disk | no deployment-config fetch | **Quoted** from `d6ab4514`. Needs `GROK_DEPLOYMENT_KEY` plus a blackholed `GROK_MANAGED_CONFIG_URL`; the battery does not cover it. | No socket with the switch off, two sockets with it on. |
+| `/share`, `/billing` with no xAI auth | one-line message, session survives | **Measured.** `./grok-test.sh -p xai-grok-shell -- auth_gate billing cloud_gate no_credential` | 23 tests run, 23 passed, 7550 skipped, exit 0. Includes `non_xai_credential_refusal_is_the_same_sentence`, `billing_refuses_without_any_credential` and the three `cloud_*_refuses_*` cases. |
+| Off-xAI battery with xAI blackholed | unchanged from Phase 3 (exit 0, ~5 s) | **Measured.** `bash grok-off-xai-check.sh` (needs a built `xai-grok-pager` and a grok.com session in `~/.grokdev/auth.json` for the two session scenarios) | 15 assertions passed, 0 failed, exit 0 — under macOS bash 3.2.57 and under Homebrew bash 5.3.9. Wall clock is minutes, not the ~5 s the target guessed: the blackhole makes each xAI dial burn its full connect timeout. |
+| xAI-present path | byte-identical wire for chat, search, and Imagine | **Quoted.** No live xAI endpoint is reachable from this host. | Wire shapes asserted in tests; not end-to-end proven against xAI. |
+
+Supporting families re-run for this revision, all exit 0:
+`./grok-test.sh -p xai-grok-shell -- xai_switch first_party_loopback` →
+10 tests run, 10 passed, 7563 skipped (includes
+`relay_gate_loses_to_the_switch_applied_at_the_entry_points` and
+`is_fetch_enabled_is_disarmed_by_the_xai_switch`);
+`./grok-test.sh -p xai-grok-tools -- media_endpoint` →
+11 tests run, 11 passed, 3060 skipped;
+`./grok-test.sh -p xai-grok-shell -- auth_gate billing cloud_gate no_credential` →
+23 tests run, 23 passed, 7550 skipped.
+
+Three residuals this table does **not** cover, recorded rather than implied:
+
+- **No relay end-to-end on the leader path.** The headless path has
+  `tests/xai_switch_relay_e2e.rs`; the leader path is covered by the entry-point
+  replay test and by manual runs only.
+- **No live search backend.** SearXNG, Tavily and Brave are exercised against
+  `wiremock`; the battery talks to a stub gateway and to nothing else.
+- **No settings-registry entry.** `[search]`, `[tools.image_gen|image_edit|video_gen]`
+  and `[voice].api_base` are absorbed as raw `toml` on the typed config (declared
+  so `serde_ignored` does not warn) and resolved from env plus that raw table, but
+  `settings/defs.rs` / `registry.rs` still list none of them: the settings sheet
+  does not show them and `/config` cannot edit them. Deferred to Phase 5 by
+  design, and therefore not testable here.
 
 ## 4. Deviations from the plan that actually happened
 
@@ -192,6 +223,9 @@ code diverged; nothing here changes the end state described in section 0.
    way `VoiceConfig::from_config_table` already read `[voice]`. Consequence: no
    typed-config field, no settings-registry entry and no settings UI for any of
    the new keys. The registry follows in Phase 5, as the non-goals said.
+   (Later, `69bc9f28` added raw `search` / `tools` absorption on the config
+   struct so the tables stop tripping `serde_ignored`. They are still raw
+   `toml::Value` and still absent from the settings registry.)
 
 4. **Two changes outside the declared file set were needed.**
    `xai-grok-config/src/lib.rs` gained a `pub use toml;` re-export so the tools

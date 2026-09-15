@@ -39,6 +39,10 @@ workspace. It supports:
 The composition-root package is `xai-grok-pager-bin`. It builds the
 `xai-grok-pager` artifact, which official releases expose as `grok`.
 
+This fork runs without an xAI account; [`docs/xai-decoupling.md`](docs/xai-decoupling.md)
+is the full story (every surface, every key, the measurements, and the
+reproducible battery in [`grok-off-xai-check.sh`](grok-off-xai-check.sh)).
+
 ## Repository Map
 
 ### Product Core
@@ -434,6 +438,12 @@ experimental `claude-cli-runtime` feature enabled. It stores artifacts in
 where possible. Targets affected by `claude-cli-runtime` are still rebuilt
 because of the feature flag. Use it only when you need that feature; for normal
 verification prefer `cargo run` with the canonical environment.
+
+`./grok-off-xai-check.sh` is the off-xAI acceptance battery. It runs the built
+binary with xAI blackholed and asserts that a run with no xAI reachability still
+works and that every xAI-hosted surface goes quiet under `GROK_XAI_ENABLED=0`.
+It is not a substitute for `./grok-test.sh`; run it when a change touches an
+xAI-hosted surface, an endpoint resolver, or the credential identity.
 
 ### Direct Cargo commands
 
