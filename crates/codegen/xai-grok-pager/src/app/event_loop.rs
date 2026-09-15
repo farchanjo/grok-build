@@ -3944,6 +3944,42 @@ fn hydrate_connection(
         vec![]
     };
 
+    // Surface the shell's no-credential remedy. `grok -p` prints it and exits;
+    // the TUI kept it in the log only, so the login-aware welcome flow offered
+    // a sign-in without ever naming the env recipe that fixes the run. On the
+    // login path it also rides the welcome error line — the login menu still
+    // renders below it, so a user who *should* sign in still can.
+    if let Some(remedy) = connection.auth_remedy.as_deref() {
+        if needs_interactive_login && !connection.auth_methods.is_empty() {
+            app.auth_state = super::app_view::AuthState::Pending {
+                error: Some(remedy.to_string()),
+            };
+        }
+        // Hydration may have opened a session view (the login path dispatches
+        // the providers sheet over one). A scrollback line survives there,
+        // where a transient welcome toast would not; with no session yet the
+        // user is still on the welcome screen, so the toast is the status line.
+        match app.active_view {
+            ActiveView::Agent(id) => {
+                if let Some(agent) = app.agents.get_mut(&id) {
+                    agent
+                        .scrollback
+                        .push_block(crate::scrollback::block::RenderBlock::System(
+                            crate::scrollback::blocks::SystemMessageBlock::new(remedy.to_string()),
+                        ));
+                }
+            }
+            _ => {
+                app.show_toast(remedy);
+                // A startup notice, not a reaction to a keypress: outlive the
+                // 4s toast default so the first frame settling cannot hide it.
+                if let Some((_, expires)) = app.welcome_toast.as_mut() {
+                    *expires = std::time::Instant::now() + std::time::Duration::from_secs(30);
+                }
+            }
+        }
+    }
+
     if let Some(meta) = connection.auth_meta.as_ref() {
         match serde_json::from_value::<xai_grok_shell::auth::AuthMeta>(meta.clone()) {
             Ok(auth_meta) => app.apply_auth_meta(&auth_meta),
@@ -5730,6 +5766,7 @@ mod tests {
             login_method_id: None,
             auth_start_mode: AuthStartMode::Pending,
             auth_meta: Some(serde_json::json!({ "team_name": "acme" })),
+            auth_remedy: None,
             leader_status_rx: None,
             cancel_rewind_enabled: true,
             session_recap_available: true,
@@ -5780,6 +5817,7 @@ mod tests {
             login_method_id: Some(agent_client_protocol::AuthMethodId::new("grok.com")),
             auth_start_mode: AuthStartMode::Pending,
             auth_meta: None,
+            auth_remedy: None,
             leader_status_rx: None,
             cancel_rewind_enabled: false,
             session_recap_available: false,
@@ -5799,6 +5837,130 @@ mod tests {
             !effects.is_empty(),
             "needs-login hydration must dispatch the providers sheet"
         );
+    }
+
+    /// Connection fixture for the no-credential-remedy tests: `needs_login`
+    /// decides whether the welcome login flow is on, `remedy` is the sentence
+    /// the shell produced.
+    fn connection_with_remedy(
+        needs_login: bool,
+        remedy: Option<&str>,
+    ) -> crate::acp::AcpConnection {
+        use crate::acp::AuthStartMode;
+        use xai_acp_lib::acp_channels;
+        let (client, _agent) = acp_channels();
+        let auth_manager = std::sync::Arc::new(xai_grok_shell::auth::AuthManager::new(
+            &xai_grok_tools::util::grok_home::grok_home(),
+            Default::default(),
+        ));
+        let methods = if needs_login {
+            vec![agent_client_protocol::AuthMethod::Agent(
+                agent_client_protocol::AuthMethodAgent::new(
+                    agent_client_protocol::AuthMethodId::new("grok.com"),
+                    "Grok".to_string(),
+                ),
+            )]
+        } else {
+            vec![]
+        };
+        crate::acp::AcpConnection {
+            tx: client.tx,
+            rx: client.rx,
+            models: crate::acp::ModelState::default(),
+            is_grok_shell: true,
+            auth_methods: methods,
+            cancel: tokio_util::sync::CancellationToken::new(),
+            available_commands: vec![],
+            needs_login,
+            login_label: needs_login.then(|| "grok.com".to_string()),
+            login_method_id: needs_login
+                .then(|| agent_client_protocol::AuthMethodId::new("grok.com")),
+            auth_start_mode: AuthStartMode::Pending,
+            auth_meta: None,
+            auth_remedy: remedy.map(str::to_owned),
+            leader_status_rx: None,
+            cancel_rewind_enabled: false,
+            session_recap_available: false,
+            prime_index: Default::default(),
+            auth_manager,
+        }
+    }
+
+    const REMEDY: &str = "No credential for model `grok-4.5`: set GROK_API_KEY (a plain bearer) \
+                          together with GROK_MODELS_BASE_URL=<endpoint>/v1 for a non-xAI gateway, \
+                          or sign in with `grok provider connect xai`";
+
+    /// The sharp edge this closes: the shell's no-credential remedy used to be
+    /// a log line only, so a TUI start showed the login-aware welcome flow and
+    /// nothing about the fix. It must now be a visible line — while the login
+    /// menu stays available for a user who *should* sign in.
+    #[tokio::test]
+    async fn hydrate_connection_shows_no_credential_remedy_on_the_welcome_line() {
+        let connection = connection_with_remedy(true, Some(REMEDY));
+        let mut app = crate::app::app_view::tests::test_app();
+        let _ = hydrate_connection(&mut app, &connection, false);
+
+        match &app.auth_state {
+            AuthState::Pending { error } => assert_eq!(
+                error.as_deref(),
+                Some(REMEDY),
+                "the remedy is the welcome error line"
+            ),
+            other => panic!("expected a pending login state, got {other:?}"),
+        }
+        assert_eq!(
+            app.login_label.as_deref(),
+            Some("grok.com"),
+            "the genuine login path is untouched"
+        );
+        assert!(
+            app.login_method_id.is_some(),
+            "a user who should sign in is still offered the login"
+        );
+        // The login path opens a session view, so the line must also land where
+        // the user actually is — the welcome toast would be gone by then.
+        let agent = app
+            .agents
+            .values()
+            .next()
+            .expect("hydration opened a session");
+        match agent.scrollback.last().map(|e| &e.block) {
+            Some(crate::scrollback::block::RenderBlock::System(block)) => {
+                assert_eq!(block.text, REMEDY)
+            }
+            other => panic!("expected a system line in the scrollback, got {other:?}"),
+        }
+    }
+
+    /// Without a login flow there is no welcome error slot and no session view,
+    /// so the remedy has to land as a status line instead of being dropped.
+    #[tokio::test]
+    async fn hydrate_connection_shows_no_credential_remedy_as_status_line() {
+        let connection = connection_with_remedy(false, Some(REMEDY));
+        let mut app = crate::app::app_view::tests::test_app();
+        let _ = hydrate_connection(&mut app, &connection, false);
+
+        assert!(
+            matches!(app.auth_state, AuthState::Done),
+            "no login flow: the auth state machine is unchanged"
+        );
+        assert!(
+            app.welcome_toast
+                .as_ref()
+                .is_some_and(|(msg, _)| msg == REMEDY),
+            "the remedy must be visible as a status line"
+        );
+    }
+
+    /// Healthy runs must stay silent: no remedy, no toast, no welcome error.
+    #[tokio::test]
+    async fn hydrate_connection_without_remedy_shows_nothing() {
+        let connection = connection_with_remedy(false, None);
+        let mut app = crate::app::app_view::tests::test_app();
+        let _ = hydrate_connection(&mut app, &connection, false);
+
+        assert!(matches!(app.auth_state, AuthState::Done));
+        assert!(app.welcome_toast.is_none());
     }
 
     /// The background connect hands off without blocking: the receiver is

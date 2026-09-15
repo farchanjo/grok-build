@@ -705,6 +705,13 @@ impl acp::Agent for MvpAgent {
                     // disabled feature produces zero `x.ai/recap` traffic.
                     "sessionRecap": self.cfg.borrow().is_session_recap_enabled(),
                     "voiceMode": self.cfg.borrow().is_voice_mode_enabled(),
+                    // The remedy for a run with no credential on any route.
+                    // `authenticate` fails with the same sentence, but the
+                    // grok.com-first flow defers auth (no `authenticate` call),
+                    // so without this the TUI welcome screen would show the
+                    // login prompt and nothing about the fix. `None` when the
+                    // run has a usable credential.
+                    "noCredentialRemedy": self.no_credential_preflight(),
                     "primeIndex": crate::session::prime::initialize_capability_value(),
                 })
                         .as_object()
@@ -3880,10 +3887,13 @@ impl acp::Agent for MvpAgent {
             }
             "x.ai/recap" => crate::extensions::recap::handle(self, &args).await,
             "x.ai/cloud/terminate" => {
+                // Cloud sandboxes run on xAI infrastructure: gate on the
+                // shared one-line refusal before building the client, so a
+                // switch-off run gets a named reason instead of a connection
+                // error from a request that could not succeed.
                 crate::extensions::auth_gate::require_xai_auth(
                     &self.auth_manager,
-                    "Authentication required",
-                    "Connect xAI in /providers to authenticate.",
+                    crate::extensions::auth_gate::XaiSurface::Cloud,
                 )?;
                 let params: serde_json::Value = serde_json::from_str(args.params.get())
                     .map_err(|e| acp::Error::invalid_params().data(e.to_string()))?;
@@ -3912,10 +3922,13 @@ impl acp::Agent for MvpAgent {
                 crate::extensions::to_raw_response(&serde_json::json!({ "ok": true }))
             }
             "x.ai/cloud/env/list" => {
+                // Cloud sandboxes run on xAI infrastructure: gate on the
+                // shared one-line refusal before building the client, so a
+                // switch-off run gets a named reason instead of a connection
+                // error from a request that could not succeed.
                 crate::extensions::auth_gate::require_xai_auth(
                     &self.auth_manager,
-                    "Authentication required",
-                    "Connect xAI in /providers to authenticate.",
+                    crate::extensions::auth_gate::XaiSurface::Cloud,
                 )?;
                 let sandbox_client = crate::remote::SandboxClient::new(
                     self.cli_chat_proxy_base_url(),
@@ -3937,10 +3950,13 @@ impl acp::Agent for MvpAgent {
                 )
             }
             "x.ai/cloud/env/create" => {
+                // Cloud sandboxes run on xAI infrastructure: gate on the
+                // shared one-line refusal before building the client, so a
+                // switch-off run gets a named reason instead of a connection
+                // error from a request that could not succeed.
                 crate::extensions::auth_gate::require_xai_auth(
                     &self.auth_manager,
-                    "Authentication required",
-                    "Connect xAI in /providers to authenticate.",
+                    crate::extensions::auth_gate::XaiSurface::Cloud,
                 )?;
                 let params: serde_json::Value = serde_json::from_str(args.params.get())
                     .map_err(|e| acp::Error::invalid_params().data(e.to_string()))?;
@@ -3994,10 +4010,13 @@ impl acp::Agent for MvpAgent {
                 )
             }
             "x.ai/cloud/env/update" => {
+                // Cloud sandboxes run on xAI infrastructure: gate on the
+                // shared one-line refusal before building the client, so a
+                // switch-off run gets a named reason instead of a connection
+                // error from a request that could not succeed.
                 crate::extensions::auth_gate::require_xai_auth(
                     &self.auth_manager,
-                    "Authentication required",
-                    "Connect xAI in /providers to authenticate.",
+                    crate::extensions::auth_gate::XaiSurface::Cloud,
                 )?;
                 let params: serde_json::Value = serde_json::from_str(args.params.get())
                     .map_err(|e| acp::Error::invalid_params().data(e.to_string()))?;
@@ -4054,10 +4073,13 @@ impl acp::Agent for MvpAgent {
                 )
             }
             "x.ai/cloud/env/delete" => {
+                // Cloud sandboxes run on xAI infrastructure: gate on the
+                // shared one-line refusal before building the client, so a
+                // switch-off run gets a named reason instead of a connection
+                // error from a request that could not succeed.
                 crate::extensions::auth_gate::require_xai_auth(
                     &self.auth_manager,
-                    "Authentication required",
-                    "Connect xAI in /providers to authenticate.",
+                    crate::extensions::auth_gate::XaiSurface::Cloud,
                 )?;
                 let params: serde_json::Value = serde_json::from_str(args.params.get())
                     .map_err(|e| acp::Error::invalid_params().data(e.to_string()))?;
@@ -4605,5 +4627,109 @@ mod tool_overrides_capability_tests {
                 "x_thread_fetch": false,
             }),
         );
+    }
+}
+
+/// `x.ai/cloud/*` is served by xAI infrastructure: with the switch off (or with
+/// only a third-party bearer) every cloud handler must refuse with the shared
+/// named reason *before* building a client, so the caller never sees a
+/// connection error from a request that could not have succeeded.
+#[cfg(test)]
+mod cloud_gate_tests {
+    use super::*;
+
+    /// Minimal agent holding one credential — enough to exercise the gate
+    /// without any network round trip.
+    fn agent_with_auth(auth: crate::auth::GrokAuth) -> (MvpAgent, tempfile::TempDir) {
+        use crate::agent::config::Config as AgentConfig;
+        use crate::auth::{AuthManager, GrokComConfig};
+
+        let dir = tempfile::tempdir().expect("tempdir for cloud gate test");
+        let auth_manager = std::sync::Arc::new(AuthManager::new(
+            dir.path(),
+            GrokComConfig::default(),
+        ));
+        auth_manager.hot_swap(auth);
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let agent = MvpAgent::new(
+            GatewaySender::new(tx),
+            &AgentConfig::default(),
+            auth_manager,
+            None,
+        )
+        .expect("valid test config");
+        (agent, dir)
+    }
+
+    /// A plain bearer: present, but not a grok.com session.
+    fn plain_bearer() -> crate::auth::GrokAuth {
+        crate::auth::GrokAuth {
+            auth_mode: crate::auth::AuthMode::ApiKey,
+            key: "plain-bearer".into(),
+            create_time: chrono::Utc::now(),
+            ..Default::default()
+        }
+    }
+
+    fn request(method: &str, params: serde_json::Value) -> acp::ExtRequest {
+        acp::ExtRequest::new(
+            method,
+            std::sync::Arc::from(serde_json::value::to_raw_value(&params).unwrap()),
+        )
+    }
+
+    fn data_of(err: &acp::Error) -> String {
+        serde_json::to_value(err)
+            .expect("acp::Error serializes to JSON-RPC shape")
+            .get("data")
+            .and_then(|v| v.as_str())
+            .expect("auth_required error carries a data string")
+            .to_string()
+    }
+
+    const REFUSAL: &str =
+        "Cloud sandboxes need a grok.com session: connect xAI in /providers to authenticate.";
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn cloud_env_list_refuses_with_a_named_reason() {
+        use acp::Agent as _;
+        let (agent, _dir) = agent_with_auth(plain_bearer());
+
+        let err = agent
+            .ext_method(request("x.ai/cloud/env/list", serde_json::json!({})))
+            .await
+            .expect_err("a plain bearer cannot list cloud environments");
+
+        assert_eq!(data_of(&err), REFUSAL);
+        assert_eq!(
+            err.code,
+            acp::Error::auth_required().code,
+            "a named refusal, not an internal error"
+        );
+        // The session survives: the credential is untouched and a second call
+        // answers identically.
+        assert_eq!(
+            agent.auth_manager.current_or_expired().map(|a| a.key),
+            Some("plain-bearer".to_string()),
+        );
+        let again = agent
+            .ext_method(request("x.ai/cloud/env/list", serde_json::json!({})))
+            .await
+            .expect_err("still refused");
+        assert_eq!(data_of(&again), REFUSAL);
+    }
+
+    /// The gate runs before param parsing, so a `terminate` with no params is
+    /// refused for the same named reason rather than "missing sandbox_id".
+    #[tokio::test(flavor = "current_thread")]
+    async fn cloud_terminate_refuses_before_param_parsing() {
+        use acp::Agent as _;
+        let (agent, _dir) = agent_with_auth(plain_bearer());
+
+        let err = agent
+            .ext_method(request("x.ai/cloud/terminate", serde_json::json!({})))
+            .await
+            .expect_err("a plain bearer cannot terminate a sandbox");
+        assert_eq!(data_of(&err), REFUSAL);
     }
 }

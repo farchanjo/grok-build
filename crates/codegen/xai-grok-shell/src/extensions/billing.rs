@@ -198,10 +198,11 @@ fn billing_unified_log_ctx(billing: &BillingConfigResponse) -> serde_json::Value
 }
 
 async fn handle_get_billing(agent: &MvpAgent) -> ExtResult {
+    // Credits come from the grok.com backend, so a bearer alone is not enough;
+    // the shared gate returns the one-line refusal for the switch-off case.
     let auth = super::auth_gate::require_xai_auth(
         &agent.auth_manager,
-        "Authentication required to fetch billing data",
-        "Billing data requires auth with grok.com. Connect xAI in /providers to authenticate.",
+        super::auth_gate::XaiSurface::Billing,
     )?;
 
     let proxy_base = agent.cli_chat_proxy_base_url();
@@ -291,8 +292,7 @@ async fn handle_get_billing(agent: &MvpAgent) -> ExtResult {
 async fn handle_get_auto_topup_rule(agent: &MvpAgent) -> ExtResult {
     let auth = super::auth_gate::require_xai_auth(
         &agent.auth_manager,
-        "Authentication required to fetch auto top-up rule",
-        "Auto top-up data requires auth with grok.com. Connect xAI in /providers to authenticate.",
+        super::auth_gate::XaiSurface::Usage,
     )?;
 
     let proxy_base = agent.cli_chat_proxy_base_url();
@@ -348,6 +348,114 @@ async fn handle_get_auto_topup_rule(agent: &MvpAgent) -> ExtResult {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Minimal agent whose `AuthManager` holds `auth` (or no credential at all)
+    /// — enough to exercise the xAI gate without any network round trip.
+    fn agent_with_auth(auth: Option<crate::auth::GrokAuth>) -> (MvpAgent, tempfile::TempDir) {
+        use crate::agent::config::Config as AgentConfig;
+        use crate::auth::{AuthManager, GrokComConfig};
+        use xai_acp_lib::AcpAgentGatewaySender as GatewaySender;
+
+        let dir = tempfile::tempdir().expect("tempdir for billing gate test");
+        let auth_manager =
+            std::sync::Arc::new(AuthManager::new(dir.path(), GrokComConfig::default()));
+        if let Some(auth) = auth {
+            auth_manager.hot_swap(auth);
+        }
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let agent = MvpAgent::new(
+            GatewaySender::new(tx),
+            &AgentConfig::default(),
+            auth_manager,
+            None,
+        )
+        .expect("valid test config");
+        (agent, dir)
+    }
+
+    /// A plain bearer: present, but not an xAI session — the shape the
+    /// off-xAI recipe produces (`GROK_API_KEY` + a third-party base URL).
+    fn plain_bearer() -> crate::auth::GrokAuth {
+        crate::auth::GrokAuth {
+            auth_mode: crate::auth::AuthMode::ApiKey,
+            key: "plain-bearer".into(),
+            create_time: chrono::Utc::now(),
+            ..Default::default()
+        }
+    }
+
+    fn error_data(err: &acp::Error) -> String {
+        serde_json::to_value(err)
+            .expect("acp::Error serializes to JSON-RPC shape")
+            .get("data")
+            .and_then(|v| v.as_str())
+            .expect("auth_required error carries a data string")
+            .to_string()
+    }
+
+    /// `/billing` with no xAI auth must refuse in one line and leave the
+    /// session usable: the refusal is `auth_required` (recoverable), the
+    /// credential is untouched, and a second call answers identically instead
+    /// of degrading.
+    #[tokio::test(flavor = "current_thread")]
+    async fn billing_refuses_without_xai_auth_with_one_actionable_line() {
+        let (agent, _dir) = agent_with_auth(Some(plain_bearer()));
+
+        let err = handle_get_billing(&agent)
+            .await
+            .expect_err("a plain bearer cannot fetch grok.com credits");
+        assert_eq!(
+            error_data(&err),
+            "`/billing` needs a grok.com session: connect xAI in /providers to authenticate.",
+        );
+        assert_eq!(err.code, acp::Error::auth_required().code);
+
+        // The session survives: same credential, same refusal, no latch.
+        assert_eq!(
+            agent.auth_manager.current_or_expired().map(|a| a.key),
+            Some("plain-bearer".to_string()),
+        );
+        let again = handle_get_billing(&agent)
+            .await
+            .expect_err("still refused on the second call");
+        assert_eq!(error_data(&again), error_data(&err));
+    }
+
+    /// No credential at all — the raw off-xAI start — must produce the *same*
+    /// sentence, so the user cannot tell the two refusal reasons apart by
+    /// wording alone.
+    #[tokio::test(flavor = "current_thread")]
+    async fn billing_refuses_without_any_credential() {
+        let (agent, _dir) = agent_with_auth(None);
+        let err = handle_get_billing(&agent)
+            .await
+            .expect_err("no credential at all");
+        assert_eq!(
+            error_data(&err),
+            "`/billing` needs a grok.com session: connect xAI in /providers to authenticate.",
+        );
+        assert!(agent.auth_manager.current_or_expired().is_none());
+    }
+
+    /// `/usage`'s data path (the auto top-up rule) is gated the same way.
+    #[tokio::test(flavor = "current_thread")]
+    async fn usage_refuses_without_xai_auth_with_one_actionable_line() {
+        let (agent, _dir) = agent_with_auth(Some(plain_bearer()));
+
+        let err = handle_get_auto_topup_rule(&agent)
+            .await
+            .expect_err("a plain bearer cannot fetch the top-up rule");
+        assert_eq!(
+            error_data(&err),
+            "`/usage` needs a grok.com session: connect xAI in /providers to authenticate.",
+        );
+        assert_eq!(err.code, acp::Error::auth_required().code);
+        assert_eq!(
+            agent.auth_manager.current_or_expired().map(|a| a.key),
+            Some("plain-bearer".to_string()),
+            "the rejected credential stays in place",
+        );
+    }
 
     #[test]
     fn auto_topup_disabled_rule_omits_enabled_field() {

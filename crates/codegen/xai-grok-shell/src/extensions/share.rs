@@ -170,14 +170,13 @@ async fn upload_share_data_to_gcs(
     }
 }
 
+/// Sharing builds a grok.com URL, so it needs an xAI account and not merely a
+/// bearer. The refusal is the shared gate's one-liner; see
+/// [`super::auth_gate`].
 fn require_xai_auth_for_share(
     auth_manager: &crate::auth::AuthManager,
 ) -> Result<crate::auth::GrokAuth, acp::Error> {
-    super::auth_gate::require_xai_auth(
-        auth_manager,
-        "Authentication required to share session",
-        "Share session is disabled. Connect xAI in /providers to authenticate.",
-    )
+    super::auth_gate::require_xai_auth(auth_manager, super::auth_gate::XaiSurface::Share)
 }
 
 #[cfg(test)]
@@ -248,7 +247,14 @@ mod tests {
             dir.path(),
             GrokComConfig::default(),
         ));
-        assert!(require_xai_auth_for_share(&mgr).is_err());
+        let err = require_xai_auth_for_share(&mgr).expect_err("no credential at all");
+        assert_eq!(
+            error_data(&err),
+            "`/share` needs a grok.com session: connect xAI in /providers to authenticate.",
+        );
+        // The session is not consumed: the same manager still reports the same
+        // state, so a later `/share` (or a login) starts from where it was.
+        assert!(mgr.current_or_expired().is_none());
     }
 
     #[test]
@@ -272,19 +278,29 @@ mod tests {
         let err = require_xai_auth_for_share(&mgr)
             .expect_err("non-xAI accounts (API key, External, enterprise IdP) must be rejected");
 
-        // This is the key assertion the review asked for: we must test the *exact*
-        // actionable data string for the non-xAI path (distinct from the generic
-        // "Authentication required to share session" path).
-        let serialized =
-            serde_json::to_value(&err).expect("acp::Error serializes to JSON-RPC shape");
-        let data = serialized
+        // This is the key assertion the review asked for: the exact actionable
+        // data string, which is also what `GROK_XAI_ENABLED=0` produces — the
+        // refusal names the missing grok.com session instead of blaming the
+        // command.
+        assert_eq!(
+            error_data(&err),
+            "`/share` needs a grok.com session: connect xAI in /providers to authenticate.",
+        );
+        assert_eq!(err.code, acp::Error::auth_required().code);
+        assert_eq!(
+            mgr.current_or_expired().map(|a| a.key),
+            Some("xai-test-key".to_string()),
+            "the rejected credential stays in place"
+        );
+    }
+
+    /// The `data` string of an ACP error — what the pager renders to the user.
+    fn error_data(err: &acp::Error) -> String {
+        serde_json::to_value(err)
+            .expect("acp::Error serializes to JSON-RPC shape")
             .get("data")
             .and_then(|v| v.as_str())
-            .expect("auth_required error carries a data string");
-
-        assert_eq!(
-            data,
-            "Share session is disabled. Connect xAI in /providers to authenticate."
-        );
+            .expect("auth_required error carries a data string")
+            .to_string()
     }
 }

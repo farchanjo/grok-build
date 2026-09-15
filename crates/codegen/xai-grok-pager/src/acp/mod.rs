@@ -76,6 +76,16 @@ pub struct AcpConnection {
     /// Auth response metadata from eager authentication (cached token / API key).
     /// Contains `team_name`, etc. `None` when interactive login is required.
     pub auth_meta: Option<serde_json::Value>,
+    /// Actionable remedy for a start that cannot reach any credential — the
+    /// shell's `no_credential_message` ("No credential for model X: set
+    /// GROK_API_KEY …"), taken from the agent's `initialize` meta and from a
+    /// failed `authenticate`.
+    ///
+    /// `grok -p` prints this sentence and exits; the TUI used to swallow it
+    /// (only a log line), leaving the remedy invisible behind the login-aware
+    /// welcome flow. The welcome screen renders it as a line so the fix is
+    /// named where the user is looking.
+    pub auth_remedy: Option<String>,
     /// Leader connection status. `Some` only when connected via leader.
     pub leader_status_rx: Option<tokio::sync::watch::Receiver<leader_bridge::ConnectionStatus>>,
     /// Whether cancel-rewind is enabled (resolved by shell from config layers).
@@ -274,13 +284,14 @@ async fn finish_connection(
         cancel_rewind_enabled,
         session_recap_available,
         prime_index,
+        no_credential_remedy,
     ) = initialize(&tx, &flags).await?;
 
     // Determine whether interactive login is needed.
     let (needs_login, login_label, login_method_id, auth_start_mode) =
         startup_auth_metadata(&auth_methods);
 
-    let (needs_login, login_label, login_method_id, auth_start_mode, auth_meta) =
+    let (needs_login, login_label, login_method_id, auth_start_mode, auth_meta, auth_failure) =
         eager_auth_or_login_fallback(
             &tx,
             &auth_methods,
@@ -291,6 +302,9 @@ async fn finish_connection(
             auth_start_mode,
         )
         .await;
+    // The agent's `initialize` remedy wins (it is the same sentence, produced
+    // before any request); a failed `authenticate` covers older shells.
+    let auth_remedy = no_credential_remedy.or(auth_failure);
 
     Ok(AcpConnection {
         tx,
@@ -305,6 +319,7 @@ async fn finish_connection(
         login_method_id,
         auth_start_mode,
         auth_meta,
+        auth_remedy,
         leader_status_rx: None,
         cancel_rewind_enabled,
         session_recap_available,
@@ -389,12 +404,13 @@ pub async fn connect_via_leader(
         cancel_rewind_enabled,
         session_recap_available,
         prime_index,
+        no_credential_remedy,
     ) = initialize(&tx, &flags).await?;
 
     let (needs_login, login_label, login_method_id, auth_start_mode) =
         startup_auth_metadata(&auth_methods);
 
-    let (needs_login, login_label, login_method_id, auth_start_mode, auth_meta) =
+    let (needs_login, login_label, login_method_id, auth_start_mode, auth_meta, auth_failure) =
         eager_auth_or_login_fallback(
             &tx,
             &auth_methods,
@@ -405,6 +421,9 @@ pub async fn connect_via_leader(
             auth_start_mode,
         )
         .await;
+    // See `finish_connection`: the `initialize` remedy is the same sentence,
+    // produced before any request.
+    let auth_remedy = no_credential_remedy.or(auth_failure);
 
     // Leader mode runs the agent in a separate process, so there's no shared
     // in-process `AuthManager`. Build a dedicated *non-refreshing* one over the
@@ -433,6 +452,7 @@ pub async fn connect_via_leader(
         login_method_id,
         auth_start_mode,
         auth_meta,
+        auth_remedy,
         leader_status_rx: Some(status_rx),
         cancel_rewind_enabled,
         session_recap_available,
@@ -552,7 +572,45 @@ pub fn parse_default_auth_method_id(meta: Option<&acp::Meta>) -> Option<acp::Aut
         .map(|s| acp::AuthMethodId::new(s.to_owned()))
 }
 
+/// Parse `noCredentialRemedy` from `InitializeResponse.meta`.
+///
+/// The shell builds this with `no_credential_message`, so the pager never
+/// re-words it. Blank/absent (older shell, or a run with a usable credential)
+/// is `None`.
+pub fn parse_no_credential_remedy(meta: Option<&acp::Meta>) -> Option<String> {
+    meta.and_then(|m| m.get("noCredentialRemedy"))
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned)
+}
+
+/// The remedy sentence carried by a failed `authenticate`.
+///
+/// `acp::Error::auth_required().data(msg)` is how the shell hands over the
+/// actionable text; anything else falls back to the error's own display so the
+/// welcome line is never empty when auth failed.
+fn auth_error_remedy(error: &anyhow::Error) -> Option<String> {
+    if let Some(acp_error) = error.downcast_ref::<acp::Error>() {
+        if let Some(serde_json::Value::String(data)) = acp_error.data.as_ref() {
+            let data = data.trim();
+            if !data.is_empty() {
+                return Some(data.to_owned());
+            }
+        }
+        if !acp_error.message.trim().is_empty() {
+            return Some(acp_error.message.clone());
+        }
+    }
+    let rendered = error.to_string();
+    let rendered = rendered.trim();
+    (!rendered.is_empty()).then(|| rendered.to_owned())
+}
+
 /// Send InitializeRequest and parse the response.
+///
+/// Last element: the agent's `noCredentialRemedy` (see
+/// [`parse_no_credential_remedy`]), `None` on the healthy path.
 async fn initialize(
     tx: &AcpAgentTx,
     flags: &ConnectFlags,
@@ -565,6 +623,7 @@ async fn initialize(
     bool,
     bool,
     xai_grok_shell::session::prime::PrimeIndexCapabilities,
+    Option<String>,
 )> {
     let req = acp::InitializeRequest::new(acp::ProtocolVersion::V1)
         .client_capabilities(
@@ -609,6 +668,7 @@ async fn initialize(
     let session_recap_available = parse_session_recap_available(resp.meta.as_ref());
     let prime_index = parse_prime_index_capability(resp.meta.as_ref());
     let default_auth_method_id = parse_default_auth_method_id(resp.meta.as_ref());
+    let no_credential_remedy = parse_no_credential_remedy(resp.meta.as_ref());
 
     Ok((
         models,
@@ -619,6 +679,7 @@ async fn initialize(
         cancel_rewind_enabled,
         session_recap_available,
         prime_index,
+        no_credential_remedy,
     ))
 }
 
@@ -748,7 +809,11 @@ pub fn find_interactive_login_method(
 /// Empty `auth_methods` (e.g. `preferred_method=api_key` with no key) is
 /// fail-closed: needs_login without an interactive method.
 ///
-/// Returns `(needs_login, login_label, login_method_id, auth_start_mode, auth_meta)`.
+/// Returns
+/// `(needs_login, login_label, login_method_id, auth_start_mode, auth_meta,
+/// auth_failure)` — the last element being the actionable sentence a failed
+/// `authenticate` carried (see [`auth_error_remedy`]), `None` when auth
+/// succeeded or was deferred.
 async fn eager_auth_or_login_fallback(
     tx: &AcpAgentTx,
     auth_methods: &[acp::AuthMethod],
@@ -763,10 +828,11 @@ async fn eager_auth_or_login_fallback(
     Option<acp::AuthMethodId>,
     AuthStartMode,
     Option<serde_json::Value>,
+    Option<String>,
 ) {
     if auth_methods.is_empty() {
         // preferred_method pin unavailable — fail closed, no invented method.
-        return (true, None, None, AuthStartMode::Pending, None);
+        return (true, None, None, AuthStartMode::Pending, None, None);
     }
     if needs_login {
         return (
@@ -774,6 +840,7 @@ async fn eager_auth_or_login_fallback(
             login_label,
             login_method_id,
             auth_start_mode,
+            None,
             None,
         );
     }
@@ -784,22 +851,32 @@ async fn eager_auth_or_login_fallback(
             login_method_id,
             auth_start_mode,
             meta,
+            None,
         ),
         Err(e) => {
             // The message is the only place the remedy is named (e.g. "No
-            // credential for model X: set GROK_API_KEY ..."), and the TUI has no
-            // on_error hook here — log it so it is not swallowed entirely.
+            // credential for model X: set GROK_API_KEY ..."). Log it, and hand
+            // it to the caller so the welcome screen can show the same
+            // sentence — the TUI has no on_error hook here.
             tracing::warn!(error = %e, "authenticate failed");
+            let failure = auth_error_remedy(&e);
             // Non-interactive credentials were advertised; shell fallthrough
             // already preferred them — do not auto-open browser login.
             let has_api_key = auth_methods
                 .iter()
                 .any(|m| AuthMethodKind::from_id(m.id()) == AuthMethodKind::XaiApiKey);
             if has_api_key {
-                return (false, login_label, login_method_id, auth_start_mode, None);
+                return (
+                    false,
+                    login_label,
+                    login_method_id,
+                    auth_start_mode,
+                    None,
+                    failure,
+                );
             }
             let (label, method_id, mode) = find_interactive_login_method(auth_methods);
-            (true, label, method_id, mode, None)
+            (true, label, method_id, mode, None, failure)
         }
     }
 }
@@ -896,6 +973,68 @@ mod tests {
     fn parse_available_commands_none_meta_returns_empty() {
         let cmds = parse_available_commands(None);
         assert!(cmds.is_empty());
+    }
+
+    // ── no-credential remedy plumbing ─────────────────────────────
+
+    fn meta_with_remedy(value: serde_json::Value) -> acp::Meta {
+        let mut meta = acp::Meta::new();
+        meta.insert("noCredentialRemedy".into(), value);
+        meta
+    }
+
+    #[test]
+    fn parse_no_credential_remedy_reads_the_shell_sentence_verbatim() {
+        const SENTENCE: &str = "No credential for model `grok-4.5`: set GROK_API_KEY (a plain \
+                                bearer) together with GROK_MODELS_BASE_URL=<endpoint>/v1 for a \
+                                non-xAI gateway, or sign in with `grok provider connect xai`";
+        let meta = meta_with_remedy(serde_json::json!(SENTENCE));
+        assert_eq!(
+            parse_no_credential_remedy(Some(&meta)).as_deref(),
+            Some(SENTENCE),
+            "the pager must not re-word the shell's message"
+        );
+    }
+
+    #[test]
+    fn parse_no_credential_remedy_treats_absent_null_and_blank_as_none() {
+        assert!(parse_no_credential_remedy(None).is_none());
+        assert!(parse_no_credential_remedy(Some(&acp::Meta::new())).is_none());
+        assert!(
+            parse_no_credential_remedy(Some(&meta_with_remedy(serde_json::Value::Null))).is_none()
+        );
+        assert!(
+            parse_no_credential_remedy(Some(&meta_with_remedy(serde_json::json!("   ")))).is_none()
+        );
+    }
+
+    #[test]
+    fn auth_error_remedy_prefers_the_acp_data_sentence() {
+        let err = anyhow::Error::new(
+            acp::Error::auth_required()
+                .data("No credential for model `grok-4.5`: set GROK_API_KEY"),
+        );
+        assert_eq!(
+            auth_error_remedy(&err).as_deref(),
+            Some("No credential for model `grok-4.5`: set GROK_API_KEY"),
+        );
+    }
+
+    #[test]
+    fn auth_error_remedy_falls_back_to_the_message_then_the_display() {
+        let bare = anyhow::Error::new(acp::Error::auth_required());
+        assert_eq!(
+            auth_error_remedy(&bare).as_deref(),
+            Some(acp::Error::auth_required().message.as_str()),
+        );
+
+        let plain = anyhow::anyhow!("channel closed");
+        assert_eq!(auth_error_remedy(&plain).as_deref(), Some("channel closed"));
+    }
+
+    #[test]
+    fn auth_error_remedy_is_none_for_an_empty_error() {
+        assert!(auth_error_remedy(&anyhow::anyhow!("")).is_none());
     }
 
     #[test]
