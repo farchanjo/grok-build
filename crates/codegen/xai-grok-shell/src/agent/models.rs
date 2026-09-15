@@ -962,7 +962,7 @@ impl ModelsManager {
         // Never eagerly drop prefetched on auth recovery. Only fall back to
         // bundled defaults when we have never had a real catalog. Resolved once
         // so the fetch and the failure-vs-disabled classification below agree.
-        let remote_fetch_enabled = crate::util::config::resolve_remote_fetch_enabled();
+        let remote_fetch_enabled = models_fetch_allowed();
         self.fetch_and_apply_inner(remote_fetch_enabled).await;
 
         if !*self.inner.has_fetched_real_catalog.read() && self.inner.prefetched.read().is_none() {
@@ -1149,7 +1149,7 @@ impl ModelsManager {
     fn spawn_catalog_retry(&self) {
         // Deliberate no-fetch state: a retry loop can never succeed, so don't
         // start one (defensive re-check; the spawn site already gates).
-        if !crate::util::config::resolve_remote_fetch_enabled() {
+        if !models_fetch_allowed() {
             return;
         }
         // Prevent overlapping retry loops.
@@ -1247,7 +1247,7 @@ impl ModelsManager {
                 notify.notified().await;
                 // Deliberate no-fetch state: skip the refresh entirely so the
                 // failure-classifying logs below keep meaning "actually failed".
-                if !crate::util::config::resolve_remote_fetch_enabled() {
+                if !models_fetch_allowed() {
                     tracing::debug!(
                         "model catalog: auth refresh watcher skipped (remote_fetch disabled)"
                     );
@@ -1418,7 +1418,7 @@ impl ModelsManager {
 
     fn spawn_fetch(&self, new_etag: Option<String>) {
         // Degrade to Offline: keep serving the current (cache/static) catalog.
-        if !crate::util::config::resolve_remote_fetch_enabled() {
+        if !models_fetch_allowed() {
             tracing::info!("model catalog refresh skipped: remote_fetch disabled");
             return;
         }
@@ -1487,8 +1487,7 @@ impl ModelsManager {
     }
 
     async fn fetch_and_apply(&self) {
-        self.fetch_and_apply_inner(crate::util::config::resolve_remote_fetch_enabled())
-            .await
+        self.fetch_and_apply_inner(models_fetch_allowed()).await
     }
 
     /// `remote_fetch_enabled` is a parameter so tests can drive the gate
@@ -1920,6 +1919,19 @@ pub(crate) fn prefetch_models_blocking(
 /// prefetch thread and the leader's startup phase so the settings gate lives
 /// once. The remote_fetch knob is resolved a single time so the two fetch
 /// decisions cannot disagree mid-startup.
+/// Whether the *model catalog* may be fetched.
+///
+/// `remote_fetch` is about xAI backends; a custom `GROK_MODELS_BASE_URL` is
+/// somebody else's gateway, so its catalog stays reachable with the knob off.
+/// Used by every gate (startup prefetch, auth-change fetch, retry loop, auth
+/// refresh watcher, manual refresh) so they cannot drift apart — a carve-out in
+/// only the startup gate would leave the run with a one-shot catalog and no
+/// retry.
+fn models_fetch_allowed() -> bool {
+    crate::util::config::resolve_remote_fetch_enabled()
+        || crate::agent::config::EndpointsConfig::from_effective_config().has_custom_endpoint()
+}
+
 pub(crate) fn prefetch_models_and_settings_blocking(
     endpoints: &config::EndpointsConfig,
     auth: Option<&GrokAuth>,

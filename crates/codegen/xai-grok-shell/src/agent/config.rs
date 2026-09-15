@@ -5934,6 +5934,9 @@ pub(crate) fn model_has_usable_credential(
     disable_api_key_auth: bool,
 ) -> bool {
     deployment_key.is_some()
+        // A named `auth_provider` mints its token before the turn, so a cold
+        // cache at authenticate time must not read as "no credential at all".
+        || model.effective_auth_provider().is_some()
         || resolve_credentials_enforced(model, session_key, disable_api_key_auth)
             .api_key
             .is_some()
@@ -8723,6 +8726,35 @@ reasoning_effort = "low"
         assert!(message.contains("GROK_API_KEY"), "{message}");
         assert!(message.contains("GROK_MODELS_BASE_URL"), "{message}");
         assert!(message.contains("grok-4.5"), "{message}");
+    }
+
+    /// A model with a named `auth_provider` mints its token *before* the turn,
+    /// so a cold cache at authenticate time must not read as "no credential":
+    /// the preflight would otherwise fail a run that works.
+    #[test]
+    #[serial_test::serial]
+    fn model_has_usable_credential_accepts_a_cold_auth_provider() {
+        use crate::agent::auth_method::{GROK_API_KEY_ENV_VAR, LEGACY_XAI_API_KEY_ENV_VAR};
+        use xai_grok_test_support::EnvGuard;
+        let _g1 = EnvGuard::unset(GROK_API_KEY_ENV_VAR);
+        let _g2 = EnvGuard::unset(LEGACY_XAI_API_KEY_ENV_VAR);
+        let _g3 = EnvGuard::unset("XAI_API_KEY");
+
+        let mut model = test_model_entry("m", "https://api.x.ai/v1", None, None, None);
+        assert!(!model_has_usable_credential(&model, None, None, false));
+
+        model.auth_provider = Some(crate::auth::AuthProviderRef::new(
+            "corp-sso".to_string(),
+            Default::default(),
+        ));
+        assert!(
+            model_has_usable_credential(&model, None, None, false),
+            "an auth_provider mints pre-turn; the cold cache is not 'no credential'"
+        );
+
+        // An own credential outranks the provider, and still counts.
+        model.api_key = Some("inline-key".to_string());
+        assert!(model_has_usable_credential(&model, None, None, false));
     }
 
     fn api_key_creds(base_url: &str) -> ResolvedCredentials {

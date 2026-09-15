@@ -865,6 +865,10 @@ impl MvpAgent {
         let user_id = auth.user_id.clone();
         let team_id = auth.team_id.clone();
         let remote_was_absent = self.cfg.borrow().remote_settings.is_none();
+        // A login is exactly the "network changed" signal the startup latch
+        // waits for: without this, a DNS/VPN blip during startup would keep
+        // remote settings disabled for the rest of the process.
+        crate::remote::client::reset_settings_fetch_latch();
         let Some(settings) = self.fetch_remote_settings(auth.clone()).await else {
             tracing::warn!("post-auth settings refresh failed (HTTP or parse error)");
             return;

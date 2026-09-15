@@ -37,6 +37,9 @@ pub fn bootstrap(
     prefetched: Option<IndexMap<String, ModelEntry>>,
 ) -> Result<(AgentConfig, ModelsManager), String> {
     let started = Instant::now();
+    // Before `resolve_config`: its Writeback downgrade and the managed-config
+    // gate both read `is_xai_auth`, so the switch has to be in place first.
+    apply_xai_switch(cfg);
     // Fail closed before any policy is read: a tampered managed policy must not run unmanaged.
     crate::managed_config::managed_policy_gate()?;
     let t_config_resolve = Instant::now();
@@ -144,22 +147,31 @@ fn resolve_config(cfg: &AgentConfig, auth_manager: &AuthManager) -> AgentConfig 
 
 /// Initialize process-level singletons (deployment sync, built-in metadata,
 /// telemetry). `Once`-guarded: only the first call takes effect.
+/// Apply the process-wide xAI switch (`GROK_XAI_ENABLED` env > `[xai] enabled`
+/// config > enabled).
+///
+/// Idempotent, and callable before `bootstrap`: consumers of `is_xai_auth` run
+/// *earlier* than `init_process` on the leader and headless paths (the relay
+/// gate, the Writeback downgrade in `resolve_config`, the session-refresh
+/// gate), so applying it only inside the `Once` there would leave them reading
+/// the pre-switch value.
+pub fn apply_xai_switch(cfg: &AgentConfig) {
+    crate::util::set_xai_enabled(crate::util::resolve_xai_enabled_from(cfg.xai.enabled));
+    if !crate::util::xai_enabled() {
+        tracing::info!(
+            env = crate::util::XAI_ENABLED_ENV,
+            config = ?cfg.xai.enabled,
+            "xAI surfaces disabled"
+        );
+    }
+}
+
 /// Telemetry user ID is updated separately via [`update_telemetry_config`].
 fn init_process(cfg: &AgentConfig, auth_manager: &AuthManager) {
     use std::sync::Once;
     static INIT: Once = Once::new();
     INIT.call_once(|| {
-        // `GROK_XAI_ENABLED=0` (env) or `[xai] enabled = false` (config) turns
-        // every xAI-hosted surface off for this process before anything reads
-        // `is_xai_auth`. The env var wins when both are set.
-        crate::util::set_xai_enabled(crate::util::resolve_xai_enabled_from(cfg.xai.enabled));
-        if !crate::util::xai_enabled() {
-            tracing::info!(
-                env = crate::util::XAI_ENABLED_ENV,
-                config = ?cfg.xai.enabled,
-                "xAI surfaces disabled"
-            );
-        }
+        apply_xai_switch(cfg);
 
         if !cfg!(test) {
             // Clear a logged-out team's files before the background sync runs.

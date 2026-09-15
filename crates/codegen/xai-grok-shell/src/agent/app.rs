@@ -335,6 +335,8 @@ pub async fn run_stdio_agent(
     prefetched_models: Option<IndexMap<String, ModelEntry>>,
     memory_config: Option<crate::config::MemoryConfig>,
 ) -> anyhow::Result<()> {
+    // Before any `is_xai_auth` reader (the relay gate below included).
+    crate::agent::init::apply_xai_switch(agent_config);
     register_fs_watch_runtime();
     // Stamp binary version into unified log entries so zombie processes
     // are identifiable by version in diagnostic logs.
@@ -490,6 +492,9 @@ async fn run_headless_inner(
     no_browser: bool,
     memory_config: Option<crate::config::MemoryConfig>,
 ) -> anyhow::Result<()> {
+    // Before the relay gate and the auth flow: both read `is_xai_auth`, and a
+    // disabled switch must mean "no relay" here too.
+    crate::agent::init::apply_xai_switch(agent_config);
     register_fs_watch_runtime();
     xai_grok_telemetry::unified_log::set_version(xai_grok_version::VERSION);
     // `grok agent [headless]` serves non-TUI automation; stamp proxy requests
@@ -1004,6 +1009,8 @@ pub async fn run_leader(
     auto_update_check: Option<LeaderAutoUpdateConfig>,
     memory_config: Option<crate::config::MemoryConfig>,
 ) -> anyhow::Result<()> {
+    // Before the relay gate: it reads `is_xai_auth`.
+    crate::agent::init::apply_xai_switch(agent_config);
     use crate::agent::relay::RelayConfig;
     use crate::leader::{
         LeaderLock, LeaderServerControlState, LeaderServerMetadata, ShutdownReason,
