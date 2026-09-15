@@ -87,6 +87,9 @@ pub fn is_xai_api_url(url: &str) -> bool {
 /// sessions/workspaces, managed MCP, trace upload and telemetry identity all
 /// go quiet even when an xAI credential happens to be present. Intended for
 /// harnesses and air-gapped runs that must not depend on xAI at all.
+///
+/// The same switch is configurable as `[xai] enabled = false` in `config.toml`;
+/// the env var wins when both are set ([`resolve_xai_enabled_from`]).
 pub const XAI_ENABLED_ENV: &str = "GROK_XAI_ENABLED";
 
 static XAI_ENABLED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
@@ -104,7 +107,19 @@ pub fn set_xai_enabled(enabled: bool) {
 /// Resolve the switch from the environment; defaults to enabled. Strict
 /// parsing, so a typo cannot silently disable the xAI surfaces.
 pub fn resolve_xai_enabled() -> bool {
-    xai_grok_config::env_bool(XAI_ENABLED_ENV).unwrap_or(true)
+    resolve_xai_enabled_from(None)
+}
+
+/// Resolve the switch from the environment and a `config.toml` tier value.
+///
+/// Precedence: `GROK_XAI_ENABLED` (strict) > `config_value` (the effective
+/// `[xai] enabled` key) > `true`. A blank or unrecognized env value falls
+/// through to the config tier, so a typo cannot silently disable the xAI
+/// surfaces and an org can pin the switch in `config.toml` without an env var.
+pub fn resolve_xai_enabled_from(config_value: Option<bool>) -> bool {
+    xai_grok_config::env_bool(XAI_ENABLED_ENV)
+        .or(config_value)
+        .unwrap_or(true)
 }
 /// Like [`is_xai_api_url`], but requires `https` on every arm, so a
 /// session bearer is never attached to a cleartext endpoint, including loopback
@@ -334,6 +349,45 @@ mod tests {
         assert_eq!(truncate("hello", 5), "hello");
         assert_eq!(truncate("hello world", 5), "hello");
         assert_eq!(truncate("abc🎉🎉def", 5), "abc🎉🎉");
+    }
+
+    /// Env wins over the config tier, in both directions.
+    #[test]
+    fn resolve_xai_enabled_from_env_beats_config() {
+        let _env = xai_grok_env::EnvVarGuard::set(XAI_ENABLED_ENV, "0");
+        assert!(!resolve_xai_enabled_from(Some(true)));
+    }
+
+    /// Config wins over the default; an unset everything still enables xAI.
+    #[test]
+    fn resolve_xai_enabled_from_config_beats_default() {
+        let _env = xai_grok_env::EnvVarGuard::remove(XAI_ENABLED_ENV);
+        assert!(!resolve_xai_enabled_from(Some(false)));
+        assert!(resolve_xai_enabled_from(Some(true)));
+        assert!(resolve_xai_enabled_from(None));
+    }
+
+    /// A blank or unrecognized env value must fall through to the config tier
+    /// (and then the default) instead of silently disabling the xAI surfaces.
+    #[test]
+    fn resolve_xai_enabled_from_blank_or_junk_env_falls_through() {
+        for raw in ["", "   ", "maybe"] {
+            let _env = xai_grok_env::EnvVarGuard::set(XAI_ENABLED_ENV, raw);
+            assert!(
+                !resolve_xai_enabled_from(Some(false)),
+                "{raw:?} must fall through to the config tier"
+            );
+            assert!(
+                resolve_xai_enabled_from(None),
+                "{raw:?} must fall through to the default"
+            );
+        }
+    }
+
+    #[test]
+    fn resolve_xai_enabled_is_env_only() {
+        let _env = xai_grok_env::EnvVarGuard::remove(XAI_ENABLED_ENV);
+        assert!(resolve_xai_enabled());
     }
     #[test]
     fn is_process_alive_current_process() {

@@ -139,6 +139,41 @@ pub(super) fn load_request_for_resume(args: acp::ResumeSessionRequest) -> acp::L
         .mcp_servers(mcp_servers)
         .meta(meta)
 }
+impl MvpAgent {
+    /// `Some(remedy)` when the effective model has no credential on *any*
+    /// route, so the run would otherwise reach the provider and fail on an
+    /// opaque `HTTP 415`/`401` after the first round trip.
+    ///
+    /// Deliberately conservative: an unknown/unresolvable current model reports
+    /// no problem, and every credential route (model `api_key`/`env_key`,
+    /// provider vault, auth-provider token, session token, `GROK_API_KEY` /
+    /// `XAI_API_KEY`, deployment key) suppresses the failure.
+    fn no_credential_preflight(&self) -> Option<String> {
+        let session_key = self.auth_manager.current_or_expired().map(|a| a.key);
+        let models = self.models_manager.models();
+        let current = self.models_manager.current_model_id();
+        let entry = models.get(current.0.as_ref())?;
+        let (deployment_key, disable_api_key_auth) = {
+            let cfg = self.cfg.borrow();
+            (
+                cfg.endpoints.deployment_key.clone(),
+                cfg.grok_com_config.api_key_auth_disabled(),
+            )
+        };
+        if crate::agent::config::model_has_usable_credential(
+            entry,
+            session_key.as_deref(),
+            deployment_key.as_deref(),
+            disable_api_key_auth,
+        ) {
+            return None;
+        }
+        Some(crate::agent::config::no_credential_message(
+            entry.info.model.as_str(),
+        ))
+    }
+}
+
 #[async_trait::async_trait(?Send)]
 impl acp::Agent for MvpAgent {
     /// In the meta, we provide
@@ -746,6 +781,16 @@ impl acp::Agent for MvpAgent {
                 self.ensure_telemetry_client();
                 if crate::agent::chat_modes::process_chat_mode_enabled() {
                     self.chat_modes.warm_in_background();
+                }
+                // With no credential on any route the run would reach the first
+                // request and die on an opaque provider 415/401; fail here
+                // instead, naming the remedy. Headless `-p` turns this into a
+                // non-zero exit; the TUI swallows it and keeps the login-aware
+                // welcome flow.
+                if let Some(message) = self.no_credential_preflight() {
+                    tracing::warn!(%message, "auth: no credential on any route");
+                    emit_login_span(false, "api_key", None, Some("no_credential"));
+                    return Err(acp::Error::auth_required().data(message));
                 }
                 emit_login_span(true, "api_key", None, None);
                 log_event(xai_grok_telemetry::events::Login {

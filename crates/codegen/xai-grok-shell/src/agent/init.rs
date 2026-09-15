@@ -149,13 +149,15 @@ fn init_process(cfg: &AgentConfig, auth_manager: &AuthManager) {
     use std::sync::Once;
     static INIT: Once = Once::new();
     INIT.call_once(|| {
-        // `GROK_XAI_ENABLED=0` turns every xAI-hosted surface off for this
-        // process before anything reads `is_xai_auth`.
-        crate::util::set_xai_enabled(crate::util::resolve_xai_enabled());
+        // `GROK_XAI_ENABLED=0` (env) or `[xai] enabled = false` (config) turns
+        // every xAI-hosted surface off for this process before anything reads
+        // `is_xai_auth`. The env var wins when both are set.
+        crate::util::set_xai_enabled(crate::util::resolve_xai_enabled_from(cfg.xai.enabled));
         if !crate::util::xai_enabled() {
             tracing::info!(
-                "xAI surfaces disabled by {}=0",
-                crate::util::XAI_ENABLED_ENV
+                env = crate::util::XAI_ENABLED_ENV,
+                config = ?cfg.xai.enabled,
+                "xAI surfaces disabled"
             );
         }
 

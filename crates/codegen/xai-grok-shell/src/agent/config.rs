@@ -1255,6 +1255,23 @@ pub struct DiagnosticsConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub crash_handler: Option<bool>,
 }
+/// `[xai]` section: first-party xAI surface switch.
+///
+/// ```toml
+/// [xai]
+/// enabled = false
+/// ```
+///
+/// `enabled = false` is the config twin of `GROK_XAI_ENABLED=0` and reaches the
+/// same process-wide flag via [`crate::util::resolve_xai_enabled_from`]; the env
+/// var wins when both are set. `None` defers to the env/default (enabled).
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct XaiConfig {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub enabled: Option<bool>,
+}
+
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ModelsConfig {
@@ -1723,6 +1740,10 @@ pub struct Config {
     /// `[diagnostics]` — crash handler toggle (`load_crash_handler_enabled_sync`).
     #[serde(default, skip_serializing)]
     pub diagnostics: DiagnosticsConfig,
+    /// `[xai]` — first-party xAI surface switch; consumed by `init_process`
+    /// through `resolve_xai_enabled_from`.
+    #[serde(default)]
+    pub xai: XaiConfig,
     /// Storage mode for session persistence.
     /// When running in relay/headless mode, this should be set to Writeback.
     /// Defaults to reading from GROK_STORAGE_MODE env var.
@@ -2109,6 +2130,7 @@ impl Default for Config {
             suggestions: SuggestionsConfig::default(),
             marketplace: MarketplaceConfig::default(),
             diagnostics: DiagnosticsConfig::default(),
+            xai: XaiConfig::default(),
             storage_mode: StorageMode::resolve(None, None),
             default_model_override: None,
             reasoning_effort_override: None,
@@ -5550,6 +5572,12 @@ pub struct Features {
     /// when set, the agent may ask permission for tool executions
     #[serde(default)]
     pub support_permission: bool,
+    /// Whether the startup model-catalog and remote-settings fetches are
+    /// allowed. Resolved by the layer walk in `util::config::resolve::features`
+    /// (env `GROK_REMOTE_FETCH` > requirements > managed > user), so this field
+    /// only makes the key recognizable. `None` = defer to env/default (on).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remote_fetch: Option<bool>,
     /// `None` = defer to remote settings / default (off).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub telemetry: Option<TelemetryMode>,
@@ -5888,6 +5916,38 @@ pub(crate) fn resolve_credentials_enforced(
     let mut credentials = resolve_credentials(entry, session_key);
     enforce_disable_api_key_auth(&mut credentials, disable_api_key_auth, session_key);
     credentials
+}
+
+/// Whether *any* credential route can serve `model` for a request right now.
+///
+/// Union of every route [`resolve_credentials`] consults (per-model
+/// `api_key`/`env_key`, provider vault, auth-provider token, session token,
+/// `GROK_API_KEY`/`XAI_API_KEY` env) plus the deployment-key proxy path, with
+/// the `disable_api_key_auth` kill switch applied exactly like a real request.
+/// `false` means the next inference request would carry no bearer at all — the
+/// condition that surfaces as an opaque provider `HTTP 415`/`401` after the
+/// first round trip.
+pub(crate) fn model_has_usable_credential(
+    model: &ModelEntry,
+    session_key: Option<&str>,
+    deployment_key: Option<&str>,
+    disable_api_key_auth: bool,
+) -> bool {
+    deployment_key.is_some()
+        || resolve_credentials_enforced(model, session_key, disable_api_key_auth)
+            .api_key
+            .is_some()
+}
+
+/// Actionable remedy for a run whose effective model has no credential on any
+/// route: names both the non-interactive env tier (a plain bearer plus a
+/// non-xAI gateway) and the interactive login.
+pub(crate) fn no_credential_message(model_id: &str) -> String {
+    format!(
+        "No credential for model `{model_id}`: set GROK_API_KEY (a plain bearer) together with \
+         GROK_MODELS_BASE_URL=<endpoint>/v1 for a non-xAI gateway, or sign in with \
+         `grok provider connect xai`"
+    )
 }
 pub use xai_grok_telemetry::config::deployment_id_from_key;
 /// Try to resolve credentials for a model by loading the effective config.
@@ -7501,6 +7561,39 @@ reasoning_effort = "low"
             Some("custom-id-model".to_owned())
         );
     }
+    /// `[xai] enabled` is the config tier of the process-wide xAI switch; an
+    /// absent section (or key) must stay `None` so the env/default still wins.
+    #[test]
+    fn new_from_toml_cfg_parses_xai_enabled() {
+        let empty: toml::Value = toml::Value::Table(toml::map::Map::new());
+        assert_eq!(
+            Config::new_from_toml_cfg(&empty).unwrap().xai.enabled,
+            None,
+            "absent [xai] must not pin the switch"
+        );
+
+        let section_without_key: toml::Value = toml::from_str("[xai]").unwrap();
+        assert_eq!(
+            Config::new_from_toml_cfg(&section_without_key)
+                .unwrap()
+                .xai
+                .enabled,
+            None
+        );
+
+        let off: toml::Value = toml::from_str("[xai]\nenabled = false").unwrap();
+        assert_eq!(
+            Config::new_from_toml_cfg(&off).unwrap().xai.enabled,
+            Some(false)
+        );
+
+        let on: toml::Value = toml::from_str("[xai]\nenabled = true").unwrap();
+        assert_eq!(
+            Config::new_from_toml_cfg(&on).unwrap().xai.enabled,
+            Some(true)
+        );
+    }
+
     #[test]
     fn hidden_default_web_search_resolution_is_explicit_and_responses_only() {
         let endpoints = EndpointsConfig::default();
@@ -8562,6 +8655,76 @@ reasoning_effort = "low"
         let creds = resolve_credentials(&model, None);
         assert_eq!(creds.auth_type, xai_chat_state::AuthType::ApiKey);
     }
+    /// The pre-flight "no credential at all" predicate must not fire when *any*
+    /// route supplies a bearer, and must fire when none does.
+    #[test]
+    #[serial_test::serial]
+    fn model_has_usable_credential_covers_every_route() {
+        use crate::agent::auth_method::{GROK_API_KEY_ENV_VAR, LEGACY_XAI_API_KEY_ENV_VAR};
+        use xai_grok_test_support::EnvGuard;
+        let _g1 = EnvGuard::unset(GROK_API_KEY_ENV_VAR);
+        let _g2 = EnvGuard::unset(LEGACY_XAI_API_KEY_ENV_VAR);
+        let _g3 = EnvGuard::unset("XAI_API_KEY");
+
+        let bare = test_model_entry("m", "https://api.x.ai/v1", None, None, None);
+        assert!(
+            !model_has_usable_credential(&bare, None, None, false),
+            "no session, no env key, no deployment key, no own key => fail"
+        );
+
+        // Every other route suppresses the failure.
+        assert!(model_has_usable_credential(
+            &bare,
+            Some("session-jwt"),
+            None,
+            false
+        ));
+        assert!(model_has_usable_credential(
+            &bare,
+            None,
+            Some("deployment-key"),
+            false
+        ));
+        let with_own_key =
+            test_model_entry("m", "https://api.x.ai/v1", Some("model-key"), None, None);
+        assert!(model_has_usable_credential(
+            &with_own_key,
+            None,
+            None,
+            false
+        ));
+
+        {
+            let _env = EnvGuard::set(GROK_API_KEY_ENV_VAR, "env-bearer");
+            assert!(
+                model_has_usable_credential(&bare, None, None, false),
+                "GROK_API_KEY alone is a usable route"
+            );
+        }
+
+        // `disable_api_key_auth` swaps a first-party key for the session, so a
+        // key-only first-party run is genuinely credential-less under the switch.
+        assert!(
+            !model_has_usable_credential(&with_own_key, None, None, true),
+            "kill switch removes the only first-party route"
+        );
+        assert!(model_has_usable_credential(
+            &with_own_key,
+            Some("session-jwt"),
+            None,
+            true
+        ));
+    }
+
+    /// The remedy must name both halves of the non-interactive fix.
+    #[test]
+    fn no_credential_message_names_the_remedy() {
+        let message = no_credential_message("grok-4.5");
+        assert!(message.contains("GROK_API_KEY"), "{message}");
+        assert!(message.contains("GROK_MODELS_BASE_URL"), "{message}");
+        assert!(message.contains("grok-4.5"), "{message}");
+    }
+
     fn api_key_creds(base_url: &str) -> ResolvedCredentials {
         ResolvedCredentials {
             api_key: Some("xai-secret".to_string()),
@@ -8570,7 +8733,6 @@ reasoning_effort = "low"
             auth_scheme: Default::default(),
         }
     }
-    /// `disable_api_key_auth` kill switch (Claude `forceLoginMethod` parity).
     #[test]
     fn enforce_disable_api_key_auth_blocks_first_party_only() {
         use xai_chat_state::AuthType;
