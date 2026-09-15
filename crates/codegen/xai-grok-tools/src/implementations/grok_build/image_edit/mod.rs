@@ -903,16 +903,16 @@ mod tests {
     }
 
     /// `wiremock`'s `body_string_contains` refuses a body that is not valid UTF-8,
-/// and a multipart body carries raw JPEG bytes. Decode lossily instead.
-struct BodyContainsLossy(&'static str);
+    /// and a multipart body carries raw JPEG bytes. Decode lossily instead.
+    struct BodyContainsLossy(&'static str);
 
-impl wiremock::Match for BodyContainsLossy {
-    fn matches(&self, request: &wiremock::Request) -> bool {
-        String::from_utf8_lossy(&request.body).contains(self.0)
+    impl wiremock::Match for BodyContainsLossy {
+        fn matches(&self, request: &wiremock::Request) -> bool {
+            String::from_utf8_lossy(&request.body).contains(self.0)
+        }
     }
-}
 
-/// OpenAI-shaped endpoint: `multipart/form-data` with the image as a file
+    /// OpenAI-shaped endpoint: `multipart/form-data` with the image as a file
     /// part, and the OpenAI `size` field instead of the xAI pair.
     #[tokio::test]
     async fn openai_shape_gateway_uses_multipart() {

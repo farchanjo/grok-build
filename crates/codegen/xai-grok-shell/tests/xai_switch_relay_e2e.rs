@@ -80,10 +80,7 @@ fn init_line() -> String {
 }
 
 /// Spawn `agent headless` with a grok.com session and the given switch value.
-async fn spawn_headless_with_session(
-    server: &MockInferenceServer,
-    switch: &str,
-) -> RawStdioClient {
+async fn spawn_headless_with_session(server: &MockInferenceServer, switch: &str) -> RawStdioClient {
     let mut sandbox = git_workdir();
     sandbox.set_env("GROK_AUTH", grok_session_json());
     sandbox.set_env("GROK_XAI_ENABLED", switch);

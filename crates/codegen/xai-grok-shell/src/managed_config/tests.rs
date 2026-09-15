@@ -39,13 +39,19 @@ fn is_fetch_enabled_is_disarmed_by_the_xai_switch() {
     {
         let _on = EnvGuard::set(crate::util::XAI_ENABLED_ENV, "1");
         let _feature_on = EnvGuard::set("GROK_MANAGED_CONFIG", "1");
-        assert!(is_fetch_enabled(), "the switch on leaves the feature gate in charge");
+        assert!(
+            is_fetch_enabled(),
+            "the switch on leaves the feature gate in charge"
+        );
     }
 
     {
         let _on = EnvGuard::set(crate::util::XAI_ENABLED_ENV, "1");
         let _feature_off = EnvGuard::set("GROK_MANAGED_CONFIG", "0");
-        assert!(!is_fetch_enabled(), "the feature gate still disarms on its own");
+        assert!(
+            !is_fetch_enabled(),
+            "the feature gate still disarms on its own"
+        );
     }
 
     // A junk env value falls through to the config tier/default, so a typo

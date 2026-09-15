@@ -206,7 +206,9 @@ mod tests {
                 api_base: base.into(),
                 ..VoiceConfig::default()
             };
-            let err = cfg.stt_ws_url().expect_err("plaintext base must be rejected");
+            let err = cfg
+                .stt_ws_url()
+                .expect_err("plaintext base must be rejected");
             assert!(
                 matches!(err, VoiceError::Config(_)),
                 "expected a config error, got {err:?}"

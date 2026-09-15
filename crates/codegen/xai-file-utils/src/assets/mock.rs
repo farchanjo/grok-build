@@ -696,8 +696,7 @@ mod tests {
             .progress_steps(4, Duration::from_millis(1))
             .build();
         let progress = ProgressHandle::new();
-        let request = put_request("uploads/a.txt", b"0123456789")
-            .with_progress(progress.clone());
+        let request = put_request("uploads/a.txt", b"0123456789").with_progress(progress.clone());
         store.put_file(request).await.unwrap();
         assert_eq!(progress.transferred(), 10);
         assert_eq!(progress.total(), Some(10));

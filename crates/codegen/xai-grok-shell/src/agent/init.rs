@@ -162,9 +162,9 @@ fn resolve_config(cfg: &AgentConfig, auth_manager: &AuthManager) -> AgentConfig 
 /// the pre-switch value.
 pub fn apply_xai_switch(cfg: &AgentConfig) {
     crate::util::set_xai_enabled(crate::util::resolve_xai_enabled_from(cfg.xai.enabled));
-    crate::util::set_first_party_loopback(
-        crate::util::resolve_first_party_loopback_from(cfg.endpoints.first_party_loopback),
-    );
+    crate::util::set_first_party_loopback(crate::util::resolve_first_party_loopback_from(
+        cfg.endpoints.first_party_loopback,
+    ));
     if !crate::util::xai_enabled() {
         tracing::info!(
             env = crate::util::XAI_ENABLED_ENV,

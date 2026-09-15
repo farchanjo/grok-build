@@ -213,10 +213,7 @@ impl JobSnapshot {
     pub fn summary(&self) -> String {
         let mut line = format!(
             "{} {} ({}) is {}",
-            self.kind,
-            self.key,
-            self.backend,
-            self.state
+            self.kind, self.key, self.backend, self.state
         );
         match self.bytes_total {
             Some(total) => line.push_str(&format!(
@@ -594,10 +591,7 @@ impl JobEntry {
     }
 
     fn outcome(&self) -> Option<JobOutcome> {
-        self.outcome
-            .read()
-            .expect("job outcome poisoned")
-            .clone()
+        self.outcome.read().expect("job outcome poisoned").clone()
     }
 
     /// Terminal timestamp, when finished.
@@ -666,10 +660,7 @@ impl AssetJobRegistry {
             clippy::unwrap_or_default,
             reason = "ProgressHandle::default() is the inactive handle; new() allocates a sink"
         )]
-        let progress = request
-            .progress
-            .clone()
-            .unwrap_or_else(ProgressHandle::new);
+        let progress = request.progress.clone().unwrap_or_else(ProgressHandle::new);
         let mut request = request;
         request.progress = Some(progress.clone());
 
@@ -833,7 +824,8 @@ impl AssetJobRegistry {
     /// Drop terminal jobs older than the TTL. Returns how many were removed.
     pub fn reap_expired(&self) -> usize {
         let now = Utc::now();
-        let ttl = chrono::Duration::from_std(self.ttl).unwrap_or_else(|_| chrono::Duration::hours(1));
+        let ttl =
+            chrono::Duration::from_std(self.ttl).unwrap_or_else(|_| chrono::Duration::hours(1));
         let mut jobs = self.jobs.lock().expect("job registry poisoned");
         let before = jobs.len();
         jobs.retain(|_, entry| match entry.ended_at() {
@@ -1029,8 +1021,8 @@ async fn poll_job(
 
         let mut emit = state_changed;
         if !emit && !past_cutoff {
-            let window_filled =
-                snapshot.bytes_transferred.saturating_sub(emitted_bytes) >= opts.buffer_bytes as u64;
+            let window_filled = snapshot.bytes_transferred.saturating_sub(emitted_bytes)
+                >= opts.buffer_bytes as u64;
             if window_filled {
                 emit = bucket.try_consume();
             }
@@ -1107,7 +1099,9 @@ mod tests {
     use super::*;
     use crate::assets::mock::MockAssetStore;
     use crate::assets::value::{DeleteOutcome, ListPage, ListQuery, PresignedUrl};
-    use crate::assets::{AssetOperation, BackendCapabilities, ContentType, StoreStatus, Visibility};
+    use crate::assets::{
+        AssetOperation, BackendCapabilities, ContentType, StoreStatus, Visibility,
+    };
     use bytes::Bytes;
     use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -1217,7 +1211,11 @@ mod tests {
             self.inner.list(query).await
         }
 
-        async fn presign_get(&self, key: &AssetKey, ttl: Duration) -> Result<PresignedUrl, AssetError> {
+        async fn presign_get(
+            &self,
+            key: &AssetKey,
+            ttl: Duration,
+        ) -> Result<PresignedUrl, AssetError> {
             self.inner.presign_get(key, ttl).await
         }
 
@@ -1297,7 +1295,11 @@ mod tests {
             Ok(ListPage::empty())
         }
 
-        async fn presign_get(&self, _key: &AssetKey, _ttl: Duration) -> Result<PresignedUrl, AssetError> {
+        async fn presign_get(
+            &self,
+            _key: &AssetKey,
+            _ttl: Duration,
+        ) -> Result<PresignedUrl, AssetError> {
             Err(AssetError::unsupported(
                 BackendKind::S3,
                 AssetOperation::PresignGet,
@@ -1347,10 +1349,7 @@ mod tests {
     async fn upload_job_runs_to_completion() {
         let registry = AssetJobRegistry::new();
         let mock = Arc::new(MockAssetStore::new());
-        let job_id = registry.spawn_upload(
-            mock.clone(),
-            upload_request("uploads/a.txt", b"hello"),
-        );
+        let job_id = registry.spawn_upload(mock.clone(), upload_request("uploads/a.txt", b"hello"));
 
         let snapshot = registry
             .wait_for_completion(&job_id, Some(Duration::from_secs(5)))

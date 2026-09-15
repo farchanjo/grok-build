@@ -267,7 +267,9 @@ mod tests {
         let ex = CapabilityMode::Execute.filter(&cfg);
         assert_eq!(
             names(&ex),
-            vec!["read", "search", "inspect", "bash", "bg", "plan", "ask", "other"]
+            vec![
+                "read", "search", "inspect", "bash", "bg", "plan", "ask", "other"
+            ]
         );
 
         let all = CapabilityMode::All.filter(&cfg);

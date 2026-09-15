@@ -1208,8 +1208,7 @@ mod xai_switch_relay_tests {
     fn relay_gate_loses_to_the_switch_applied_at_the_entry_points() {
         let ctx = GrokComConfig::default();
         let session = xai_session();
-        let _env =
-            xai_grok_test_support::EnvGuard::set(crate::util::XAI_ENABLED_ENV, "0");
+        let _env = xai_grok_test_support::EnvGuard::set(crate::util::XAI_ENABLED_ENV, "0");
         // Start from the un-applied default, exactly like a fresh process whose
         // entry point has not run its hoist yet.
         crate::util::set_xai_enabled(true);

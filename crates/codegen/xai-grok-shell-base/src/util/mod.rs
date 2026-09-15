@@ -426,7 +426,9 @@ mod tests {
     #[serial_test::serial]
     fn first_party_loopback_opt_out_leaves_other_hosts_alone() {
         set_first_party_loopback(false);
-        assert!(!is_cli_chat_proxy_url("http://localhost.example.com:8000/v1"));
+        assert!(!is_cli_chat_proxy_url(
+            "http://localhost.example.com:8000/v1"
+        ));
         assert!(!is_cli_chat_proxy_url("http://192.168.1.10:8000/v1"));
         assert!(!is_cli_chat_proxy_url("not-a-url"));
         set_first_party_loopback(true);

@@ -7621,10 +7621,8 @@ reasoning_effort = "low"
             "absent [endpoints] must not pin the opt-out"
         );
 
-        let section_without_key: toml::Value = toml::from_str(
-            "[endpoints]\nxai_api_base_url = \"https://api.x.ai/v1\"\n",
-        )
-        .unwrap();
+        let section_without_key: toml::Value =
+            toml::from_str("[endpoints]\nxai_api_base_url = \"https://api.x.ai/v1\"\n").unwrap();
         assert_eq!(
             Config::new_from_toml_cfg(&section_without_key)
                 .unwrap()
@@ -7633,7 +7631,8 @@ reasoning_effort = "low"
             None
         );
 
-        let off: toml::Value = toml::from_str("[endpoints]\nfirst_party_loopback = false\n").unwrap();
+        let off: toml::Value =
+            toml::from_str("[endpoints]\nfirst_party_loopback = false\n").unwrap();
         assert_eq!(
             Config::new_from_toml_cfg(&off)
                 .unwrap()

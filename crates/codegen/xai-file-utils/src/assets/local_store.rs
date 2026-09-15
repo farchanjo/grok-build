@@ -210,7 +210,7 @@ impl LocalAssetStore {
     }
 
     /// Stream `source` to `dest` atomically. Neither side is buffered whole, and
-/// every copied chunk is reported into `progress`.
+    /// every copied chunk is reported into `progress`.
     async fn stream_file_atomic(
         &self,
         dest: &Path,
