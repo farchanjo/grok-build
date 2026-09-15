@@ -141,7 +141,14 @@ impl GrokAuth {
     /// The issuer is a client-side hint, not a trust assertion: everything
     /// it unlocks still authenticates the actual token server-side, and it
     /// never influences endpoints.
+    ///
+    /// Also false when `GROK_XAI_ENABLED=0` (see [`crate::util::xai_enabled`]):
+    /// the credential can still be present, but every xAI-hosted surface is
+    /// treated as unavailable.
     pub fn is_xai_auth(&self) -> bool {
+        if !crate::util::xai_enabled() {
+            return false;
+        }
         match self.auth_mode {
             AuthMode::Oidc | AuthMode::External => self
                 .oidc_issuer

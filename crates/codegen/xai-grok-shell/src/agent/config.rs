@@ -5823,6 +5823,16 @@ pub fn resolve_credentials(model: &ModelEntry, session_key: Option<&str>) -> Res
                 "model has env_key configured but none of the environment variables are set — \
                  requests will have no API key",
             );
+        } else if crate::util::is_xai_api_url(&info.base_url) {
+            // No session, no API key, and the request is headed for xAI: name
+            // the remedy instead of letting the server answer an opaque 415.
+            tracing::warn!(
+                model = %info.model,
+                base_url = %info.base_url,
+                "no credential for this model: set GROK_API_KEY (a plain bearer) together with \
+                 GROK_MODELS_BASE_URL for a non-xAI gateway, or sign in with \
+                 `grok provider connect xai`",
+            );
         }
         (
             None,
@@ -6175,7 +6185,18 @@ pub fn resolve_chat_state_auth_type(
 /// `session::acp_session_impl::inference_turn`) so the two cannot drift.
 pub fn provider_identity_for_model(model: &ModelEntry) -> ProviderIdentity {
     match model.model_provider.as_ref().map(|provider| provider.kind) {
-        None => ProviderIdentity::Xai,
+        None => {
+            // No explicit provider used to mean "xAI", which stamps first-party
+            // `x-grok-*` headers and xAI-only request extensions onto whatever
+            // endpoint the model points at. Derive it from the URL instead: an
+            // xAI host (or the proxy) keeps the old behavior, a local or
+            // third-party gateway gets `Custom`.
+            if crate::util::is_xai_api_url(&model.info().base_url) {
+                ProviderIdentity::Xai
+            } else {
+                ProviderIdentity::Custom
+            }
+        }
         Some(ModelProviderKind::Xai) => ProviderIdentity::Xai,
         Some(ModelProviderKind::OpenAi) => ProviderIdentity::OpenAi,
         Some(ModelProviderKind::OpenRouter) => ProviderIdentity::OpenRouter,
@@ -9569,6 +9590,57 @@ reasoning_effort = "low"
         );
         assert_eq!(config.provider_identity, ProviderIdentity::Zai);
         assert_eq!(config.wire_dialect, Some(WireDialect::Standard));
+    }
+
+    /// A model with no explicit `model_provider` derives its identity from the
+    /// endpoint. Assuming xAI would stamp `x-grok-*` headers and xAI-only
+    /// request extensions onto a local or third-party gateway.
+    #[test]
+    fn provider_identity_without_model_provider_follows_the_base_url() {
+        let xai = test_model_entry("grok-4.5", "https://api.x.ai/v1", None, None, None);
+        assert_eq!(provider_identity_for_model(&xai), ProviderIdentity::Xai);
+
+        let proxy = test_model_entry(
+            "grok-4.5",
+            "https://cli-chat-proxy.grok.com/v1",
+            None,
+            None,
+            None,
+        );
+        assert_eq!(
+            provider_identity_for_model(&proxy),
+            ProviderIdentity::Xai,
+            "the xAI proxy is still first-party"
+        );
+
+        let local = test_model_entry("qwen3", "http://192.168.1.10:8000/v1", None, None, None);
+        assert_eq!(
+            provider_identity_for_model(&local),
+            ProviderIdentity::Custom,
+            "a LAN endpoint must not be treated as first-party"
+        );
+
+        // Loopback stays first-party: `is_xai_api_url` accepts it so local mock
+        // servers keep behaving like the proxy (and `x-grok-*` headers are
+        // harmless for a real local server).
+        let loopback = test_model_entry("qwen3", "http://localhost:8000/v1", None, None, None);
+        assert_eq!(
+            provider_identity_for_model(&loopback),
+            ProviderIdentity::Xai
+        );
+
+        let gateway = test_model_entry(
+            "deepseek/deepseek-v4.1-flash",
+            "https://gateway.example/v1",
+            None,
+            None,
+            None,
+        );
+        assert_eq!(
+            provider_identity_for_model(&gateway),
+            ProviderIdentity::Custom,
+            "a third-party gateway must not be treated as first-party"
+        );
     }
 
     /// DashScope keeps a real 1:1 provider identity, and its thinking knobs

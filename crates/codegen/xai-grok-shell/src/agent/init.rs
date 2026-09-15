@@ -149,6 +149,16 @@ fn init_process(cfg: &AgentConfig, auth_manager: &AuthManager) {
     use std::sync::Once;
     static INIT: Once = Once::new();
     INIT.call_once(|| {
+        // `GROK_XAI_ENABLED=0` turns every xAI-hosted surface off for this
+        // process before anything reads `is_xai_auth`.
+        crate::util::set_xai_enabled(crate::util::resolve_xai_enabled());
+        if !crate::util::xai_enabled() {
+            tracing::info!(
+                "xAI surfaces disabled by {}=0",
+                crate::util::XAI_ENABLED_ENV
+            );
+        }
+
         if !cfg!(test) {
             // Clear a logged-out team's files before the background sync runs.
             crate::managed_config::clear_orphan();

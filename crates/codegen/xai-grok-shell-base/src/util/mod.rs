@@ -79,6 +79,33 @@ pub fn is_cli_chat_proxy_url(url: &str) -> bool {
 pub fn is_xai_api_url(url: &str) -> bool {
     is_xai_api_url_impl(url, false)
 }
+
+/// Env switch that turns every xAI-hosted surface off for this process.
+///
+/// `GROK_XAI_ENABLED=0` makes [`xai_enabled`] false, which
+/// `GrokAuth::is_xai_auth` consults: relay, share, billing, Writeback, remote
+/// sessions/workspaces, managed MCP, trace upload and telemetry identity all
+/// go quiet even when an xAI credential happens to be present. Intended for
+/// harnesses and air-gapped runs that must not depend on xAI at all.
+pub const XAI_ENABLED_ENV: &str = "GROK_XAI_ENABLED";
+
+static XAI_ENABLED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+
+/// Whether xAI-hosted surfaces are considered available this process.
+pub fn xai_enabled() -> bool {
+    XAI_ENABLED.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Override [`xai_enabled`]. Called once at agent init from the environment.
+pub fn set_xai_enabled(enabled: bool) {
+    XAI_ENABLED.store(enabled, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Resolve the switch from the environment; defaults to enabled. Strict
+/// parsing, so a typo cannot silently disable the xAI surfaces.
+pub fn resolve_xai_enabled() -> bool {
+    xai_grok_config::env_bool(XAI_ENABLED_ENV).unwrap_or(true)
+}
 /// Like [`is_xai_api_url`], but requires `https` on every arm, so a
 /// session bearer is never attached to a cleartext endpoint, including loopback
 /// (a co-located process could otherwise read a token sent to `http://localhost`).
