@@ -1929,7 +1929,14 @@ pub(crate) fn prefetch_models_and_settings_blocking(
     Option<crate::util::config::RemoteSettings>,
 ) {
     let remote_fetch_enabled = crate::util::config::resolve_remote_fetch_enabled();
-    let models = prefetch_models_blocking_gated(endpoints, auth, fetch_auth, remote_fetch_enabled);
+    // The knob is about *xAI* backends. A custom models endpoint
+    // (`GROK_MODELS_BASE_URL`) is somebody else's gateway, so its catalog stays
+    // reachable even with the knob off — otherwise an off-xAI run has no model
+    // list at all and silently falls back to a bundled/preset entry the gateway
+    // does not serve. Settings still follow the knob (they need a grok.com
+    // session, so they are xAI by definition).
+    let fetch_models = remote_fetch_enabled || endpoints.has_custom_endpoint();
+    let models = prefetch_models_blocking_gated(endpoints, auth, fetch_auth, fetch_models);
     // Settings need a grok.com session; skip for BYOK.
     let settings = match auth {
         Some(auth) if remote_fetch_enabled => {
@@ -2041,9 +2048,15 @@ fn resolve_prefetch_env_from_parts(
     endpoints: config::EndpointsConfig,
     remote_fetch_enabled: bool,
 ) -> Option<PrefetchEnv> {
-    if !remote_fetch_enabled {
+    if !remote_fetch_enabled && !endpoints.has_custom_endpoint() {
         tracing::info!("startup model/settings prefetch skipped: remote_fetch disabled");
         return None;
+    }
+    if !remote_fetch_enabled {
+        tracing::info!(
+            "remote_fetch disabled but a custom models endpoint is configured: \
+             still fetching the model catalog from it"
+        );
     }
 
     let model_fetch_auth = ModelFetchAuth::resolve(&endpoints, auth.is_some());
@@ -4265,9 +4278,10 @@ mod tests {
     #[serial]
     fn prefetch_env_none_when_remote_fetch_disabled_despite_credentials() {
         let _key = EnvGuard::set("XAI_API_KEY", "stray-env-key");
+        // No custom endpoint: the knob really does disarm everything, even with
+        // a stray credential that would otherwise re-arm it.
         let endpoints = config::EndpointsConfig {
             deployment_key: Some("deploy-key".to_owned()),
-            models_base_url: Some("https://custom.example.com".to_owned()),
             ..config::EndpointsConfig::default()
         };
         assert!(
@@ -4281,7 +4295,28 @@ mod tests {
         );
         assert!(
             resolve_prefetch_env_from_parts(None, endpoints, false).is_none(),
-            "API key / deployment key / custom endpoint must not re-arm it either",
+            "API key / deployment key must not re-arm it either",
+        );
+    }
+
+    /// A custom models endpoint is not an xAI backend, so the knob does not
+    /// disarm its catalog: an off-xAI run still needs a model list, and without
+    /// one it silently falls back to a bundled entry the gateway cannot serve.
+    #[test]
+    #[serial]
+    fn prefetch_env_survives_remote_fetch_disabled_with_custom_endpoint() {
+        let _unset = EnvGuard::unset("XAI_API_KEY");
+        let _unset_legacy = EnvGuard::unset("GROK_CODE_XAI_API_KEY");
+        let endpoints = config::EndpointsConfig {
+            models_base_url: Some("https://custom.example.com".to_owned()),
+            ..config::EndpointsConfig::default()
+        };
+        let env = resolve_prefetch_env_from_parts(None, endpoints, false)
+            .expect("custom endpoint keeps the prefetch armed when remote_fetch is off");
+        assert_eq!(
+            env.model_fetch_auth,
+            ModelFetchAuth::CustomEndpoint,
+            "the catalog must come from the custom endpoint"
         );
     }
 
