@@ -1,0 +1,799 @@
+//! The `xai` backend: a minimal, purpose-built HTTP client for calling the
+//! Responses API with web search capability.
+//!
+//! Wire-identical to the historical `WebSearchClient`: `POST {base_url}/responses`
+//! with the same payload, headers, 401 attribution and response parsing. This
+//! module is the moved implementation; only the type name changed.
+
+use async_openai::types::responses as rs;
+use reqwest::header::{AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderValue};
+
+use crate::attribution::{SharedAttributionCallback, ToolConsumer};
+use crate::types::SharedApiKeyProvider;
+
+use super::{
+    SearchHit, SearchProvider, SearchRequest, SearchResponse, WebSearchBackend, headers_from_extra,
+    http_client_with_headers, web_search_tool_id,
+};
+use crate::implementations::web_search::types::WebSearchConfig;
+
+/// Responses-API client with web search capability.
+#[derive(Clone)]
+pub struct XaiBackend {
+    http: reqwest::Client,
+    base_url: String,
+    model: String,
+    api_key_provider: Option<SharedApiKeyProvider>,
+    /// Optional 401-attribution hook. Callers can wire this so a 401
+    /// from the Responses API emits an `auth_401_attribution` event
+    /// with `consumer == "WebSearch"`.
+    attribution_callback: Option<SharedAttributionCallback>,
+}
+
+impl XaiBackend {
+    /// Create a backend from the resolved endpoint settings.
+    ///
+    /// Returns `Err` only if a header value is invalid; a missing base URL or
+    /// key is reported by [`WebSearchBackend::is_configured`] so the tool can
+    /// name the remedy.
+    pub fn new(
+        base_url: &str,
+        api_key: &str,
+        model: &str,
+        extra_headers: &indexmap::IndexMap<String, String>,
+        api_key_provider: Option<SharedApiKeyProvider>,
+    ) -> Result<Self, xai_tool_runtime::ToolError> {
+        let mut headers = HeaderMap::new();
+        headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
+        if !api_key.is_empty() {
+            headers.insert(
+                AUTHORIZATION,
+                HeaderValue::from_str(&format!("Bearer {api_key}")).map_err(|error| {
+                    xai_tool_runtime::ToolError::execution(
+                        web_search_tool_id(),
+                        format!("Invalid API key for header: {error}"),
+                    )
+                })?,
+            );
+        }
+        headers.extend(headers_from_extra(extra_headers)?);
+        let http = http_client_with_headers(headers, "xai")?;
+        Ok(Self {
+            http,
+            base_url: base_url.to_string(),
+            model: model.to_string(),
+            api_key_provider,
+            attribution_callback: None,
+        })
+    }
+
+    /// Create a backend from a [`WebSearchConfig`] whose provider is `xai`.
+    ///
+    /// Returns `Err` for `Disabled` or for a config naming another provider.
+    pub fn from_config(
+        config: &WebSearchConfig,
+        api_key_provider: Option<SharedApiKeyProvider>,
+    ) -> Result<Self, xai_tool_runtime::ToolError> {
+        match config {
+            WebSearchConfig::Enabled {
+                api_key,
+                base_url,
+                model,
+                extra_headers,
+                ..
+            } => Self::new(base_url, api_key, model, extra_headers, api_key_provider),
+            WebSearchConfig::External {
+                provider,
+                base_url,
+                api_key,
+                model,
+                extra_headers,
+            } if SearchProvider::parse(provider) == Some(SearchProvider::Xai) => Self::new(
+                base_url,
+                api_key.as_deref().unwrap_or_default(),
+                model,
+                extra_headers,
+                api_key_provider,
+            ),
+            other => Err(xai_tool_runtime::ToolError::execution(
+                web_search_tool_id(),
+                format!("Cannot create XaiBackend from {other:?}"),
+            )),
+        }
+    }
+
+    /// Wire a 401-attribution callback into this backend. Idempotent;
+    /// safe to call before or after the first request.
+    pub fn with_attribution_callback(
+        mut self,
+        callback: Option<SharedAttributionCallback>,
+    ) -> Self {
+        self.attribution_callback = callback;
+        self
+    }
+
+    /// Whether a 401-attribution callback is installed (production-boundary tests).
+    pub fn has_attribution_callback(&self) -> bool {
+        self.attribution_callback.is_some()
+    }
+
+    async fn current_bearer(&self) -> Option<String> {
+        crate::types::api_key_provider::resolve_bearer(self.api_key_provider.as_ref()).await
+    }
+
+    fn record_401_attribution(&self, sent_bearer: Option<&str>) {
+        crate::attribution::emit_401(
+            self.attribution_callback.as_ref(),
+            ToolConsumer::WebSearch,
+            sent_bearer,
+        );
+    }
+
+    /// Perform a web search query using the Responses API.
+    ///
+    /// Returns `(content, citations)` where content is the assistant's text
+    /// and citations are unique URLs found in the response annotations.
+    pub async fn search(
+        &self,
+        query: &str,
+        allowed_domains: Option<Vec<String>>,
+    ) -> Result<(String, Vec<String>), xai_tool_runtime::ToolError> {
+        let response = self.call(query, allowed_domains).await?;
+        Ok((response_text(&response), extract_citations(&response)))
+    }
+
+    /// Same as [`Self::search`] but also extracts per-citation titles when
+    /// the Responses API surfaces them. Returns `(content, citations_with_titles)`
+    /// where each citation is `(title, url)`. Empty `title` strings indicate
+    /// the upstream didn't supply one for that URL.
+    ///
+    /// Used by the cursor-compat `WebSearch` adapter to render a
+    /// `Links:\n1. [title](url)` list instead of the LLM synthesis text.
+    pub async fn search_with_titles(
+        &self,
+        query: &str,
+        allowed_domains: Option<Vec<String>>,
+    ) -> Result<(String, Vec<(String, String)>), xai_tool_runtime::ToolError> {
+        let response = self.call(query, allowed_domains).await?;
+        Ok((response_text(&response), extract_citation_pairs(&response)))
+    }
+
+    /// One `POST {base_url}/responses` round trip.
+    async fn call(
+        &self,
+        query: &str,
+        allowed_domains: Option<Vec<String>>,
+    ) -> Result<rs::Response, xai_tool_runtime::ToolError> {
+        let web_search = rs::WebSearchToolArgs::default()
+            .filters(rs::WebSearchToolFilters { allowed_domains })
+            .build()
+            .map_err(|error| {
+                xai_tool_runtime::ToolError::execution(
+                    web_search_tool_id(),
+                    format!("Failed to build web search tool: {error}"),
+                )
+            })?;
+        let request = rs::CreateResponseArgs::default()
+            .model(self.model.clone())
+            .input(query.to_string())
+            .tools(vec![rs::Tool::WebSearch(web_search)])
+            .store(false)
+            .temperature(0.1_f32)
+            .top_p(0.95_f32)
+            .max_output_tokens(8192u32)
+            .build()
+            .map_err(|error| {
+                xai_tool_runtime::ToolError::execution(
+                    web_search_tool_id(),
+                    format!("Failed to build request: {error}"),
+                )
+            })?;
+        let url = format!("{}/responses", self.base_url.trim_end_matches('/'));
+        let sent_bearer = self.current_bearer().await;
+        let mut req = self.http.post(&url).json(&request);
+        if let Some(ref key) = sent_bearer {
+            req = req.header(AUTHORIZATION, format!("Bearer {key}"));
+        }
+        let response = req.send().await.map_err(|error| {
+            xai_tool_runtime::ToolError::execution(
+                web_search_tool_id(),
+                format!("HTTP request failed: {error}"),
+            )
+        })?;
+        let status = response.status();
+        if status == reqwest::StatusCode::UNAUTHORIZED {
+            self.record_401_attribution(sent_bearer.as_deref());
+            let body = super::error_body(response).await;
+            return Err(xai_tool_runtime::ToolError::unauthorized(format!(
+                "Responses API returned 401 Unauthorized: {body}"
+            ))
+            .with_details(serde_json::json!({
+                "tool_id": "web_search",
+                "status": 401,
+            })));
+        }
+        if !status.is_success() {
+            let body = super::error_body(response).await;
+            return Err(xai_tool_runtime::ToolError::execution(
+                web_search_tool_id(),
+                format!("Responses API returned {status}: {body}"),
+            ));
+        }
+        let bytes = response.bytes().await.map_err(|error| {
+            xai_tool_runtime::ToolError::execution(
+                web_search_tool_id(),
+                format!("Failed to read response body: {error}"),
+            )
+        })?;
+        let response_obj: rs::Response = serde_json::from_slice(&bytes).map_err(|error| {
+            xai_tool_runtime::ToolError::execution(
+                web_search_tool_id(),
+                format!("Failed to parse response: {error}"),
+            )
+        })?;
+        Ok(response_obj)
+    }
+}
+
+impl WebSearchBackend for XaiBackend {
+    fn name(&self) -> &str {
+        SearchProvider::Xai.as_str()
+    }
+
+    fn is_configured(&self) -> Result<(), String> {
+        if self.base_url.trim().is_empty() {
+            return Err(super::missing_base_url_reason(self.name()));
+        }
+        if self.model.trim().is_empty() {
+            return Err(format!(
+                "xai search backend has no model: set `model` under `[search]` in config.toml \
+                 (or GROK_SEARCH_MODEL)"
+            ));
+        }
+        Ok(())
+    }
+
+    async fn search(
+        &self,
+        request: &SearchRequest<'_>,
+    ) -> Result<SearchResponse, xai_tool_runtime::ToolError> {
+        let (content, pairs) = XaiBackend::search_with_titles(
+            self,
+            request.query,
+            request.allowed_domains.map(<[String]>::to_vec),
+        )
+        .await?;
+        Ok(SearchResponse {
+            content,
+            hits: pairs
+                .into_iter()
+                .map(|(title, url)| SearchHit {
+                    title,
+                    url,
+                    snippet: String::new(),
+                })
+                .collect(),
+        })
+    }
+}
+
+/// The assistant's synthesized text, or the shared placeholder when the
+/// response carried none.
+fn response_text(response: &rs::Response) -> String {
+    response
+        .output_text()
+        .unwrap_or_else(|| super::NO_RESULTS.to_string())
+}
+
+/// Extract citation URLs from the Response output items.
+/// The async-openai crate doesn't provide a helper for this, and the `url` field
+/// in `UrlCitationBody` is private, so we serialize to JSON to extract it.
+fn extract_citations(response: &rs::Response) -> Vec<String> {
+    let mut citations = Vec::new();
+    for output_item in &response.output {
+        if let rs::OutputItem::Message(output_message) = output_item {
+            for message_content in &output_message.content {
+                if let rs::OutputMessageContent::OutputText(text_content) = message_content {
+                    for annotation in &text_content.annotations {
+                        if let rs::Annotation::UrlCitation(url_citation) = annotation
+                            && let Ok(json) = serde_json::to_value(url_citation)
+                            && let Some(url) = json.get("url").and_then(|v| v.as_str())
+                        {
+                            citations.push(url.to_string());
+                        }
+                    }
+                }
+            }
+        }
+    }
+    let mut seen = std::collections::HashSet::new();
+    citations.retain(|url| seen.insert(url.clone()));
+    citations
+}
+
+/// Extract `(title, url)` pairs from the Responses API annotations.
+///
+/// `title` may be an empty string when upstream doesn't supply one. URLs
+/// are deduplicated while preserving the first-seen order so the rendered
+/// `Links:` list is stable and free of duplicates.
+fn extract_citation_pairs(response: &rs::Response) -> Vec<(String, String)> {
+    let mut pairs: Vec<(String, String)> = Vec::new();
+    for output_item in &response.output {
+        if let rs::OutputItem::Message(output_message) = output_item {
+            for message_content in &output_message.content {
+                if let rs::OutputMessageContent::OutputText(text_content) = message_content {
+                    for annotation in &text_content.annotations {
+                        if let rs::Annotation::UrlCitation(url_citation) = annotation
+                            && let Ok(json) = serde_json::to_value(url_citation)
+                        {
+                            let url = json.get("url").and_then(|v| v.as_str()).unwrap_or("");
+                            if url.is_empty() {
+                                continue;
+                            }
+                            let title = json
+                                .get("title")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("")
+                                .to_string();
+                            pairs.push((title, url.to_string()));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    let mut seen = std::collections::HashSet::new();
+    pairs.retain(|(_t, url)| seen.insert(url.clone()));
+    pairs
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use indexmap::IndexMap;
+
+    /// Helper to create a Response from JSON for testing.
+    fn response_from_json(json: serde_json::Value) -> rs::Response {
+        serde_json::from_value(json).expect("Failed to parse test Response JSON")
+    }
+
+    #[test]
+    fn test_new_client_uses_configured_model() {
+        let config = WebSearchConfig::Enabled {
+            api_key: "test-key".to_string(),
+            base_url: "https://api.x.ai/v1".to_string(),
+            model: "custom-enterprise-model".to_string(),
+            extra_headers: IndexMap::new(),
+            alpha_test_key: None,
+        };
+        let client = XaiBackend::from_config(&config, None).expect("client should build");
+        assert_eq!(client.model, "custom-enterprise-model");
+        assert_eq!(WebSearchBackend::name(&client), "xai");
+        assert!(client.is_configured().is_ok());
+    }
+
+    /// A selected `xai` backend with no base URL reports the missing knob
+    /// instead of failing construction.
+    #[test]
+    fn unconfigured_xai_backend_reports_why() {
+        let config = WebSearchConfig::External {
+            provider: "xai".to_string(),
+            base_url: String::new(),
+            api_key: None,
+            model: "grok-4-fast".to_string(),
+            extra_headers: IndexMap::new(),
+        };
+        let client = XaiBackend::from_config(&config, None).expect("client should build");
+        let reason = client.is_configured().unwrap_err();
+        assert!(reason.contains("GROK_SEARCH_BASE_URL"), "{reason}");
+    }
+
+    /// Counts attribution callback invocations for the test below.
+    #[derive(Default, Debug)]
+    struct CountingCallback {
+        invocations: std::sync::Mutex<Vec<(ToolConsumer, Option<String>)>>,
+    }
+
+    impl crate::attribution::Auth401AttributionCallback for CountingCallback {
+        fn record_401(&self, consumer: ToolConsumer, sent_bearer_tail: Option<&str>) {
+            self.invocations
+                .lock()
+                .unwrap()
+                .push((consumer, sent_bearer_tail.map(str::to_owned)));
+        }
+    }
+
+    /// `record_401_attribution` invokes the wired callback with
+    /// `ToolConsumer::WebSearch` and the truncated bearer tail.
+    /// The full bearer never crosses the trait boundary.
+    #[test]
+    fn record_401_attribution_passes_truncated_tail_to_callback() {
+        let cb = std::sync::Arc::new(CountingCallback::default());
+        let cb_dyn: crate::attribution::SharedAttributionCallback = cb.clone();
+        let config = WebSearchConfig::Enabled {
+            api_key: "ignored".to_string(),
+            base_url: "https://api.x.ai/v1".to_string(),
+            model: "test-model".to_string(),
+            extra_headers: IndexMap::new(),
+            alpha_test_key: None,
+        };
+        let client = XaiBackend::from_config(&config, None)
+            .expect("client should build")
+            .with_attribution_callback(Some(cb_dyn));
+        client.record_401_attribution(Some("bearer-with-long-tail-aaaaaaaaaa"));
+        let calls = cb.invocations.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].0, ToolConsumer::WebSearch);
+        assert_eq!(calls[0].1.as_deref(), Some("l-aaaaaaaaaa"));
+        assert_eq!(
+            calls[0].1.as_deref().map(str::chars).map(Iterator::count),
+            Some(crate::attribution::BEARER_TAIL_CHARS),
+        );
+    }
+
+    /// `record_401_attribution` is a no-op when no callback is wired
+    /// -- the BYOK / standalone case must not panic or allocate.
+    #[test]
+    fn record_401_attribution_is_noop_without_callback() {
+        let config = WebSearchConfig::Enabled {
+            api_key: "test-key".to_string(),
+            base_url: "https://api.x.ai/v1".to_string(),
+            model: "test-model".to_string(),
+            extra_headers: IndexMap::new(),
+            alpha_test_key: None,
+        };
+        let client = XaiBackend::from_config(&config, None).expect("client should build");
+        client.record_401_attribution(Some("any-bearer"));
+        client.record_401_attribution(None);
+    }
+
+    #[test]
+    fn test_extract_citations_empty_response() {
+        let response = response_from_json(serde_json::json!({
+            "id": "resp_test",
+            "object": "response",
+            "created_at": 1234567890,
+            "status": "completed",
+            "output": [],
+            "model": "test-model"
+        }));
+        let citations = extract_citations(&response);
+        assert!(citations.is_empty());
+    }
+
+    #[test]
+    fn test_extract_citations_with_url_citations() {
+        let response = response_from_json(serde_json::json!({
+            "id": "resp_test",
+            "object": "response",
+            "created_at": 1234567890,
+            "status": "completed",
+            "model": "test-model",
+            "output": [
+                {
+                    "type": "message",
+                    "id": "msg_1",
+                    "status": "completed",
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "output_text",
+                            "text": "Here is some info about Rust.",
+                            "annotations": [
+                                {
+                                    "type": "url_citation",
+                                    "url": "https://www.rust-lang.org/",
+                                    "title": "Rust Programming Language",
+                                    "start_index": 0,
+                                    "end_index": 10
+                                },
+                                {
+                                    "type": "url_citation",
+                                    "url": "https://docs.rs/",
+                                    "title": "Docs.rs",
+                                    "start_index": 11,
+                                    "end_index": 20
+                                }
+                            ]
+                        }
+                    ]
+                }
+            ]
+        }));
+        let citations = extract_citations(&response);
+        assert_eq!(citations.len(), 2);
+        assert_eq!(citations[0], "https://www.rust-lang.org/");
+        assert_eq!(citations[1], "https://docs.rs/");
+    }
+
+    #[test]
+    fn test_extract_citations_deduplicates() {
+        let response = response_from_json(serde_json::json!({
+            "id": "resp_test",
+            "object": "response",
+            "created_at": 1234567890,
+            "status": "completed",
+            "model": "test-model",
+            "output": [
+                {
+                    "type": "message",
+                    "id": "msg_1",
+                    "status": "completed",
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "output_text",
+                            "text": "Info with duplicate citations.",
+                            "annotations": [
+                                {
+                                    "type": "url_citation",
+                                    "url": "https://example.com/page1",
+                                    "title": "Page 1",
+                                    "start_index": 0,
+                                    "end_index": 5
+                                },
+                                {
+                                    "type": "url_citation",
+                                    "url": "https://example.com/page2",
+                                    "title": "Page 2",
+                                    "start_index": 6,
+                                    "end_index": 10
+                                },
+                                {
+                                    "type": "url_citation",
+                                    "url": "https://example.com/page1",
+                                    "title": "Page 1 Again",
+                                    "start_index": 11,
+                                    "end_index": 15
+                                }
+                            ]
+                        }
+                    ]
+                }
+            ]
+        }));
+        let citations = extract_citations(&response);
+        assert_eq!(citations.len(), 2);
+        assert_eq!(citations[0], "https://example.com/page1");
+        assert_eq!(citations[1], "https://example.com/page2");
+    }
+
+    #[test]
+    fn test_extract_citations_multiple_messages() {
+        let response = response_from_json(serde_json::json!({
+            "id": "resp_test",
+            "object": "response",
+            "created_at": 1234567890,
+            "status": "completed",
+            "model": "test-model",
+            "output": [
+                {
+                    "type": "message",
+                    "id": "msg_1",
+                    "status": "completed",
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "output_text",
+                            "text": "First message",
+                            "annotations": [
+                                {
+                                    "type": "url_citation",
+                                    "url": "https://first.com/",
+                                    "title": "First",
+                                    "start_index": 0,
+                                    "end_index": 5
+                                }
+                            ]
+                        }
+                    ]
+                },
+                {
+                    "type": "message",
+                    "id": "msg_2",
+                    "status": "completed",
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "output_text",
+                            "text": "Second message",
+                            "annotations": [
+                                {
+                                    "type": "url_citation",
+                                    "url": "https://second.com/",
+                                    "title": "Second",
+                                    "start_index": 0,
+                                    "end_index": 6
+                                }
+                            ]
+                        }
+                    ]
+                }
+            ]
+        }));
+        let citations = extract_citations(&response);
+        assert_eq!(citations.len(), 2);
+        assert_eq!(citations[0], "https://first.com/");
+        assert_eq!(citations[1], "https://second.com/");
+    }
+
+    #[test]
+    fn test_extract_citations_ignores_non_url_annotations() {
+        let response = response_from_json(serde_json::json!({
+            "id": "resp_test",
+            "object": "response",
+            "created_at": 1234567890,
+            "status": "completed",
+            "model": "test-model",
+            "output": [
+                {
+                    "type": "message",
+                    "id": "msg_1",
+                    "status": "completed",
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "output_text",
+                            "text": "Some text",
+                            "annotations": [
+                                {
+                                    "type": "url_citation",
+                                    "url": "https://valid.com/",
+                                    "title": "Valid",
+                                    "start_index": 0,
+                                    "end_index": 4
+                                }
+                            ]
+                        }
+                    ]
+                }
+            ]
+        }));
+        let citations = extract_citations(&response);
+        assert_eq!(citations.len(), 1);
+        assert_eq!(citations[0], "https://valid.com/");
+    }
+
+    /// A provider that always returns `None`, simulating an API-key user
+    /// whose token has aged past the client-side TTL.
+    struct NoneProvider;
+
+    impl crate::types::ApiKeyProvider for NoneProvider {
+        fn current_api_key(&self) -> Option<String> {
+            None
+        }
+    }
+
+    /// When the dynamic provider returns `None`, the static `api_key`
+    /// from config must still be sent as the Authorization header.
+    /// This is a regression scenario: API-key users
+    /// past the 30-day client TTL saw 401 because no auth was sent.
+    #[tokio::test]
+    async fn static_api_key_is_fallback_when_provider_returns_none() {
+        use wiremock::matchers::{header, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/responses"))
+            .and(header("Authorization", "Bearer static-key-from-config"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": "resp_test",
+                "object": "response",
+                "created_at": 1234567890,
+                "status": "completed",
+                "model": "test-model",
+                "output": [{
+                    "type": "message",
+                    "id": "msg_1",
+                    "status": "completed",
+                    "role": "assistant",
+                    "content": [{
+                        "type": "output_text",
+                        "text": "search result",
+                        "annotations": []
+                    }]
+                }]
+            })))
+            .mount(&server)
+            .await;
+
+        let config = WebSearchConfig::Enabled {
+            api_key: "static-key-from-config".to_string(),
+            base_url: server.uri(),
+            model: "test-model".to_string(),
+            extra_headers: IndexMap::new(),
+            alpha_test_key: None,
+        };
+        let provider: SharedApiKeyProvider = std::sync::Arc::new(NoneProvider);
+        let client = XaiBackend::from_config(&config, Some(provider)).expect("client should build");
+        let (content, _citations) = client
+            .search("test query", None)
+            .await
+            .expect("search must succeed with static key fallback");
+        assert_eq!(content, "search result");
+    }
+
+    /// When the provider returns a fresh key, it overrides the static one.
+    #[tokio::test]
+    async fn provider_key_overrides_static_key() {
+        use wiremock::matchers::{header, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        struct FreshProvider;
+
+        impl crate::types::ApiKeyProvider for FreshProvider {
+            fn current_api_key(&self) -> Option<String> {
+                Some("fresh-key-from-provider".to_string())
+            }
+        }
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/responses"))
+            .and(header("Authorization", "Bearer fresh-key-from-provider"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": "resp_test",
+                "object": "response",
+                "created_at": 1234567890,
+                "status": "completed",
+                "model": "test-model",
+                "output": [{
+                    "type": "message",
+                    "id": "msg_1",
+                    "status": "completed",
+                    "role": "assistant",
+                    "content": [{
+                        "type": "output_text",
+                        "text": "fresh result",
+                        "annotations": []
+                    }]
+                }]
+            })))
+            .mount(&server)
+            .await;
+
+        let config = WebSearchConfig::Enabled {
+            api_key: "stale-static-key".to_string(),
+            base_url: server.uri(),
+            model: "test-model".to_string(),
+            extra_headers: IndexMap::new(),
+            alpha_test_key: None,
+        };
+        let provider: SharedApiKeyProvider = std::sync::Arc::new(FreshProvider);
+        let client = XaiBackend::from_config(&config, Some(provider)).expect("client should build");
+        let (content, _citations) = client
+            .search("test query", None)
+            .await
+            .expect("search must succeed with provider key");
+        assert_eq!(content, "fresh result");
+    }
+
+    #[test]
+    fn test_extract_citations_no_annotations() {
+        let response = response_from_json(serde_json::json!({
+            "id": "resp_test",
+            "object": "response",
+            "created_at": 1234567890,
+            "status": "completed",
+            "model": "test-model",
+            "output": [
+                {
+                    "type": "message",
+                    "id": "msg_1",
+                    "status": "completed",
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "output_text",
+                            "text": "Plain text with no annotations",
+                            "annotations": []
+                        }
+                    ]
+                }
+            ]
+        }));
+        let citations = extract_citations(&response);
+        assert!(citations.is_empty());
+    }
+}

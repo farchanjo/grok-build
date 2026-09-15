@@ -532,8 +532,36 @@ pub(crate) async fn spawn_session_actor(
             (0, Vec::new(), Vec::new())
         };
     let primary_model_id = inference_config.model.clone();
+    // Effective config snapshot, loaded once per session spawn: the
+    // search-backend factory reads `[search]` from it and the vector-mirror
+    // resolution below reads `[vector_stores]` (skipped entirely when no
+    // `vector_store` selection exists).
+    let memory_and_prime_mirror_config: Option<toml::Value> =
+        crate::config::load_effective_config().ok();
+    // `GROK_SEARCH_PROVIDER` / `[search] provider` beats the xAI model route. A
+    // non-xAI backend needs neither an xAI credential nor a `models.web_search`
+    // route, which is the whole point of the factory.
+    use xai_grok_tools::implementations::web_search::factory;
+    let xai_search_route =
+        web_search_inference_config
+            .as_ref()
+            .map(|cfg| factory::XaiRouteFallback {
+                base_url: Some(cfg.base_url.clone()),
+                api_key: cfg.api_key.clone(),
+                model: Some(cfg.model.clone()),
+                extra_headers: cfg.extra_headers.clone(),
+            });
+    let search_selection = factory::resolve_search_backend(
+        &factory::ProcessEnv,
+        memory_and_prime_mirror_config
+            .as_ref()
+            .and_then(toml::Value::as_table),
+        xai_search_route.as_ref(),
+    );
     let web_search_config = if disable_web_search {
         xai_grok_tools::implementations::WebSearchConfig::Disabled
+    } else if let Some(selected) = search_selection.to_config() {
+        selected
     } else if let Some(cfg) = web_search_inference_config {
         if let Some(api_key) = cfg.api_key {
             xai_grok_tools::implementations::WebSearchConfig::Enabled {
@@ -947,11 +975,6 @@ pub(crate) async fn spawn_session_actor(
     let mut memory_backend_params_for_session: Option<crate::session::memory::MemoryBackendParams> =
         None;
     let mut memory_search_counter: Option<std::sync::Arc<std::sync::atomic::AtomicU64>> = None;
-    // Effective config snapshot for vector-mirror resolution (memory +
-    // prime). Loaded once per session spawn; mirror resolution is skipped
-    // entirely when no `vector_store` selection exists.
-    let memory_and_prime_mirror_config: Option<toml::Value> =
-        crate::config::load_effective_config().ok();
     let memory_backend_for_spec: Option<
         std::sync::Arc<dyn xai_grok_tools::types::memory_backend::MemoryBackend>,
     > = if let Some(ref storage) = memory_storage_for_session {

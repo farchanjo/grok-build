@@ -28,6 +28,10 @@ pub mod version_overrides;
 
 // Only the cross-crate campaign surface is re-exported at the root; the rest stays
 // reachable via the `pub mod` paths for in-crate use without widening the API.
+//
+// `toml` is re-exported so a crate that only consumes a raw config table (for
+// example the search-backend factory in `xai-grok-tools`) can name the type
+// without taking its own dependency on the same version.
 pub use campaigns::{
     CampaignEntry, CampaignOverrides, filter_active_campaigns, ids_touching_paths,
 };
@@ -53,6 +57,7 @@ pub use paths::{
     ensure_sessions_cwd_dir_in, grok_application, grok_application_in, grok_home, sessions_cwd_dir,
     sessions_cwd_dir_in, set_dir_owner_only, system_config_dir, user_grok_home,
 };
+pub use toml;
 pub use validation::{
     RequirementsError, RequirementsLayer, RequirementsSource, load_merged_requirements,
     requirements_layers, validate_requirements,

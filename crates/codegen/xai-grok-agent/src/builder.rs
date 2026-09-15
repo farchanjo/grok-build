@@ -525,10 +525,7 @@ impl AgentBuilder {
     /// Set the `[assets]` / `[assets_providers.<id>]` configuration backing the
     /// `asset_*` tools. The tools are registered regardless; this only decides
     /// which backend the store resolves to.
-    pub fn with_assets_settings(
-        mut self,
-        settings: xai_grok_config_types::AssetsSettings,
-    ) -> Self {
+    pub fn with_assets_settings(mut self, settings: xai_grok_config_types::AssetsSettings) -> Self {
         self.assets_settings = settings;
         self
     }
@@ -2350,6 +2347,75 @@ mod tests {
         for excluded in ["run_terminal_command", "search_replace"] {
             assert!(!names.contains(&excluded.to_string()), "got: {names:?}");
         }
+    }
+    /// A non-xAI search backend carries no xAI credential and resolves no
+    /// `models.web_search` route, yet the tool must still register — that is the
+    /// entire point of `WebSearchConfig::External`.
+    #[tokio::test]
+    async fn external_search_backend_registers_web_search_without_xai_route() {
+        use xai_grok_tools::computer::local::LocalTerminalBackend;
+        use xai_grok_tools::implementations::web_search::WebSearchConfig;
+        use xai_grok_tools::notification::ToolNotificationHandle;
+        let agent = AgentBuilder::new(
+            std::env::temp_dir(),
+            Arc::new(LocalTerminalBackend::new()),
+            ToolNotificationHandle::noop(),
+        )
+        .from_definition(crate::config::AgentDefinition::default_grok_build())
+        .with_web_search_config(WebSearchConfig::External {
+            provider: "searxng".into(),
+            base_url: "http://localhost:8888".into(),
+            api_key: None,
+            model: String::new(),
+            extra_headers: Default::default(),
+        })
+        .build()
+        .await
+        .expect("agent should build with an external search backend");
+        let names: Vec<String> = agent
+            .tool_definitions()
+            .await
+            .iter()
+            .map(|d| d.function.name.clone())
+            .collect();
+        assert!(
+            names.contains(&"web_search".to_string()),
+            "web_search must register for an external backend; got: {names:?}"
+        );
+    }
+    /// A selected backend that is missing its key still registers: the failure
+    /// is reported by the tool at call time, not by a silent `Disabled`.
+    #[tokio::test]
+    async fn external_search_backend_without_key_still_registers() {
+        use xai_grok_tools::computer::local::LocalTerminalBackend;
+        use xai_grok_tools::implementations::web_search::WebSearchConfig;
+        use xai_grok_tools::notification::ToolNotificationHandle;
+        let agent = AgentBuilder::new(
+            std::env::temp_dir(),
+            Arc::new(LocalTerminalBackend::new()),
+            ToolNotificationHandle::noop(),
+        )
+        .from_definition(crate::config::AgentDefinition::default_grok_build())
+        .with_web_search_config(WebSearchConfig::External {
+            provider: "tavily".into(),
+            base_url: String::new(),
+            api_key: None,
+            model: String::new(),
+            extra_headers: Default::default(),
+        })
+        .build()
+        .await
+        .expect("agent should build with an unconfigured external backend");
+        let names: Vec<String> = agent
+            .tool_definitions()
+            .await
+            .iter()
+            .map(|d| d.function.name.clone())
+            .collect();
+        assert!(
+            names.contains(&"web_search".to_string()),
+            "web_search must register even when the backend is unconfigured; got: {names:?}"
+        );
     }
     /// grok-build toolsets have no Skill tool — skills are read from
     /// `SKILL.md` via `read_file` — so a compat `Skill` allowlist entry grants
