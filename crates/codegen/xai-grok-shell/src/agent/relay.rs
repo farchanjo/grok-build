@@ -1182,3 +1182,38 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod xai_switch_relay_tests {
+    use super::*;
+    use crate::auth::AuthMode;
+
+    fn xai_session() -> GrokAuth {
+        let mut auth = GrokAuth::test_default();
+        auth.auth_mode = AuthMode::Oidc;
+        auth.oidc_issuer = Some(crate::auth::XAI_OAUTH2_ISSUER.to_string());
+        auth.key = "session-jwt".to_string();
+        auth
+    }
+
+    /// The leader and headless paths pick the relay *before* `bootstrap`, which
+    /// is why `apply_xai_switch` is hoisted into them. If that hoist is ever
+    /// dropped, this is the test that catches it.
+    #[test]
+    fn relay_is_off_when_the_xai_switch_is_disabled() {
+        let ctx = GrokComConfig::default();
+        crate::util::set_xai_enabled(true);
+        assert!(
+            RelayConfig::for_session(&xai_session(), &ctx, None, None).is_some(),
+            "an xAI session relays by default"
+        );
+
+        crate::util::set_xai_enabled(false);
+        assert!(
+            RelayConfig::for_session(&xai_session(), &ctx, None, None).is_none(),
+            "the switch must keep the grok.com websocket closed"
+        );
+
+        crate::util::set_xai_enabled(true);
+    }
+}

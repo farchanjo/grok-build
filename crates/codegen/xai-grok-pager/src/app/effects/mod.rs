@@ -4724,6 +4724,11 @@ pub(crate) fn execute(
                             if !xai_grok_shell::util::config::resolve_remote_fetch_enabled() {
                                 return None;
                             }
+                            // A user-triggered refresh is the pager's "network
+                            // changed" signal: without this, a startup blip
+                            // latched in the shell would silence settings for
+                            // the rest of the process.
+                            xai_grok_shell::remote::client::reset_settings_fetch_latch();
                             let grok_home = xai_grok_shell::util::grok_home::grok_home();
                             let store = xai_grok_shell::auth::read_auth_json(
                                     &grok_home.join("auth.json"),

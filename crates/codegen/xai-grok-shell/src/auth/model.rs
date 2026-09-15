@@ -516,3 +516,34 @@ mod tests {
         assert!(GrokAuth::default().coding_data_retention_opt_out);
     }
 }
+
+#[cfg(test)]
+mod xai_switch_tests {
+    use super::*;
+
+    fn xai_session() -> GrokAuth {
+        let mut auth = GrokAuth::test_default();
+        auth.auth_mode = AuthMode::Oidc;
+        auth.oidc_issuer = Some(crate::auth::XAI_OAUTH2_ISSUER.to_string());
+        auth.key = "session-jwt".to_string();
+        auth
+    }
+
+    /// `GROK_XAI_ENABLED=0` / `[xai] enabled = false` must be able to make a
+    /// genuine xAI session read as "not xAI" — that is the whole point of the
+    /// switch.
+    #[test]
+    fn xai_switch_forces_is_xai_auth_false() {
+        let auth = xai_session();
+        crate::util::set_xai_enabled(true);
+        assert!(
+            auth.is_xai_auth(),
+            "an x.ai issuer is first-party by default"
+        );
+
+        crate::util::set_xai_enabled(false);
+        assert!(!auth.is_xai_auth(), "the switch wins over the issuer");
+
+        crate::util::set_xai_enabled(true);
+    }
+}

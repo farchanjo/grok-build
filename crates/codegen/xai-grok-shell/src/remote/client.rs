@@ -577,6 +577,17 @@ pub fn reset_settings_fetch_latch() {
     SETTINGS_FETCH_FAILED.store(false, std::sync::atomic::Ordering::Relaxed);
 }
 
+/// Whether a terminal settings-fetch failure is latched for this process.
+pub fn settings_fetch_latch_is_set() -> bool {
+    SETTINGS_FETCH_FAILED.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Latch a failure without performing a fetch (test seam, and for callers that
+/// know the proxy is down).
+pub fn mark_settings_fetch_failed() {
+    SETTINGS_FETCH_FAILED.store(true, std::sync::atomic::Ordering::Relaxed);
+}
+
 /// (`std::thread::spawn`, no tokio runtime). Returns `None` on any error
 /// so startup is never blocked by a settings fetch failure.
 ///
@@ -2428,5 +2439,30 @@ mod tests {
             let count = request.headers().get_all(name).iter().count();
             assert_eq!(count, 1, "duplicate header {name}");
         }
+    }
+}
+
+#[cfg(test)]
+mod settings_latch_tests {
+    use super::{
+        mark_settings_fetch_failed, reset_settings_fetch_latch, settings_fetch_latch_is_set,
+    };
+
+    /// The latch exists so three startup callers do not each pay the budget
+    /// against the same dead proxy — but it must be clearable, or one blip
+    /// disables remote settings for the whole process.
+    #[test]
+    fn latch_sets_and_reset_rearms() {
+        reset_settings_fetch_latch();
+        assert!(!settings_fetch_latch_is_set());
+
+        mark_settings_fetch_failed();
+        assert!(settings_fetch_latch_is_set());
+
+        reset_settings_fetch_latch();
+        assert!(
+            !settings_fetch_latch_is_set(),
+            "a login (or a network change) must be able to re-arm the fetch"
+        );
     }
 }

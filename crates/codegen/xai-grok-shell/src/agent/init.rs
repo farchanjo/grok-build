@@ -283,3 +283,51 @@ mod tests {
         assert_eq!(settings.max_upload_file_bytes, Some(4242));
     }
 }
+
+#[cfg(test)]
+mod xai_switch_apply_tests {
+    use super::*;
+    use xai_grok_test_support::EnvGuard;
+
+    /// The switch has to be readable from both tiers, with the env winning, and
+    /// it must land on the process flag (which is what `is_xai_auth` consults).
+    #[test]
+    fn apply_xai_switch_env_beats_config_and_lands_on_the_flag() {
+        let cfg = |enabled: Option<bool>| AgentConfig {
+            xai: config::XaiConfig { enabled },
+            ..AgentConfig::default()
+        };
+
+        let _env = EnvGuard::set(crate::util::XAI_ENABLED_ENV, "0");
+        apply_xai_switch(&cfg(Some(true)));
+        assert!(
+            !crate::util::xai_enabled(),
+            "env must beat a config that says enabled"
+        );
+
+        let _env_on = EnvGuard::set(crate::util::XAI_ENABLED_ENV, "1");
+        apply_xai_switch(&cfg(Some(false)));
+        assert!(
+            crate::util::xai_enabled(),
+            "env must beat a disabled config"
+        );
+
+        crate::util::set_xai_enabled(true);
+    }
+
+    /// With no env override the config tier decides.
+    #[test]
+    fn apply_xai_switch_honors_config_without_env() {
+        let _unset = EnvGuard::unset(crate::util::XAI_ENABLED_ENV);
+        let cfg = AgentConfig {
+            xai: config::XaiConfig {
+                enabled: Some(false),
+            },
+            ..AgentConfig::default()
+        };
+        apply_xai_switch(&cfg);
+        assert!(!crate::util::xai_enabled());
+
+        crate::util::set_xai_enabled(true);
+    }
+}

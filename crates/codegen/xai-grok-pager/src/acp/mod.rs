@@ -785,7 +785,11 @@ async fn eager_auth_or_login_fallback(
             auth_start_mode,
             meta,
         ),
-        Err(_) => {
+        Err(e) => {
+            // The message is the only place the remedy is named (e.g. "No
+            // credential for model X: set GROK_API_KEY ..."), and the TUI has no
+            // on_error hook here — log it so it is not swallowed entirely.
+            tracing::warn!(error = %e, "authenticate failed");
             // Non-interactive credentials were advertised; shell fallthrough
             // already preferred them — do not auto-open browser login.
             let has_api_key = auth_methods

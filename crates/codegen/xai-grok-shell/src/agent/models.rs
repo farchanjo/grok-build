@@ -1927,7 +1927,7 @@ pub(crate) fn prefetch_models_blocking(
 /// refresh watcher, manual refresh) so they cannot drift apart — a carve-out in
 /// only the startup gate would leave the run with a one-shot catalog and no
 /// retry.
-fn models_fetch_allowed() -> bool {
+pub(crate) fn models_fetch_allowed() -> bool {
     crate::util::config::resolve_remote_fetch_enabled()
         || crate::agent::config::EndpointsConfig::from_effective_config().has_custom_endpoint()
 }
@@ -5284,5 +5284,31 @@ mod tests {
                 "inspect must retain a private safe source for gated alias classification"
             );
         });
+    }
+}
+
+#[cfg(test)]
+mod models_fetch_allowed_tests {
+    use super::models_fetch_allowed;
+    use xai_grok_test_support::EnvGuard;
+
+    /// The carve-out has to hold on *every* gate, not just the startup prefetch:
+    /// a one-shot catalog with no refresh/retry strands the run on bundled
+    /// defaults the gateway cannot serve.
+    #[test]
+    #[serial_test::serial]
+    fn custom_endpoint_keeps_every_gate_open() {
+        let _rf = EnvGuard::set("GROK_REMOTE_FETCH", "0");
+        let _unset_url = EnvGuard::unset("GROK_MODELS_BASE_URL");
+        assert!(
+            !models_fetch_allowed(),
+            "no custom endpoint + knob off => no fetch"
+        );
+
+        let _url = EnvGuard::set("GROK_MODELS_BASE_URL", "https://gateway.example/v1");
+        assert!(
+            models_fetch_allowed(),
+            "a custom endpoint is not an xAI backend; its catalog stays reachable"
+        );
     }
 }
