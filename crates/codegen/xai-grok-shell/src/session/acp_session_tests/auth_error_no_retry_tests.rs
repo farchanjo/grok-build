@@ -2256,7 +2256,8 @@ async fn reconstruct_openrouter_vault_model_no_xai_bearer_resolver() {
         .await;
 }
 
-/// Official OpenAI API-key vault model under session ACP: no xAI resolver.
+/// Official OpenAI API-key vault model under session ACP: the resolver, if
+/// any, is route-scoped — never the xAI session resolver.
 #[tokio::test(flavor = "current_thread")]
 async fn reconstruct_openai_api_vault_model_no_xai_bearer_resolver() {
     let local = tokio::task::LocalSet::new();
@@ -2283,7 +2284,22 @@ async fn reconstruct_openai_api_vault_model_no_xai_bearer_resolver() {
             actor.chat_state_handle.update_inference_settings(settings);
 
             let cfg = actor.reconstruct_full_config().await.expect("reconstruct");
-            assert!(cfg.bearer_resolver.is_none());
+            // Since 118f27b the OpenAI-platform credential route also carries
+            // a route-scoped resolver (same branch as OpenRouter). It must
+            // stay route-bound: the xAI session resolver never governs and the
+            // xAI session token never reaches api.openai.com.
+            assert!(
+                cfg.bearer_resolver.is_some(),
+                "OpenAI platform vault route installs a route-bound bearer_resolver"
+            );
+            assert_ne!(
+                cfg.bearer_resolver
+                    .as_ref()
+                    .and_then(|r| r.current_bearer())
+                    .as_deref(),
+                Some("xai-session-jwt-for-resolver"),
+                "xAI session token must never be the live bearer for the OpenAI API"
+            );
             assert_eq!(cfg.api_key.as_deref(), Some("openai-api-key-on-wire"));
             assert_eq!(
                 cfg.provider_identity,
@@ -2364,10 +2380,24 @@ async fn reconstruct_catalog_miss_codex_url_is_openai_not_xai() {
             actor.chat_state_handle.update_inference_settings(settings);
 
             let cfg = actor.reconstruct_full_config().await.expect("reconstruct");
-            assert!(cfg.bearer_resolver.is_none());
             assert_eq!(
                 cfg.provider_identity,
                 xai_grok_inference::config::ProviderIdentity::OpenAi
+            );
+            // The catalog miss yields a legacy (non-authoritative) OpenAi
+            // route; since 118f27b that route is credential-bound, so the
+            // resolver is route-scoped and never the xAI session resolver.
+            assert!(
+                cfg.bearer_resolver.is_some(),
+                "legacy Codex route installs a route-bound bearer_resolver"
+            );
+            assert_ne!(
+                cfg.bearer_resolver
+                    .as_ref()
+                    .and_then(|r| r.current_bearer())
+                    .as_deref(),
+                Some("xai-session-jwt"),
+                "xAI session token must never be the live bearer for Codex"
             );
         })
         .await;

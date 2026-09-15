@@ -3811,6 +3811,22 @@ mod tests {
         );
     }
 
+    /// True when `json` carries an `sk-…` token long enough to be key material.
+    ///
+    /// A bare `contains("sk-")` is not enough: free-text fields (skill and
+    /// agent descriptions) legitimately contain words such as "risk-free".
+    /// Real provider keys (`sk-proj-…`, `sk-ant-api03-…`, `sk-or-v1-…`) are
+    /// `sk-` followed by a long token.
+    fn contains_sk_shaped_secret(json: &str) -> bool {
+        json.match_indices("sk-").any(|(idx, needle)| {
+            json[idx + needle.len()..]
+                .chars()
+                .take_while(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
+                .count()
+                >= 8
+        })
+    }
+
     #[tokio::test]
     async fn inspect_report_json_omits_paths_urls_and_credentials() {
         let cwd = tempfile::tempdir().unwrap();
@@ -3825,7 +3841,7 @@ mod tests {
             "inspect JSON must not emit URLs: {json}"
         );
         assert!(
-            !json.contains("sk-"),
+            !contains_sk_shaped_secret(&json),
             "inspect JSON must not emit credentials: {json}"
         );
         assert_eq!(report.cwd, workspace_storage_identity(cwd.path()));

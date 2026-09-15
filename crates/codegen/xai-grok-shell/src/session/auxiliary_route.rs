@@ -1000,12 +1000,52 @@ mod tests {
         entry
     }
 
+    /// Materialize the fixture's providers into the tempdir home.
+    ///
+    /// Route resolution is home-authoritative once a `grok_home` is supplied:
+    /// the provider guard loads the durable registry from `<home>/config.toml`
+    /// and never consults the in-memory manager config. A provider that exists
+    /// only in memory therefore fails closed with `ProviderMissing`, so every
+    /// provider referenced by a catalog entry — plus every explicitly
+    /// configured one — is registered in the home. Rows carry only the fields
+    /// the fixtures set; the TOML defaults match `ModelProviderConfig`'s.
+    fn materialize_providers(
+        home: &Path,
+        models: &IndexMap<String, ModelEntry>,
+        providers: &IndexMap<String, ModelProviderConfig>,
+    ) {
+        let mut rows: IndexMap<&str, &str> = IndexMap::new();
+        for (id, cfg) in providers {
+            if let Some(base_url) = cfg.base_url.as_deref() {
+                rows.insert(id.as_str(), base_url);
+            }
+        }
+        for entry in models.values() {
+            if let Some(provider) = entry.model_provider.as_ref() {
+                rows.entry(provider.id.as_str())
+                    .or_insert(entry.info.base_url.as_str());
+            }
+        }
+        if rows.is_empty() {
+            return;
+        }
+        let mut raw = String::new();
+        for (id, base_url) in rows {
+            raw.push_str(&format!(
+                "[model_providers.\"{id}\"]\nbase_url = \"{base_url}\"\n\n"
+            ));
+        }
+        std::fs::write(home.join("config.toml"), raw).expect("write provider config");
+        crate::provider_registry::runtime_cache::invalidate_for_home(home);
+    }
+
     fn manager_with(
         models: IndexMap<String, ModelEntry>,
         providers: IndexMap<String, ModelProviderConfig>,
         current: &str,
         home: &Path,
     ) -> ModelsManager {
+        materialize_providers(home, &models, &providers);
         let mut config = crate::agent::config::Config::default();
         config.model_providers = providers;
         ModelsManager::new(
