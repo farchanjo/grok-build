@@ -322,6 +322,17 @@ impl EndpointsConfig {
             .clone()
             .unwrap_or_else(|| self.proxy_url())
     }
+    /// Base URL for the generic `XAI_API_KEY` bearer path.
+    ///
+    /// When the user points the models endpoint elsewhere, that key is a
+    /// third-party bearer and must reach the same endpoint as the model —
+    /// defaulting to `xai_api_base_url` there sends the request to xAI with a
+    /// foreign key and returns an opaque 415/401.
+    pub fn resolve_api_key_base_url(&self) -> String {
+        self.models_base_url
+            .clone()
+            .unwrap_or_else(|| self.xai_api_base_url.clone())
+    }
     /// Feedback endpoint — an auxiliary service, so it defaults to the
     /// cli-chat-proxy, never `xai_api_base_url`.
     pub fn resolve_feedback_base_url(&self) -> String {
@@ -4247,7 +4258,7 @@ fn default_models(endpoints: &EndpointsConfig) -> IndexMap<String, ModelEntryCon
                 id: m.id,
                 model: m.model,
                 base_url: endpoints.resolve_inference_base_url(),
-                api_base_url: Some(endpoints.xai_api_base_url.clone()),
+                api_base_url: Some(endpoints.resolve_api_key_base_url()),
                 name: m.name,
                 description: m.description,
                 context_window,
@@ -8224,6 +8235,37 @@ reasoning_effort = "low"
             assert_eq!(
                 api_key_creds.base_url, endpoints.xai_api_base_url,
                 "{model_id}: ExternalApiKey must route to api.x.ai"
+            );
+        }
+    }
+
+    /// A custom models endpoint means the user's `XAI_API_KEY` is a generic
+    /// bearer for *that* endpoint: the bundled default model must not keep
+    /// pointing its api-key route at api.x.ai, or a run with no xAI credential
+    /// fails with an opaque 415 from xAI.
+    #[test]
+    fn default_models_api_key_route_follows_custom_endpoint() {
+        let endpoints = EndpointsConfig {
+            models_base_url: Some("https://gateway.example/v1".to_owned()),
+            ..EndpointsConfig::default()
+        };
+        assert_eq!(
+            endpoints.resolve_api_key_base_url(),
+            "https://gateway.example/v1"
+        );
+
+        let entries = default_model_entries(&endpoints);
+        assert!(!entries.is_empty(), "bundled catalog must not be empty");
+        for (model_id, entry) in entries {
+            assert_eq!(
+                entry.api_base_url.as_deref(),
+                Some("https://gateway.example/v1"),
+                "{model_id}: api-key route must follow the custom endpoint"
+            );
+            assert_eq!(
+                entry.info().base_url,
+                "https://gateway.example/v1",
+                "{model_id}: inference base must follow the custom endpoint"
             );
         }
     }

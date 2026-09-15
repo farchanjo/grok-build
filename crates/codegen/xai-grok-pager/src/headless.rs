@@ -511,14 +511,20 @@ fn auto_respond_to_permissions(
 }
 
 /// "Not signed in" error message, tailored to the session type.
+///
+/// Deliberately names the provider-neutral path first: the value read from
+/// `GROK_API_KEY` / `XAI_API_KEY` is a plain bearer, and with
+/// `GROK_MODELS_BASE_URL` set it never reaches xAI at all.
 fn auth_required_message(interactive: bool) -> String {
     if interactive {
-        "Not signed in. Connect xAI in /providers (or run `grok provider connect xai`).".to_string()
+        "Not signed in. Run `grok provider connect <provider>` (xai, openai, \
+         openrouter), or open /providers."
+            .to_string()
     } else {
-        "Not signed in. To authenticate without a browser, run:\n  \
-         grok provider connect xai\n\n\
-         Alternatively, set the XAI_API_KEY environment variable \
-         or connect xAI in /providers (or run `grok provider connect xai`)."
+        "Not signed in. Authenticate without a browser with either:\n  \
+         grok provider connect <provider>\n  \
+         GROK_API_KEY (or XAI_API_KEY) = <bearer for your endpoint>, plus \
+         GROK_MODELS_BASE_URL=<endpoint>/v1 for a non-xAI gateway"
             .to_string()
     }
 }

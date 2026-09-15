@@ -25,19 +25,28 @@ pub(crate) fn new_shared_auth_method_id(initial: Option<acp::AuthMethodId>) -> S
 /// Kept as a constant so test code and the production check stay in sync.
 pub const XAI_API_KEY_ENV_VAR: &str = "XAI_API_KEY";
 
+/// Provider-neutral alias for [`XAI_API_KEY_ENV_VAR`], checked first.
+///
+/// The value is a plain bearer: with `GROK_MODELS_BASE_URL` pointing at a
+/// third-party or local gateway, "XAI_API_KEY" is a misnomer and a harness has
+/// no way to know it is the expected variable name.
+pub const GROK_API_KEY_ENV_VAR: &str = "GROK_API_KEY";
+
 /// Legacy env var name. Checked as a fallback when `XAI_API_KEY` is not set,
 /// so existing deployments that use the old name keep working.
 pub const LEGACY_XAI_API_KEY_ENV_VAR: &str = "GROK_CODE_XAI_API_KEY";
 
 /// Read the API key from the environment.
 ///
-/// Checks `XAI_API_KEY` first, then falls back to the legacy
+/// Checks `GROK_API_KEY`, then `XAI_API_KEY`, then the legacy
 /// `GROK_CODE_XAI_API_KEY` for backward compatibility.
 pub fn read_xai_api_key_env() -> Result<String, std::env::VarError> {
-    std::env::var(XAI_API_KEY_ENV_VAR).or_else(|_| std::env::var(LEGACY_XAI_API_KEY_ENV_VAR))
+    std::env::var(GROK_API_KEY_ENV_VAR)
+        .or_else(|_| std::env::var(XAI_API_KEY_ENV_VAR))
+        .or_else(|_| std::env::var(LEGACY_XAI_API_KEY_ENV_VAR))
 }
 
-/// Returns `true` if either `XAI_API_KEY` or `GROK_CODE_XAI_API_KEY` is set.
+/// Returns `true` if any of the bearer env vars is set.
 pub fn has_xai_api_key_env() -> bool {
     read_xai_api_key_env().is_ok()
 }

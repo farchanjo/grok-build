@@ -7,6 +7,15 @@ use serde::{Deserialize, Serialize};
 use std::time::Duration;
 const GROK_CODE_BACKEND_URL: &str = "https://code.grok.com";
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Per-attempt budget for the startup settings fetch (see
+/// [`fetch_settings_blocking`]). Short on purpose: settings are advisory and
+/// the fetch sits in front of the first prompt.
+const DEFAULT_SETTINGS_FETCH_TIMEOUT: Duration = Duration::from_secs(10);
+/// Attempts (1 + one retry) for the startup settings fetch.
+const SETTINGS_FETCH_ATTEMPTS: u64 = 2;
+/// Overrides [`DEFAULT_SETTINGS_FETCH_TIMEOUT`], in seconds.
+const SETTINGS_FETCH_TIMEOUT_ENV: &str = "GROK_SETTINGS_FETCH_TIMEOUT_SECS";
 const GROK_CODE_WEB_URL: &str = "https://grok.com";
 /// Build a share URL from a permission ID
 pub fn share_url(permission_id: &str) -> String {
@@ -552,24 +561,51 @@ impl BackendClient {
 /// Fetch remote settings from cli-chat-proxy `GET /v1/settings`.
 ///
 /// This is a blocking call intended for use in the early prefetch thread
+/// Set once a settings fetch has terminally failed in this process.
+///
+/// Startup reaches this function from more than one place (the prefetch thread,
+/// the shell's fallback prefetch, a post-auth refresh). Against an unreachable
+/// proxy each caller used to pay the full budget again — three cycles of
+/// 2 x 10 s plus backoff is ~90 s in front of the first prompt. The first
+/// caller pays, the rest return immediately. [`reset_settings_fetch_latch`]
+/// clears it for callers that know the network changed (e.g. after a login).
+static SETTINGS_FETCH_FAILED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Clear the failure latch so the next fetch tries again.
+pub fn reset_settings_fetch_latch() {
+    SETTINGS_FETCH_FAILED.store(false, std::sync::atomic::Ordering::Relaxed);
+}
+
 /// (`std::thread::spawn`, no tokio runtime). Returns `None` on any error
 /// so startup is never blocked by a settings fetch failure.
 ///
-/// Retries up to 2 times (3 attempts total) on transient errors (5xx,
-/// network). 4xx and parse errors are not retried.
+/// Retries once on transient errors (5xx, network). 4xx and parse errors are
+/// not retried. Each attempt is bounded by [`settings_fetch_timeout`]: the
+/// shared blocking client allows 30 s, and a blackholed host (no RST) would
+/// otherwise put 3 x 30 s = 91 s in front of the first prompt. Settings are
+/// advisory — a miss falls back to local defaults, and a terminal failure is
+/// latched process-wide (see [`SETTINGS_FETCH_FAILED`]).
 pub fn fetch_settings_blocking(
     cli_chat_proxy_base_url: &str,
     auth: &GrokAuth,
     alpha_test_key: Option<&str>,
 ) -> Option<crate::util::config::RemoteSettings> {
+    use std::sync::atomic::Ordering;
+    if SETTINGS_FETCH_FAILED.load(Ordering::Relaxed) {
+        tracing::debug!("settings fetch skipped: a previous attempt failed this process");
+        return None;
+    }
     let client = crate::http::shared_blocking_client();
     let url = format!("{}/settings", cli_chat_proxy_base_url);
-    for attempt in 0u64..3 {
+    let timeout = settings_fetch_timeout();
+    for attempt in 0u64..SETTINGS_FETCH_ATTEMPTS {
         if attempt > 0 {
             std::thread::sleep(std::time::Duration::from_millis(500 * attempt));
         }
         let request =
-            add_cli_chat_proxy_headers_blocking(client.get(&url), auth, alpha_test_key, &url);
+            add_cli_chat_proxy_headers_blocking(client.get(&url), auth, alpha_test_key, &url)
+                .timeout(timeout);
         match request.send() {
             Ok(resp) if resp.status().is_success() => match resp.json() {
                 Ok(settings) => {
@@ -599,8 +635,59 @@ pub fn fetch_settings_blocking(
             }
         }
     }
-    tracing::error!("Settings fetch failed after 3 attempts");
+    tracing::error!("Settings fetch failed after {SETTINGS_FETCH_ATTEMPTS} attempts");
+    SETTINGS_FETCH_FAILED.store(true, std::sync::atomic::Ordering::Relaxed);
     None
+}
+
+/// Per-attempt budget for the startup settings fetch, overridable with
+/// `GROK_SETTINGS_FETCH_TIMEOUT_SECS`. `0`/unparseable keeps the default.
+fn settings_fetch_timeout() -> std::time::Duration {
+    settings_fetch_timeout_from(std::env::var(SETTINGS_FETCH_TIMEOUT_ENV).ok().as_deref())
+}
+
+fn settings_fetch_timeout_from(raw: Option<&str>) -> std::time::Duration {
+    raw.and_then(|v| v.trim().parse::<u64>().ok())
+        .filter(|secs| *secs > 0)
+        .map(std::time::Duration::from_secs)
+        .unwrap_or(DEFAULT_SETTINGS_FETCH_TIMEOUT)
+}
+
+#[cfg(test)]
+mod settings_fetch_budget_tests {
+    use super::{DEFAULT_SETTINGS_FETCH_TIMEOUT, settings_fetch_timeout_from};
+    use std::time::Duration;
+
+    #[test]
+    fn timeout_defaults_and_honors_env_override() {
+        assert_eq!(
+            settings_fetch_timeout_from(None),
+            DEFAULT_SETTINGS_FETCH_TIMEOUT
+        );
+        assert_eq!(
+            settings_fetch_timeout_from(Some("  ")),
+            DEFAULT_SETTINGS_FETCH_TIMEOUT
+        );
+        assert_eq!(
+            settings_fetch_timeout_from(Some("0")),
+            DEFAULT_SETTINGS_FETCH_TIMEOUT
+        );
+        assert_eq!(
+            settings_fetch_timeout_from(Some("junk")),
+            DEFAULT_SETTINGS_FETCH_TIMEOUT
+        );
+        assert_eq!(
+            settings_fetch_timeout_from(Some("3")),
+            Duration::from_secs(3)
+        );
+    }
+
+    /// The budget exists so a blackholed proxy cannot put 3 x 30 s in front of
+    /// the first prompt.
+    #[test]
+    fn default_budget_is_well_under_the_shared_client_timeout() {
+        assert!(DEFAULT_SETTINGS_FETCH_TIMEOUT < super::DEFAULT_TIMEOUT);
+    }
 }
 #[derive(Deserialize)]
 struct LoginConfigResponse {

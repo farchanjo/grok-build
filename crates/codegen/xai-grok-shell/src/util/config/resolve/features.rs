@@ -1,6 +1,9 @@
 use crate::util::config::RemoteSettings;
 use toml::Value as TomlValue;
 
+/// Env override for [`resolve_remote_fetch_enabled`].
+const REMOTE_FETCH_ENV: &str = "GROK_REMOTE_FETCH";
+
 /// Resolve whether ZDR users are allowed to use the product.
 ///
 /// Precedence: requirements > env > config.toml > managed > remote settings > default (false).
@@ -28,16 +31,20 @@ pub fn resolve_zdr_access_enabled(
 /// bundled into the startup prefetch (the background managed-config sync has
 /// its own `[features] managed_config` gate).
 ///
-/// Precedence: requirements (MDM > system > user) > managed
-/// (`managed_config.toml` > system managed) > user `config.toml` > default
-/// (true). Callable before an `AgentConfig` exists (startup prefetch runs
-/// pre-agent), so it re-reads the config layers like
+/// Precedence: env (`GROK_REMOTE_FETCH`) > requirements (MDM > system > user) >
+/// managed (`managed_config.toml` > system managed) > user `config.toml` >
+/// default (true). Callable before an `AgentConfig` exists (startup prefetch
+/// runs pre-agent), so it re-reads the config layers like
 /// `managed_config::is_fetch_enabled`.
 ///
-/// Deliberately no env var and no remote tier: remote settings are exactly
-/// what is unreachable when this knob is needed (firewalled / air-gapped
-/// deployments), and an env var would be one more way to re-arm the fetches.
+/// No remote tier on purpose: remote settings are exactly what is unreachable
+/// when this knob is needed (firewalled / air-gapped deployments). The env tier
+/// exists for harnesses, containers and CI, where writing a config file just to
+/// disarm the startup fetches is friction; unset/blank keeps the layer walk.
 pub fn resolve_remote_fetch_enabled() -> bool {
+    if let Some(value) = remote_fetch_env_override() {
+        return value;
+    }
     match crate::config::ConfigLayers::load() {
         Ok(layers) => remote_fetch_enabled_from_layers(&layers),
         // The full-layer load is all-or-nothing, but the policy tiers load
@@ -55,6 +62,18 @@ pub fn resolve_remote_fetch_enabled() -> bool {
 
 fn remote_fetch_value(v: &TomlValue) -> Option<bool> {
     v.get("features")?.get("remote_fetch")?.as_bool()
+}
+
+/// Highest-tier override. Strict parsing: unset, blank and unrecognized values
+/// fall through to the layer walk, so a typo cannot silently disarm fetching.
+fn remote_fetch_env_override() -> Option<bool> {
+    let value = xai_grok_config::env_bool(REMOTE_FETCH_ENV)?;
+    tracing::info!(
+        env = REMOTE_FETCH_ENV,
+        enabled = value,
+        "remote_fetch set by env"
+    );
+    Some(value)
 }
 
 /// First-match layer walk instead of the plain effective-config merge: the
@@ -258,6 +277,47 @@ mod tests {
         assert!(
             remote_fetch_enabled_from_policy_layers(None, None, None),
             "genuinely absent policy fails open"
+        );
+    }
+}
+
+#[cfg(test)]
+mod remote_fetch_env_tests {
+    use super::{REMOTE_FETCH_ENV, resolve_remote_fetch_enabled};
+
+    fn with_env<T>(value: Option<&str>, f: impl FnOnce() -> T) -> T {
+        let previous = std::env::var(REMOTE_FETCH_ENV).ok();
+        match value {
+            Some(v) => unsafe { std::env::set_var(REMOTE_FETCH_ENV, v) },
+            None => unsafe { std::env::remove_var(REMOTE_FETCH_ENV) },
+        }
+        let out = f();
+        match previous {
+            Some(p) => unsafe { std::env::set_var(REMOTE_FETCH_ENV, p) },
+            None => unsafe { std::env::remove_var(REMOTE_FETCH_ENV) },
+        }
+        out
+    }
+
+    /// The env tier is what lets a harness or container disarm the startup
+    /// fetches without writing a config file.
+    #[test]
+    fn env_disarms_and_rearms_the_prefetch() {
+        assert!(!with_env(Some("0"), resolve_remote_fetch_enabled));
+        assert!(!with_env(Some("false"), resolve_remote_fetch_enabled));
+        assert!(with_env(Some("1"), resolve_remote_fetch_enabled));
+        assert!(with_env(Some("true"), resolve_remote_fetch_enabled));
+    }
+
+    /// Unset and unrecognized values fall through to the layer walk instead of
+    /// silently disarming fetching.
+    #[test]
+    fn blank_and_junk_fall_through_to_the_layers() {
+        let baseline = with_env(None, resolve_remote_fetch_enabled);
+        assert_eq!(with_env(Some(""), resolve_remote_fetch_enabled), baseline);
+        assert_eq!(
+            with_env(Some("junk"), resolve_remote_fetch_enabled),
+            baseline
         );
     }
 }
