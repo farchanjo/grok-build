@@ -1049,6 +1049,7 @@ mod tests {
             kill_requested_at: None,
             scrollback_entry_id: None,
             is_monitor: false,
+            is_wait: false,
             restored_from_replay: false,
         }
     }

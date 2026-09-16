@@ -1052,6 +1052,7 @@ mod resolve_turn_activity_tests {
                 kill_requested_at: None,
                 scrollback_entry_id: None,
                 is_monitor: false,
+                is_wait: false,
                 restored_from_replay: false,
             },
         );
@@ -1126,6 +1127,7 @@ mod resolve_turn_activity_tests {
                 kill_requested_at: None,
                 scrollback_entry_id: None,
                 is_monitor: false,
+                is_wait: false,
                 restored_from_replay: false,
             },
         );
@@ -1181,6 +1183,7 @@ mod resolve_turn_activity_tests {
                 kill_requested_at: None,
                 scrollback_entry_id: None,
                 is_monitor: false,
+                is_wait: false,
                 restored_from_replay: false,
             },
         );
@@ -1245,6 +1248,7 @@ mod resolve_turn_activity_tests {
                 kill_requested_at: None,
                 scrollback_entry_id: None,
                 is_monitor: false,
+                is_wait: false,
                 restored_from_replay: false,
             },
         );
@@ -1395,6 +1399,7 @@ mod resolve_turn_activity_tests {
                 kill_requested_at: None,
                 scrollback_entry_id: None,
                 is_monitor: false,
+                is_wait: false,
                 restored_from_replay: false,
             },
         );

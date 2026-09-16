@@ -223,6 +223,12 @@ pub struct BgTaskState {
     /// command. Set from the `monitor_description` field of the
     /// `TaskBackgrounded` notification.
     pub is_monitor: bool,
+    /// True when this background task is a `wait_for` watcher. A wait is a
+    /// one-shot monitor on the wire (its `monitor_description` is
+    /// `"wait: <condition>"`), so it shares the monitor's neutral row shape but
+    /// gets its own "Wait" tag instead of "Monitor". Set from the same
+    /// notification field as `is_monitor`.
+    pub is_wait: bool,
     /// True when this task was restored from a `session/load` replay
     /// (`_meta.isReplay`) rather than started live in this client. Restored
     /// tasks are historical context: the tasks pane must not auto-open for

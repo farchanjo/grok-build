@@ -395,7 +395,11 @@ impl AgentView {
             .values()
             .filter(|t| t.status == crate::app::agent::BgTaskStatus::Running)
         {
-            if task.is_monitor {
+            if task.is_wait {
+                // A wait is a one-shot monitor on the wire; count it as its
+                // own kind so the cue can say "wait" instead of "monitor".
+                watchers.waits += 1;
+            } else if task.is_monitor {
                 watchers.monitors += 1;
             } else {
                 watchers.commands += 1;
@@ -1809,6 +1813,7 @@ mod watcher_tests {
                 kill_requested_at: None,
                 scrollback_entry_id: None,
                 is_monitor,
+                is_wait: false,
                 restored_from_replay: false,
             },
         );
@@ -1827,10 +1832,53 @@ mod watcher_tests {
             Watchers {
                 commands: 1,
                 monitors: 1,
+                waits: 0,
                 loops: 0,
                 subagents: 0,
                 workflows: 0,
             }
+        );
+    }
+
+    /// A running `wait_for` watcher: a monitor on the wire, flagged as a wait.
+    fn insert_wait_task(agent: &mut crate::app::agent_view::AgentView, task_id: &str) {
+        insert_bg_task(agent, task_id, true);
+        agent
+            .session
+            .bg_tasks
+            .get_mut(task_id)
+            .expect("task just inserted")
+            .is_wait = true;
+    }
+
+    #[test]
+    fn watchers_counts_waits_apart_from_monitors() {
+        let mut agent = test_agent_view(Some("s1"), std::path::PathBuf::from("/tmp"));
+        insert_bg_task(&mut agent, "bg-1", false);
+        insert_bg_task(&mut agent, "mon-1", true);
+        insert_wait_task(&mut agent, "wait-1");
+        insert_bg_task(&mut agent, "done-wait", true);
+        {
+            let done = agent
+                .session
+                .bg_tasks
+                .get_mut("done-wait")
+                .expect("task just inserted");
+            done.is_wait = true;
+            done.status = crate::app::agent::BgTaskStatus::Done;
+        }
+
+        assert_eq!(
+            agent.watchers(),
+            Watchers {
+                commands: 1,
+                monitors: 1,
+                waits: 1,
+                loops: 0,
+                subagents: 0,
+                workflows: 0,
+            },
+            "a live wait is its own watcher kind; a finished one drops out",
         );
     }
 
@@ -1850,6 +1898,7 @@ mod watcher_tests {
             Watchers {
                 commands: 0,
                 monitors: 0,
+                waits: 0,
                 loops: 0,
                 subagents: 0,
                 workflows: 1,
@@ -1876,6 +1925,7 @@ mod watcher_tests {
             Watchers {
                 commands: 0,
                 monitors: 0,
+                waits: 0,
                 loops: 0,
                 subagents: 1,
                 workflows: 1,

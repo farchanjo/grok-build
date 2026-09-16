@@ -238,6 +238,7 @@ pub(super) fn insert_running_task(agent: &mut AgentView, task_id: &str, command:
                 kill_requested_at: None,
                 scrollback_entry_id: None,
                 is_monitor: false,
+                is_wait: false,
                 restored_from_replay: false,
             },
         );
@@ -1653,6 +1654,32 @@ pub(super) fn make_task_backgrounded_notif(
             cwd: "/tmp".into(),
             output_file: "/tmp/output.log".into(),
             monitor_description: None,
+            description: None,
+        },
+        meta: None,
+    };
+    let raw = serde_json::value::to_raw_value(&notif).unwrap();
+    acp::ExtNotification::new("x.ai/task_backgrounded", std::sync::Arc::from(raw))
+}
+/// [`make_task_backgrounded_notif`] with the `monitor_description` field set —
+/// the channel monitors announce themselves through, and the one `wait_for`
+/// watchers use to declare themselves (`"wait: <condition>"`).
+pub(super) fn make_task_backgrounded_notif_with_monitor_description(
+    session_id: &str,
+    tool_call_id: &str,
+    task_id: &str,
+    command: &str,
+    monitor_description: &str,
+) -> acp::ExtNotification {
+    let notif = SessionNotification {
+        session_id: acp::SessionId::new(session_id),
+        update: XaiSessionUpdate::TaskBackgrounded {
+            tool_call_id: tool_call_id.into(),
+            task_id: task_id.into(),
+            command: command.into(),
+            cwd: "/tmp".into(),
+            output_file: "/tmp/output.log".into(),
+            monitor_description: Some(monitor_description.into()),
             description: None,
         },
         meta: None,

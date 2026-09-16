@@ -92,15 +92,18 @@ pub struct MouseButtons {
 
 /// Counts of idle-surviving "watcher" work — background jobs that can wake
 /// the agent for a new turn while it sits idle (commands and monitors on
-/// completion/events, `/loop` tasks on a timer, background subagents on
-/// finish). They share one persistent still-running cue above the prompt.
-/// Broader than the tasks-pane `Watchers` group (monitors + loops only).
+/// completion/events, waits on satisfaction, `/loop` tasks on a timer,
+/// background subagents on finish). They share one persistent still-running
+/// cue above the prompt. Broader than the tasks-pane `Watchers` group
+/// (waits + monitors + loops only).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Watchers {
     /// Running background commands (non-monitor `background: true` tasks).
     pub commands: usize,
     /// Running `monitor` background tasks.
     pub monitors: usize,
+    /// Live `wait_for` watchers (one-shot, resolving into a wake).
+    pub waits: usize,
     /// Active scheduled `/loop` tasks.
     pub loops: usize,
     /// Running background subagents. While the agent is idle, any running
@@ -113,20 +116,21 @@ pub struct Watchers {
 impl Watchers {
     /// Total watcher count across all kinds.
     pub fn total(self) -> usize {
-        self.commands + self.monitors + self.loops + self.subagents + self.workflows
+        self.commands + self.monitors + self.waits + self.loops + self.subagents + self.workflows
     }
 
     /// Awaitable in-flight work — the kinds a blocking `wait_tasks` /
-    /// `get_task_output` wait can resolve on (commands, monitors, subagents;
-    /// scheduled `/loop` tasks and workflows are not task waits).
+    /// `get_task_output` wait can resolve on (commands, monitors, waits,
+    /// subagents; scheduled `/loop` tasks and workflows are not task waits).
+    /// A live wait resolves into a wake, so it counts here.
     pub fn awaitable_work(self) -> usize {
-        self.commands + self.monitors + self.subagents
+        self.commands + self.monitors + self.waits + self.subagents
     }
 }
 
 /// Format a counts-first `"… still running"` cue from `(count, noun)` pairs,
 /// listing only the non-zero kinds (plain-`s` plurals) — e.g.
-/// `"1 command · 2 monitors still running"`. `None` when every count is
+/// `"1 wait · 2 monitors still running"`. `None` when every count is
 /// zero. Single owner of the format mechanics so the agent view's idle cue
 /// and the dashboard's background-work label cannot drift.
 pub(crate) fn format_still_running<'a>(
@@ -152,13 +156,14 @@ pub(crate) fn format_still_running<'a>(
 }
 
 /// The idle watcher cue's label — e.g.
-/// `"1 command · 2 monitors · 1 loop · 1 subagent still running"`. Leads
+/// `"1 wait · 2 monitors · 1 loop · 1 subagent still running"`. Leads
 /// with the counts (not an ambient "watching") so a glance under a
 /// "Worked for X" marker still reads as unfinished work. `None` when no
 /// watchers are live.
 fn still_running_label(watchers: Watchers) -> Option<String> {
     format_still_running([
         (watchers.commands, "command"),
+        (watchers.waits, "wait"),
         (watchers.monitors, "monitor"),
         (watchers.loops, "loop"),
         (watchers.subagents, "subagent"),
@@ -830,8 +835,9 @@ fn render_starting_session(
 /// is showing "Starting session…" (a fresh `total == 0` seed), or when the
 /// agent is idle but background watchers are still running
 /// (`watchers.total() > 0`) — running commands and monitors wake the agent on
-/// completion/events, scheduled `/loop` tasks fire prompts, and background
-/// subagents inject a completion turn, any of which can start a new turn.
+/// completion/events, live waits wake it on satisfaction, scheduled `/loop`
+/// tasks fire prompts, and background subagents inject a completion turn, any
+/// of which can start a new turn.
 ///
 /// A parked turn (`parked` — the stopped look while blocked on a sendable
 /// wait) suppresses the running-turn chrome entirely: the row shows only when
@@ -1109,7 +1115,7 @@ mod tests {
 
     #[test]
     fn should_show_when_watchers_running() {
-        // Idle but a watcher (command, monitor, loop, or subagent) is still
+        // Idle but a watcher (command, monitor, wait, loop, or subagent) is still
         // running → row stays visible so the persistent "… still running" cue
         // can show.
         for watchers in [
@@ -1119,6 +1125,10 @@ mod tests {
             },
             Watchers {
                 monitors: 1,
+                ..Watchers::default()
+            },
+            Watchers {
+                waits: 1,
                 ..Watchers::default()
             },
             Watchers {
@@ -1445,10 +1455,11 @@ mod tests {
 
     #[test]
     fn idle_with_all_watcher_kinds_lists_all() {
-        // Commands, monitors, loops, and subagents present → one cue lists
-        // all four in order, middle-dot separated.
+        // Commands, waits, monitors, loops, and subagents present → one cue
+        // lists all of them in order, middle-dot separated.
         let text = render_idle_with_watchers(Watchers {
             commands: 1,
+            waits: 1,
             monitors: 2,
             loops: 1,
             subagents: 3,
@@ -1456,7 +1467,7 @@ mod tests {
         });
         assert!(
             text.contains(
-                "1 command \u{00b7} 2 monitors \u{00b7} 1 loop \u{00b7} 3 subagents still running"
+                "1 command \u{00b7} 1 wait \u{00b7} 2 monitors \u{00b7} 1 loop \u{00b7} 3 subagents still running"
             ),
             "all kinds must be listed in one cue, got: {text:?}"
         );
@@ -1617,6 +1628,22 @@ mod tests {
         );
         assert_eq!(
             still_running_label(Watchers {
+                waits: 1,
+                ..Watchers::default()
+            }),
+            Some("1 wait still running".into())
+        );
+        // A wait reads as its own kind, ahead of monitors — never folded in.
+        assert_eq!(
+            still_running_label(Watchers {
+                waits: 1,
+                monitors: 2,
+                ..Watchers::default()
+            }),
+            Some("1 wait \u{00b7} 2 monitors still running".into())
+        );
+        assert_eq!(
+            still_running_label(Watchers {
                 loops: 1,
                 ..Watchers::default()
             }),
@@ -1640,17 +1667,55 @@ mod tests {
         assert_eq!(
             still_running_label(Watchers {
                 commands: 1,
+                waits: 1,
                 monitors: 1,
                 loops: 1,
                 subagents: 2,
                 workflows: 0,
             }),
             Some(
-                "1 command \u{00b7} 1 monitor \u{00b7} 1 loop \u{00b7} 2 subagents still running"
+                "1 command \u{00b7} 1 wait \u{00b7} 1 monitor \u{00b7} 1 loop \u{00b7} 2 subagents still running"
                     .into()
             )
         );
         assert_eq!(still_running_label(Watchers::default()), None);
+    }
+
+    #[test]
+    fn live_waits_count_as_watchers_and_as_awaitable_work() {
+        // A live wait can resolve into a wake, so it keeps the idle cue alive
+        // (`total`) and counts as work a blocking task wait can resolve on
+        // (`awaitable_work`) — while loops and workflows stay out of the latter.
+        let waits = Watchers {
+            waits: 2,
+            ..Watchers::default()
+        };
+        assert_eq!(waits.total(), 2);
+        assert_eq!(waits.awaitable_work(), 2);
+
+        let mixed = Watchers {
+            commands: 1,
+            monitors: 1,
+            waits: 3,
+            subagents: 1,
+            loops: 2,
+            workflows: 1,
+        };
+        assert_eq!(mixed.total(), 9);
+        assert_eq!(
+            mixed.awaitable_work(),
+            6,
+            "waits count; loops and workflows do not"
+        );
+        assert_eq!(
+            Watchers {
+                loops: 2,
+                workflows: 1,
+                ..Watchers::default()
+            }
+            .awaitable_work(),
+            0
+        );
     }
 
     #[test]

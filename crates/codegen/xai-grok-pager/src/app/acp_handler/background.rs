@@ -1,5 +1,14 @@
 use super::*;
 
+/// `monitor_description` prefix the `wait_for` tool bakes into its
+/// backgrounded notification (`"wait: <condition>"`). The pager keys the
+/// wait row kind off it; the condition itself follows the prefix.
+///
+/// Shared with the producer so the two cannot drift: see
+/// [`xai_grok_tools::implementations::grok_build::wait_for::WAIT_DESCRIPTION_PREFIX`].
+const WAIT_DESCRIPTION_PREFIX: &str =
+    xai_grok_tools::implementations::grok_build::wait_for::WAIT_DESCRIPTION_PREFIX;
+
 /// Route a `ToolCallUpdate` stdout chunk to the central bg task store.
 ///
 /// Returns `true` if the update was consumed (belongs to a bg task),
@@ -134,6 +143,13 @@ pub(super) fn handle_task_backgrounded(notif: &acp::ExtNotification, app: &mut A
     // "Monitor" row instead of a bash-highlighted "[monitor] …" under Tasks.
     let monitor_prefix = command.strip_prefix("[monitor] ").map(str::to_string);
     let is_monitor = monitor_description.is_some() || monitor_prefix.is_some();
+    // A `wait_for` watcher announces itself as a monitor whose description is
+    // `"wait: <condition>"`. It is one-shot rather than recurring, so flag it
+    // for its own "Wait" row tag and strip the prefix from the display label —
+    // the same treatment the "[monitor] " command prefix gets below.
+    let is_wait = monitor_description
+        .as_deref()
+        .is_some_and(|d| d.starts_with(WAIT_DESCRIPTION_PREFIX));
     // Always drain the deferred-tool suppression key now that routing is being
     // set up — even when we end up preferring the wire `description`. This entry
     // also suppresses late stdout ToolCallUpdates (see tracker), so leaving it
@@ -148,10 +164,14 @@ pub(super) fn handle_task_backgrounded(notif: &acp::ExtNotification, app: &mut A
     // values count as absent so an empty wire `description` can't shadow a real
     // fallback. On demotion we also fall back to the Execute block's description.
     let non_blank = |d: Option<String>| d.filter(|s| !s.trim().is_empty());
-    let mut description = non_blank(monitor_description)
-        .or_else(|| non_blank(monitor_prefix))
-        .or_else(|| non_blank(notif_description))
-        .or_else(|| non_blank(deferred_description));
+    let mut description = non_blank(monitor_description.map(|d| {
+        d.strip_prefix(WAIT_DESCRIPTION_PREFIX)
+            .map(|rest| rest.trim().to_string())
+            .unwrap_or(d)
+    }))
+    .or_else(|| non_blank(monitor_prefix))
+    .or_else(|| non_blank(notif_description))
+    .or_else(|| non_blank(deferred_description));
 
     // Create central bg task state (description may still be filled from the
     // Execute block on demotion before we insert into the map).
@@ -174,6 +194,7 @@ pub(super) fn handle_task_backgrounded(notif: &acp::ExtNotification, app: &mut A
         kill_requested_at: None,
         scrollback_entry_id: None,
         is_monitor,
+        is_wait,
         restored_from_replay,
     };
 

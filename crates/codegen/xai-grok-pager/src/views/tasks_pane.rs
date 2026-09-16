@@ -208,9 +208,10 @@ pub enum GroupKind {
     Workflows,
     Subagents,
     Tasks,
-    /// Recurring background processes: `monitor` tasks and `/loop` scheduled
-    /// tasks share one section. They stay contiguous (monitors first, then
-    /// loops) via [`TaskEntry::type_order`].
+    /// Background work the agent is watching: one-shot `wait_for` waits,
+    /// `monitor` tasks, and `/loop` scheduled tasks share one section. They
+    /// stay contiguous (waits, then monitors, then loops) via
+    /// [`TaskEntry::type_order`].
     Watchers,
     /// Async asset transfer jobs. Sorted after every other group so a burst of
     /// uploads never displaces the tasks the user is watching.
@@ -258,6 +259,10 @@ pub enum TaskEntry {
         /// True for `monitor` tool tasks. Used to sort monitors into their
         /// own contiguous group (separate from one-shot bg commands).
         is_monitor: bool,
+        /// True for `wait_for` watchers. A wait is a one-shot monitor on the
+        /// wire, so it renders the same neutral shape as a monitor but with
+        /// its own `Wait` tag and next to monitors in the `Watchers` group.
+        is_wait: bool,
     },
     Agent {
         id: u64,
@@ -323,24 +328,26 @@ impl TaskEntry {
             .filter(|s| !s.is_empty());
 
         let running = task.status == BgTaskStatus::Running;
-        let (label, styled) = if task.is_monitor {
-            // Monitor: blue "Monitor" tag + neutral description, mirroring
-            // scheduled `/loop` rows. Falls back to the command if the
-            // description is somehow empty. The description (not the raw
-            // command) is what we show, so it never gets bash-highlighted.
+        let (label, styled) = if task.is_monitor || task.is_wait {
+            // Watcher row: blue tag + neutral description, mirroring scheduled
+            // `/loop` rows. Falls back to the command if the description is
+            // somehow empty. The description (not the raw command) is what we
+            // show, so it never gets bash-highlighted. A `wait_for` watcher is
+            // a one-shot monitor on the wire, so it shares this shape and only
+            // swaps the tag — its own kind must never read as "Monitor".
             let theme = Theme::current();
             let text = description
                 .map(|d| d.replace('\n', " "))
                 .unwrap_or_else(|| task.command.trim().replace('\n', " "));
-            const TAG: &str = "Monitor";
+            let tag = if task.is_wait { "Wait" } else { "Monitor" };
             let desc_style = if running {
                 Style::default().fg(theme.text_secondary)
             } else {
                 Style::default().fg(theme.gray_bright)
             };
-            let label = format!("{TAG} {text}");
+            let label = format!("{tag} {text}");
             let styled = Line::from(vec![
-                Span::styled(format!("{TAG} "), Style::default().fg(theme.accent_system)),
+                Span::styled(format!("{tag} "), Style::default().fg(theme.accent_system)),
                 Span::styled(text, desc_style),
             ]);
             (label, styled)
@@ -399,6 +406,7 @@ impl TaskEntry {
             running,
             start_time: task.start_time,
             is_monitor: task.is_monitor,
+            is_wait: task.is_wait,
         }
     }
 
@@ -789,11 +797,12 @@ impl TaskEntry {
         match self {
             TaskEntry::Agent { .. } => GroupKind::Subagents,
             TaskEntry::BgTask {
-                is_monitor: false, ..
+                is_monitor: false,
+                is_wait: false,
+                ..
             } => GroupKind::Tasks,
-            TaskEntry::BgTask {
-                is_monitor: true, ..
-            } => GroupKind::Watchers,
+            // Monitors and waits share the watchers section.
+            TaskEntry::BgTask { .. } => GroupKind::Watchers,
             TaskEntry::Scheduled { .. } => GroupKind::Watchers,
             TaskEntry::Workflow { .. } => GroupKind::Workflows,
             TaskEntry::Transfer { .. } => GroupKind::Transfers,
@@ -813,22 +822,28 @@ impl TaskEntry {
     }
 
     /// Fine-grained sort rank, distinct per task kind so each renders as a
-    /// contiguous block: subagents (0) → one-shot bg tasks (1) → monitors
-    /// (2) → scheduled/loops (3) → transfers (4). Monitors and loops share the
-    /// `Watchers` group/header but keep distinct ranks so monitors always sort
-    /// before loops within that section.
+    /// contiguous block: subagents (0) → one-shot bg tasks (1) → waits (2) →
+    /// monitors (3) → scheduled/loops (4) → transfers (5). Waits, monitors and
+    /// loops share the `Watchers` group/header but keep distinct ranks so a
+    /// wait always sorts before a monitor, and a monitor before a loop, within
+    /// that section.
     fn type_order(&self) -> u8 {
         match self {
             TaskEntry::Workflow { .. } => 0,
             TaskEntry::Agent { .. } => 1,
             TaskEntry::BgTask {
-                is_monitor: false, ..
+                is_monitor: false,
+                is_wait: false,
+                ..
             } => 2,
+            // One-shot wait: the most ephemeral watcher, so it leads the
+            // section it shares with monitors.
+            TaskEntry::BgTask { is_wait: true, .. } => 3,
             TaskEntry::BgTask {
                 is_monitor: true, ..
-            } => 3,
-            TaskEntry::Scheduled { .. } => 4,
-            TaskEntry::Transfer { .. } => 5,
+            } => 4,
+            TaskEntry::Scheduled { .. } => 5,
+            TaskEntry::Transfer { .. } => 6,
             // Headers never appear in the sorted `items` list; fall back to
             // the group's coarse order for completeness.
             TaskEntry::Header { group, .. } => group.order(),
@@ -1108,14 +1123,14 @@ impl TasksPane {
             }
         }
 
-        // Sort: group by type first (subagents → tasks → monitors →
+        // Sort: group by type first (subagents → tasks → waits → monitors →
         // scheduled) so each kind is one contiguous block, then running
         // before done within each group, then newest-first, then a stable
-        // id tiebreak. Monitors and scheduled/loops render under one shared
-        // "Watchers" header but keep distinct ranks (monitors first).
+        // id tiebreak. Waits, monitors and scheduled/loops render under one
+        // shared "Watchers" header but keep distinct ranks (waits first).
         self.items.sort_by(|a, b| {
             // 1. Group by type so each kind is one contiguous block:
-            //    subagents → tasks → monitors → scheduled.
+            //    subagents → tasks → waits → monitors → scheduled.
             a.type_order()
                 .cmp(&b.type_order())
                 // 2. Running before done *within* each group.
@@ -2250,6 +2265,7 @@ mod tests {
             kill_requested_at: None,
             scrollback_entry_id: None,
             is_monitor: false,
+            is_wait: false,
             restored_from_replay: false,
         }
     }
@@ -2394,6 +2410,47 @@ mod tests {
             "incrementing event counter every 3s"
         );
         assert_eq!(styled.spans[1].style.fg, Some(theme.text_secondary));
+    }
+
+    #[test]
+    fn wait_task_styled_with_wait_tag() {
+        // A wait is a one-shot monitor on the wire (its `monitor_description`
+        // is `wait: <condition>`), so it shares the monitor row shape but must
+        // carry its own "Wait" tag — never "Monitor".
+        let mut task = make_bg_task("w1", "curl -sf localhost:3000", BgTaskStatus::Running);
+        task.is_monitor = true;
+        task.is_wait = true;
+        task.description = Some("curl -sf localhost:3000".into());
+        let mut cache = HashMap::new();
+        let entry = TaskEntry::from_bg_task(&task, &mut cache);
+        let (label, styled) = match &entry {
+            TaskEntry::BgTask { label, styled, .. } => (label.as_str(), styled),
+            _ => panic!("expected BgTask variant"),
+        };
+        let theme = Theme::current();
+        assert_eq!(label, "Wait curl -sf localhost:3000");
+        assert_eq!(styled.spans.len(), 2);
+        assert_eq!(styled.spans[0].content.as_ref(), "Wait ");
+        assert_eq!(styled.spans[0].style.fg, Some(theme.accent_system));
+        assert_eq!(styled.spans[1].content.as_ref(), "curl -sf localhost:3000");
+        assert_eq!(styled.spans[1].style.fg, Some(theme.text_secondary));
+    }
+
+    #[test]
+    fn wait_task_without_description_falls_back_to_command() {
+        // No description on the wire: the row still reads as a wait (tag +
+        // command), never as a bare bash-highlighted command.
+        let mut task = make_bg_task("w2", "test -f /tmp/ready", BgTaskStatus::Running);
+        task.is_wait = true;
+        let mut cache = HashMap::new();
+        let entry = TaskEntry::from_bg_task(&task, &mut cache);
+        let (label, styled) = match &entry {
+            TaskEntry::BgTask { label, styled, .. } => (label.as_str(), styled),
+            _ => panic!("expected BgTask variant"),
+        };
+        assert_eq!(label, "Wait test -f /tmp/ready");
+        assert_eq!(styled.spans[0].content.as_ref(), "Wait ");
+        assert_eq!(styled.spans[1].content.as_ref(), "test -f /tmp/ready");
     }
 
     #[test]
@@ -3005,6 +3062,7 @@ mod tests {
                 &pane.items[1],
                 TaskEntry::BgTask {
                     is_monitor: false,
+                    is_wait: false,
                     ..
                 }
             ),
@@ -3015,11 +3073,91 @@ mod tests {
                 &pane.items[2],
                 TaskEntry::BgTask {
                     is_monitor: true,
+                    is_wait: false,
                     ..
                 }
             ),
             "monitor in its own group, after one-shot tasks",
         );
+    }
+
+    #[test]
+    fn waits_sit_in_the_watchers_group_ahead_of_monitors() {
+        // A `wait_for` watcher is a one-shot bg task on the wire but belongs
+        // in `Watchers` next to monitors — contiguous, and sorted before them
+        // (a wait is the most ephemeral watcher) while one-shot commands stay
+        // in `Tasks`.
+        let mut pane = TasksPane::new();
+        pane.show_done = true;
+
+        let mut bg_tasks = std::collections::BTreeMap::new();
+        bg_tasks.insert("t1".into(), make_bg_task("t1", "ls", BgTaskStatus::Running));
+        let mut wait = make_bg_task("w1", "test -f /tmp/ready", BgTaskStatus::Running);
+        wait.is_monitor = true;
+        wait.is_wait = true;
+        bg_tasks.insert("w1".into(), wait);
+        let mut mon = make_bg_task("m1", "tail -f log", BgTaskStatus::Running);
+        mon.is_monitor = true;
+        bg_tasks.insert("m1".into(), mon);
+
+        pane.sync(
+            &bg_tasks,
+            &HashMap::new(),
+            &HashMap::new(),
+            None,
+            &HashSet::new(),
+            &[],
+            &BTreeMap::new(),
+        );
+
+        // items: one-shot task → wait → monitor.
+        assert_eq!(pane.items.len(), 3);
+        assert!(
+            matches!(&pane.items[1], TaskEntry::BgTask { is_wait: true, .. }),
+            "the wait sorts into its own rank ahead of monitors",
+        );
+        assert!(
+            matches!(
+                &pane.items[2],
+                TaskEntry::BgTask {
+                    is_monitor: true,
+                    is_wait: false,
+                    ..
+                }
+            ),
+            "the monitor follows the wait",
+        );
+        assert_eq!(
+            pane.items
+                .iter()
+                .map(TaskEntry::group_kind)
+                .collect::<Vec<_>>(),
+            vec![GroupKind::Tasks, GroupKind::Watchers, GroupKind::Watchers],
+        );
+
+        // Display list: Tasks header + task, then ONE Watchers header carrying
+        // the wait and the monitor together.
+        assert_eq!(pane.entries.len(), 5);
+        let watchers_header = match &pane.entries[2] {
+            TaskEntry::Header {
+                group: GroupKind::Watchers,
+                styled,
+            } => styled
+                .spans
+                .iter()
+                .map(|s| s.content.as_ref())
+                .collect::<String>(),
+            _ => panic!("expected Watchers header at index 2"),
+        };
+        assert!(
+            watchers_header.contains("Watchers"),
+            "got: {watchers_header}"
+        );
+        assert!(watchers_header.contains('2'), "count: {watchers_header}");
+        assert!(matches!(
+            &pane.entries[3],
+            TaskEntry::BgTask { is_wait: true, .. }
+        ));
     }
 
     #[test]
@@ -3056,6 +3194,7 @@ mod tests {
             &pane.items[0],
             TaskEntry::BgTask {
                 is_monitor: true,
+                is_wait: false,
                 ..
             }
         ));
@@ -3076,6 +3215,7 @@ mod tests {
             &pane.entries[1],
             TaskEntry::BgTask {
                 is_monitor: true,
+                is_wait: false,
                 ..
             }
         ));

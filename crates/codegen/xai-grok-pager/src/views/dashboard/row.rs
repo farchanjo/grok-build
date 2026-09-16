@@ -416,6 +416,7 @@ pub fn has_background_work(agent: &AgentView) -> bool {
 fn background_work_label(agent: &AgentView) -> Option<String> {
     let w = agent.watchers();
     crate::views::turn_status::format_still_running([
+        (w.waits, "wait"),
         (w.monitors, "monitor"),
         (w.loops, "loop"),
         (w.commands, "task"),
@@ -1840,6 +1841,7 @@ mod tests {
             kill_requested_at: None,
             scrollback_entry_id: None,
             is_monitor: false,
+            is_wait: false,
             restored_from_replay: false,
         };
         for (status, expect_badge) in [
@@ -1881,6 +1883,7 @@ mod tests {
             kill_requested_at: None,
             scrollback_entry_id: None,
             is_monitor,
+            is_wait: false,
             restored_from_replay: false,
         }
     }

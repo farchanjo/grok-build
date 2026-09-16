@@ -327,6 +327,59 @@
         assert_eq!(task.description.as_deref(), Some("event counter"));
     }
 
+    #[test]
+    fn task_backgrounded_wait_description_marks_is_wait_and_strips_prefix() {
+        // A `wait_for` watcher announces itself as a monitor whose description
+        // is `wait: <condition>`. The pager flags it as a wait (its own row
+        // tag, never "Monitor") and drops the redundant prefix from the
+        // display description.
+        let mut app = make_app_with_agent("sess-1");
+        let notif = make_task_backgrounded_notif_with_monitor_description(
+            "sess-1",
+            "tc-wait-1",
+            "task-wait-1",
+            "curl -sf localhost:3000",
+            "wait: curl -sf localhost:3000",
+        );
+        handle_task_backgrounded(&notif, &mut app);
+
+        let agent = app.agents.get(&AgentId(0)).unwrap();
+        let task = agent
+            .session
+            .bg_tasks
+            .get("task-wait-1")
+            .expect("bg task registered");
+        assert!(task.is_wait, "a `wait: ` description marks the task a wait");
+        assert!(
+            task.is_monitor,
+            "a wait is still a monitor on the wire (shares the watcher shape)"
+        );
+        assert_eq!(task.description.as_deref(), Some("curl -sf localhost:3000"));
+    }
+
+    #[test]
+    fn task_backgrounded_monitor_description_is_not_a_wait() {
+        let mut app = make_app_with_agent("sess-1");
+        let notif = make_task_backgrounded_notif_with_monitor_description(
+            "sess-1",
+            "tc-mon-2",
+            "task-mon-2",
+            "python -u counter.py",
+            "incrementing event counter every 3s",
+        );
+        handle_task_backgrounded(&notif, &mut app);
+
+        let agent = app.agents.get(&AgentId(0)).unwrap();
+        let task = agent.session.bg_tasks.get("task-mon-2").expect("registered");
+        assert!(task.is_monitor);
+        assert!(!task.is_wait, "a plain monitor must keep the Monitor tag");
+        assert_eq!(
+            task.description.as_deref(),
+            Some("incrementing event counter every 3s"),
+            "a non-wait description is left untouched"
+        );
+    }
+
     /// Resume regression: the agent's cold-load reconciliation
     /// completes replay-restored dead tasks with `signal: "session_restart"`.
     /// That synthetic completion must finalize state QUIETLY — finish the
