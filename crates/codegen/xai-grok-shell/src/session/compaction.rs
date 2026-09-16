@@ -1747,22 +1747,27 @@ impl SessionActor {
                         .await;
                     let pending_tasks: Vec<_> =
                         bridge_tasks.into_iter().filter(|t| !t.completed).collect();
-                    let (execute_tool_name, monitor_tool_name) = if pending_tasks.is_empty() {
-                        (None, None)
-                    } else {
-                        let agent_ref = self.agent.borrow();
-                        let bridge = agent_ref.tool_bridge();
-                        let empty = serde_json::json!({});
-                        let execute = bridge
-                            .render_prompt("${{ tools.by_kind.execute }}", &empty)
-                            .await
-                            .filter(|s| !s.is_empty() && !s.contains("by_kind"));
-                        let monitor = bridge
-                            .render_prompt("${{ tools.by_kind.monitor }}", &empty)
-                            .await
-                            .filter(|s| !s.is_empty() && !s.contains("by_kind"));
-                        (execute, monitor)
-                    };
+                    let (execute_tool_name, monitor_tool_name, wait_tool_name) =
+                        if pending_tasks.is_empty() {
+                            (None, None, None)
+                        } else {
+                            let agent_ref = self.agent.borrow();
+                            let bridge = agent_ref.tool_bridge();
+                            let empty = serde_json::json!({});
+                            let execute = bridge
+                                .render_prompt("${{ tools.by_kind.execute }}", &empty)
+                                .await
+                                .filter(|s| !s.is_empty() && !s.contains("by_kind"));
+                            let monitor = bridge
+                                .render_prompt("${{ tools.by_kind.monitor }}", &empty)
+                                .await
+                                .filter(|s| !s.is_empty() && !s.contains("by_kind"));
+                            let wait = bridge
+                                .render_prompt("${{ tools.by_kind.wait_for }}", &empty)
+                                .await
+                                .filter(|s| !s.is_empty() && !s.contains("by_kind"));
+                            (execute, monitor, wait)
+                        };
                     let running_tasks: Vec<_> = pending_tasks
                         .into_iter()
                         .map(|t| {
@@ -1772,6 +1777,9 @@ impl SessionActor {
                                 }
                                 xai_grok_tools::computer::types::TaskKind::Bash => {
                                     execute_tool_name.clone()
+                                }
+                                xai_grok_tools::computer::types::TaskKind::Wait => {
+                                    wait_tool_name.clone()
                                 }
                             };
                             CompactionStateContext::task_summary(

@@ -131,6 +131,8 @@ pub enum TaskKind {
     Bash,
     /// Monitor tool — streams stdout events with rate limiting.
     Monitor,
+    /// `wait_for` watcher — polls a shell condition, owns no child process.
+    Wait,
 }
 
 #[derive(Clone)]

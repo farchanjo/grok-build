@@ -104,6 +104,8 @@ pub enum ToolKind {
     SearchModels,
     UseTool,
     Monitor,
+    /// Wait for a shell condition or a fixed delay under a bounded deadline.
+    WaitFor,
     GoalUpdate,
     Workflow,
     /// Store a local file in the session asset store.

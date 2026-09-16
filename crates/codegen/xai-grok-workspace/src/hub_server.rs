@@ -224,6 +224,7 @@ async fn list_outstanding_background_tasks(
     };
     let execute_name = toolset.tool_name_for_kind(ToolKind::Execute);
     let monitor_name = toolset.tool_name_for_kind(ToolKind::Monitor);
+    let wait_name = toolset.tool_name_for_kind(ToolKind::WaitFor);
     terminal
         .list_tasks()
         .await
@@ -238,6 +239,7 @@ async fn list_outstanding_background_tasks(
             let tool_name = match t.kind {
                 TaskKind::Monitor => monitor_name.clone(),
                 TaskKind::Bash => execute_name.clone(),
+                TaskKind::Wait => wait_name.clone(),
             };
             BackgroundTaskSummaryWire {
                 task_id: t.task_id,
@@ -275,6 +277,7 @@ async fn tasks_snapshot(toolset: &FinalizedToolset) -> TasksSnapshotResponse {
                     kind: match t.kind {
                         TaskKind::Bash => "bash".to_owned(),
                         TaskKind::Monitor => "monitor".to_owned(),
+                        TaskKind::Wait => "wait".to_owned(),
                     },
                     started_at: DateTime::<Utc>::from(t.start_time).to_rfc3339(),
                 }

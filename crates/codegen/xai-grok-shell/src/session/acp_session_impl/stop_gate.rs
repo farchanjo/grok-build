@@ -28,6 +28,9 @@ fn stop_entry_from_task(task: &xai_grok_tools::types::TaskSnapshot) -> StopBackg
         xai_grok_tools::computer::types::TaskKind::Monitor => {
             (BackgroundTaskType::Monitor, None, Some(command_text))
         }
+        xai_grok_tools::computer::types::TaskKind::Wait => {
+            (BackgroundTaskType::Monitor, None, Some(command_text))
+        }
     };
     StopBackgroundTask {
         id: task.task_id.clone(),

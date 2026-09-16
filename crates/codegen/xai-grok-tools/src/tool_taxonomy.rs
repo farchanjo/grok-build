@@ -68,6 +68,7 @@ impl ToolKind {
             ToolKind::SearchModels => "Search Model",
             ToolKind::UseTool => "Use Tool",
             ToolKind::Monitor => "Monitor",
+            ToolKind::WaitFor => "Wait For",
             ToolKind::GoalUpdate => "Update Goal",
             ToolKind::Workflow => "Workflow",
             ToolKind::AssetUpload => "Upload Asset",
@@ -125,6 +126,7 @@ impl ToolKind {
             | ToolKind::SearchTool
             | ToolKind::UseTool
             | ToolKind::Monitor
+            | ToolKind::WaitFor
             | ToolKind::GoalUpdate
             | ToolKind::Workflow
             | ToolKind::AssetUpload

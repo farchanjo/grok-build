@@ -350,6 +350,7 @@ pub fn format_resumed_tasks_reminder(entries: &[BackgroundTaskManifestEntry]) ->
         let ago = format_duration_ago(now, entry.start_time);
         let kind_label = match entry.kind {
             xai_grok_tools::computer::types::TaskKind::Monitor => " [monitor]",
+            xai_grok_tools::computer::types::TaskKind::Wait => " [wait]",
             xai_grok_tools::computer::types::TaskKind::Bash => "",
         };
         let _ = writeln!(
