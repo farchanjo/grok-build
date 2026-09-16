@@ -698,6 +698,7 @@ pub enum ToolOutput {
     ExitPlanMode(ExitPlanModeOutput),
     AskUserQuestion(AskUserQuestionOutput),
     Monitor(crate::implementations::grok_build::monitor::types::MonitorOutput),
+    WaitFor(crate::implementations::grok_build::wait_for::types::WaitForOutput),
     SchedulerCreate(crate::implementations::grok_build::scheduler::create::SchedulerCreateOutput),
     SchedulerDelete(crate::implementations::grok_build::scheduler::delete::SchedulerDeleteOutput),
     SchedulerList(crate::implementations::grok_build::scheduler::list::SchedulerListOutput),
@@ -767,6 +768,13 @@ impl ToolOutput {
                 TodoWriteOutput::DuplicateId(_) | TodoWriteOutput::InvalidArgument(_),
             ) => true,
             ToolOutput::GrepSearch(g) => g.exit_code > 1,
+            // A wait that is still watching succeeded. Both "the condition never
+            // held" outcomes are failures: the model asked for a condition and
+            // did not get it.
+            ToolOutput::WaitFor(w) => {
+                use crate::implementations::grok_build::wait_for::types::WaitOutcome;
+                matches!(w.outcome, WaitOutcome::TimedOut | WaitOutcome::NotSatisfied)
+            }
             _ => false,
         }
     }
@@ -1040,6 +1048,40 @@ impl ToolOutput {
                          Events may arrive while you are waiting for the user -- an event is not their reply.",
                         o.task_id, o.timeout_ms
                     )
+                }
+            }
+            ToolOutput::WaitFor(o) => {
+                use crate::implementations::grok_build::wait_for::types::WaitOutcome;
+                match o.outcome {
+                    WaitOutcome::Satisfied => format!(
+                        "Wait satisfied after {} ({} attempt{}).\n{}",
+                        o.elapsed,
+                        o.attempts,
+                        if o.attempts == 1 { "" } else { "s" },
+                        o.last_output,
+                    ),
+                    WaitOutcome::Watching => format!(
+                        "Condition not met yet after {} attempt{}. Watching in the background \
+                         (task {}); you will be woken when it is met. Keep working -- do not poll \
+                         or sleep.",
+                        o.attempts,
+                        if o.attempts == 1 { "" } else { "s" },
+                        o.task_id.as_deref().unwrap_or("?"),
+                    ),
+                    WaitOutcome::TimedOut => format!(
+                        "Wait timed out after {} ({} attempt{}).\n{}",
+                        o.elapsed,
+                        o.attempts,
+                        if o.attempts == 1 { "" } else { "s" },
+                        o.last_output,
+                    ),
+                    WaitOutcome::NotSatisfied => format!(
+                        "Condition not satisfied after {} ({} attempt{}); no watcher kept.\n{}",
+                        o.elapsed,
+                        o.attempts,
+                        if o.attempts == 1 { "" } else { "s" },
+                        o.last_output,
+                    ),
                 }
             }
             ToolOutput::SchedulerCreate(o) => {

@@ -189,6 +189,77 @@ pub fn format_monitor_completion(task: &TaskSnapshot, task_output_name: Option<&
         dur = task.duration_secs(),
     )
 }
+/// Format a model-facing auto-wake message for a completed **`wait_for`** watcher.
+///
+/// A satisfied wait (no signal, exit code 0) and a deadline expiry
+/// (`signal == "timeout"`) read differently on purpose: the first tells the
+/// model the condition it was blocked on now holds, the second tells it the
+/// condition never held and the last attempt is still failing. A cancelled
+/// watcher is reported as such instead of being mistaken for either.
+///
+/// A watcher owns no registered task, so `get_task_output` cannot resolve its
+/// id; the message therefore carries the last attempt's output and points at
+/// the attempt log instead of at a poll tool call.
+pub fn format_wait_completion(task: &TaskSnapshot, _task_output_name: Option<&str>) -> String {
+    use crate::implementations::grok_build::wait_for::TIMEOUT_SIGNAL;
+
+    let id = task.task_id.as_str();
+    let condition = task.command.as_str();
+    let duration = task.duration_secs();
+    let tail = |msg: &mut String| {
+        if !task.output.trim().is_empty() {
+            msg.push_str("Last attempt output:\n");
+            msg.push_str(task.output.trim_end());
+            msg.push('\n');
+        }
+        msg.push_str(&format!("Full output: {}", task.output_file.display()));
+    };
+
+    match task.signal.as_deref() {
+        None if task.exit_code == Some(0) => {
+            let mut msg = format!(
+                "Wait \"{id}\" satisfied: the condition exited 0 after {duration:.1}s.\n\
+                 Condition: {condition}\n\
+                 The work that was blocked on it can continue.\n"
+            );
+            tail(&mut msg);
+            msg
+        }
+        Some(TIMEOUT_SIGNAL) => {
+            let mut msg = format!(
+                "Wait \"{id}\" expired: the deadline passed after {duration:.1}s without the \
+                 condition exiting 0.\n\
+                 Condition: {condition}\n\
+                 The last attempt is still failing — re-check the command, or wait again with a \
+                 longer timeout.\n"
+            );
+            tail(&mut msg);
+            msg
+        }
+        Some(signal) => {
+            let mut msg = format!(
+                "Wait \"{id}\" was cancelled (signal {signal}) after {duration:.1}s, before the \
+                 condition held.\n\
+                 Condition: {condition}\n"
+            );
+            tail(&mut msg);
+            msg
+        }
+        None => {
+            let mut msg = format!(
+                "Wait \"{id}\" ended after {duration:.1}s without the condition holding \
+                 (last exit code: {}).\n\
+                 Condition: {condition}\n",
+                task.exit_code
+                    .map(|code| code.to_string())
+                    .unwrap_or_else(|| "unknown".into()),
+            );
+            tail(&mut msg);
+            msg
+        }
+    }
+}
+
 /// Warn the model about other background tasks that are still running.
 fn format_running_tasks_warning(running: &[&TaskSnapshot], kill_task_name: Option<&str>) -> String {
     use std::fmt::Write as _;
@@ -593,6 +664,7 @@ pub fn consumed_completion_ids(output: &ToolOutput) -> Vec<&str> {
         | ToolOutput::ExitPlanMode(_)
         | ToolOutput::AskUserQuestion(_)
         | ToolOutput::Monitor(_)
+        | ToolOutput::WaitFor(_)
         | ToolOutput::SchedulerCreate(_)
         | ToolOutput::SchedulerDelete(_)
         | ToolOutput::SchedulerList(_)
@@ -878,6 +950,64 @@ mod tests {
             "expected signal wording: {msg}"
         );
         assert!(msg.contains("get_task_output(\"mon-sig\")"), "{msg}");
+    }
+    /// A satisfied wait reads as a success and points at the poll tool.
+    #[test]
+    fn format_wait_completion_satisfied() {
+        let mut task = wait_snapshot("wait-1", Some(0), None);
+        task.output = "HTTP/1.1 200 OK".into();
+        task.output_file = std::path::PathBuf::from("/tmp/wait-1.log");
+        let msg = format_wait_completion(&task, Some("get_command_or_subagent_output"));
+        assert!(msg.contains("Wait \"wait-1\" satisfied"), "{msg}");
+        assert!(msg.contains("curl -sf localhost:3000"), "condition: {msg}");
+        assert!(
+            msg.contains("Last attempt output:\nHTTP/1.1 200 OK"),
+            "the wake carries the last attempt output, because the watcher id does not resolve \
+             in the poll tool: {msg}"
+        );
+        assert!(
+            msg.contains("Full output: /tmp/wait-1.log"),
+            "the wake points at the attempt log: {msg}"
+        );
+    }
+    /// A deadline expiry is distinct from satisfaction: the condition never held.
+    #[test]
+    fn format_wait_completion_timeout_is_not_satisfied_wording() {
+        use crate::implementations::grok_build::wait_for::TIMEOUT_SIGNAL;
+        let task = wait_snapshot("wait-2", None, Some(TIMEOUT_SIGNAL));
+        let msg = format_wait_completion(&task, Some("get_command_or_subagent_output"));
+        assert!(msg.contains("Wait \"wait-2\" expired"), "{msg}");
+        assert!(msg.contains("longer timeout"), "retry hint: {msg}");
+        assert!(!msg.contains("satisfied"), "{msg}");
+    }
+    #[test]
+    fn format_wait_completion_cancelled_is_not_timeout_wording() {
+        use crate::implementations::grok_build::wait_for::CANCELLED_SIGNAL;
+        let task = wait_snapshot("wait-3", None, Some(CANCELLED_SIGNAL));
+        let msg = format_wait_completion(&task, None);
+        assert!(msg.contains("cancelled"), "{msg}");
+        assert!(msg.contains(CANCELLED_SIGNAL), "{msg}");
+        assert!(msg.contains("Full output: "), "{msg}");
+    }
+    fn wait_snapshot(task_id: &str, exit_code: Option<i32>, signal: Option<&str>) -> TaskSnapshot {
+        TaskSnapshot {
+            task_id: task_id.into(),
+            command: "curl -sf localhost:3000".into(),
+            display_command: Some("[wait] curl -sf localhost:3000".into()),
+            cwd: String::new(),
+            start_time: std::time::SystemTime::now(),
+            end_time: Some(std::time::SystemTime::now()),
+            output: String::new(),
+            output_file: std::path::PathBuf::new(),
+            truncated: false,
+            exit_code,
+            signal: signal.map(str::to_owned),
+            completed: true,
+            kind: crate::computer::types::TaskKind::Wait,
+            block_waited: false,
+            explicitly_killed: false,
+            owner_session_id: None,
+        }
     }
     #[test]
     fn format_bash_completion_prefers_display_command() {

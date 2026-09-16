@@ -97,6 +97,13 @@ pub fn canonical_input(input: &ToolInput) -> Option<serde_json::Value> {
             (field::PATTERN, req(&g.pattern)),
             (field::PATH, opt(g.path.as_ref())),
         ]),
+        ToolInput::WaitFor(w) => obj([
+            ("until", req(&w.until)),
+            (
+                "timeout",
+                opt(w.timeout.map(crate::util::duration::format_duration)),
+            ),
+        ]),
         ToolInput::TodoWrite(_)
         | ToolInput::Skill(_)
         | ToolInput::MCPTool(_)

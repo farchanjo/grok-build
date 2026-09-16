@@ -763,6 +763,7 @@ impl ToolRegistryBuilder {
                 grok_build::ask_user_question::AskUserQuestionParams,
             >();
         b.register::<grok_build::MonitorTool>();
+        b.register_with_params::<grok_build::WaitForTool, grok_build::WaitForParams>();
         b.register::<grok_build::SchedulerCreateTool>();
         b.register::<grok_build::SchedulerDeleteTool>();
         b.register::<grok_build::SchedulerListTool>();

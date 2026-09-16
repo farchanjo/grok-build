@@ -96,6 +96,7 @@ pub enum ToolInput {
     AskUserQuestion(AskUserQuestionInput),
     Lsp(LspToolInput),
     Monitor(crate::implementations::grok_build::monitor::types::MonitorInput),
+    WaitFor(crate::implementations::grok_build::wait_for::types::WaitForInput),
     SchedulerCreate(crate::implementations::grok_build::scheduler::create::SchedulerCreateInput),
     SchedulerDelete(crate::implementations::grok_build::scheduler::delete::SchedulerDeleteInput),
     SchedulerList(crate::implementations::grok_build::scheduler::list::SchedulerListInput),
