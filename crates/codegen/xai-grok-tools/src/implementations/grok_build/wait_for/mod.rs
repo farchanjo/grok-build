@@ -24,7 +24,8 @@ pub use types::{
     WaitForParams, WaitOutcome, parse_until,
 };
 pub use watcher::{
-    CANCELLED_SIGNAL, TIMEOUT_SIGNAL, WaitForRegistry, WatcherSpec, spawn_watcher, watcher_task_id,
+    CANCELLED_SIGNAL, TIMEOUT_SIGNAL, WaitForRegistry, WaitSlot, WatcherSpec, spawn_watcher,
+    watcher_task_id,
 };
 
 use crate::types::requirements::{Expr, ToolRequirement};
@@ -54,7 +55,7 @@ impl crate::types::tool_metadata::ToolMetadata for WaitForTool {
 
 Why prefer it: a bare `sleep 30` blocks the turn and, past ~15s, gets auto-backgrounded so you have to poll for it; a `sleep 5 && check` loop burns turns. Here the first attempt runs inline, and if it fails the tool returns immediately — a background watcher keeps polling with backoff until `timeout`, you keep working, and you are woken when the condition is met. A duration-only `until` is a clean `sleep` replacement.
 
-The watcher shows in the tasks pane under Watchers and can be cancelled there."#
+The watcher shows in the tasks pane under Watchers and can be cancelled there. Its `task_id` stays readable${%- if tools.by_kind.background_task_action %} through `${{ tools.by_kind.background_task_action }}`${%- endif %}: the last attempt while it runs, the final state after it ends."#
     }
 
     fn emitted_notifications(&self) -> &'static [&'static str] {
@@ -150,12 +151,13 @@ impl xai_tool_runtime::Tool for WaitForTool {
         let params = params.unwrap_or_default();
 
         let timeout = params.resolve_timeout(input.timeout);
-        input.validate(&until, timeout)?;
+        let wake = input.wake.unwrap_or(params.wake_on_timeout);
+        let retry_initial = input.retry.unwrap_or(params.retry_initial);
+        input.validate(&until, timeout, retry_initial, wake)?;
 
         let started = Instant::now();
         let deadline = started + timeout;
         let attempt_timeout = params.attempt_timeout;
-        let wake = input.wake.unwrap_or(params.wake_on_timeout);
         let task_id = watcher_task_id(ctx.call_id.as_str());
         let output_file = session_folder
             .join("terminal")
@@ -300,7 +302,7 @@ impl xai_tool_runtime::Tool for WaitForTool {
                 command,
                 cwd: cwd.clone(),
                 deadline,
-                retry_initial: input.retry.unwrap_or(params.retry_initial),
+                retry_initial,
                 retry_max: params.retry_max,
                 retry_multiplier: if input.retry.is_some() {
                     1
@@ -421,5 +423,45 @@ mod tests {
         assert_eq!(excerpt("hello"), "hello");
         let long = "x".repeat(OUTPUT_EXCERPT_CHARS + 10);
         assert!(excerpt(&long).ends_with("[truncated]"));
+    }
+
+    /// The description names the read-back tool, so the model knows a watcher id
+    /// is not a dead end. It must survive a toolset without that tool.
+    #[test]
+    fn description_names_the_read_back_tool_only_when_present() {
+        use crate::types::template_renderer::TemplateRenderer;
+        use crate::types::tool_metadata::ToolMetadata;
+
+        let template = WaitForTool.description_template();
+        let with_tool = TemplateRenderer::new(
+            std::collections::HashMap::from([(
+                ToolKind::BackgroundTaskAction,
+                "get_command_or_subagent_output".to_string(),
+            )]),
+            std::collections::HashMap::new(),
+        );
+        let rendered = with_tool.render(template).unwrap();
+        assert!(
+            rendered.contains("`get_command_or_subagent_output`"),
+            "the read path must be named: {rendered}"
+        );
+        assert!(
+            !rendered.contains("${%-"),
+            "no raw template left: {rendered}"
+        );
+
+        let without = TemplateRenderer::new(
+            std::collections::HashMap::new(),
+            std::collections::HashMap::new(),
+        );
+        let rendered = without.render(template).unwrap();
+        assert!(
+            rendered.contains("stays readable: the last attempt"),
+            "the sentence must still read without the tool: {rendered}"
+        );
+        assert!(
+            !rendered.contains("${%-"),
+            "no raw template left: {rendered}"
+        );
     }
 }

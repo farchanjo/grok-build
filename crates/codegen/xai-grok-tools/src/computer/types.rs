@@ -321,6 +321,20 @@ pub trait TerminalBackend: Send + Sync {
         false
     }
 
+    /// Kill a live foreground command by the tool call that started it.
+    /// Returns `true` if a matching process was found and killed.
+    ///
+    /// A caller that drops the future awaiting [`run`](Self::run) does not stop
+    /// the process — the backend owns it. The `wait_for` watcher is exactly that
+    /// caller: a cancel drops the in-flight attempt, and this is how it reaches
+    /// the process without knowing the backend's internal id.
+    ///
+    /// Backends that do not track foreground processes by tool call id may keep
+    /// the default no-op; the attempt then runs out its own budget.
+    async fn kill_foreground_command_by_tool_call_id(&self, _tool_call_id: &str) -> bool {
+        false
+    }
+
     /// Wait for a background task to complete, with optional timeout.
     async fn wait_for_completion(
         &self,

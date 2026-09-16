@@ -133,6 +133,12 @@ enum TerminalCommand {
         reply: oneshot::Sender<bool>,
     },
 
+    /// Kill a live foreground command by tool_call_id.
+    KillForegroundByToolCallId {
+        tool_call_id: String,
+        reply: oneshot::Sender<bool>,
+    },
+
     /// Wait for a background task to finish, with optional timeout.
     WaitForCompletion {
         task_id: String,
@@ -972,6 +978,15 @@ impl LocalTerminalActor {
             } => {
                 let found = self.handle_background_foreground(&tool_call_id);
                 let _ = reply.send(found);
+            }
+            TerminalCommand::KillForegroundByToolCallId {
+                tool_call_id,
+                reply,
+            } => {
+                let killed = self
+                    .handle_kill_foreground_by_tool_call_id(&tool_call_id)
+                    .await;
+                let _ = reply.send(killed);
             }
             TerminalCommand::KillForegroundCommandsByOwner { owner_session_id } => {
                 self.kill_foreground_commands_by_owner(&owner_session_id)
@@ -1893,6 +1908,27 @@ impl LocalTerminalActor {
         self.transition_to_background(&internal_id, BackgroundReason::UserSignal)
     }
 
+    /// Kill a live foreground command by the `tool_call_id` that started it.
+    ///
+    /// The `wait_for` watcher is the caller: it drops the future awaiting the
+    /// attempt but the actor owns the process, so the cancel has to arrive here
+    /// by the only id the watcher holds. The attempt is never backgrounded on
+    /// timeout (`auto_background_on_timeout: false`), so any live process with a
+    /// matching id is that attempt.
+    async fn handle_kill_foreground_by_tool_call_id(&mut self, tool_call_id: &str) -> bool {
+        let internal_id = self
+            .processes
+            .iter()
+            .find(|(_, p)| p.tool_call_id == tool_call_id && p.exit_status.is_none())
+            .map(|(id, _)| id.clone());
+
+        let Some(internal_id) = internal_id else {
+            return false;
+        };
+
+        matches!(self.handle_kill(&internal_id).await, KillOutcome::Killed)
+    }
+
     /// Kill all non-backgrounded (foreground) processes and notify their waiters.
     /// Backgrounded processes are left untouched. The actor stays alive for reuse.
     ///
@@ -2545,6 +2581,22 @@ impl TerminalBackend for LocalTerminalBackend {
         if self
             .cmd_tx
             .send(TerminalCommand::BackgroundForeground {
+                tool_call_id: tool_call_id.to_string(),
+                reply: reply_tx,
+            })
+            .await
+            .is_err()
+        {
+            return false;
+        }
+        reply_rx.await.unwrap_or(false)
+    }
+
+    async fn kill_foreground_command_by_tool_call_id(&self, tool_call_id: &str) -> bool {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        if self
+            .cmd_tx
+            .send(TerminalCommand::KillForegroundByToolCallId {
                 tool_call_id: tool_call_id.to_string(),
                 reply: reply_tx,
             })

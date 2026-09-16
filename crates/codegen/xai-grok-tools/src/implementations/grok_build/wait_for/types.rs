@@ -42,6 +42,8 @@ pub enum WaitForError {
     UnknownUnit(String, String),
     #[error("`until` duration {0} exceeds the deadline {1}")]
     DelayExceedsTimeout(String, String),
+    #[error("`retry` {0} exceeds the deadline {1} — the watcher would never retry")]
+    RetryExceedsTimeout(String, String),
     #[error("`retry` must be greater than zero")]
     ZeroRetry,
     #[error("wait_for params: {0}")]
@@ -195,7 +197,16 @@ pub struct WaitForInput {
 
 impl WaitForInput {
     /// Cross-field validation that needs the resolved params.
-    pub fn validate(&self, until: &Until, timeout: Duration) -> Result<(), WaitForError> {
+    ///
+    /// `retry` and `watch` are the effective values (input over params), because
+    /// both checks describe what the watcher would actually do.
+    pub fn validate(
+        &self,
+        until: &Until,
+        timeout: Duration,
+        retry: Duration,
+        watch: bool,
+    ) -> Result<(), WaitForError> {
         if self.retry == Some(Duration::ZERO) {
             return Err(WaitForError::ZeroRetry);
         }
@@ -204,6 +215,15 @@ impl WaitForInput {
         {
             return Err(WaitForError::DelayExceedsTimeout(
                 format_duration(delay),
+                format_duration(timeout),
+            ));
+        }
+        // A retry interval wider than the whole deadline leaves the watcher with
+        // one attempt and a sleep: `retry: "60s"` against the default 120s is
+        // fine, against `timeout: "30s"` it is a mistake worth naming.
+        if watch && !until.is_delay_only() && retry > timeout {
+            return Err(WaitForError::RetryExceedsTimeout(
+                format_duration(retry),
                 format_duration(timeout),
             ));
         }
@@ -491,10 +511,73 @@ mod tests {
         };
         assert!(
             input
-                .validate(&until, Duration::from_secs(5))
+                .validate(&until, Duration::from_secs(5), Duration::from_secs(1), true)
                 .is_err_and(|e| matches!(e, WaitForError::DelayExceedsTimeout(_, _)))
         );
-        assert!(input.validate(&until, Duration::from_secs(30)).is_ok());
+        assert!(
+            input
+                .validate(
+                    &until,
+                    Duration::from_secs(30),
+                    Duration::from_secs(1),
+                    true
+                )
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn retry_wider_than_the_deadline_is_rejected() {
+        let until = parsed("curl -sf x");
+        let input = WaitForInput {
+            until: "curl -sf x".into(),
+            retry: Some(Duration::from_secs(60)),
+            timeout: None,
+            wake: None,
+        };
+        assert!(
+            input
+                .validate(
+                    &until,
+                    Duration::from_secs(30),
+                    Duration::from_secs(60),
+                    true
+                )
+                .is_err_and(|e| matches!(e, WaitForError::RetryExceedsTimeout(_, _)))
+        );
+        // Inside the deadline, and outside a watcher (no wake, or a pure delay),
+        // the same retry is fine.
+        assert!(
+            input
+                .validate(
+                    &until,
+                    Duration::from_secs(120),
+                    Duration::from_secs(60),
+                    true
+                )
+                .is_ok()
+        );
+        assert!(
+            input
+                .validate(
+                    &until,
+                    Duration::from_secs(30),
+                    Duration::from_secs(60),
+                    false
+                )
+                .is_ok()
+        );
+        let delay_only = parsed("5s");
+        assert!(
+            input
+                .validate(
+                    &delay_only,
+                    Duration::from_secs(30),
+                    Duration::from_secs(60),
+                    true
+                )
+                .is_ok()
+        );
     }
 
     #[test]
@@ -507,7 +590,12 @@ mod tests {
             wake: None,
         };
         assert_eq!(
-            input.validate(&until, Duration::from_secs(30)),
+            input.validate(
+                &until,
+                Duration::from_secs(30),
+                Duration::from_secs(1),
+                true
+            ),
             Err(WaitForError::ZeroRetry)
         );
     }

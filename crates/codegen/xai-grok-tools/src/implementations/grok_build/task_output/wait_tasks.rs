@@ -172,10 +172,15 @@ impl xai_tool_runtime::Tool for WaitTasksTool {
         let timeout =
             crate::implementations::grok_build::task_output::capped_wait_timeout(input.timeout_ms);
 
-        let (terminal, backend, read_file_name, max_output_bytes) = {
+        let (terminal, backend, registry, read_file_name, max_output_bytes) = {
             let res = resources.lock().await;
             let terminal = res.require::<Terminal>()?.0.clone();
             let backend = res.get::<SubagentBackendResource>().cloned();
+            let registry = res
+                .get::<std::sync::Arc<
+                    crate::implementations::grok_build::wait_for::WaitForRegistry,
+                >>()
+                .cloned();
             let renderer = res.require::<TemplateRenderer>()?;
             let rfn = renderer
                 .render("${{ tools.by_kind.read }}")
@@ -189,28 +194,28 @@ impl xai_tool_runtime::Tool for WaitTasksTool {
                     )
                 })
                 .unwrap_or(DEFAULT_TOOL_OUTPUT_BYTES);
-            (terminal, backend, rfn, mob)
+            (terminal, backend, registry, rfn, mob)
         };
 
         let initial = resolve_tasks(
             &input.task_ids,
             &terminal,
             &backend,
+            registry.as_ref(),
             &read_file_name,
             max_output_bytes,
         )
         .await;
 
-        let has_pending =
-            !initial.pending_bash_ids.is_empty() || !initial.pending_subagent_ids.is_empty();
-
-        let results = if has_pending {
+        let results = if initial.has_pending() {
             let deadline = tokio::time::Instant::now() + timeout;
             wait_any_event_driven(
                 &terminal,
                 &backend,
                 &initial.pending_bash_ids,
+                &initial.pending_wait_ids,
                 &initial.pending_subagent_ids,
+                registry.as_ref(),
                 deadline,
             )
             .await;
@@ -218,6 +223,7 @@ impl xai_tool_runtime::Tool for WaitTasksTool {
                 &input.task_ids,
                 &terminal,
                 &backend,
+                registry.as_ref(),
                 &read_file_name,
                 max_output_bytes,
             )

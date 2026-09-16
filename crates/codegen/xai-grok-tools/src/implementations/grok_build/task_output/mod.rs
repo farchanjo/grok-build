@@ -14,6 +14,7 @@ use crate::implementations::BashTool;
 use crate::implementations::grok_build::task::TaskTool;
 use crate::implementations::grok_build::task::backend::SubagentBackendResource;
 use crate::implementations::grok_build::task::types::{SubagentSnapshot, SubagentSnapshotStatus};
+use crate::implementations::grok_build::wait_for::WaitForRegistry;
 use crate::implementations::grok_build_concise::BashConciseTool;
 use crate::implementations::opencode::OpenCodeBashTool;
 use crate::implementations::task_output::tool::snapshot_to_result;
@@ -130,6 +131,31 @@ impl TaskOutputTool {
             terminal.get_task(task_id).await
         };
 
+        // A `wait_for` watcher owns no process, so the terminal above reports
+        // nothing for its id. Its registry entry is the only source: a live
+        // watcher is waited on, a finished one keeps its last snapshot.
+        let registry = {
+            resources
+                .lock()
+                .await
+                .get::<std::sync::Arc<WaitForRegistry>>()
+                .cloned()
+        };
+        let snapshot = match snapshot {
+            Some(snapshot) => Some(snapshot),
+            None => match registry.as_ref().and_then(|r| r.snapshot(task_id)) {
+                Some(snapshot) if snapshot.completed || !waits => Some(snapshot),
+                Some(live) => match registry.as_ref() {
+                    Some(registry) => registry
+                        .wait_completed(task_id, capped_wait_timeout(timeout_ms))
+                        .await
+                        .or(Some(live)),
+                    None => Some(live),
+                },
+                None => None,
+            },
+        };
+
         if let Some(snapshot) = snapshot {
             let read_file_name;
             {
@@ -211,10 +237,11 @@ impl TaskOutputTool {
         let waits = xai_tool_types::task_output_waits(timeout_ms);
         let timeout = capped_wait_timeout(timeout_ms);
 
-        let (terminal, backend, read_file_name, max_output_bytes) = {
+        let (terminal, backend, registry, read_file_name, max_output_bytes) = {
             let res = resources.lock().await;
             let terminal = res.require::<Terminal>()?.0.clone();
             let backend = res.get::<SubagentBackendResource>().cloned();
+            let registry = res.get::<std::sync::Arc<WaitForRegistry>>().cloned();
             let renderer = res.require::<TemplateRenderer>()?;
             let rfn = renderer
                 .render("${{ tools.by_kind.read }}")
@@ -226,27 +253,28 @@ impl TaskOutputTool {
                         .max_output_bytes_for(tool_name_for_truncation, DEFAULT_TOOL_OUTPUT_BYTES)
                 })
                 .unwrap_or(DEFAULT_TOOL_OUTPUT_BYTES);
-            (terminal, backend, rfn, mob)
+            (terminal, backend, registry, rfn, mob)
         };
 
         let initial = resolve_tasks(
             task_ids,
             &terminal,
             &backend,
+            registry.as_ref(),
             &read_file_name,
             max_output_bytes,
         )
         .await;
 
-        let results = if waits
-            && (!initial.pending_bash_ids.is_empty() || !initial.pending_subagent_ids.is_empty())
-        {
+        let results = if waits && initial.has_pending() {
             let deadline = tokio::time::Instant::now() + timeout;
             wait_all_event_driven(
                 &terminal,
                 &backend,
                 &initial.pending_bash_ids,
+                &initial.pending_wait_ids,
                 &initial.pending_subagent_ids,
+                registry.as_ref(),
                 deadline,
             )
             .await;
@@ -254,6 +282,7 @@ impl TaskOutputTool {
                 task_ids,
                 &terminal,
                 &backend,
+                registry.as_ref(),
                 &read_file_name,
                 max_output_bytes,
             )
@@ -302,18 +331,32 @@ pub(crate) fn not_found_result(task_id: &str) -> TaskOutputResult {
 pub(crate) struct ResolveResult {
     pub(crate) results: Vec<TaskOutputResult>,
     pub(crate) pending_bash_ids: Vec<String>,
+    /// Live `wait_for` watchers, which own no process and so resolve through the
+    /// session's watcher registry instead of the terminal backend.
+    pub(crate) pending_wait_ids: Vec<String>,
     pub(crate) pending_subagent_ids: Vec<String>,
+}
+
+impl ResolveResult {
+    /// True when at least one resolved task is still running.
+    pub(crate) fn has_pending(&self) -> bool {
+        !self.pending_bash_ids.is_empty()
+            || !self.pending_wait_ids.is_empty()
+            || !self.pending_subagent_ids.is_empty()
+    }
 }
 
 pub(crate) async fn resolve_tasks(
     task_ids: &[String],
     terminal: &std::sync::Arc<dyn crate::computer::types::TerminalBackend>,
     backend: &Option<SubagentBackendResource>,
+    registry: Option<&std::sync::Arc<WaitForRegistry>>,
     read_file_name: &str,
     max_output_bytes: usize,
 ) -> ResolveResult {
     let mut results = Vec::with_capacity(task_ids.len());
     let mut pending_bash_ids = Vec::new();
+    let mut pending_wait_ids = Vec::new();
     let mut pending_subagent_ids = Vec::new();
 
     for id in task_ids {
@@ -322,6 +365,18 @@ pub(crate) async fn resolve_tasks(
             results.push(snapshot_to_result(snap, read_file_name, max_output_bytes));
             if is_pending {
                 pending_bash_ids.push(id.clone());
+            }
+            continue;
+        }
+
+        // A `wait_for` watcher owns no process, so the terminal reports nothing
+        // for its id. Its registry entry is the only source: live watchers are
+        // pending, finished ones keep their last snapshot.
+        if let Some(snap) = registry.and_then(|registry| registry.snapshot(id)) {
+            let is_pending = !snap.completed;
+            results.push(snapshot_to_result(snap, read_file_name, max_output_bytes));
+            if is_pending {
+                pending_wait_ids.push(id.clone());
             }
             continue;
         }
@@ -345,6 +400,7 @@ pub(crate) async fn resolve_tasks(
     ResolveResult {
         results,
         pending_bash_ids,
+        pending_wait_ids,
         pending_subagent_ids,
     }
 }
@@ -375,12 +431,14 @@ impl Drop for AbortWaitsOnDrop {
     }
 }
 
-/// Wait until any one task (bash or subagent) completes, or deadline is reached.
+/// Wait until any one task (bash, watcher, or subagent) completes, or deadline is reached.
 pub(crate) async fn wait_any_event_driven(
     terminal: &std::sync::Arc<dyn crate::computer::types::TerminalBackend>,
     backend: &Option<SubagentBackendResource>,
     bash_ids: &[String],
+    wait_ids: &[String],
     subagent_ids: &[String],
+    registry: Option<&std::sync::Arc<WaitForRegistry>>,
     deadline: tokio::time::Instant,
 ) {
     let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
@@ -404,6 +462,21 @@ pub(crate) async fn wait_any_event_driven(
         waits.push(
             tokio::spawn(async move {
                 terminal.wait_for_completion(&id, Some(timeout)).await;
+                done.notify_waiters();
+            })
+            .abort_handle(),
+        );
+    }
+
+    for id in wait_ids {
+        let Some(registry) = registry.cloned() else {
+            continue;
+        };
+        let id = id.clone();
+        let done = done.clone();
+        waits.push(
+            tokio::spawn(async move {
+                registry.wait_completed(&id, remaining).await;
                 done.notify_waiters();
             })
             .abort_handle(),
@@ -436,12 +509,14 @@ pub(crate) async fn wait_any_event_driven(
     }
 }
 
-/// Wait until all tasks (bash and subagent) complete, or deadline is reached.
+/// Wait until all tasks (bash, watcher, and subagent) complete, or deadline is reached.
 pub(crate) async fn wait_all_event_driven(
     terminal: &std::sync::Arc<dyn crate::computer::types::TerminalBackend>,
     backend: &Option<SubagentBackendResource>,
     bash_ids: &[String],
+    wait_ids: &[String],
     subagent_ids: &[String],
+    registry: Option<&std::sync::Arc<WaitForRegistry>>,
     deadline: tokio::time::Instant,
 ) {
     let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
@@ -457,6 +532,16 @@ pub(crate) async fn wait_all_event_driven(
         let timeout = remaining;
         handles.push(tokio::spawn(async move {
             terminal.wait_for_completion(&id, Some(timeout)).await;
+        }));
+    }
+
+    for id in wait_ids {
+        let Some(registry) = registry.cloned() else {
+            continue;
+        };
+        let id = id.clone();
+        handles.push(tokio::spawn(async move {
+            registry.wait_completed(&id, remaining).await;
         }));
     }
 
@@ -946,6 +1031,134 @@ mod tests {
     use crate::types::tool_metadata::ToolMetadata;
     use crate::types::tool_metadata::test_ctx;
     use std::sync::Arc;
+
+    /// A `wait_for` watcher owns no process, so the terminal backend reports
+    /// nothing for its id. The registry is the read path: a live watcher shows
+    /// its last attempt instead of "not found".
+    #[tokio::test]
+    async fn get_task_reads_a_live_watcher_from_the_registry() {
+        let mut resources = resources_with_terminal(None);
+        let registry = Arc::new(WaitForRegistry::default());
+        let (_tx, _rx) = tokio::sync::mpsc::channel(1);
+        let slot = registry.register("wait-live", _tx);
+        slot.publish(make_snapshot("wait-live", false, Some(1)));
+        resources.insert(registry);
+
+        let result = xai_tool_runtime::Tool::run(
+            &TaskOutputTool,
+            test_ctx(resources.into_shared()),
+            TaskOutputToolInput {
+                task_ids: vec!["wait-live".into()],
+                timeout_ms: None,
+            },
+        )
+        .await
+        .unwrap();
+
+        match result {
+            TaskOutputOutput::Result(r) => {
+                assert_eq!(r.status, "running");
+                assert!(r.output.contains("test output"), "got: {}", r.output);
+                assert_eq!(r.exit_code, Some(1));
+            }
+            other => panic!("expected the live watcher, got {other:?}"),
+        }
+    }
+
+    /// With a positive `timeout_ms` the read blocks on the watcher and returns
+    /// its final state, the same contract as a backgrounded command.
+    #[tokio::test]
+    async fn get_task_waits_for_a_live_watcher_to_finish() {
+        let mut resources = resources_with_terminal(None);
+        let registry = Arc::new(WaitForRegistry::default());
+        let (_tx, _rx) = tokio::sync::mpsc::channel(1);
+        let slot = registry.register("wait-soon", _tx);
+        slot.publish(make_snapshot("wait-soon", false, None));
+        resources.insert(registry);
+
+        let finisher = {
+            let slot = slot.clone();
+            tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+                slot.finish(make_snapshot("wait-soon", true, Some(0)));
+            })
+        };
+
+        let result = xai_tool_runtime::Tool::run(
+            &TaskOutputTool,
+            test_ctx(resources.into_shared()),
+            TaskOutputToolInput {
+                task_ids: vec!["wait-soon".into()],
+                timeout_ms: Some(5_000),
+            },
+        )
+        .await
+        .unwrap();
+        finisher.await.unwrap();
+
+        match result {
+            TaskOutputOutput::Result(r) => {
+                assert_eq!(r.status, "completed");
+                assert_eq!(r.exit_code, Some(0));
+            }
+            other => panic!("expected the finished watcher, got {other:?}"),
+        }
+    }
+
+    /// A watcher that already finished stays readable, so a late read is not a
+    /// spurious "not found".
+    #[tokio::test]
+    async fn get_task_reads_a_finished_watcher() {
+        let mut resources = resources_with_terminal(None);
+        let registry = Arc::new(WaitForRegistry::default());
+        let (_tx, _rx) = tokio::sync::mpsc::channel(1);
+        let slot = registry.register("wait-done", _tx);
+        slot.finish(make_snapshot("wait-done", true, Some(0)));
+        registry.forget("wait-done");
+        resources.insert(registry);
+
+        let result = xai_tool_runtime::Tool::run(
+            &TaskOutputTool,
+            test_ctx(resources.into_shared()),
+            TaskOutputToolInput {
+                task_ids: vec!["wait-done".into()],
+                timeout_ms: None,
+            },
+        )
+        .await
+        .unwrap();
+
+        match result {
+            TaskOutputOutput::Result(r) => assert_eq!(r.status, "completed"),
+            other => panic!("expected the finished watcher, got {other:?}"),
+        }
+    }
+
+    /// The multi-id path must classify a live watcher as pending, so a wait-all
+    /// call blocks on it instead of returning an immediate not-found.
+    #[tokio::test]
+    async fn resolve_tasks_reports_a_live_watcher_as_pending() {
+        let terminal: Arc<dyn TerminalBackend> = Arc::new(MockTerminal::empty());
+        let registry = Arc::new(WaitForRegistry::default());
+        let (_tx, _rx) = tokio::sync::mpsc::channel(1);
+        let slot = registry.register("wait-pending", _tx);
+        slot.publish(make_snapshot("wait-pending", false, None));
+
+        let resolved = resolve_tasks(
+            &["wait-pending".into()],
+            &terminal,
+            &None,
+            Some(&registry),
+            "read_file",
+            DEFAULT_TOOL_OUTPUT_BYTES,
+        )
+        .await;
+
+        assert!(resolved.has_pending());
+        assert_eq!(resolved.pending_wait_ids, vec!["wait-pending"]);
+        assert!(resolved.pending_bash_ids.is_empty());
+        assert_eq!(resolved.results.len(), 1);
+    }
 
     // A blocking wait must never hold the turn for longer than the wait
     // cap, regardless of the model's requested `timeout_ms` (repro: an
