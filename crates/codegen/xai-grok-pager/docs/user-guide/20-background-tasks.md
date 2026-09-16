@@ -175,7 +175,11 @@ Every attempt runs through the session terminal, in the session working director
 
 The watcher appears in the tasks pane (`Ctrl+G`) under **Watchers** and is cancelled from there like any background task, or with `kill_command_or_subagent(task_id)`.
 
+The watcher's `task_id` also works with `get_command_or_subagent_output`: while the wait runs it reports the last attempt's output and exit code, and after it ends it reports the final state. Adding a `timeout_ms` blocks the read until the wait finishes. In scrollback and in the wake the wait reads with its own verbs — `satisfied`, `expired`, `cancelled` — so a deadline that ran out is not reported as a task failure.
+
 When the deadline expires while watching, the wake reports that the wait timed out. A deadline already exhausted inline returns a `timed_out` outcome from the tool call instead of spawning a watcher; with `wake: false` the outcome is `not_satisfied` and no watcher is kept, which is not a timeout.
+
+Cancelling a wait stops the attempt in flight, not just the polling loop.
 
 ### Parameters
 
@@ -186,7 +190,7 @@ When the deadline expires while watching, the wake reports that the wait timed o
 | `timeout` | Deadline for the whole wait (default `120s`, clamped to `max_timeout`, `10m` by default — a longer `timeout` is silently reduced). |
 | `wake`    | Keep watching after the inline attempt (default `true`). Set `false` to keep the call inline-only. |
 
-A duration that does not fit inside the deadline is rejected before the wait starts — `until: "10s"` with `timeout: "5s"` is an error.
+A duration that does not fit inside the deadline is rejected before the wait starts — `until: "10s"` with `timeout: "5s"` is an error. So is a retry interval wider than the whole deadline (`retry: "60s"` with `timeout: "30s"`): the watcher would never get a second attempt.
 
 ### Examples
 
