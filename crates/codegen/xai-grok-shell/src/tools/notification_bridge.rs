@@ -107,6 +107,62 @@ impl WakeAdmissionOutcome {
         matches!(self, Self::Accepted)
     }
 }
+
+/// How a completed background task is classified for wake wording and for the
+/// deferred fallback prompt id.
+///
+/// The three kinds share the wake path, the admission gate and the suppression
+/// flags; only the model-facing wording and the prompt-id prefix differ, so the
+/// classification is resolved once at the top of the `TaskCompleted` arm.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CompletedTaskKind {
+    Monitor,
+    /// `wait_for` watcher — reports satisfaction or deadline expiry.
+    Wait,
+    Bash,
+}
+
+impl CompletedTaskKind {
+    fn of(snapshot: &xai_grok_tools::computer::types::TaskSnapshot) -> Self {
+        use xai_grok_tools::computer::types::TaskKind;
+        match snapshot.kind {
+            TaskKind::Monitor => Self::Monitor,
+            TaskKind::Wait => Self::Wait,
+            TaskKind::Bash => Self::Bash,
+        }
+    }
+
+    fn is_monitor(self) -> bool {
+        matches!(self, Self::Monitor)
+    }
+
+    /// Fallback / deferred-inject prompt id, prefixed per kind so a deferred
+    /// wait completion can never dedupe against a same-task-id bash one.
+    fn fallback_prompt_id(self, task_id: &str) -> String {
+        match self {
+            Self::Monitor => format!("monitor-completed-{task_id}"),
+            Self::Wait => format!("wait-completed-{task_id}"),
+            Self::Bash => format!("bash-completed-{task_id}"),
+        }
+    }
+
+    /// Model-facing wake body.
+    fn body(
+        self,
+        task: &xai_grok_tools::computer::types::TaskSnapshot,
+        tool_name: Option<&str>,
+        read_name: Option<&str>,
+    ) -> String {
+        use xai_grok_tools::reminders::task_completion::{
+            format_bash_completion, format_monitor_completion, format_wait_completion,
+        };
+        match self {
+            Self::Monitor => format_monitor_completion(task, tool_name),
+            Self::Wait => format_wait_completion(task, tool_name),
+            Self::Bash => format_bash_completion(task, tool_name, read_name),
+        }
+    }
+}
 /// Configuration for the notification bridge.
 pub struct NotificationBridgeConfig {
     /// ACP gateway for sending streaming updates to TUI
@@ -470,8 +526,8 @@ async fn handle_notification(
             );
         }
         ToolNotification::TaskCompleted(task_snapshot) => {
-            let is_monitor =
-                task_snapshot.kind == xai_grok_tools::computer::types::TaskKind::Monitor;
+            let completion_kind = CompletedTaskKind::of(&task_snapshot);
+            let is_monitor = completion_kind.is_monitor();
             let task_id = task_snapshot.task_id.clone();
             let goal_loop_active = config
                 .goal_loop_active
@@ -488,18 +544,7 @@ async fn handle_notification(
                 config.task_completion_reservations.reserve(task_id.clone());
                 let tool_name = resolved_tool_name(&config.task_output_tool_name);
                 let read_name = resolved_tool_name(&config.read_tool_name);
-                let body = if is_monitor {
-                    xai_grok_tools::reminders::task_completion::format_monitor_completion(
-                        &task_snapshot,
-                        tool_name,
-                    )
-                } else {
-                    xai_grok_tools::reminders::task_completion::format_bash_completion(
-                        &task_snapshot,
-                        tool_name,
-                        read_name,
-                    )
-                };
+                let body = completion_kind.body(&task_snapshot, tool_name, read_name);
                 let message = xai_grok_tools::reminders::wrap_reminder(&body);
                 let prompt_id = format!("task-completed-{task_id}");
                 let prompt_blocks = vec![acp::ContentBlock::Text(acp::TextContent::new(message))];
@@ -537,11 +582,7 @@ async fn handle_notification(
                         admission: Some(crate::session::commands::TaskWakeAdmission {
                             respond_to: admission_tx,
                             fallback: crate::session::commands::TaskWakeFallback {
-                                prompt_id: if is_monitor {
-                                    format!("monitor-completed-{task_id}")
-                                } else {
-                                    format!("bash-completed-{task_id}")
-                                },
+                                prompt_id: completion_kind.fallback_prompt_id(&task_id),
                                 prompt_blocks: vec![acp::ContentBlock::Text(
                                     acp::TextContent::new(body.clone()),
                                 )],
@@ -589,11 +630,7 @@ async fn handle_notification(
                     let _ = config
                         .session_cmd_tx
                         .send(SessionCommand::InjectNotification {
-                            prompt_id: if is_monitor {
-                                format!("monitor-completed-{task_id}")
-                            } else {
-                                format!("bash-completed-{task_id}")
-                            },
+                            prompt_id: completion_kind.fallback_prompt_id(&task_id),
                             prompt_blocks: vec![acp::ContentBlock::Text(acp::TextContent::new(
                                 body.clone(),
                             ))],
@@ -658,18 +695,7 @@ async fn handle_notification(
             } else {
                 let tool_name = resolved_tool_name(&config.task_output_tool_name);
                 let read_name = resolved_tool_name(&config.read_tool_name);
-                let message = if is_monitor {
-                    xai_grok_tools::reminders::task_completion::format_monitor_completion(
-                        &task_snapshot,
-                        tool_name,
-                    )
-                } else {
-                    xai_grok_tools::reminders::task_completion::format_bash_completion(
-                        &task_snapshot,
-                        tool_name,
-                        read_name,
-                    )
-                };
+                let message = completion_kind.body(&task_snapshot, tool_name, read_name);
                 let source = if is_monitor {
                     NotificationSource::MonitorCompleted {
                         task_id: task_id.clone(),
@@ -682,11 +708,7 @@ async fn handle_notification(
                 let _ = config
                     .session_cmd_tx
                     .send(SessionCommand::InjectNotification {
-                        prompt_id: if is_monitor {
-                            format!("monitor-completed-{task_id}")
-                        } else {
-                            format!("bash-completed-{task_id}")
-                        },
+                        prompt_id: completion_kind.fallback_prompt_id(&task_id),
                         prompt_blocks: vec![acp::ContentBlock::Text(acp::TextContent::new(
                             message,
                         ))],
@@ -2181,6 +2203,62 @@ mod tests {
                 );
             }
             _ => panic!("expected DispatchNotificationHook"),
+        }
+    }
+    /// A completed `wait_for` watcher wakes with wait wording and its own
+    /// `wait-completed-` fallback id, never the bash one.
+    #[tokio::test]
+    async fn wait_task_completed_uses_wait_wording_and_prompt_id() {
+        let (mut config, mut cmd_rx) = make_test_config();
+        config.auto_wake_enabled = false;
+        let mut snapshot = make_task_snapshot("wait-abc", TaskKind::Wait);
+        snapshot.command = "curl -sf localhost:3000".into();
+        snapshot.exit_code = None;
+        snapshot.signal = Some("timeout".into());
+        let notification = ToolNotification::TaskCompleted(snapshot);
+        let mut state = BridgeState::default();
+        handle_notification(&config, notification, &mut state).await;
+        let cmd = cmd_rx.try_recv().expect("expected InjectNotification");
+        match cmd {
+            SessionCommand::InjectNotification {
+                prompt_id,
+                prompt_blocks,
+                ..
+            } => {
+                assert!(prompt_id.starts_with("wait-completed-"), "{prompt_id}");
+                assert!(prompt_id.ends_with("wait-abc"), "{prompt_id}");
+                let text = match &prompt_blocks[0] {
+                    acp::ContentBlock::Text(t) => &t.text,
+                    _ => panic!("expected text block"),
+                };
+                assert!(text.contains("expired"), "deadline wording: {text}");
+                assert!(!text.contains("satisfied"), "{text}");
+                assert!(text.contains("curl -sf localhost:3000"), "{text}");
+            }
+            _ => panic!("expected InjectNotification"),
+        }
+    }
+    /// A satisfied wait (exit code 0, no signal) reads as a success.
+    #[tokio::test]
+    async fn satisfied_wait_task_completed_says_satisfied() {
+        let (mut config, mut cmd_rx) = make_test_config();
+        config.auto_wake_enabled = false;
+        let mut snapshot = make_task_snapshot("wait-ok", TaskKind::Wait);
+        snapshot.exit_code = Some(0);
+        snapshot.signal = None;
+        let notification = ToolNotification::TaskCompleted(snapshot);
+        let mut state = BridgeState::default();
+        handle_notification(&config, notification, &mut state).await;
+        match cmd_rx.try_recv().expect("expected InjectNotification") {
+            SessionCommand::InjectNotification { prompt_blocks, .. } => {
+                let text = match &prompt_blocks[0] {
+                    acp::ContentBlock::Text(t) => &t.text,
+                    _ => panic!("expected text block"),
+                };
+                assert!(text.contains("satisfied"), "{text}");
+                assert!(!text.contains("expired"), "{text}");
+            }
+            _ => panic!("expected InjectNotification"),
         }
     }
     #[tokio::test]

@@ -648,6 +648,7 @@ pub fn acp_tool_update(
         ToolOutput::UpdateGoal(_)
         | ToolOutput::Workflow(_)
         | ToolOutput::Monitor(_)
+        | ToolOutput::WaitFor(_)
         | ToolOutput::SchedulerCreate(_)
         | ToolOutput::SchedulerDelete(_)
         | ToolOutput::SchedulerList(_) => Some(acp::ToolCallUpdate::new(

@@ -23,6 +23,10 @@ fn is_interruptible_wait_tool(tool_name: &str, args: &serde_json::Value) -> bool
         | "get_task_or_subagent_output"
         | "get_terminal_command_output" => xai_tool_types::task_output_waits_from_json(args),
         "wait_tasks" | "wait_commands_or_subagents" | "wait_tasks_or_subagents" => true,
+        // The inline phase of `wait_for` blocks on a delay or a polling
+        // attempt; a pending interjection aborts it and the watcher keeps
+        // running in the background.
+        "wait_for" => true,
         "Await" | "AwaitShell" => true,
         _ => false,
     }
@@ -3750,6 +3754,10 @@ mod wait_interrupt_tests {
         assert!(is_interruptible_wait_tool(
             "wait_commands_or_subagents",
             &serde_json::json!({"task_ids": ["t"]})
+        ));
+        assert!(is_interruptible_wait_tool(
+            "wait_for",
+            &serde_json::json!({"until": "10s"})
         ));
         assert!(!is_interruptible_wait_tool(
             "read_file",
