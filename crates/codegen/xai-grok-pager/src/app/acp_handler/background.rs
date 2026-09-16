@@ -175,6 +175,24 @@ pub(super) fn handle_task_backgrounded(notif: &acp::ExtNotification, app: &mut A
 
     // Create central bg task state (description may still be filled from the
     // Execute block on demotion before we insert into the map).
+    //
+    // A completion can beat this notification: the tool announces the task while
+    // the terminal actor reports its exit, two producers with no cross-ordering.
+    // A task that fails instantly (`false`, a missing binary, a bad path) does
+    // exactly that, and the completion path records the terminal state when it
+    // lands first — so adopt it here instead of birthing a `Running` row that
+    // nothing would ever finalize (the pane and the idle cue would keep counting
+    // a task that is already over).
+    let prior_terminal = session.bg_tasks.get(&task_id).and_then(|task| {
+        (task.status != BgTaskStatus::Running).then(|| {
+            (
+                task.status,
+                task.exit_code,
+                task.signal.clone(),
+                task.end_time,
+            )
+        })
+    });
     let mut bg_task = BgTaskState {
         task_id: task_id.clone(),
         tool_call_id: tool_call_id.clone(),
@@ -240,6 +258,13 @@ pub(super) fn handle_task_backgrounded(notif: &acp::ExtNotification, app: &mut A
     };
 
     bg_task.description = description;
+
+    if let Some((status, exit_code, signal, end_time)) = prior_terminal {
+        bg_task.status = status;
+        bg_task.exit_code = exit_code;
+        bg_task.signal = signal;
+        bg_task.end_time = end_time;
+    }
 
     session.bg_tasks.insert(task_id.clone(), bg_task);
     session
@@ -794,6 +819,41 @@ pub(super) fn handle_task_completed(notif: &acp::ExtNotification, app: &mut AppV
             });
             // Unknown task: it never counted toward the parked marker's
             // running total, so its completion is not a countdown edge.
+            //
+            // Record the terminal state anyway. When this completion beat the
+            // task's own `TaskBackgrounded`, that notification has not created
+            // the row yet; without a record it would be born `Running` with
+            // nothing left to finalize it.
+            use xai_grok_tools::computer::types::TaskKind;
+            session.bg_tasks.insert(
+                task_id.clone(),
+                BgTaskState {
+                    task_id: task_id.clone(),
+                    tool_call_id: String::new(),
+                    command: command.clone(),
+                    description: description.clone(),
+                    cwd: task_snapshot.cwd.clone(),
+                    output_file: task_snapshot.output_file.display().to_string(),
+                    status: if success {
+                        BgTaskStatus::Done
+                    } else {
+                        BgTaskStatus::Failed
+                    },
+                    start_time: task_snapshot.start_time,
+                    end_time: task_snapshot.end_time,
+                    exit_code,
+                    signal: signal.clone(),
+                    stdout: String::new(),
+                    stdout_line_count: 0,
+                    truncated: false,
+                    pending_kill: false,
+                    kill_requested_at: None,
+                    scrollback_entry_id: None,
+                    is_monitor: task_snapshot.kind == TaskKind::Monitor,
+                    is_wait: task_snapshot.kind == TaskKind::Wait,
+                    restored_from_replay: false,
+                },
+            );
             (command, elapsed, description, None, false)
         };
 

@@ -688,3 +688,39 @@
         );
     }
 
+    /// Regression (completion racing its own backgrounded notification): the two
+    /// come from different producers — the tool announces the task, the terminal
+    /// actor reports its exit — so a task that fails instantly (`false`, a
+    /// missing binary, a bad path) can complete before its row exists. The late
+    /// row must not be born `Running`: nothing would ever finalize it, so the
+    /// pane and the idle cue would keep counting a task that is already over.
+    #[test]
+    fn completion_before_backgrounded_does_not_leave_a_stuck_row() {
+        let mut app = make_app_with_agent("sess-1");
+
+        // 1. The completion lands first, for a task the pager never saw.
+        handle_ext_notification(
+            &make_task_completed_notif("sess-1", "t-err", "false", Some(1)),
+            &mut app,
+        );
+
+        // 2. Its own backgrounded notification arrives afterwards.
+        handle_ext_notification(
+            &make_task_backgrounded_notif("sess-1", "tc-err", "t-err", "false"),
+            &mut app,
+        );
+
+        let agent = app.agents.get(&AgentId(0)).unwrap();
+        let task = agent
+            .session
+            .bg_tasks
+            .get("t-err")
+            .expect("the late row must still be created");
+        assert_ne!(
+            task.status,
+            BgTaskStatus::Running,
+            "a row born after its own completion must not stay Running"
+        );
+        assert_eq!(task.exit_code, Some(1), "the exit code must survive");
+    }
+
