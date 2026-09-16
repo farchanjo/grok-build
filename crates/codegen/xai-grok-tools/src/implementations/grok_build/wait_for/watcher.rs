@@ -279,8 +279,12 @@ async fn run_watcher(
         }
 
         attempt += 1;
-        let sleep_for = jittered(delay, spec.retry_jitter_permille, attempt)
-            .min(spec.deadline.saturating_duration_since(Instant::now()));
+        // Never let the backoff eat the whole remaining window. `min(remaining)` alone lets a
+        // capped 30s delay sleep straight to the deadline, after which the loop's top-of-iteration
+        // deadline check returns `TimedOut` *without another attempt* — so a condition satisfied in
+        // that tail window is missed entirely. Reserving a tail keeps the deadline ending on a try.
+        let remaining = spec.deadline.saturating_duration_since(Instant::now());
+        let sleep_for = next_sleep(delay, spec.retry_jitter_permille, attempt, remaining);
         if sleep_for.is_zero() {
             continue;
         }
@@ -291,6 +295,20 @@ async fn run_watcher(
         }
         delay = (delay * spec.retry_multiplier).min(spec.retry_max);
     }
+}
+
+/// Budget reserved before the deadline so the final attempt still fits inside it.
+const FINAL_ATTEMPT_TAIL: Duration = Duration::from_millis(250);
+
+/// Sleep before the next attempt: jittered backoff, capped so the deadline ends on a try rather
+/// than on a sleep. Zero means "attempt now".
+pub(crate) fn next_sleep(
+    delay: Duration,
+    permille: u32,
+    attempt: u64,
+    remaining: Duration,
+) -> Duration {
+    jittered(delay, permille, attempt).min(remaining.saturating_sub(FINAL_ATTEMPT_TAIL))
 }
 
 /// Cap for the last-attempt excerpt carried on the completion snapshot.
@@ -395,6 +413,41 @@ mod tests {
             Duration::from_secs(5)
         );
         assert_eq!(jittered(Duration::ZERO, 100, 7), Duration::ZERO);
+    }
+
+    /// The backoff must never consume the whole remaining window: the loop's
+    /// top-of-iteration deadline check returns `TimedOut` without another attempt, so a
+    /// condition satisfied in the tail would be missed. A capped 30s delay against a 20s
+    /// window is exactly the live case that exposed this.
+    #[test]
+    fn next_sleep_reserves_a_final_attempt() {
+        let capped = Duration::from_secs(30);
+
+        // Plenty of window: the backoff is used as-is.
+        assert_eq!(
+            next_sleep(Duration::from_secs(1), 0, 1, Duration::from_secs(60)),
+            Duration::from_secs(1)
+        );
+
+        // Window shorter than the delay: sleep only up to the reserved tail.
+        assert_eq!(
+            next_sleep(capped, 0, 5, Duration::from_secs(20)),
+            Duration::from_secs(20) - FINAL_ATTEMPT_TAIL
+        );
+
+        // Window inside the tail: attempt immediately instead of sleeping past the deadline.
+        assert_eq!(
+            next_sleep(capped, 0, 5, FINAL_ATTEMPT_TAIL / 2),
+            Duration::ZERO
+        );
+        assert_eq!(next_sleep(capped, 0, 5, FINAL_ATTEMPT_TAIL), Duration::ZERO);
+
+        // Never past the deadline, never negative.
+        for millis in [0u64, 1, 100, 249, 250, 251, 1_000, 29_999, 30_000] {
+            let remaining = Duration::from_millis(millis);
+            let sleep = next_sleep(capped, 100, 3, remaining);
+            assert!(sleep <= remaining, "{sleep:?} exceeds {remaining:?}");
+        }
     }
 
     #[test]
