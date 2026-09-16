@@ -1508,6 +1508,9 @@ Usage notes:
   - Timeout enforcement: when the timeout fires, the wrapper${%- if is_windows %} terminates the child's Job Object, killing every descendant process immediately (no graceful-termination grace period).${%- else %} kills the child process group (SIGTERM, escalated to SIGKILL after a ~1s grace period). Descendants that did not detach via `setsid` / `nohup` will also be killed.${%- endif %} `${{ params.execute.timeout }}: 0` in `${%- if params is defined and params.execute is defined and params.execute.is_background %}${{ params.execute.is_background }}${%- else %}background${%- endif %}: true` mode disables the wrapper timeout entirely; the child's lifetime is owned by the model via ${{ tools.by_kind.kill_task_action }}.
   - If the output exceeds {max_output_bytes} characters, output will be truncated before being returned to you.
   - You can use the ${{ params.execute.is_background }} parameter to run the command in the background (e.g., dev servers, long builds): it returns a task id immediately and keeps running in the background. You are notified on completion, so do not poll or sleep-wait for it.${%- if has_unix_utilities %} You do not need to use '&' at the end of the command when using this parameter.${%- endif %}
+${%- if tools.by_kind.wait_for %}
+  - Do not wait inside the command with `sleep N` or `sleep N && check`. Use ${{ tools.by_kind.wait_for }} instead: it returns as soon as the condition holds and keeps watching in the background otherwise. A `sleep` past ~15s is auto-backgrounded and needs polling.
+${%- endif %}
 ${%- if shell_uses_semicolon %}
   - '&&' is not supported in this shell; chain sequential commands with ';'.
 ${%- endif %}
@@ -1523,6 +1526,9 @@ Usage notes:
   - You can specify an optional ${{ params.execute.timeout }} in milliseconds (up to ${{ max_timeout_ms | default(300000) }}ms). If not specified, commands will timeout after ${{ default_timeout_ms | default(120000) }}ms.
   - Timeout enforcement: when the timeout fires, the wrapper${%- if is_windows %} terminates the child's Job Object, killing every descendant process immediately (no graceful-termination grace period).${%- else %} kills the child process group (SIGTERM, escalated to SIGKILL after a ~1s grace period).${%- endif %}
   - If the output exceeds {max_output_bytes} characters, output will be truncated before being returned to you.
+${%- if tools.by_kind.wait_for %}
+  - Do not wait inside the command with `sleep N` or `sleep N && check`. Use ${{ tools.by_kind.wait_for }} instead.
+${%- endif %}
 ${%- if shell_uses_semicolon %}
   - '&&' is not supported in this shell; chain sequential commands with ';'.
 ${%- endif %}
@@ -4876,6 +4882,7 @@ mod tests {
                         ToolKind::BackgroundTaskAction,
                         "get_task_output".to_string(),
                     ),
+                    (ToolKind::WaitFor, "wait_for".to_string()),
                 ]),
                 HashMap::from([(
                     ToolKind::Execute,
@@ -4933,6 +4940,46 @@ mod tests {
             assert!(
                 !out.contains("optional timeout in milliseconds") && !out.contains("`timeout: 0`"),
                 "canonical timeout must not remain after rename:\n{out}"
+            );
+        }
+
+        /// The bash description must steer the model off `sleep` and onto the
+        /// dedicated wait tool — but only when that tool is in the toolset, so a
+        /// restricted toolset never names a tool the model cannot call.
+        #[test]
+        fn description_points_at_wait_for_only_when_present() {
+            let template = BashTool::default_description_template_enabled();
+
+            let with_wait = render(template, true);
+            assert!(
+                with_wait.contains("Do not wait inside the command with `sleep N`"),
+                "the anti-sleep rule must render:\n{with_wait}"
+            );
+            assert!(
+                with_wait.contains("Use wait_for instead"),
+                "the rule must name the tool:\n{with_wait}"
+            );
+
+            let renderer = TemplateRenderer::new(
+                HashMap::from([(ToolKind::Execute, "run_terminal_cmd".to_string())]),
+                HashMap::from([(
+                    ToolKind::Execute,
+                    HashMap::from([
+                        ("timeout".to_string(), "timeout".to_string()),
+                        ("is_background".to_string(), "is_background".to_string()),
+                    ]),
+                )]),
+            );
+            let extras = serde_json::json!({
+                "auto_background_on_timeout": true,
+                "is_windows": false,
+                "shell_uses_semicolon": false,
+                "has_unix_utilities": true,
+            });
+            let without_wait = renderer.render_with_extra(template, &extras).unwrap();
+            assert!(
+                !without_wait.contains("sleep N"),
+                "no wait tool in the toolset must drop the rule:\n{without_wait}"
             );
         }
 

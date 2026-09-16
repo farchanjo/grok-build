@@ -48,11 +48,13 @@ impl crate::types::tool_metadata::ToolMetadata for WaitForTool {
     }
 
     fn description_template(&self) -> &str {
-        r#"Wait for a shell condition or a fixed delay, without burning the turn on `sleep`.
+        r#"Wait for a shell condition or a fixed delay. Prefer this over `sleep` and `timeout` inside commands.
 
 `until` takes a duration (`"5s"`), a command whose exit code is the condition (`"curl -sf localhost:3000"`), or both (`"10s && curl -sf localhost:3000"` — the duration is the initial delay). Exit code 0 satisfies; any other exit code retries.
 
-The first attempt runs inline. If it fails, the tool returns immediately and a background watcher keeps polling with backoff until `timeout`; you keep working and are woken when the condition is met. A duration-only `until` is a clean `sleep` replacement. The watcher shows in the tasks pane under Watchers and can be cancelled there."#
+Why prefer it: a bare `sleep 30` blocks the turn and, past ~15s, gets auto-backgrounded so you have to poll for it; a `sleep 5 && check` loop burns turns. Here the first attempt runs inline, and if it fails the tool returns immediately — a background watcher keeps polling with backoff until `timeout`, you keep working, and you are woken when the condition is met. A duration-only `until` is a clean `sleep` replacement.
+
+The watcher shows in the tasks pane under Watchers and can be cancelled there."#
     }
 
     fn emitted_notifications(&self) -> &'static [&'static str] {
@@ -394,6 +396,24 @@ mod tests {
         assert_eq!(tool.kind(), ToolKind::WaitFor);
         assert_eq!(tool.tool_namespace(), ToolNamespace::GrokBuild);
         assert!(!tool.is_read_only());
+    }
+
+    #[test]
+    fn description_mandates_preferring_it_over_sleep() {
+        use crate::types::tool_metadata::ToolMetadata;
+        let description = WaitForTool.description_template();
+        assert!(
+            description.contains("Prefer this over `sleep` and `timeout`"),
+            "the preference must be explicit: {description}"
+        );
+        assert!(
+            description.contains("sleep 5 && check"),
+            "the anti-loop reason must be stated: {description}"
+        );
+        assert!(
+            description.contains("auto-backgrounded"),
+            "the why must name the bash auto-background trap: {description}"
+        );
     }
 
     #[test]
