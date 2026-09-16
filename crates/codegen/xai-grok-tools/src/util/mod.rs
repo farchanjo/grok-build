@@ -1,6 +1,7 @@
 pub mod base64_images;
 pub mod binary;
 pub mod command_display;
+pub mod duration;
 pub mod env;
 pub mod ffmpeg;
 pub mod fs;
