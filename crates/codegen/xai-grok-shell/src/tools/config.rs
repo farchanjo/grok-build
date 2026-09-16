@@ -81,6 +81,78 @@ impl BashToolConfig {
     }
 }
 
+/// User configurable settings for the built-in `wait_for` tool
+/// (`[toolset.wait_for]`).
+///
+/// Every field is optional and only emitted when set, so an unset knob stays
+/// on the tool's own default. Duration values are unit-bearing strings
+/// (`"30s"`, `"10m"`) normalized through the shared duration parser before
+/// they reach the tool.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct WaitForToolConfig {
+    /// Base interval between watcher attempts (`"1s"`).
+    pub retry_initial: Option<String>,
+    /// Backoff ceiling between watcher attempts (`"30s"`).
+    pub retry_max: Option<String>,
+    /// Backoff growth factor per attempt (>= 1).
+    pub retry_multiplier: Option<u32>,
+    /// Jitter in permille of the computed delay (0-1000; 100 = ±10%).
+    pub retry_jitter_permille: Option<u32>,
+    /// Default deadline when the model omits `timeout` (`"120s"`).
+    pub timeout: Option<String>,
+    /// Ceiling applied to any requested deadline (`"600s"`).
+    pub max_timeout: Option<String>,
+    /// Cap for a single attempt, inline or in the watcher (`"30s"`).
+    pub attempt_timeout: Option<String>,
+    /// Whether a watcher is spawned by default once the inline attempt fails.
+    pub wake_on_timeout: Option<bool>,
+}
+
+impl WaitForToolConfig {
+    /// Build the JSON params map for the `wait_for` tool.
+    ///
+    /// Emits only the keys that are set. Duration strings are parsed and
+    /// re-emitted canonically; an unparsable value is passed through verbatim
+    /// so the tool's params validation reports the typo instead of the key
+    /// silently reverting to its default.
+    pub fn to_wait_for_params_json(&self) -> serde_json::Map<String, serde_json::Value> {
+        let mut map = serde_json::Map::new();
+        insert_duration_param(&mut map, "retry_initial", self.retry_initial.as_deref());
+        insert_duration_param(&mut map, "retry_max", self.retry_max.as_deref());
+        if let Some(multiplier) = self.retry_multiplier {
+            map.insert("retry_multiplier".into(), multiplier.into());
+        }
+        if let Some(permille) = self.retry_jitter_permille {
+            map.insert("retry_jitter_permille".into(), permille.into());
+        }
+        insert_duration_param(&mut map, "timeout", self.timeout.as_deref());
+        insert_duration_param(&mut map, "max_timeout", self.max_timeout.as_deref());
+        insert_duration_param(&mut map, "attempt_timeout", self.attempt_timeout.as_deref());
+        if let Some(wake) = self.wake_on_timeout {
+            map.insert("wake_on_timeout".into(), wake.into());
+        }
+        map
+    }
+}
+
+/// Insert a duration-string config value under `key`, normalized through the
+/// shared duration parser. No-op when unset.
+fn insert_duration_param(
+    map: &mut serde_json::Map<String, serde_json::Value>,
+    key: &str,
+    raw: Option<&str>,
+) {
+    use xai_grok_tools::util::duration::{format_duration, parse_duration};
+
+    let Some(raw) = raw else { return };
+    let value = match parse_duration(raw) {
+        Ok(duration) => format_duration(duration),
+        Err(_) => raw.trim().to_owned(),
+    };
+    map.insert(key.into(), value.into());
+}
+
 /// User configurable settings for the ask_user_question tool
 /// (`[toolset.ask_user_question]`).
 ///
@@ -172,6 +244,9 @@ pub struct ShellToolsetConfig {
     /// Web fetch tool parameters (`[toolset.web_fetch]`).
     #[serde(default)]
     pub web_fetch: WebFetchToolConfig,
+    /// Wait-for-condition tool parameters (`[toolset.wait_for]`).
+    #[serde(default)]
+    pub wait_for: WaitForToolConfig,
     /// Ask-user-question tool parameters (`[toolset.ask_user_question]`).
     #[serde(default)]
     pub ask_user_question: AskUserQuestionToolConfig,
@@ -269,6 +344,7 @@ impl ShellToolsetConfig {
             bash: BashToolConfig::default(),
             web_search: web_search_inference_config(default_base),
             web_fetch: WebFetchToolConfig::default(),
+            wait_for: WaitForToolConfig::default(),
             ask_user_question: AskUserQuestionToolConfig::default(),
             file_toolset: FileToolset::default(),
             hashline: HashlineSchemeConfig::default(),
@@ -758,6 +834,120 @@ mod tests {
         assert_eq!(
             fg_budget(&local.to_bash_params_json(None, None)),
             Some(30_000),
+        );
+    }
+
+    // -- wait_for params: only set keys are emitted, durations are normalized --
+
+    #[test]
+    fn wait_for_params_omitted_by_default() {
+        let local = WaitForToolConfig::default();
+        assert!(
+            local.to_wait_for_params_json().is_empty(),
+            "an unset wait_for config must not send any key"
+        );
+    }
+
+    #[test]
+    fn wait_for_params_emit_only_what_is_set() {
+        let local = WaitForToolConfig {
+            timeout: Some("3m".to_owned()),
+            ..WaitForToolConfig::default()
+        };
+        let map = local.to_wait_for_params_json();
+        assert_eq!(map.len(), 1);
+        assert_eq!(map.get("timeout").and_then(|v| v.as_str()), Some("3m"));
+    }
+
+    #[test]
+    fn wait_for_params_normalize_duration_strings() {
+        let local = WaitForToolConfig {
+            retry_initial: Some("  2000ms ".to_owned()),
+            max_timeout: Some("600s".to_owned()),
+            ..WaitForToolConfig::default()
+        };
+        let map = local.to_wait_for_params_json();
+        assert_eq!(
+            map.get("retry_initial").and_then(|v| v.as_str()),
+            Some("2s")
+        );
+        assert_eq!(map.get("max_timeout").and_then(|v| v.as_str()), Some("10m"));
+    }
+
+    #[test]
+    fn wait_for_params_keep_unparsable_duration_verbatim() {
+        let local = WaitForToolConfig {
+            timeout: Some("2x".to_owned()),
+            ..WaitForToolConfig::default()
+        };
+        let map = local.to_wait_for_params_json();
+        assert_eq!(map.get("timeout").and_then(|v| v.as_str()), Some("2x"));
+    }
+
+    #[test]
+    fn wait_for_params_carry_scalars() {
+        let local = WaitForToolConfig {
+            retry_multiplier: Some(3),
+            retry_jitter_permille: Some(0),
+            wake_on_timeout: Some(false),
+            ..WaitForToolConfig::default()
+        };
+        let map = local.to_wait_for_params_json();
+        assert_eq!(
+            map.get("retry_multiplier").and_then(|v| v.as_u64()),
+            Some(3)
+        );
+        assert_eq!(
+            map.get("retry_jitter_permille").and_then(|v| v.as_u64()),
+            Some(0)
+        );
+        assert_eq!(
+            map.get("wake_on_timeout").and_then(|v| v.as_bool()),
+            Some(false)
+        );
+    }
+
+    /// The emitted map must deserialize into the tool's own params type.
+    #[test]
+    fn wait_for_params_round_trip_into_the_tool_type() {
+        let local = WaitForToolConfig {
+            retry_initial: Some("500ms".to_owned()),
+            retry_max: Some("15s".to_owned()),
+            timeout: Some("45s".to_owned()),
+            max_timeout: Some("5m".to_owned()),
+            attempt_timeout: Some("10s".to_owned()),
+            ..WaitForToolConfig::default()
+        };
+        let params: xai_grok_tools::implementations::grok_build::WaitForParams =
+            serde_json::from_value(serde_json::Value::Object(local.to_wait_for_params_json()))
+                .expect("emitted map must deserialize into WaitForParams");
+        assert_eq!(params.retry_initial, std::time::Duration::from_millis(500));
+        assert_eq!(params.timeout, std::time::Duration::from_secs(45));
+        assert_eq!(params.max_timeout, std::time::Duration::from_secs(300));
+    }
+
+    #[test]
+    fn wait_for_config_deserializes_from_toml() {
+        let raw_config: toml::Value = toml::from_str(
+            r#"
+            [toolset.wait_for]
+            timeout = "2m"
+            retry_initial = "500ms"
+            retry_jitter_permille = 0
+            "#,
+        )
+        .unwrap();
+        let cfg = crate::agent::config::Config::new_from_toml_cfg(&raw_config)
+            .expect("config should parse");
+        assert_eq!(cfg.toolset.wait_for.timeout.as_deref(), Some("2m"));
+        let map = cfg.toolset.wait_for.to_wait_for_params_json();
+        assert_eq!(
+            map.get("retry_initial").and_then(|v| v.as_str()),
+            Some("500ms")
+        );
+        assert_eq!(
+            map.get("retry_jitter_permille").and_then(|v| v.as_u64()),
+            Some(0)
         );
     }
 }

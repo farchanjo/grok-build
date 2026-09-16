@@ -764,10 +764,11 @@ fn subagent_worktree_snapshot_gate_local_enables() {
     assert!(ctx.resolve_subagent_worktree_snapshot_enabled());
 }
 /// Subagent spawns carry concrete ask_user_question timeout params (the
-/// session-level config follows the child) while bash stays on tool
-/// defaults. Tier precedence itself is pinned by the resolver's own
-/// tests; asserting concrete values here would read the host's disk
-/// layers and flake on configured dev machines.
+/// session-level config follows the child) and the parent's wait_for
+/// retry/deadline policy, while bash stays on tool defaults. Tier precedence
+/// itself is pinned by the resolver's own tests; asserting concrete values
+/// here would read the host's disk layers and flake on configured dev
+/// machines.
 #[test]
 fn subagent_tool_params_carry_ask_user_question_timeouts() {
     let ctx = ctx_with_toggle(std::collections::HashMap::new());
@@ -778,6 +779,14 @@ fn subagent_tool_params_carry_ask_user_question_timeouts() {
         .expect("subagents must receive resolved ask_user_question params");
     assert!(ask.get("timeout_enabled").is_some_and(|v| v.is_boolean()));
     assert!(ask.get("timeout_secs").is_some_and(|v| v.is_u64()));
+    let wait_for = params
+        .wait_for
+        .expect("subagents must inherit the parent's wait_for params");
+    assert_eq!(
+        wait_for.get("timeout").and_then(|v| v.as_str()),
+        Some("45s"),
+        "the parent's wait_for deadline must be inherited verbatim"
+    );
 }
 /// Seed a coordinator with one completed subagent owned by `session-A`.
 fn coordinator_with_completed(id: &str) -> SubagentCoordinator {

@@ -266,6 +266,10 @@ pub(crate) struct SubagentSpawnContext {
     /// Whether the `ask_user_question` tool is exposed to this subagent,
     /// inherited from the parent session (see `build_subagent_spawn_context`).
     pub ask_user_question_enabled: bool,
+    /// Resolved `[toolset.wait_for]` params, inherited so a child's waits use
+    /// the same retry cadence and deadlines as the parent's. `None` leaves the
+    /// child on the tool defaults.
+    pub wait_for_params_json: Option<serde_json::Map<String, serde_json::Value>>,
     /// Parent session command channel. Carries lifecycle notifications the
     /// parent persists (`SubagentSpawned` / `SubagentFinished`) and — when
     /// goal mode is on — transient `SubagentProgress` ticks the parent
@@ -501,8 +505,10 @@ impl SubagentSpawnContext {
     /// Per-tool params for the child's spawn. The ask_user_question timeout is
     /// session-level config, so it is resolved from the same tiers as the
     /// parent (requirements/env/user/managed from disk; remote from the
-    /// parent's snapshot) and follows the session into subagents. Bash stays
-    /// on tool defaults, as before that knob existed.
+    /// parent's snapshot) and follows the session into subagents. The
+    /// wait_for retry/deadline policy is likewise session-level and is
+    /// inherited verbatim from the parent. Bash stays on tool defaults, as
+    /// before that knob existed.
     pub fn resolve_tool_params_json(
         &self,
     ) -> crate::session::agent_rebuild::ResolvedToolParamsJson {
@@ -515,6 +521,7 @@ impl SubagentSpawnContext {
                 Ok(serde_json::Value::Object(map)) => Some(map),
                 _ => None,
             },
+            wait_for: self.wait_for_params_json.clone(),
         }
     }
 }

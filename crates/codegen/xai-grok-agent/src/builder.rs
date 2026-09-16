@@ -116,6 +116,7 @@ pub struct AgentBuilder {
     compat: xai_grok_tools::types::compat::CompatConfig,
     bash_params_json: Option<serde_json::Map<String, serde_json::Value>>,
     ask_user_question_params_json: Option<serde_json::Map<String, serde_json::Value>>,
+    wait_for_params_json: Option<serde_json::Map<String, serde_json::Value>>,
     plugin_registry: Option<std::sync::Arc<crate::plugins::PluginRegistry>>,
     context_window_tokens: Option<u64>,
     api_key_provider: Option<xai_grok_tools::types::SharedApiKeyProvider>,
@@ -278,6 +279,7 @@ impl AgentBuilder {
             compat: Default::default(),
             bash_params_json: None,
             ask_user_question_params_json: None,
+            wait_for_params_json: None,
             plugin_registry: None,
             context_window_tokens: None,
             api_key_provider: None,
@@ -669,6 +671,15 @@ impl AgentBuilder {
         self.ask_user_question_params_json = Some(params);
         self
     }
+    /// Inject `[toolset.wait_for]` overrides from config.toml into the
+    /// `wait_for` tool params (retry cadence, deadlines, attempt cap).
+    pub fn with_wait_for_params(
+        mut self,
+        params: serde_json::Map<String, serde_json::Value>,
+    ) -> Self {
+        self.wait_for_params_json = Some(params);
+        self
+    }
     /// Set the plugin registry for plugin-aware skill/agent discovery.
     pub fn with_plugin_registry(
         mut self,
@@ -958,6 +969,9 @@ impl AgentBuilder {
                 &["GrokBuild:ask_user_question"],
                 ask_params,
             );
+        }
+        if let Some(ref wait_for_params) = self.wait_for_params_json {
+            merge_tool_params(&mut tool_config, &["GrokBuild:wait_for"], wait_for_params);
         }
         if !definition.disallowed_tools.is_empty() {
             let before: std::collections::HashSet<String> =

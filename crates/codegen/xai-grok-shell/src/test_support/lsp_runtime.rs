@@ -125,6 +125,14 @@ pub(crate) fn ctx_with_toggle(toggle: HashMap<String, bool>) -> SubagentSpawnCon
         goal_enabled: false,
         background_workflows_enabled: false,
         ask_user_question_enabled: true,
+        // Non-empty so `resolve_tool_params_json` inheritance is observable.
+        wait_for_params_json: Some(
+            crate::tools::config::WaitForToolConfig {
+                timeout: Some("45s".to_owned()),
+                ..Default::default()
+            }
+            .to_wait_for_params_json(),
+        ),
         parent_cmd_tx: None,
         parent_session_info: None,
         subagent_roles: HashMap::new(),

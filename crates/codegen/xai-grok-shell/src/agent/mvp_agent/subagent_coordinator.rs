@@ -600,6 +600,9 @@ impl MvpAgent {
                 .map(|h| h.ask_user_question_enabled)
                 .unwrap_or_else(|| self.cfg.borrow().resolve_ask_user_question().value)
         };
+        // The wait_for retry/deadline policy is session-level config; the child
+        // inherits the parent's resolved values so waits behave identically.
+        let wait_for_params_json = self.cfg.borrow().toolset.wait_for.to_wait_for_params_json();
         let (gcs_upload_method, gcs_bucket_url) = match self.trace_upload_config_snapshot() {
             Some(method) => {
                 use crate::session::repo_changes::UploadMethod;
@@ -713,6 +716,7 @@ impl MvpAgent {
             goal_enabled: self.cfg.borrow().resolve_goal().value,
             background_workflows_enabled: self.cfg.borrow().resolve_workflows().value,
             ask_user_question_enabled,
+            wait_for_params_json: Some(wait_for_params_json),
             parent_cmd_tx: parent_cmd_tx.clone(),
             parent_session_info: {
                 let sessions = self.sessions.borrow();

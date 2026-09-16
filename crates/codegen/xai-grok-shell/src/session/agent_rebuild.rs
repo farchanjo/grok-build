@@ -71,6 +71,8 @@ pub(crate) struct ResolvedToolParamsJson {
     pub bash: Option<serde_json::Map<String, serde_json::Value>>,
     /// `[toolset.ask_user_question]` timeout policy for the ask tool.
     pub ask_user_question: Option<serde_json::Map<String, serde_json::Value>>,
+    /// `[toolset.wait_for]` retry / deadline policy for the wait tool.
+    pub wait_for: Option<serde_json::Map<String, serde_json::Value>>,
 }
 /// Cached recipe for building a session-scoped [`Agent`].
 ///
@@ -328,6 +330,9 @@ impl AgentRebuildSpec {
         }
         if let Some(ask_user_question_params_json) = tool_params_json.ask_user_question.clone() {
             builder = builder.with_ask_user_question_params(ask_user_question_params_json);
+        }
+        if let Some(wait_for_params_json) = tool_params_json.wait_for.clone() {
+            builder = builder.with_wait_for_params(wait_for_params_json);
         }
         if let Some(prompt_working_directory) = prompt_working_directory.clone() {
             builder = builder.with_prompt_working_directory(prompt_working_directory);
