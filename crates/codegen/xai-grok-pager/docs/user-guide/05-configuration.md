@@ -204,9 +204,21 @@ timeout_secs = 1800                    # seconds to wait when enabled (default: 
 proxy_endpoint = "https://proxy.example.com"   # egress proxy URL
 allowed_domains = ["docs.rs", "x.ai"]          # override the built-in allowlist
 allow_local = false                            # true = allow localhost / 127.0.0.0/8 / ::1 only
+
+[toolset.wait_for]
+retry_initial = "1s"          # backoff base between watcher attempts
+retry_max = "30s"             # backoff ceiling between watcher attempts
+retry_multiplier = 2          # backoff growth factor per attempt
+retry_jitter_permille = 100   # jitter in permille of the computed delay (100 = +/-10%; 0 disables)
+timeout = "120s"              # default deadline when a call omits `timeout`
+max_timeout = "10m"           # ceiling applied to any requested deadline
+attempt_timeout = "30s"       # cap for a single attempt, inline or in the watcher
+wake_on_timeout = true        # spawn the background watcher after a failed inline attempt (false = inline-only)
 ```
 
 `allow_local` is off by default (SSRF fail-closed). Turn it on (or set `GROK_WEB_FETCH_ALLOW_LOCAL=1`) and `web_fetch` may reach **explicit** loopback hosts only — private, link-local, and cloud-metadata ranges stay blocked. Resolution: TOML > env > default off.
+
+`[toolset.wait_for]` is entirely optional — the defaults live in the code, so override only the keys you need. The time keys (`retry_initial`, `retry_max`, `timeout`, `max_timeout`, `attempt_timeout`) take unit-bearing strings such as `"30s"` or `"2m"`, like the tool's own `until`, `retry`, and `timeout` arguments. See [Background Tasks and Monitoring](20-background-tasks.md#the-wait_for-tool).
 
 `[toolset.ask_user_question]` is honored across **requirements.toml**, **managed config**, and your user **`config.toml`**. Precedence: requirements → env (`GROK_ASK_USER_QUESTION_TIMEOUT_ENABLED` / `GROK_ASK_USER_QUESTION_TIMEOUT_SECS`) → user config → managed → defaults. Set `timeout_enabled = false` in your user config to disable the automatic questionnaire timeout for yourself; `timeout_secs` must be a positive integer. You can also toggle `timeout_enabled` from `/settings` → **Ask-Question timeout** (under Agent & Approval); changes apply to newly started sessions.
 

@@ -47,7 +47,7 @@ Automate, script, and integrate Grok Build with other systems.
 | 17 | [Session Management](17-sessions.md) | Save, load, resume, rewind, compact, and the session persistence format |
 | 18 | [Sandbox Mode](18-sandbox.md) | OS-level filesystem and network isolation profiles |
 | 19 | [Plan Mode](19-plan-mode.md) | Structured planning, plan-file edits, and approval before coding |
-| 20 | [Background Tasks and Monitoring](20-background-tasks.md) | `background: true`, `/loop`, `monitor`, and `Ctrl+B` to demote |
+| 20 | [Background Tasks and Monitoring](20-background-tasks.md) | `background: true`, `/loop`, `monitor`, `wait_for`, and `Ctrl+B` to demote |
 | 21 | [Terminal Support and Troubleshooting](21-terminal-support.md) | tmux, SSH, truecolor, clipboard, and OSC 52 |
 | 22 | [Permissions and Safety Controls](22-permissions-and-safety.md) | `dontAsk` mode, auto-approved tools, the safe-bash list, and restrictive PreToolUse hooks (such as git/gh-only) |
 | 23 | [Agent Dashboard](23-dashboard.md) | Central overview of local sessions and forks |

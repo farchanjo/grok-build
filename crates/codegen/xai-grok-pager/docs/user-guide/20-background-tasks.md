@@ -1,6 +1,6 @@
 # Background Tasks and Monitoring
 
-Grok runs long-lived processes without blocking the conversation. This document covers background commands, the `/loop` command, the `monitor` tool, and the scheduler.
+Grok runs long-lived processes without blocking the conversation. This document covers background commands, the `/loop` command, the `monitor` and `wait_for` tools, and the scheduler.
 
 ---
 
@@ -147,6 +147,67 @@ If a monitor produces too many events, Grok stops it automatically. When this ha
 
 ---
 
+## The wait_for Tool
+
+The `wait_for` tool waits for a shell condition or a fixed delay without parking the turn on a `sleep`. It never shells out to `sleep` or `timeout`: the loop is tokio, and every attempt is bounded.
+
+### The Three `until` Shapes
+
+`until` is required and takes one of three shapes:
+
+| Shape              | Example                            | Description |
+| ------------------ | ---------------------------------- | ----------- |
+| Duration           | `"5s"`                             | Wait that long, then return. A clean `sleep` replacement. |
+| Command            | `"curl -sf localhost:3000"`        | Poll the command; exit code `0` satisfies the wait. |
+| Duration + command | `"10s && curl -sf localhost:3000"` | Wait first, then poll. The duration is the initial delay before the first attempt. |
+
+Durations use `ms`, `s`, `m`, `h`, or `d`. The unit is mandatory: `until: "60"` is an error, `until: "60s"` is not.
+
+Exit code `0` satisfies the wait. Any other exit code retries until the deadline.
+
+### How It Works
+
+1. The first attempt runs inline, so a condition that already holds resolves without a round trip.
+2. If it fails, the tool returns immediately and a background watcher keeps polling with backoff until `timeout`.
+3. You keep working, and the watcher wakes you when the condition is met.
+
+Every attempt runs through the session terminal, in the session working directory.
+
+The watcher appears in the tasks pane (`Ctrl+G`) under **Watchers** and is cancelled from there like any background task, or with `kill_command_or_subagent(task_id)`.
+
+When the deadline expires while watching, the wake reports that the wait timed out. A deadline already exhausted inline returns a `timed_out` outcome from the tool call instead of spawning a watcher; with `wake: false` the outcome is `not_satisfied` and no watcher is kept, which is not a timeout.
+
+### Parameters
+
+| Parameter | Description |
+| --------- | ----------- |
+| `until`   | Required. A duration, a condition command, or `"<duration> && <command>"`. |
+| `retry`   | Fixed interval between attempts, for example `"2s"`; a value above `retry_max` is capped there after the first attempt. Without `retry`, the watcher backs off from `1s` up to `30s`. |
+| `timeout` | Deadline for the whole wait (default `120s`, clamped to `max_timeout`, `10m` by default — a longer `timeout` is silently reduced). |
+| `wake`    | Keep watching after the inline attempt (default `true`). Set `false` to keep the call inline-only. |
+
+A duration that does not fit inside the deadline is rejected before the wait starts — `until: "10s"` with `timeout: "5s"` is an error.
+
+### Examples
+
+```bash
+# Wait for a local server to accept connections
+wait_for(until="curl -sf localhost:3000")
+
+# Give the server a head start, then poll it for up to 2 minutes
+wait_for(until="10s && curl -sf localhost:3000", timeout="2m")
+
+# Wait for a CI run to finish, re-checking every 20 seconds
+wait_for(until="gh run view $RUN_ID --json status -q .status | grep -q completed", retry="20s", timeout="10m")
+
+# Replace a bare sleep
+wait_for(until="45s")
+```
+
+A condition is any command whose exit code means "done": `test -f`, `nc -z`, `docker ps --filter`, `gh run view`. Durations can be compound (`1m30s`), and the unit is mandatory — `until: "60"` is an error. A leading token that looks like a duration but is not (`7z`, `2to3`) is treated as a command, so `7z t archive.7z` works.
+
+---
+
 ## The Scheduler
 
 The scheduler provides a lower-level API for creating recurring tasks. `/loop` is a convenience wrapper around the scheduler.
@@ -179,7 +240,7 @@ In the interactive TUI, press `Ctrl+G` to toggle the tasks pane. This pane lists
 
 - Running subagents and their progress
 - Active background tasks and their status
-- Monitor and `/loop` tasks, each with a live line-count badge
+- Monitor, `/loop`, and `wait_for` watcher tasks, each with a live line-count badge
 - The task ID for each entry
 
 To toggle the prompt queue instead, press `Ctrl+;`.
@@ -242,7 +303,7 @@ Each error or warning appears as a notification in the conversation.
 - **Use `background` for one-shot long commands** (builds, test suites, server starts)
 - **Use `/loop` for periodic checks** (CI status, test runs, health checks)
 - **Use `monitor` for real-time event streams** (log tailing, file watching)
+- **Use `wait_for` instead of sleep loops** — poll a shell condition or wait a fixed delay; keep `get_command_or_subagent_output` with `timeout_ms` for tasks you already backgrounded
 - **Use `scheduler_create` with `recurring: false`** for delayed one-shot tasks
 - **Keep monitor filters tight** — prefer `grep --line-buffered` over raw log streams
-- **Do not use sleep loops** in normal commands to poll — use `get_command_or_subagent_output` with `timeout_ms` instead
 - **Set reasonable poll intervals** — 30s+ for remote APIs to avoid rate limits, shorter for local checks
