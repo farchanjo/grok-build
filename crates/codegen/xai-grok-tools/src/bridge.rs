@@ -586,12 +586,37 @@ impl ToolBridge {
         task_id: &str,
     ) -> Result<KillOutcome, xai_tool_runtime::ToolError> {
         if let Some(terminal) = &self.terminal {
-            Ok(terminal.kill_task(task_id).await)
+            let outcome = terminal.kill_task(task_id).await;
+            if outcome != KillOutcome::NotFound {
+                return Ok(outcome);
+            }
+            // A `wait_for` watcher owns no child process, so the terminal does
+            // not know its id. Fall back to the session's watcher registry,
+            // which signals the watcher's cancel channel; the watcher then
+            // completes with `explicitly_killed` and the wake is suppressed.
+            if let Some(registry) = self.wait_for_registry().await {
+                return Ok(if registry.cancel(task_id) {
+                    KillOutcome::Killed
+                } else {
+                    KillOutcome::NotFound
+                });
+            }
+            Ok(outcome)
         } else {
             Err(xai_tool_runtime::ToolError::invalid_arguments(format!(
                 "Missing Task Id: {task_id}"
             )))
         }
+    }
+
+    /// The session's live `wait_for` watchers, when the tool has registered any.
+    async fn wait_for_registry(
+        &self,
+    ) -> Option<std::sync::Arc<crate::implementations::grok_build::wait_for::WaitForRegistry>> {
+        let resources = self.registry.resources.lock().await;
+        resources
+            .get::<std::sync::Arc<crate::implementations::grok_build::wait_for::WaitForRegistry>>()
+            .cloned()
     }
 
     /// Cancel an in-flight asset transfer job.
@@ -912,6 +937,41 @@ mod tests {
             explicitly_killed: false,
             owner_session_id: owner.map(|s| s.to_string()),
         }
+    }
+
+    /// A `wait_for` watcher owns no process, so the terminal reports
+    /// `NotFound` for its id; the bridge must fall back to the session's
+    /// watcher registry and signal the cancel channel instead of reporting a
+    /// phantom id as unkillable.
+    #[tokio::test]
+    async fn kill_falls_back_to_the_wait_registry_for_a_watcher_id() {
+        use crate::implementations::grok_build::wait_for::WaitForRegistry;
+
+        let toolset = FinalizedToolset::empty_for_test();
+        let registry = Arc::new(WaitForRegistry::default());
+        let (cancel_tx, mut cancel_rx) = tokio::sync::mpsc::channel(1);
+        registry.register("wait-abc", cancel_tx);
+        {
+            let mut res = toolset.resources.lock().await;
+            res.insert(registry);
+        }
+        let backend: Arc<dyn TerminalBackend> = Arc::new(MockTerminal { tasks: Vec::new() });
+        let bridge = ToolBridge {
+            registry: Arc::new(toolset),
+            terminal: Some(backend),
+        };
+
+        assert_eq!(
+            bridge.kill_background_task("wait-abc").await.unwrap(),
+            KillOutcome::Killed,
+            "a live watcher is killed through the registry"
+        );
+        assert_eq!(cancel_rx.try_recv(), Ok(()), "the watcher is signalled");
+        assert_eq!(
+            bridge.kill_background_task("wait-gone").await.unwrap(),
+            KillOutcome::NotFound,
+            "an unknown id stays NotFound"
+        );
     }
 
     /// Regression: subagents share the parent's terminal backend, so the

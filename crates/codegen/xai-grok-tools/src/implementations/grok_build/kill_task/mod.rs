@@ -214,6 +214,30 @@ impl xai_tool_runtime::Tool for KillTaskTool {
                 message: "Task had already completed".to_string(),
             })),
             KillOutcome::NotFound => {
+                // A `wait_for` watcher owns no child process, so the terminal
+                // never saw its id. Signal the watcher's cancel channel before
+                // falling back to the subagent backend — without this the model
+                // gets "not found" while the watcher keeps polling and still
+                // wakes it later.
+                let wait_registry = {
+                    resources
+                        .lock()
+                        .await
+                        .get::<std::sync::Arc<
+                            crate::implementations::grok_build::wait_for::WaitForRegistry,
+                        >>()
+                        .cloned()
+                };
+                if let Some(registry) = wait_registry
+                    && registry.cancel(&input.task_id)
+                {
+                    return Ok(KillTaskOutput::Result(KillTaskResult {
+                        task_id: input.task_id.clone(),
+                        outcome: "killed".to_string(),
+                        message: "Wait cancelled; the watcher will not wake".to_string(),
+                    }));
+                }
+
                 // Try subagent cancel via backend
                 let backend = {
                     resources
