@@ -44,6 +44,9 @@ pub struct BgTaskBlock {
     pub kind: BgTaskKind,
     /// Optional description (from the tool call's description field).
     pub description: Option<String>,
+    /// True for a `wait_for` watcher, which reads as "Wait" with its own verbs:
+    /// a wait that ran out of deadline *expired*, it did not fail.
+    pub is_wait: bool,
 }
 
 impl BgTaskBlock {
@@ -54,6 +57,7 @@ impl BgTaskBlock {
             task_id: task_id.into(),
             kind: BgTaskKind::Started,
             description: None,
+            is_wait: false,
         }
     }
 
@@ -68,6 +72,7 @@ impl BgTaskBlock {
             task_id: task_id.into(),
             kind: BgTaskKind::Completed { elapsed },
             description: None,
+            is_wait: false,
         }
     }
 
@@ -88,12 +93,19 @@ impl BgTaskBlock {
                 signal,
             },
             description: None,
+            is_wait: false,
         }
     }
 
     /// Set the description (builder pattern).
     pub fn with_description(mut self, description: Option<String>) -> Self {
         self.description = description;
+        self
+    }
+
+    /// Mark this block as a `wait_for` watcher (builder pattern).
+    pub fn with_wait(mut self, is_wait: bool) -> Self {
+        self.is_wait = is_wait;
         self
     }
 
@@ -119,6 +131,39 @@ impl BgTaskBlock {
             exit_code,
             signal,
         };
+    }
+}
+
+impl BgTaskBlock {
+    /// Label noun, trailing space included: a watcher reads as "Wait", everything
+    /// else as "Task".
+    fn noun(&self) -> &'static str {
+        if self.is_wait { "Wait " } else { "Task " }
+    }
+
+    /// Verb for a satisfied ending.
+    fn done_verb(&self) -> &'static str {
+        if self.is_wait {
+            "satisfied"
+        } else {
+            "completed"
+        }
+    }
+
+    /// Verb for a watcher that ended on its own terms, so the caller never reads
+    /// a scheduled `timeout` as a failure.
+    fn wait_verb(&self, signal: Option<&str>) -> Option<&'static str> {
+        if !self.is_wait {
+            return None;
+        }
+        use xai_grok_tools::implementations::grok_build::wait_for::{
+            CANCELLED_SIGNAL, TIMEOUT_SIGNAL,
+        };
+        match signal {
+            Some(TIMEOUT_SIGNAL) => Some("expired"),
+            Some(CANCELLED_SIGNAL) => Some("cancelled"),
+            _ => None,
+        }
     }
 }
 
@@ -148,14 +193,14 @@ impl BlockContent for BgTaskBlock {
         };
         let line = match &self.kind {
             BgTaskKind::Started => Line::from(vec![
-                Span::styled("Task ", bold),
+                Span::styled(self.noun(), bold),
                 Span::styled("started: ", muted),
                 Span::styled(display, muted),
             ]),
             BgTaskKind::Completed { elapsed } => Line::from(vec![
-                Span::styled("Task ", bold),
+                Span::styled(self.noun(), bold),
                 Span::styled(
-                    format!("completed in {}: ", format_duration(*elapsed)),
+                    format!("{} in {}: ", self.done_verb(), format_duration(*elapsed)),
                     muted,
                 ),
                 Span::styled(display, muted),
@@ -169,8 +214,14 @@ impl BlockContent for BgTaskBlock {
                 let is_killed = signal
                     .as_deref()
                     .is_some_and(|s| matches!(s, "killed" | "SIGTERM" | "SIGKILL" | "oom"));
-                let verb = if is_killed { "killed" } else { "failed" };
-                let detail = if is_killed {
+                let verb = if is_killed {
+                    "killed"
+                } else {
+                    self.wait_verb(signal.as_deref()).unwrap_or("failed")
+                };
+                // A wait's own ending ("expired", "cancelled") already names the
+                // reason, so the signal in parentheses would repeat it.
+                let detail = if is_killed || self.wait_verb(signal.as_deref()).is_some() {
                     String::new()
                 } else {
                     match (exit_code, signal) {
@@ -180,7 +231,7 @@ impl BlockContent for BgTaskBlock {
                     }
                 };
                 Line::from(vec![
-                    Span::styled("Task ", bold),
+                    Span::styled(self.noun(), bold),
                     Span::styled(format!("{verb} in {}: ", format_duration(*elapsed)), muted),
                     Span::styled(format!("{}{}", display, detail), muted),
                 ])
@@ -220,6 +271,11 @@ impl BlockContent for BgTaskBlock {
                 }
             }
             BgTaskKind::Completed { .. } => Some(AccentStyle::static_color(theme.accent_success)),
+            // A watcher that expired or was cancelled did what it was told, so
+            // it keeps the neutral bullet instead of the red failure one.
+            BgTaskKind::Failed { signal, .. } if self.wait_verb(signal.as_deref()).is_some() => {
+                None
+            }
             BgTaskKind::Failed { .. } => Some(AccentStyle::static_color(theme.accent_error)),
         }
     }
@@ -346,6 +402,7 @@ fn push_shell_command_preamble_lines(
 mod tests {
     use super::*;
     use crate::appearance::AppearanceConfig;
+    use xai_grok_tools::implementations::grok_build::wait_for::{CANCELLED_SIGNAL, TIMEOUT_SIGNAL};
 
     fn test_ctx() -> BlockContext {
         BlockContext {
@@ -367,6 +424,94 @@ mod tests {
             .iter()
             .map(|s| s.content.as_ref())
             .collect()
+    }
+
+    /// A watcher reads as "Wait" with its own verbs: a satisfied wait was not a
+    /// task that "completed", and a wait that ran out of deadline did not fail.
+    #[test]
+    fn wait_blocks_use_the_wait_vocabulary() {
+        let started = BgTaskBlock::started("curl -sf localhost:3000", "wait-1").with_wait(true);
+        assert!(
+            line_text(&started).starts_with("Wait started: "),
+            "got {:?}",
+            line_text(&started)
+        );
+
+        let satisfied =
+            BgTaskBlock::completed("curl -sf localhost:3000", "wait-1", Duration::from_secs(3))
+                .with_wait(true);
+        assert_eq!(
+            line_text(&satisfied),
+            "Wait satisfied in 3.0s: curl -sf localhost:3000"
+        );
+
+        let expired = BgTaskBlock::failed(
+            "curl -sf localhost:3000",
+            "wait-1",
+            Duration::from_secs(120),
+            None,
+            Some(TIMEOUT_SIGNAL.to_owned()),
+        )
+        .with_wait(true);
+        assert_eq!(
+            line_text(&expired),
+            "Wait expired in 2m0s: curl -sf localhost:3000",
+            "the signal must not repeat in parentheses"
+        );
+
+        let cancelled = BgTaskBlock::failed(
+            "curl -sf localhost:3000",
+            "wait-1",
+            Duration::from_secs(5),
+            None,
+            Some(CANCELLED_SIGNAL.to_owned()),
+        )
+        .with_wait(true);
+        assert_eq!(
+            line_text(&cancelled),
+            "Wait cancelled in 5.0s: curl -sf localhost:3000"
+        );
+    }
+
+    /// A plain background task keeps the original wording.
+    #[test]
+    fn non_wait_blocks_keep_the_task_vocabulary() {
+        let failed = BgTaskBlock::failed(
+            "cargo build",
+            "t1",
+            Duration::from_secs(1),
+            None,
+            Some(TIMEOUT_SIGNAL.to_owned()),
+        );
+        assert_eq!(
+            line_text(&failed),
+            "Task failed in 1.0s: cargo build (timeout)"
+        );
+    }
+
+    /// A wait that expired on schedule is not a failure: it keeps the neutral
+    /// bullet instead of the red one.
+    #[test]
+    fn expired_wait_keeps_the_neutral_bullet() {
+        let expired = BgTaskBlock::failed(
+            "curl -sf x",
+            "wait-1",
+            Duration::from_secs(120),
+            None,
+            Some(TIMEOUT_SIGNAL.to_owned()),
+        )
+        .with_wait(true);
+        assert!(expired.bullet(&test_ctx()).is_none());
+
+        let failed_hard = BgTaskBlock::failed(
+            "curl -sf x",
+            "wait-1",
+            Duration::from_secs(1),
+            Some(2),
+            None,
+        )
+        .with_wait(true);
+        assert!(failed_hard.bullet(&test_ctx()).is_some());
     }
 
     #[test]

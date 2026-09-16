@@ -824,6 +824,15 @@ impl RenderBlock {
         self
     }
 
+    /// Mark a `BgTask` block as a `wait_for` watcher (builder pattern, no-op for
+    /// other variants), so it renders with the wait vocabulary.
+    pub fn with_bg_task_wait(mut self, is_wait: bool) -> Self {
+        if let RenderBlock::BgTask(ref mut b) = self {
+            b.is_wait = is_wait;
+        }
+        self
+    }
+
     /// Get mutable access to a StubBlock if this is one.
     pub fn as_stub_mut(&mut self) -> Option<&mut StubBlock> {
         match self {

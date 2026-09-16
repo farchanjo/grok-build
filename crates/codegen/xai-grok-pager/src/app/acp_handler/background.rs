@@ -230,7 +230,8 @@ pub(super) fn handle_task_backgrounded(notif: &acp::ExtNotification, app: &mut A
                 }
             }
             let block = crate::scrollback::blocks::BgTaskBlock::started(&command, &task_id)
-                .with_description(description.clone());
+                .with_description(description.clone())
+                .with_wait(is_wait);
             entry.block = RenderBlock::BgTask(block);
             entry.display_mode = crate::scrollback::types::DisplayMode::Collapsed;
             entry.display_mode_pinned = false;
@@ -244,14 +245,16 @@ pub(super) fn handle_task_backgrounded(notif: &acp::ExtNotification, app: &mut A
             // clear, etc.). Create a fresh BgTask so the task has UI presence.
             session.tracker.remove_pending_tool(&tool_call_id);
             let block = crate::scrollback::blocks::BgTaskBlock::started(&command, &task_id)
-                .with_description(description.clone());
+                .with_description(description.clone())
+                .with_wait(is_wait);
             let fallback = scrollback.push_block(RenderBlock::BgTask(block));
             scrollback.set_last_running(true);
             fallback
         }
     } else {
         let block = crate::scrollback::blocks::BgTaskBlock::started(&command, &task_id)
-            .with_description(description.clone());
+            .with_description(description.clone())
+            .with_wait(is_wait);
         let eid = scrollback.push_block(RenderBlock::BgTask(block));
         scrollback.set_last_running(true);
         eid
@@ -773,7 +776,7 @@ pub(super) fn handle_task_completed(notif: &acp::ExtNotification, app: &mut AppV
     // Prefer the human description for "Task completed/failed: …" labels
     // (same as "Task started"), falling back to the raw command only when
     // no description was supplied.
-    let (command, elapsed, mut description, scrollback_entry_id, was_running) =
+    let (command, elapsed, mut description, scrollback_entry_id, was_running, is_wait) =
         if let Some(bg_task) = session.bg_tasks.get_mut(task_id) {
             let was_running = bg_task.status == BgTaskStatus::Running;
             bg_task.status = if success {
@@ -792,6 +795,7 @@ pub(super) fn handle_task_completed(notif: &acp::ExtNotification, app: &mut AppV
                 bg_task.description.clone(),
                 bg_task.scrollback_entry_id,
                 was_running,
+                bg_task.is_wait,
             )
         } else {
             // Task we didn't know about — use snapshot data. Prefer
@@ -854,7 +858,8 @@ pub(super) fn handle_task_completed(notif: &acp::ExtNotification, app: &mut AppV
                     restored_from_replay: false,
                 },
             );
-            (command, elapsed, description, None, false)
+            let is_wait = task_snapshot.kind == TaskKind::Wait;
+            (command, elapsed, description, None, false, is_wait)
         };
 
     // Finish the "Task started" scrollback entry (stops bullet animation).
@@ -904,7 +909,8 @@ pub(super) fn handle_task_completed(notif: &acp::ExtNotification, app: &mut AppV
     } else {
         RenderBlock::bg_task_failed(&command, task_id, elapsed, exit_code, signal)
             .with_bg_task_description(description)
-    };
+    }
+    .with_bg_task_wait(is_wait);
     scrollback.push_block(block);
 
     // Re-eval a withheld park; the slot self-dedupes. Root sessions only.
