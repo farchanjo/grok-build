@@ -138,6 +138,59 @@ fn pending_notification_cap_keeps_newest_entries() {
         newest
     );
 }
+/// The count cap alone still lets the queue hold tens of 16 KiB pushes, all of
+/// which land in one batched turn. The byte budget drops the oldest until the
+/// queue fits, and never empties the queue outright.
+#[test]
+fn pending_notification_byte_budget_drops_oldest() {
+    fn big_push(index: usize, bytes: usize) -> PendingNotification {
+        PendingNotification {
+            prompt_id: format!("mcp-resource-{index}"),
+            prompt_blocks: vec![agent_client_protocol::ContentBlock::Text(
+                agent_client_protocol::TextContent::new("x".repeat(bytes)),
+            )],
+            priority: NotificationPriority::Later,
+            source: NotificationSource::McpResourceUpdated {
+                server: "ssh".to_string(),
+                uri: format!("command://exec-{index}/output"),
+            },
+        }
+    }
+
+    fn empty_state() -> State {
+        State {
+            running_task: None,
+            pending_inputs: std::collections::VecDeque::new(),
+            combine_edit_holds: std::collections::HashSet::new(),
+            pending_notifications: Vec::new(),
+            notifications_suppressed: true,
+            rewindable: false,
+            nudges_used_this_session: 0,
+        }
+    }
+
+    // Four 32 KiB pushes: 128 KiB, twice the 64 KiB budget.
+    let mut state = empty_state();
+    for index in 0..4 {
+        SessionActor::push_pending_notification(&mut state, big_push(index, 32 * 1024));
+    }
+    assert_eq!(
+        state.pending_notifications.len(),
+        2,
+        "oldest pushes dropped to fit the byte budget"
+    );
+    assert_eq!(
+        state.pending_notifications[0].prompt_id, "mcp-resource-2",
+        "the two newest survive"
+    );
+    assert_eq!(state.pending_notifications[1].prompt_id, "mcp-resource-3");
+
+    // A single oversized notification is kept: upstream already caps each
+    // burst, so an empty queue here would simply lose the update.
+    let mut single = empty_state();
+    SessionActor::push_pending_notification(&mut single, big_push(9, 128 * 1024));
+    assert_eq!(single.pending_notifications.len(), 1);
+}
 #[tokio::test(flavor = "current_thread")]
 async fn drain_delivers_mcp_resource_update_with_intact_text() {
     let local = tokio::task::LocalSet::new();

@@ -6,6 +6,29 @@ use super::*;
 /// Maximum number of pending notifications before oldest are dropped.
 pub(super) const MAX_PENDING_NOTIFICATIONS: usize = 50;
 
+/// Maximum total text bytes held across pending notifications before the
+/// oldest are dropped.
+///
+/// The count cap alone is not a byte cap. A full queue of
+/// [`MAX_PENDING_NOTIFICATIONS`] notifications that each filled
+/// `mcp_push::MAX_PENDING_BYTES` (16 KiB) delivers ~800 KiB into *one* batched
+/// turn, and that turn is then re-sent on every model call until compaction.
+/// 64 KiB keeps a burst's worth of stream output while bounding what a single
+/// drain can inflate the context by.
+pub(super) const MAX_PENDING_NOTIFICATION_BYTES: usize = 64 * 1024;
+
+/// Text bytes a pending notification contributes to the batched turn.
+fn pending_notification_bytes(notification: &PendingNotification) -> usize {
+    notification
+        .prompt_blocks
+        .iter()
+        .map(|block| match block {
+            acp::ContentBlock::Text(text) => text.text.len(),
+            _ => 0,
+        })
+        .sum()
+}
+
 /// A notification buffered for idle-gated drain (see `maybe_drain_notifications`).
 pub(crate) struct PendingNotification {
     pub(crate) prompt_id: String,
@@ -27,6 +50,31 @@ impl SessionActor {
                 dropped = excess,
                 "Dropped oldest pending notifications (exceeded cap of {})",
                 MAX_PENDING_NOTIFICATIONS,
+            );
+        }
+        // Byte budget. The count cap still lets the queue hold
+        // MAX_PENDING_NOTIFICATIONS x mcp_push::MAX_PENDING_BYTES (16 KiB) of
+        // stream output, and every one of them lands in a single batched turn.
+        // Drop oldest until the queue fits, never emptying it: a lone
+        // notification is already bounded by the per-burst cap upstream.
+        let mut total_bytes: usize = state
+            .pending_notifications
+            .iter()
+            .map(pending_notification_bytes)
+            .sum();
+        let mut dropped_for_bytes = 0usize;
+        while total_bytes > MAX_PENDING_NOTIFICATION_BYTES && state.pending_notifications.len() > 1
+        {
+            let oldest = state.pending_notifications.remove(0);
+            total_bytes -= pending_notification_bytes(&oldest);
+            dropped_for_bytes += 1;
+        }
+        if dropped_for_bytes > 0 {
+            tracing::warn!(
+                dropped = dropped_for_bytes,
+                remaining_bytes = total_bytes,
+                "Dropped oldest pending notifications (exceeded byte budget of {})",
+                MAX_PENDING_NOTIFICATION_BYTES,
             );
         }
     }
