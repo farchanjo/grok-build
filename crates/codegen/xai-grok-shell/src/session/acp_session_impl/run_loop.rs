@@ -2721,6 +2721,11 @@ pub(super) async fn run_session(
                             // abort.
                             session.drop_pending_synthetic_items().await;
 
+                            // Release the server-side session references while
+                            // the session is still alive (SGLang `/close_session`).
+                            // Best-effort: every failure is logged and ignored.
+                            session.close_sampling_session().await;
+
                             // Reports queued by an earlier turn must precede session-end hooks.
                             turn_end_queue.flush().await;
                             // ── session_end hook (shutdown path) ────────

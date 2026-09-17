@@ -2051,6 +2051,7 @@ mod reasoning_compaction_regression_tests {
             doom_loop_recovery: None,
             header_injector: None,
             provider_identity: Default::default(),
+            session_id: None,
         }
     }
     #[tokio::test]

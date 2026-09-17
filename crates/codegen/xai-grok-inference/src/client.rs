@@ -44,6 +44,9 @@ const DEFAULT_CLIENT_IDENTIFIER: &str = "grok-shell";
 /// Product identifier baked into User-Agent strings.
 const AGENT_PRODUCT: &str = "grok-shell";
 const ANTHROPIC_DEFAULT_MAX_TOKENS: u32 = 128_000;
+/// Bound on the best-effort `/close_session` call so session shutdown can never
+/// hang on an endpoint that does not implement it.
+const CLOSE_SESSION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// Per-request `x-grok-*` headers. Optional fields are skipped when empty/`None`.
 ///
@@ -69,13 +72,21 @@ impl GrokRequestHeaders<'_> {
         if !self.first_party {
             return builder;
         }
-        let mut b = builder
-            .header("x-grok-conv-id", self.conv_id)
-            .header("x-grok-req-id", self.req_id)
-            .header("x-grok-model-override", self.model_id)
-            .header("x-grok-session-id", self.session_id)
-            .header("x-grok-agent-id", self.agent_id);
-        if let Some(idx) = self.turn_idx {
+        let mut b = builder;
+        // Empty values are skipped so an unset field is absent on the wire
+        // instead of a header with an empty value.
+        for (name, value) in [
+            ("x-grok-conv-id", self.conv_id),
+            ("x-grok-req-id", self.req_id),
+            ("x-grok-model-override", self.model_id),
+            ("x-grok-session-id", self.session_id),
+            ("x-grok-agent-id", self.agent_id),
+        ] {
+            if !value.is_empty() {
+                b = b.header(name, value);
+            }
+        }
+        if let Some(idx) = self.turn_idx.filter(|s| !s.is_empty()) {
             b = b.header("x-grok-turn-idx", idx);
         }
         if let Some(id) = self.deployment_id.filter(|s| !s.is_empty()) {
@@ -666,6 +677,18 @@ pub struct InferenceClient {
     adapter: Arc<dyn crate::provider::ProviderAdapter>,
 }
 
+/// FNV-1a over the key bytes: tiny, dependency-free, and stable across
+/// processes — `DefaultHasher` is not, and an unstable rank pin would send a
+/// session to a different DP rank after every client restart.
+fn fnv1a_32(key: &str) -> u32 {
+    let mut hash: u32 = 0x811c_9dc5;
+    for byte in key.as_bytes() {
+        hash ^= u32::from(*byte);
+        hash = hash.wrapping_mul(0x0100_0193);
+    }
+    hash
+}
+
 impl std::fmt::Debug for InferenceClient {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("InferenceClient")
@@ -727,6 +750,8 @@ struct ClientDefaults {
     dashscope_thinking_budget: Option<u32>,
     /// vLLM/SGLang `chat_template_kwargs` object.
     vllm_chat_template_kwargs: Option<serde_json::Value>,
+    /// Session identity defaulted onto every request built from this config.
+    session_id: Option<String>,
     api_backend: ApiBackend,
     include_message_model_id: bool,
     auth_scheme: AuthScheme,
@@ -1017,6 +1042,7 @@ impl InferenceClient {
             dashscope_enable_thinking: config.dashscope_enable_thinking,
             dashscope_thinking_budget: config.dashscope_thinking_budget,
             vllm_chat_template_kwargs: config.vllm_chat_template_kwargs,
+            session_id: config.session_id,
             api_backend: config.api_backend,
             include_message_model_id: config.include_message_model_id,
             auth_scheme: config.auth_scheme,
@@ -1118,6 +1144,96 @@ impl InferenceClient {
                 msg.reasoning_content = None;
                 msg.reasoning_details.clear();
             }
+        }
+    }
+
+    /// Stamp the session fields that follow a conversation to the same backend
+    /// state. Applied unconditionally from the request's session key; there is
+    /// no per-provider opt-in.
+    ///
+    /// `bootstrap_room` drives SGLang's `--load-balance-method
+    /// follow_bootstrap_room` (`rank = bootstrap_room % dp_size`), so a session
+    /// keeps landing on the rank that holds its prefix. SGLang's default
+    /// `round_robin` is prefix-blind: measured over 3737 prefill batches each
+    /// rank still showed a 94-98% hit rate, but that was a rolling four-turns-old
+    /// copy of the conversation, and the tokens appended since that rank's last
+    /// visit were re-prefilled on every turn.
+    ///
+    /// `session_id` is SGLang's per-session KV reference key
+    /// (`--enable-session-radix-cache`), which keeps an idle conversation's prefix
+    /// from being evicted, so its next turn does not start empty. Without that
+    /// flag SGLang accepts and ignores it, and the rank pin alone keeps the
+    /// ordinary prefix cache warm. vLLM models `session_id` natively (chat and
+    /// responses) and ignores `bootstrap_room` (`extra="allow"`).
+    ///
+    /// Both fields are skipped when unset, so a provider that never receives the
+    /// session key is unaffected.
+    pub fn apply_session_affinity(&self, request: &mut ChatCompletionRequest) {
+        let Some(key) = request.x_grok_session_id.as_deref() else {
+            return;
+        };
+        if key.is_empty() {
+            return;
+        }
+        request.bootstrap_room = Some(u64::from(fnv1a_32(key)));
+        request.session_id = Some(key.to_string());
+    }
+
+    /// Best-effort `POST /close_session` so a session-aware server releases the
+    /// session's KV references (SGLang's `--enable-session-radix-cache` path).
+    /// Without it the refs linger until the session id is reused.
+    ///
+    /// One attempt per candidate URL, no retry, and every failure is returned for
+    /// the caller to log at debug: the endpoint is SGLang-only, so a 404 from
+    /// vLLM, OpenAI, Anthropic or OpenRouter is expected and harmless.
+    ///
+    /// SGLang serves the route at the app root, while `base_url` usually ends in
+    /// `/v1`, so the root-stripped URL is tried first and the raw base second.
+    pub async fn close_session(&self) -> Result<()> {
+        let Some(key) = self
+            .defaults
+            .session_id
+            .as_deref()
+            .filter(|key| !key.is_empty())
+        else {
+            return Ok(());
+        };
+        let mut last_error: Option<InferenceError> = None;
+        for url in self.close_session_candidates() {
+            let SentRequest { builder, .. } = self.post(url);
+            let request = builder.json(&serde_json::json!({ "session_id": key }));
+            match tokio::time::timeout(CLOSE_SESSION_TIMEOUT, request.send()).await {
+                Ok(Ok(response)) if response.status().is_success() => return Ok(()),
+                Ok(Ok(response)) => {
+                    tracing::debug!(
+                        status = %response.status(),
+                        "close_session not acknowledged"
+                    );
+                }
+                Ok(Err(error)) => last_error = Some(error.into()),
+                Err(_) => {
+                    tracing::debug!("close_session timed out");
+                }
+            }
+        }
+        match last_error {
+            Some(error) => Err(error),
+            None => Ok(()),
+        }
+    }
+
+    /// Candidate URLs for [`Self::close_session`]: the root-stripped base first
+    /// (SGLang registers the route at `/close_session`), then the base as-is.
+    fn close_session_candidates(&self) -> Vec<String> {
+        let base = self.base_url.trim_end_matches('/');
+        let root = base.strip_suffix("/v1").unwrap_or(base);
+        if root == base {
+            vec![format!("{base}/close_session")]
+        } else {
+            vec![
+                format!("{root}/close_session"),
+                format!("{base}/close_session"),
+            ]
         }
     }
 
@@ -1320,7 +1436,65 @@ impl InferenceClient {
             }
         }
 
+        // Session identity first: affinity is derived from it, so the order is
+        // load-bearing. An explicit request field wins over the config default.
+        if request.x_grok_session_id.is_none() {
+            request.x_grok_session_id = self.defaults.session_id.clone();
+        }
+        self.apply_session_affinity(&mut request);
+
+        // OpenAI (api + Codex) and Anthropic do not model the SGLang fields and
+        // validate request bodies strictly; they get `prompt_cache_key` instead.
+        if self.session_fields_suppressed() {
+            request.session_id = None;
+            request.bootstrap_room = None;
+        }
+        if request.prompt_cache_key.is_none() {
+            request.prompt_cache_key = request.x_grok_session_id.clone();
+        }
+
         Ok(request)
+    }
+
+    /// True when this provider rejects the SGLang session fields on a body it
+    /// models itself (OpenAI and Anthropic validate unknown parameters).
+    fn session_fields_suppressed(&self) -> bool {
+        matches!(
+            self.adapter.id(),
+            crate::provider::ProviderKind::OpenAi | crate::provider::ProviderKind::Anthropic
+        )
+    }
+
+    /// True for the self-hosted OpenAI-compatible family, where the session also
+    /// rides on the `X-Session-ID` header so an intermediate router can read it
+    /// without parsing the body. vLLM reads that header natively.
+    fn self_hosted_family(&self) -> bool {
+        matches!(
+            self.adapter.id(),
+            crate::provider::ProviderKind::OpenAiCompatible | crate::provider::ProviderKind::Custom
+        )
+    }
+
+    /// Mirror the session key on the `X-Session-ID` header for the self-hosted
+    /// family (vLLM reads it natively; SGLang ignores unknown headers). The body
+    /// stays the primary carrier; the header exists so a router can route on the
+    /// session without parsing the body. Falls back to the config default when
+    /// the request carries no key.
+    fn apply_session_header(
+        &self,
+        builder: reqwest::RequestBuilder,
+        session_id: Option<&str>,
+    ) -> reqwest::RequestBuilder {
+        if !self.self_hosted_family() {
+            return builder;
+        }
+        match session_id
+            .or(self.defaults.session_id.as_deref())
+            .filter(|key| !key.is_empty())
+        {
+            Some(key) => builder.header("X-Session-ID", key),
+            None => builder,
+        }
     }
 
     /// OpenRouter's `models` extension contains fallback models only; the
@@ -1513,18 +1687,23 @@ impl InferenceClient {
         // `enable_thinking` requires `stream: true` on the hybrid-thinking
         // Qwen3 models, and this is the non-streaming path. The agent and
         // compaction sampling paths both use chat_completion_stream.
-        let http_request = grok_headers.apply(builder).json(&ChatRequestWithFallbacks {
-            inner: &payload,
-            models: self.openrouter_fallback_models(),
-            provider: self.openrouter_provider_preferences(),
-            plugins: self.openrouter_plugins(),
-            reasoning: reasoning.as_ref(),
-            tool_stream: self.defaults.zai_tool_stream,
-            thinking: self.defaults.zai_thinking.as_ref(),
-            enable_thinking: None,
-            thinking_budget: None,
-            chat_template_kwargs: self.vllm_chat_template_kwargs(),
-        });
+        let http_request = self
+            .apply_session_header(
+                grok_headers.apply(builder),
+                payload.x_grok_session_id.as_deref(),
+            )
+            .json(&ChatRequestWithFallbacks {
+                inner: &payload,
+                models: self.openrouter_fallback_models(),
+                provider: self.openrouter_provider_preferences(),
+                plugins: self.openrouter_plugins(),
+                reasoning: reasoning.as_ref(),
+                tool_stream: self.defaults.zai_tool_stream,
+                thinking: self.defaults.zai_thinking.as_ref(),
+                enable_thinking: None,
+                thinking_budget: None,
+                chat_template_kwargs: self.vllm_chat_template_kwargs(),
+            });
 
         let response = http_request.send().await.map_err(|e| {
             // Log at debug level; errors are surfaced to the caller.
@@ -1605,8 +1784,11 @@ impl InferenceClient {
                 InferenceError::Serialization(e)
             })?,
         );
-        let http_request = grok_headers
-            .apply(builder)
+        let http_request = self
+            .apply_session_header(
+                grok_headers.apply(builder),
+                payload.x_grok_session_id.as_deref(),
+            )
             .header(ACCEPT, HeaderValue::from_static("text/event-stream"))
             .header(CONTENT_TYPE, HeaderValue::from_static("application/json"))
             .body(request_body.clone());
@@ -1891,15 +2073,29 @@ impl InferenceClient {
     }
 
     /// Post-serialize Responses body shaping (Codex strip + optional xAI extras).
+    ///
+    /// `session_id` is the request's session key. The typed `rs::CreateResponse`
+    /// has no slot for the session fields and no `flatten extra`, so they are
+    /// injected here — the single seam shared by the streaming and non-streaming
+    /// Responses paths. Codex is skipped: it validates parameters strictly and
+    /// does not model `session_id`.
     fn finalize_responses_request_body(
         &self,
         request_body: &mut serde_json::Value,
         extra_tool_entries: Vec<serde_json::Value>,
+        session_id: Option<&str>,
     ) {
         let is_codex = xai_grok_inference_types::is_chatgpt_codex_base_url(&self.base_url);
         // xAI-only: never inject stream_tool_calls toward ChatGPT Codex.
         if !is_codex && self.defaults.stream_tool_calls {
             request_body["stream_tool_calls"] = serde_json::json!(true);
+        }
+        if !is_codex
+            && !self.session_fields_suppressed()
+            && let Some(key) = session_id.filter(|key| !key.is_empty())
+        {
+            request_body["session_id"] = serde_json::json!(key);
+            request_body["bootstrap_room"] = serde_json::json!(fnv1a_32(key));
         }
         add_openrouter_fallback_models(request_body, self.openrouter_fallback_models());
         // OpenRouter-native extensions (identity-gated, shared with Chat).
@@ -1961,13 +2157,25 @@ impl InferenceClient {
             tracing::error!("Failed to serialize responses request: {}", e);
             InferenceError::Serialization(e)
         })?;
-        self.finalize_responses_request_body(&mut request_body, Vec::new());
+        self.finalize_responses_request_body(
+            &mut request_body,
+            Vec::new(),
+            request
+                .x_grok_session_id
+                .as_deref()
+                .or(self.defaults.session_id.as_deref()),
+        );
         let SentRequest {
             builder,
             sent_credential,
             sent_bearer_tail,
         } = self.post(self.endpoint("responses"));
-        let http_request = grok_headers.apply(builder).json(&request_body);
+        let http_request = self
+            .apply_session_header(
+                grok_headers.apply(builder),
+                request.x_grok_session_id.as_deref(),
+            )
+            .json(&request_body);
 
         let response = http_request.send().await.map_err(|e| {
             tracing::debug!("HTTP request failed: {}", e);
@@ -2103,7 +2311,14 @@ impl InferenceClient {
             tracing::error!("Failed to serialize responses request: {}", e);
             InferenceError::Serialization(e)
         })?;
-        self.finalize_responses_request_body(&mut request_body, extra_tool_entries);
+        self.finalize_responses_request_body(
+            &mut request_body,
+            extra_tool_entries,
+            request
+                .x_grok_session_id
+                .as_deref()
+                .or(self.defaults.session_id.as_deref()),
+        );
         // Fresh per attempt so signals never leak across retries; `None`
         // (check disabled) sends no header and does no peek work per event.
         let doom_loop = self
@@ -2115,8 +2330,11 @@ impl InferenceClient {
             sent_credential,
             sent_bearer_tail,
         } = self.post(self.endpoint("responses"));
-        let mut http_request = grok_headers
-            .apply(builder)
+        let mut http_request = self
+            .apply_session_header(
+                grok_headers.apply(builder),
+                request.x_grok_session_id.as_deref(),
+            )
             .header(ACCEPT, HeaderValue::from_static("text/event-stream"));
         if doom_loop.is_some() {
             // Presence opts in; the server ignores the value.
@@ -2346,6 +2564,15 @@ impl InferenceClient {
         // Drop process-local trace data.
         request.trace.take();
 
+        // SGLang/vLLM-served Messages endpoints model `session_id`; Anthropic's
+        // own API does not (it gets `metadata.user_id`, set by the converter).
+        if !self.session_fields_suppressed() {
+            request.inner.session_id = request
+                .x_grok_session_id
+                .clone()
+                .or_else(|| self.defaults.session_id.clone());
+        }
+
         tracing::debug!("create_message: {:?}", &request.inner);
         tracing::debug!("endpoint: {:?}", self.endpoint("messages"));
 
@@ -2365,7 +2592,12 @@ impl InferenceClient {
             sent_credential,
             sent_bearer_tail,
         } = self.post(self.endpoint("messages"));
-        let http_request = grok_headers.apply(builder).json(&request.inner);
+        let http_request = self
+            .apply_session_header(
+                grok_headers.apply(builder),
+                request.x_grok_session_id.as_deref(),
+            )
+            .json(&request.inner);
 
         let response = http_request.send().await.map_err(|e| {
             tracing::debug!("HTTP request failed: {}", e);
@@ -2469,6 +2701,14 @@ impl InferenceClient {
         // Drop process-local trace data.
         request.trace.take();
 
+        // See `create_message`: same identity gate for the session field.
+        if !self.session_fields_suppressed() {
+            request.inner.session_id = request
+                .x_grok_session_id
+                .clone()
+                .or_else(|| self.defaults.session_id.clone());
+        }
+
         tracing::debug!(
             base_url = %self.base_url,
             model_id = model_id.as_str(),
@@ -2491,8 +2731,11 @@ impl InferenceClient {
             sent_credential,
             sent_bearer_tail,
         } = self.post(self.endpoint("messages"));
-        let http_request = grok_headers
-            .apply(builder)
+        let http_request = self
+            .apply_session_header(
+                grok_headers.apply(builder),
+                request.x_grok_session_id.as_deref(),
+            )
             .header(ACCEPT, HeaderValue::from_static("text/event-stream"))
             .json(&request.inner);
 
@@ -2666,6 +2909,19 @@ impl InferenceClient {
                 .or(self.defaults.max_completion_tokens),
             self.defaults.max_output_ceiling,
         );
+
+        // Session identity: fills the per-request id when the caller omitted one,
+        // so auxiliary call sites follow the session without stamping anything.
+        // Explicit request values always win.
+        if request.x_grok_session_id.is_none() {
+            request.x_grok_session_id = self.defaults.session_id.clone();
+        }
+        // Sticky cache-routing key for the Responses transport (OpenAI, Codex,
+        // OpenRouter fallback). Cheap and identity-safe: the field is dropped by
+        // the Messages conversion and ignored by providers that do not model it.
+        if request.prompt_cache_key.is_none() {
+            request.prompt_cache_key = request.x_grok_session_id.clone();
+        }
 
         Ok(())
     }
@@ -3109,6 +3365,7 @@ mod tests {
             doom_loop_recovery: None,
             header_injector: None,
             provider_identity: crate::config::ProviderIdentity::default(),
+            session_id: None,
         }
     }
 
@@ -3159,6 +3416,8 @@ mod tests {
         let request = ChatCompletionRequest {
             model: Some("test-model".into()),
             messages: vec![ChatRequestMessage::user("hello")],
+            bootstrap_room: None,
+            session_id: None,
             temperature: Some(0.7),
             max_tokens: None,
             top_p: None,
@@ -3178,6 +3437,7 @@ mod tests {
             x_grok_deployment_id: None,
             x_grok_user_id: None,
             trace: None,
+            prompt_cache_key: None,
         };
 
         let wrapper = StreamingChatRequest {
@@ -3593,6 +3853,73 @@ mod tests {
         assert!(
             json["messages"][1].get("model_id").is_none(),
             "internal model metadata must not reach strict OpenAI-compatible providers"
+        );
+    }
+
+    #[test]
+    fn session_affinity_stamps_both_custom_sglang_fields() {
+        let client = InferenceClient::new(minimal_config()).unwrap();
+
+        let mut request = ChatCompletionRequest::new("m", vec![]);
+        request.x_grok_session_id = Some("01a0ad75-session".into());
+        client.apply_session_affinity(&mut request);
+        let room = request.bootstrap_room.expect("session key pins a room");
+        assert_eq!(
+            room,
+            u64::from(fnv1a_32("01a0ad75-session")),
+            "the raw FNV-1a hash is the room; the server reduces it mod dp_size"
+        );
+        assert_eq!(
+            request.session_id.as_deref(),
+            Some("01a0ad75-session"),
+            "the session key is also carried for the server's KV references"
+        );
+
+        let body = serde_json::to_value(&request).unwrap();
+        assert_eq!(
+            body.get("bootstrap_room").and_then(|v| v.as_u64()),
+            Some(room),
+            "both fields travel in the body"
+        );
+        assert_eq!(
+            body.get("session_id").and_then(|v| v.as_str()),
+            Some("01a0ad75-session")
+        );
+
+        // Same session -> same room (prefix-cache affinity); the hash is
+        // FNV-1a so it survives a client restart.
+        let mut again = ChatCompletionRequest::new("m", vec![]);
+        again.x_grok_session_id = Some("01a0ad75-session".into());
+        client.apply_session_affinity(&mut again);
+        assert_eq!(again.bootstrap_room, Some(room));
+
+        // A request with no session key is left untouched: no opt-in needed,
+        // but nothing to derive the room from either.
+        let mut anonymous = ChatCompletionRequest::new("m", vec![]);
+        client.apply_session_affinity(&mut anonymous);
+        assert_eq!(anonymous.bootstrap_room, None);
+        assert_eq!(anonymous.session_id, None);
+    }
+
+    #[test]
+    fn unset_session_fields_stay_off_the_wire() {
+        // `apply_session_affinity` on its own (no `apply_defaults`) with no
+        // session key: nothing to derive the room from, so the body stays
+        // byte-identical to a client that never had the feature.
+        let client = InferenceClient::new(minimal_config()).unwrap();
+        let mut request = ChatCompletionRequest::new("m", vec![ChatRequestMessage::user("hi")]);
+        client.apply_session_affinity(&mut request);
+
+        assert_eq!(request.bootstrap_room, None);
+        assert_eq!(request.session_id, None);
+        let body = serde_json::to_value(&request).unwrap();
+        assert!(
+            body.get("bootstrap_room").is_none(),
+            "unset session field must stay off the wire"
+        );
+        assert!(
+            body.get("session_id").is_none(),
+            "unset session field must stay off the wire"
         );
     }
 
@@ -4909,7 +5236,7 @@ mod tests {
             "store": true,
             "previous_response_id": "resp_should_not_leave"
         });
-        client.finalize_responses_request_body(&mut body, Vec::new());
+        client.finalize_responses_request_body(&mut body, Vec::new(), None);
         assert_eq!(body["store"], false);
         assert!(
             body.get("previous_response_id").is_none(),
@@ -4943,7 +5270,7 @@ mod tests {
             "store": true,
             "previous_response_id": "resp_keep_for_non_or"
         });
-        client.finalize_responses_request_body(&mut body, Vec::new());
+        client.finalize_responses_request_body(&mut body, Vec::new(), None);
         assert!(body.get("provider").is_none());
         assert!(body.get("plugins").is_none());
         assert!(
@@ -5054,7 +5381,7 @@ mod tests {
         let mut wrapper = CreateResponseWrapper::new(responses);
         client.apply_response_defaults(&mut wrapper).unwrap();
         let mut body = serde_json::to_value(&wrapper.inner).unwrap();
-        client.finalize_responses_request_body(&mut body, Vec::new());
+        client.finalize_responses_request_body(&mut body, Vec::new(), None);
         assert_eq!(body["store"], false);
         assert!(body.get("previous_response_id").is_none());
         assert_eq!(body["provider"]["require_parameters"], true);

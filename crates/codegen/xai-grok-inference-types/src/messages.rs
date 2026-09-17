@@ -46,6 +46,12 @@ pub struct MessagesRequest {
     pub output_config: Option<OutputConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub metadata: Option<Metadata>,
+    /// Session key. Native on SGLang/vLLM-served Messages endpoints; not
+    /// modelled by Anthropic's own API, so the client only sets it for
+    /// identities that accept it. The Anthropic carrier is
+    /// [`Metadata::user_id`] instead.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

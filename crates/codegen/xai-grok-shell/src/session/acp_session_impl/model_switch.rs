@@ -12,6 +12,12 @@ impl SessionActor {
         auto_compact_threshold_percent: u8,
         execution_backend: crate::agent::execution_backend::ExecutionBackend,
     ) -> Result<acp::ModelId, acp::Error> {
+        // The switched-to config becomes the sampler's config, so it must carry
+        // the session identity: a model switch must not change the session key.
+        let mut inference_config = inference_config;
+        if inference_config.session_id.is_none() {
+            inference_config.session_id = Some(self.session_info.id.to_string());
+        }
         // Canonical selection is session-scoped; never take the upstream wire slug
         // from InferenceConfig.model as the selection id.
         let model_id = selection_model_id;

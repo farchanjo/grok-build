@@ -371,5 +371,6 @@ pub fn test_inference_config(
         doom_loop_recovery: None,
         header_injector: None,
         provider_identity: Default::default(),
+        session_id: None,
     }
 }

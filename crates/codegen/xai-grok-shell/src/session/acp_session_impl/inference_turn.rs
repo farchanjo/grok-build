@@ -724,6 +724,7 @@ impl SessionActor {
             model: cfg.model.clone(),
             provider_identity,
             openrouter_pacing: self.openrouter_pacing.get(),
+            session_id: Some(self.session_info.id.to_string()),
             ..InferenceConfig::default()
         };
         // Preserve media/backend fields needed by legacy_from_config fallback.
@@ -857,6 +858,12 @@ impl SessionActor {
             compaction_at_tokens: self.compaction_at_tokens.get(),
             doom_loop_recovery: self.doom_loop_recovery,
             header_injector: Some(std::sync::Arc::new(TraceContextInjector)),
+            // This per-turn rebuild is the config the sampler actually runs
+            // with, so the session id has to be stamped here: it is the source
+            // of the first-party session header, the SGLang/vLLM session
+            // fields, OpenRouter's `session_id`, Anthropic's `metadata.user_id`
+            // and OpenAI's `prompt_cache_key`.
+            session_id: Some(self.session_info.id.to_string()),
         })
     }
     /// Install auto-mode permission classifier with a live LLM side-query
@@ -1310,6 +1317,22 @@ impl SessionActor {
         let sampling_client = xai_grok_inference::InferenceClient::new(full_config)
             .map_err(|e| self.to_acp_error(e))?;
         Ok(sampling_client)
+    }
+
+    /// Best-effort session close on the sampling endpoint at session teardown.
+    ///
+    /// SGLang releases a session's KV references on `/close_session`; without it
+    /// they linger until the id is reused. Sent for every provider: the endpoint
+    /// is SGLang-only, so a 404 elsewhere is expected and logged at debug. One
+    /// attempt with a bounded timeout — teardown must never hang on it.
+    pub(super) async fn close_sampling_session(&self) {
+        let Ok(client) = self.prepare_chat_completion(false).await else {
+            tracing::debug!("close_session skipped: sampler config unavailable");
+            return;
+        };
+        if let Err(error) = client.close_session().await {
+            tracing::debug!(%error, "close_session not acknowledged");
+        }
     }
     /// Push a fresh `InferenceConfig` into the per-session sampler actor
     /// before each turn. Mirrors `prepare_chat_completion`'s

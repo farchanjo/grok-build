@@ -88,6 +88,51 @@ pub struct ChatCompletionRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reasoning_effort: Option<ReasoningEffort>,
 
+    /// SGLang session routing key for `follow_bootstrap_room` DP dispatch
+    /// (prefix-cache affinity).
+    ///
+    /// The provider serves with `--load-balance-method follow_bootstrap_room`,
+    /// whose dispatch is `rank = bootstrap_room % dp_size`
+    /// (`data_parallel_controller.py`). Deriving the room from the request's
+    /// session key keeps one session on one rank, where its prefix cache
+    /// lives; without it SGLang round-robins, each turn lands on a rank that
+    /// has never seen the session's prefix, and the whole 300k-900k context
+    /// is re-prefilled.
+    ///
+    /// Declared by SGLang's own OpenAI-compatible layer
+    /// (`entrypoints/openai/protocol.py`, chat and responses). vLLM does not
+    /// model it and ignores it (`extra="allow"`), so it is safe to send
+    /// wherever a session key exists. Serialized only when set.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bootstrap_room: Option<u64>,
+
+    /// Session key for the server's per-session KV references
+    /// (`--enable-session-radix-cache`) and, on vLLM, the stable session
+    /// identity reported on KV-cache events.
+    ///
+    /// With SGLang's flag on, the scheduler registers the session's reusable
+    /// radix leaves and eviction then consumes unreferenced entries before
+    /// referenced ones (`session_ref_tracker.py`), so an idle conversation's
+    /// prefix survives eviction and its next turn does not start from an empty
+    /// cache. It is per-rank state, which is why it is sent alongside the
+    /// `bootstrap_room` that pins the session to a rank. Without the flag it is
+    /// accepted and inert.
+    ///
+    /// Native on SGLang (chat + responses) and on vLLM (chat + responses, or
+    /// the `X-Session-ID` header), and native on OpenRouter. OpenAI and
+    /// Anthropic do not model it and get `prompt_cache_key` /
+    /// `metadata.user_id` instead. Serialized only when set.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+
+    /// Sticky cache-routing key for prompt-cache reuse.
+    ///
+    /// Native on OpenAI (chat and responses) and on OpenRouter (where it is the
+    /// fallback routing key when `session_id` is absent). Dropped by the
+    /// Messages conversion. Serialized only when set.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prompt_cache_key: Option<String>,
+
     /// custom headers
     #[serde(skip)]
     pub x_grok_conv_id: Option<String>,
@@ -134,6 +179,9 @@ impl ChatCompletionRequest {
             x_grok_agent_id: None,
             x_grok_deployment_id: None,
             x_grok_user_id: None,
+            bootstrap_room: None,
+            session_id: None,
+            prompt_cache_key: None,
             trace: None,
         }
     }
@@ -160,6 +208,9 @@ impl ChatCompletionRequest {
             x_grok_agent_id: None,
             x_grok_deployment_id: None,
             x_grok_user_id: None,
+            bootstrap_room: None,
+            session_id: None,
+            prompt_cache_key: None,
             trace: None,
         }
     }

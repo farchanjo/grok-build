@@ -6205,6 +6205,9 @@ pub fn stamp_session_local_sampler_fields(
     max_retries: Option<u32>,
 ) {
     cfg.client_identifier = client_identifier;
+    // Aux calls belong to the session: without this the helper model would send
+    // its own (absent) session key and fragment the prefix cache.
+    cfg.session_id = active_session_config.session_id.clone();
     cfg.attribution_callback = active_session_config.attribution_callback.clone();
     if crate::util::is_xai_api_bearer_url(&cfg.base_url) {
         cfg.bearer_resolver = active_session_config.bearer_resolver.clone();
@@ -6385,6 +6388,9 @@ fn build_inference_config_for_model(
         .model_provider
         .as_ref()
         .and_then(|provider| provider.dialect);
+    // Session identity is stamped by the session-scoped producers
+    // (`reconstruct_full_config`, `stamp_session_local_sampler_fields`,
+    // model switch); a model-level config has no session yet.
     // Phase 3b: the adapter owns per-kind policy — request extensions and
     // (now) the max-tokens budget governance — so no inline
     // `provider.kind == OpenRouter` branches remain in the shell.
@@ -6581,6 +6587,7 @@ fn build_inference_config_for_model(
         api_key: credentials.api_key,
         model: model_name,
         base_url: credentials.base_url,
+        session_id: None,
         max_completion_tokens,
         max_output_ceiling,
         temperature,

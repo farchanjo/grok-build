@@ -2442,6 +2442,13 @@ impl From<ConversationRequest> for ChatCompletionRequest {
         ChatCompletionRequest {
             model: req.model,
             messages,
+            // Stamped by the client from the session key (`apply_defaults`);
+            // the conversation form carries neither field.
+            bootstrap_room: None,
+            session_id: None,
+            // The conversation form is the carrier; the chat form re-derives it
+            // from the session key.
+            prompt_cache_key: None,
             temperature: req.temperature,
             max_tokens: req.max_output_tokens,
             top_p: req.top_p,
@@ -3382,8 +3389,8 @@ pub fn dedup_duplicate_tool_results(conversation: &mut Vec<ConversationItem>) ->
 pub fn build_messages_request(req: &ConversationRequest) -> crate::messages::MessagesRequest {
     use crate::messages::{
         CacheControl, ContentBlock, ImageSource, Message, MessageContent, MessageRole,
-        MessagesRequest, OutputConfig, SystemParam, TextBlock, ToolChoiceParam, ToolParam,
-        ToolResultContent,
+        MessagesRequest, Metadata, OutputConfig, SystemParam, TextBlock, ToolChoiceParam,
+        ToolParam, ToolResultContent,
     };
 
     let mut system_blocks: Vec<TextBlock> = Vec::new();
@@ -3744,7 +3751,13 @@ pub fn build_messages_request(req: &ConversationRequest) -> crate::messages::Mes
         stop_sequences: None,
         thinking,
         output_config,
-        metadata: None,
+        // Session grouping for the Anthropic Messages API: `metadata.user_id` is
+        // the only native carrier there. The client sets `session_id` separately
+        // for identities that model it.
+        metadata: req.x_grok_session_id.clone().map(|user_id| Metadata {
+            user_id: Some(user_id),
+        }),
+        session_id: None,
     }
 }
 

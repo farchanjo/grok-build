@@ -138,6 +138,31 @@ The `kind` field on the provider (`"xai"`, `"openai"`, `"openrouter"`,
 `"anthropic"`, `"codex"`, or `"custom"`) drives the gate — it is identity-based,
 not URL-based, so a mistyped `base_url` cannot leak the headers.
 
+### Session and Cache Continuity
+
+Every request built from a session carries that session's identifier, in the
+carrier the target provider actually understands. There is nothing to enable.
+
+| Provider | Carrier | Effect |
+| --- | --- | --- |
+| xAI (`kind = "xai"`, or an unscoped xAI model) | `x-grok-session-id` header | server-side session correlation |
+| OpenAI (`kind = "openai"`, API key or ChatGPT OAuth) | `prompt_cache_key` | routes related requests to the same prompt cache |
+| OpenRouter | `session_id` body field | sticky routing to the same upstream provider |
+| Anthropic | `metadata.user_id` | session grouping |
+| `openai_compatible` / `custom` (vLLM, SGLang, gateway) | `session_id` + `bootstrap_room` body fields, and the `X-Session-ID` header | keeps a session on the same worker so its prefix cache stays warm; see [Local and gateway providers](../providers/local-gateways.md) |
+
+The identifier is derived from the Grok session, so it survives a resume: the
+same session lands on the same worker and reuses its cache after a restart.
+
+Two providers reject unknown request parameters, so they get their own carrier
+instead of the generic one: OpenAI (including ChatGPT Codex) and Anthropic. A
+model with `api_backend = "chat_completions"` on one of those kinds gets
+`prompt_cache_key` rather than `session_id`.
+
+The provider-level `session_affinity` and `routed_dp_size` keys are gone —
+both behaviors are now automatic. An existing `config.toml` that still sets them
+keeps parsing; the keys are simply ignored.
+
 ### Context Window
 
 The `context_window` value tells Grok when to trigger auto-compaction. When you override a known model, Grok inherits that model's context window. When you define a new model and omit `context_window`, Grok defaults to 200,000 tokens, so set it explicitly to match your provider.

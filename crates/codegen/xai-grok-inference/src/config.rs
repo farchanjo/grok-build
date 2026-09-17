@@ -396,6 +396,16 @@ pub struct InferenceConfig {
     /// closed), never silently downgraded to `Standard`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wire_dialect: Option<WireDialect>,
+    /// Session identity carried on every request built from this config.
+    ///
+    /// Defaults the per-request `x_grok_session_id` when the request leaves it
+    /// unset, so an auxiliary call site that never stamped one still follows the
+    /// session. From it the client derives the first-party `x-grok-session-id`
+    /// header, the SGLang `session_id` / `bootstrap_room` pair, OpenRouter's
+    /// native `session_id`, Anthropic's `metadata.user_id`, and OpenAI's
+    /// `prompt_cache_key`. An explicit request field always wins.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
     /// Whether Chat Completions history may include xAI's non-standard
     /// `messages[].model_id` metadata. OpenAI-compatible third-party
     /// providers such as OpenRouter reject that field with HTTP 400.
@@ -535,6 +545,7 @@ impl std::fmt::Debug for InferenceConfig {
             .field("vllm_chat_template_kwargs", &self.vllm_chat_template_kwargs)
             .field("api_backend", &self.api_backend)
             .field("wire_dialect", &self.wire_dialect)
+            .field("session_id", &self.session_id)
             .field("include_message_model_id", &self.include_message_model_id)
             .field("auth_scheme", &self.auth_scheme)
             .field("provider_identity", &self.provider_identity)
@@ -598,6 +609,7 @@ impl Default for InferenceConfig {
             vllm_chat_template_kwargs: None,
             api_backend: ApiBackend::default(),
             wire_dialect: None,
+            session_id: None,
             include_message_model_id: true,
             auth_scheme: AuthScheme::default(),
             provider_identity: ProviderIdentity::default(),

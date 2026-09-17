@@ -118,6 +118,7 @@ fn test_config(base_url: String, model: &str) -> InferenceConfig {
         doom_loop_recovery: None,
         header_injector: None,
         provider_identity: xai_grok_inference::config::ProviderIdentity::default(),
+        session_id: None,
     }
 }
 

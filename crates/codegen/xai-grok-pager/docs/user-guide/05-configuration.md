@@ -977,6 +977,12 @@ Legacy `kind = "custom"` still loads as `openai_compatible`. Application and
 administration keys live in the owner-only `auth.json` vault under
 `openai_compatible::<id>::api_key` / `::admin_key`, never in `config.toml`.
 
+Session following is automatic: every request carries the session's `session_id`
+(and, for SGLang, a `bootstrap_room` rank pin), so a session keeps hitting the
+same worker and its prefix cache stays warm. No `session_affinity` flag is
+needed. `dialect` is only about reasoning-key shaping, not sessions. See
+[Local and gateway providers](providers/local-gateways.md#session-affinity-and-prompt-caching).
+
 Hot reload watches `[model_providers]` as well as `[model]` / `[models]`.
 
 ### Provider and retrieval ownership

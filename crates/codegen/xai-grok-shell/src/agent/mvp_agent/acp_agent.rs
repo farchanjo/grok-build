@@ -1266,6 +1266,10 @@ impl acp::Agent for MvpAgent {
         {
             session_sampling.reasoning_effort = Some(validated);
         }
+        // Session identity belongs on the session-scoped config: it feeds the
+        // title sampler (`build_summary_client`) and the initial sampler push
+        // before the first `reconstruct_full_config` runs.
+        session_sampling.session_id = Some(session_id.0.to_string());
         let (summary_client, summary_model) = self
             .build_summary_client(&session_sampling)?;
         let relay_sync = if let Some(sync) = self
@@ -1604,11 +1608,14 @@ impl acp::Agent for MvpAgent {
             drop(flush_timer);
         }
         let origin_client = self.origin_client_info_from_meta(request_meta.as_ref());
-        let load_session_sampling = self
+        let mut load_session_sampling = self
             .resolve_inference_config_for_model(
                 &self.models_manager.current_model_id(),
                 origin_client.clone(),
             );
+        // See the spawn path: the session id must ride the session config so the
+        // resumed session keeps its cache affinity and its aux samplers agree.
+        load_session_sampling.session_id = Some(session_id.0.to_string());
         let (summary_client, summary_model) = self
             .build_summary_client(&load_session_sampling)?;
         let relay_sync = if let Some(sync) = self

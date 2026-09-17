@@ -1216,6 +1216,7 @@ async fn read_parent_inference_config(
                     supports_image_input: ctx.inference_config.supports_image_input,
                     supports_audio_input: ctx.inference_config.supports_audio_input,
                     supports_video_input: ctx.inference_config.supports_video_input,
+                    session_id: None,
                 }
             };
 

@@ -339,6 +339,7 @@ impl ShellToolsetConfig {
             doom_loop_recovery: None,
             header_injector: None,
             provider_identity: xai_grok_inference::config::ProviderIdentity::Xai,
+            session_id: None,
         };
         let mut toolset = base.unwrap_or_else(|| Self {
             bash: BashToolConfig::default(),

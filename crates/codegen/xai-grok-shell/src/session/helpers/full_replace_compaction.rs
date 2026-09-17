@@ -907,6 +907,7 @@ mod compaction_route_tests {
             supports_image_input: None,
             supports_audio_input: None,
             supports_video_input: None,
+            session_id: None,
         }
     }
 

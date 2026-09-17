@@ -1189,6 +1189,7 @@ async fn set_session_model_invalidates_byok_memo_for_same_model_id() {
                 doom_loop_recovery: None,
                 header_injector: None,
                 provider_identity: Default::default(),
+                session_id: None,
             };
             let _ = actor
                 .handle_set_session_model(
@@ -1307,6 +1308,7 @@ async fn switch_to_first_party_model_drops_minted_provider_token() {
                 doom_loop_recovery: None,
                 header_injector: None,
                 provider_identity: xai_grok_inference::config::ProviderIdentity::Xai,
+                session_id: None,
             };
             let _ = actor
                 .handle_set_session_model(
@@ -3048,6 +3050,78 @@ async fn preturn_chatgpt_connected_first_party_xai_still_refreshes_xai() {
             assert_eq!(key, "refreshed-test-token");
 
             crate::agent::providers::set_stored_key_home_for_tests(None);
+        })
+        .await;
+}
+
+/// The per-turn `reconstruct_full_config()` is the config the sampler actually
+/// runs with (`prepare_sampler_for_turn` -> `update_config_with_route_context`).
+/// It must carry the session id: it is the single source of the first-party
+/// session header, the SGLang/vLLM session fields, OpenRouter's `session_id`,
+/// Anthropic's `metadata.user_id` and OpenAI's `prompt_cache_key`. Hardcoding
+/// it there silently drops every one of them (verified on the wire on
+/// 2026-09-17).
+#[tokio::test(flavor = "current_thread")]
+async fn reconstruct_full_config_keeps_the_session_id() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (_dir, am) = auth_manager_with_valid_token("fresh-session-token");
+            let (gateway_tx, _) = mpsc::unbounded_channel();
+            let (persistence_tx, _persistence_rx) = mpsc::unbounded_channel();
+            let mut actor =
+                create_test_actor(50_000, 100_000, 85, gateway_tx, persistence_tx).await;
+            // Deliberately leave `actor.auth_manager = None`: `grok_home` is then
+            // `None`, which skips the runtime provider-registry guard
+            // (`assert_route_usable`) that a tempdir home cannot satisfy. The
+            // assertion is about the reconstructed config, not the guard.
+
+            // Catalog row shaped like `resolve_model_list` output for a
+            // `[model."…"]` table whose `model_provider` names a self-hosted
+            // provider.
+            let mut entry = crate::agent::config::ModelEntry::fallback(
+                crate::test_support::TEST_MODEL,
+                &crate::agent::config::EndpointsConfig::default(),
+            );
+            entry.model_provider = Some(crate::agent::model_providers::ResolvedModelProvider {
+                id: "rezulto-deepseek-flash41".to_string(),
+                kind: crate::agent::model_providers::ModelProviderKind::OpenAiCompatible,
+                openrouter_fallback_models: Vec::new(),
+                openrouter_provider_preferences: None,
+                openrouter_plugins: Vec::new(),
+                openrouter_pacing: false,
+                dashscope_enable_thinking: None,
+                dashscope_thinking_budget: None,
+                vllm_chat_template_kwargs: None,
+                max_completion_tokens: None,
+                dialect: None,
+                command: Vec::new(),
+            });
+            let mut models = indexmap::IndexMap::new();
+            // The session model (chat-state `model`) and the picker's selection
+            // id both have to resolve to this row for the reconstruction to use
+            // it.
+            models.insert("test".to_string(), entry.clone());
+            models.insert(crate::test_support::TEST_MODEL.to_string(), entry);
+            actor.models_manager = crate::agent::models::ModelsManager::new(
+                None,
+                models,
+                acp::ModelId::new(crate::test_support::TEST_MODEL),
+                am,
+                crate::agent::config::Config::default(),
+            );
+            let actor = Arc::new(actor);
+
+            let reconstructed = actor
+                .reconstruct_full_config()
+                .await
+                .expect("per-turn reconstruction must succeed");
+
+            assert_eq!(
+                reconstructed.session_id.as_deref(),
+                Some(actor.session_info.id.0.as_ref()),
+                "the per-turn rebuild must carry the session id"
+            );
         })
         .await;
 }
