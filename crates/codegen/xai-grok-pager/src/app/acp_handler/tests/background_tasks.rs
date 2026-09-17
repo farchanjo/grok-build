@@ -513,11 +513,10 @@
             task.is_wait,
             "the Wait kind must survive an unknown-task completion"
         );
-        assert_eq!(
-            task.description.as_deref(),
-            Some("test -f /tmp/gate"),
-            "the baked display prefix must be stripped"
-        );
+        // The stripped label equals the raw command here, so it collapses to
+        // `None` (the block then renders the command) — what matters is that no
+        // `[wait] ` prefix survives anywhere.
+        assert_eq!(task.description.as_deref(), None);
 
         let text: String = (0..agent.scrollback.len())
             .filter_map(|i| agent.scrollback.entry(i))
