@@ -61,8 +61,11 @@ pub(crate) fn set_hint(key: &str, value: impl Into<toml_edit::Value>) -> std::io
     set_table_field("hints", key, value)
 }
 
-/// Replace `[hints].pinned_tools` with `tools`, creating the array only when
-/// non-empty (an empty pin list removes the key to keep `config.toml` tidy).
+/// Replace `[hints].pinned_tools` with `tools`.
+///
+/// An empty list is written as an explicit `[]` rather than removing the key:
+/// an absent key means "the user never chose" and now defaults to every built-in
+/// pinned, so unpinning all of them has to be expressible.
 pub(crate) fn set_pinned_tools(tools: &[String]) -> std::io::Result<()> {
     let path = xai_grok_tools::util::grok_home::grok_home().join("config.toml");
     set_pinned_tools_at(&path, tools)
@@ -94,9 +97,6 @@ pub(crate) fn write_project_memory_config(
 /// Like [`set_pinned_tools`] but targeting an explicit `config.toml` path
 /// (test seam).
 fn set_pinned_tools_at(path: &Path, tools: &[String]) -> std::io::Result<()> {
-    if tools.is_empty() {
-        return remove_table_key_at(path, "hints", "pinned_tools");
-    }
     let array = toml_edit::Array::from_iter(tools.iter().map(String::as_str));
     set_table_field_at(path, "hints", "pinned_tools", array)
 }
@@ -104,26 +104,45 @@ fn set_pinned_tools_at(path: &Path, tools: &[String]) -> std::io::Result<()> {
 /// Read `[hints].pinned_tools` from the on-disk `config.toml`. Deduplicated
 /// (first-seen order), blank entries dropped. Missing key/file → empty;
 /// malformed shapes degrade to empty (fail-open display only).
-pub(crate) fn read_pinned_tools() -> Vec<String> {
+/// Read `[hints].pinned_tools`; `None` when the key is absent, which is what
+/// tells the default rule apart from an explicit empty list.
+pub(crate) fn read_pinned_tools_opt() -> Option<Vec<String>> {
     let path = xai_grok_tools::util::grok_home::grok_home().join("config.toml");
-    read_pinned_tools_at(&path)
+    read_pinned_tools_opt_at(&path)
 }
 
-/// Like [`read_pinned_tools`] but reading an explicit path (test seam).
-fn read_pinned_tools_at(path: &Path) -> Vec<String> {
-    let Ok(content) = std::fs::read_to_string(&path) else {
-        return Vec::new();
-    };
-    let Ok(doc) = content.parse::<toml_edit::DocumentMut>() else {
-        return Vec::new();
-    };
-    let Some(items) = doc
+/// The pins the settings sheet shows and persists: the user's list when they
+/// have one, otherwise every built-in in the live catalog.
+pub(crate) fn effective_pinned_tools(
+    catalog: &[crate::acp::tracker::ToolCatalogEntry],
+) -> Vec<String> {
+    effective_pinned_tools_from(read_pinned_tools_opt(), catalog)
+}
+
+/// The rule, with the disk read passed in (test seam).
+pub(crate) fn effective_pinned_tools_from(
+    pins: Option<Vec<String>>,
+    catalog: &[crate::acp::tracker::ToolCatalogEntry],
+) -> Vec<String> {
+    match pins {
+        Some(pins) => pins,
+        None => catalog
+            .iter()
+            .map(|entry| entry.name.clone())
+            .filter(|name| xai_grok_tools::types::definition::is_builtin_tool_name(name))
+            .collect(),
+    }
+}
+
+/// Explicit-path reader (test seam). `None` for a missing key or an unreadable
+/// file — both mean "no explicit choice".
+fn read_pinned_tools_opt_at(path: &Path) -> Option<Vec<String>> {
+    let content = std::fs::read_to_string(path).ok()?;
+    let doc = content.parse::<toml_edit::DocumentMut>().ok()?;
+    let items = doc
         .get("hints")
         .and_then(|h| h.get("pinned_tools"))
-        .and_then(|p| p.as_array())
-    else {
-        return Vec::new();
-    };
+        .and_then(|p| p.as_array())?;
     let mut seen = std::collections::HashSet::new();
     let mut out = Vec::new();
     for item in items.iter() {
@@ -135,7 +154,7 @@ fn read_pinned_tools_at(path: &Path) -> Vec<String> {
         }
         out.push(name.to_owned());
     }
-    out
+    Some(out)
 }
 
 /// Inclusive minimum ChatGPT subscription `context_window` override.
@@ -602,8 +621,8 @@ mod tests {
         set_pinned_tools_at(&path, &["server__search".to_string(), "grep".to_string()]).unwrap();
 
         assert_eq!(
-            read_pinned_tools_at(&path),
-            vec!["server__search".to_string(), "grep".to_string()]
+            read_pinned_tools_opt_at(&path),
+            Some(vec!["server__search".to_string(), "grep".to_string()])
         );
         assert!(
             fs::read_to_string(&path).unwrap().contains("compact_mode"),
@@ -612,18 +631,64 @@ mod tests {
 
         // Replacing the list overwrites in place.
         set_pinned_tools_at(&path, &["grep".to_string()]).unwrap();
-        assert_eq!(read_pinned_tools_at(&path), vec!["grep".to_string()]);
+        assert_eq!(
+            read_pinned_tools_opt_at(&path),
+            Some(vec!["grep".to_string()])
+        );
 
-        // Empty list removes the key entirely.
+        // An empty list is written as `[]`, NOT removed: an absent key means
+        // "the user never chose" and now defaults to every built-in pinned, so
+        // unpinning all of them has to survive a reload.
         set_pinned_tools_at(&path, &[]).unwrap();
-        assert!(read_pinned_tools_at(&path).is_empty());
+        assert_eq!(read_pinned_tools_opt_at(&path), Some(Vec::new()));
         let doc = read_config_document_for_edit(&path).expect("reparse");
         assert!(
             doc.get("hints")
                 .and_then(|h| h.get("pinned_tools"))
-                .is_none(),
-            "empty pin list must remove the key"
+                .is_some(),
+            "empty pin list must stay an explicit empty array"
         );
+    }
+
+    /// No key means "never chose": every built-in in the catalog is pinned, and
+    /// MCP tools stay opt-in. An explicit list wins verbatim.
+    #[test]
+    fn effective_pins_default_to_every_builtin() {
+        use crate::acp::tracker::ToolCatalogEntry;
+        let catalog = vec![
+            ToolCatalogEntry {
+                name: "read_file".to_owned(),
+                description: None,
+            },
+            ToolCatalogEntry {
+                name: "grep".to_owned(),
+                description: None,
+            },
+            ToolCatalogEntry {
+                name: "arithma__divide".to_owned(),
+                description: None,
+            },
+        ];
+        assert_eq!(
+            effective_pinned_tools_from(None, &catalog),
+            vec!["read_file".to_string(), "grep".to_string()]
+        );
+        // An explicit list is honored even when it names an MCP tool.
+        assert_eq!(
+            effective_pinned_tools_from(Some(vec!["arithma__divide".to_string()]), &catalog),
+            vec!["arithma__divide".to_string()]
+        );
+        // An explicit empty list pins nothing (the user turned them all off).
+        assert!(effective_pinned_tools_from(Some(Vec::new()), &catalog).is_empty());
+    }
+
+    /// No key means "never chose": the default rule (all built-ins) applies.
+    #[test]
+    fn absent_pin_key_reads_as_none() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        fs::write(&path, "[ui]\ncompact_mode = false\n").unwrap();
+        assert_eq!(read_pinned_tools_opt_at(&path), None);
     }
 
     #[test]

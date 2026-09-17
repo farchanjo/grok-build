@@ -27,16 +27,16 @@ const MAX_DESCRIPTION_CHARS: usize = 400;
 /// dropped. Never fails — malformed shapes read as "no pins".
 #[must_use]
 pub fn pinned_tools_from_disk() -> Vec<String> {
+    pinned_tools_from_disk_opt().unwrap_or_default()
+}
+
+/// Like [`pinned_tools_from_disk`], but distinguishing "no key" from "empty
+/// list": `None` means the user never touched the pin sheet.
+#[must_use]
+pub fn pinned_tools_from_disk_opt() -> Option<Vec<String>> {
     let config = crate::config::load_effective_config().ok();
-    let Some(hints) = config.as_ref().and_then(|root| root.get("hints")) else {
-        return Vec::new();
-    };
-    let Some(list) = hints.get(PINNED_TOOLS_HINT_KEY) else {
-        return Vec::new();
-    };
-    let Some(items) = list.as_array() else {
-        return Vec::new();
-    };
+    let hints = config.as_ref().and_then(|root| root.get("hints"))?;
+    let items = hints.get(PINNED_TOOLS_HINT_KEY)?.as_array()?;
     let mut seen = std::collections::HashSet::new();
     let mut out = Vec::new();
     for item in items {
@@ -48,7 +48,36 @@ pub fn pinned_tools_from_disk() -> Vec<String> {
         }
         out.push(name.to_owned());
     }
-    out
+    Some(out)
+}
+
+/// The pins a session should actually stamp: the user's list when they have one,
+/// otherwise every built-in in the catalog.
+///
+/// Built-ins are the bare client names; MCP tools (`server__tool`) stay opt-in so
+/// a chatty server does not land in the prompt uninvited. Any edit in Settings →
+/// Tools writes the whole list, so unpinning one built-in keeps the rest pinned.
+#[must_use]
+pub fn effective_pinned_tools(
+    definitions: &[xai_grok_tools::types::definition::ToolDefinition],
+) -> Vec<String> {
+    effective_pinned_tools_from(pinned_tools_from_disk_opt(), definitions)
+}
+
+/// The rule, with the disk read passed in (test seam).
+#[must_use]
+pub fn effective_pinned_tools_from(
+    pins: Option<Vec<String>>,
+    definitions: &[xai_grok_tools::types::definition::ToolDefinition],
+) -> Vec<String> {
+    match pins {
+        Some(pins) => pins,
+        None => definitions
+            .iter()
+            .map(|d| d.function.name.clone())
+            .filter(|name| xai_grok_tools::types::definition::is_builtin_tool_name(name))
+            .collect(),
+    }
 }
 
 /// Build the `<pinned_tools>` block body from resolved tool definitions.
@@ -184,6 +213,26 @@ mod tests {
                 parameters: serde_json::json!({}),
             },
         }
+    }
+
+    /// No `[hints] pinned_tools` key means the user never chose: every built-in
+    /// gets pinned. MCP tools stay opt-in, and an explicit list wins verbatim.
+    #[test]
+    fn effective_pins_default_to_every_builtin() {
+        let definitions = vec![
+            definition("read_file", Some("Reads.")),
+            definition("grep", Some("Searches.")),
+            definition("arithma__divide", Some("Divides.")),
+        ];
+        assert_eq!(
+            effective_pinned_tools_from(None, &definitions),
+            vec!["read_file".to_string(), "grep".to_string()]
+        );
+        assert_eq!(
+            effective_pinned_tools_from(Some(vec!["arithma__divide".to_string()]), &definitions),
+            vec!["arithma__divide".to_string()]
+        );
+        assert!(effective_pinned_tools_from(Some(Vec::new()), &definitions).is_empty());
     }
 
     #[test]

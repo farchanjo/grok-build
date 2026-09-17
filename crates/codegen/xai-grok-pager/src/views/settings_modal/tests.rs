@@ -7891,6 +7891,195 @@ fn open_tools_row_status_kind_and_enter_opens_sheet() {
     assert!(matches!(s.state.mode, SettingsMode::PickingTools { .. }));
 }
 
+/// A catalog taller than the sheet must scroll with the focus. Before this the
+/// list always rendered from the top, so every tool past the last visible row
+/// was unreachable: moving the selection down just walked it off the edge.
+#[test]
+fn tools_sheet_window_follows_the_focus() {
+    let mut s = make_state();
+    s.pager_snapshot.tool_catalog = (0..12)
+        .map(|i| ToolCatalogEntry {
+            name: format!("tool_{i:02}"),
+            description: Some(format!("Does thing {i}.")),
+        })
+        .collect();
+    s.state.mode = SettingsMode::PickingTools { tool_idx: 0 };
+
+    let area = Rect {
+        x: 0,
+        y: 0,
+        width: 100,
+        height: 16,
+    };
+    let mut buf = Buffer::empty(area);
+    render_settings_modal(&mut buf, area, &mut s, false, None);
+    let first_screen: Vec<String> = (0..area.height)
+        .map(|y| buf_row_text(&buf, y, area.x, area.width))
+        .collect();
+    assert!(
+        first_screen.iter().any(|r| r.contains("tool_00")),
+        "the first tool renders at the top: {first_screen:#?}"
+    );
+
+    // Focus the last tool: the window has to follow it.
+    s.state.mode = SettingsMode::PickingTools { tool_idx: 11 };
+    let mut buf = Buffer::empty(area);
+    render_settings_modal(&mut buf, area, &mut s, false, None);
+    let scrolled: Vec<String> = (0..area.height)
+        .map(|y| buf_row_text(&buf, y, area.x, area.width))
+        .collect();
+    assert!(
+        scrolled.iter().any(|r| r.contains("tool_11")),
+        "the focused tool must be on screen: {scrolled:#?}"
+    );
+    assert!(
+        !scrolled.iter().any(|r| r.contains("tool_00")),
+        "the top of the list scrolls off: {scrolled:#?}"
+    );
+    assert!(
+        scrolled.iter().any(|r| r.contains(" of 12")),
+        "the search line carries the window position: {scrolled:#?}"
+    );
+    // Every entry keeps a hit-rect slot, so the mouse index stays absolute.
+    assert_eq!(s.picker_choice_rects.len(), 12);
+    assert!(
+        s.picker_choice_rects[0].height == 0,
+        "off-window rows carry a zero-height rect"
+    );
+    assert!(s.picker_choice_rects[11].height > 0);
+}
+
+/// An empty sheet says why it is empty: no catalog yet (before the session's
+/// first turn) reads differently from a query that matched nothing.
+#[test]
+fn tools_sheet_explains_an_empty_list() {
+    let mut s = make_state();
+    s.state.mode = SettingsMode::PickingTools { tool_idx: 0 };
+    let area = Rect {
+        x: 0,
+        y: 0,
+        width: 100,
+        height: 20,
+    };
+    let mut buf = Buffer::empty(area);
+    render_settings_modal(&mut buf, area, &mut s, false, None);
+    let text: String = (0..area.height)
+        .map(|y| buf_row_text(&buf, y, area.x, area.width))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        text.contains("No tool catalog yet"),
+        "an empty catalog must explain itself: {text}"
+    );
+
+    // With a catalog but a non-matching query, the hint changes.
+    s.pager_snapshot.tool_catalog = vec![ToolCatalogEntry {
+        name: "read_file".to_owned(),
+        description: None,
+    }];
+    s.enum_picker_filter = LineEditor::default();
+    let _ = s.enum_picker_filter.insert_paste("zzz");
+    let mut buf = Buffer::empty(area);
+    render_settings_modal(&mut buf, area, &mut s, false, None);
+    let text: String = (0..area.height)
+        .map(|y| buf_row_text(&buf, y, area.x, area.width))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        text.contains("No tool matches"),
+        "a filtered-out list reads differently: {text}"
+    );
+}
+
+/// Space pins the focused tool (it must not be swallowed as a filter char), and
+/// a letter still filters.
+#[test]
+fn tools_sheet_space_pins_and_letters_filter() {
+    let mut s = tools_state();
+    s.state.mode = SettingsMode::PickingTools { tool_idx: 1 };
+    let space = KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE);
+    let out = handle_settings_key(&mut s, &space);
+    assert!(
+        matches!(out, SettingsKeyOutcome::Action(_)),
+        "space must toggle the pin, got {out:?}"
+    );
+    assert!(
+        s.pinned_tools().iter().any(|p| p == "arithma__divide"),
+        "the focused tool is now pinned: {:?}",
+        s.pinned_tools()
+    );
+    assert_eq!(
+        s.enum_picker_filter.text(),
+        "",
+        "space must not land in the query"
+    );
+
+    let letter = KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE);
+    let _ = handle_settings_key(&mut s, &letter);
+    assert_eq!(s.enum_picker_filter.text(), "r");
+}
+
+/// Page keys, Home/End and the wheel all move the focus; the window follows.
+#[test]
+fn tools_sheet_page_home_end_and_wheel_move_the_focus() {
+    let mut s = make_state();
+    s.pager_snapshot.tool_catalog = (0..30)
+        .map(|i| ToolCatalogEntry {
+            name: format!("tool_{i:02}"),
+            description: None,
+        })
+        .collect();
+    s.state.mode = SettingsMode::PickingTools { tool_idx: 0 };
+
+    let page_down = KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE);
+    assert!(matches!(
+        handle_settings_key(&mut s, &page_down),
+        SettingsKeyOutcome::Changed
+    ));
+    assert!(matches!(
+        s.state.mode,
+        SettingsMode::PickingTools { tool_idx: 10 }
+    ));
+
+    let end = KeyEvent::new(KeyCode::End, KeyModifiers::NONE);
+    let _ = handle_settings_key(&mut s, &end);
+    assert!(matches!(
+        s.state.mode,
+        SettingsMode::PickingTools { tool_idx: 29 }
+    ));
+
+    // PageDown at the end is a no-op, PageUp steps back.
+    assert!(matches!(
+        handle_settings_key(&mut s, &page_down),
+        SettingsKeyOutcome::Unchanged
+    ));
+    let page_up = KeyEvent::new(KeyCode::PageUp, KeyModifiers::NONE);
+    let _ = handle_settings_key(&mut s, &page_up);
+    assert!(matches!(
+        s.state.mode,
+        SettingsMode::PickingTools { tool_idx: 19 }
+    ));
+
+    let home = KeyEvent::new(KeyCode::Home, KeyModifiers::NONE);
+    let _ = handle_settings_key(&mut s, &home);
+    assert!(matches!(
+        s.state.mode,
+        SettingsMode::PickingTools { tool_idx: 0 }
+    ));
+
+    // The wheel scrolls the same focus.
+    let _ = handle_settings_mouse(&mut s, MouseEventKind::ScrollDown, 10, 10);
+    assert!(matches!(
+        s.state.mode,
+        SettingsMode::PickingTools { tool_idx: 3 }
+    ));
+    let _ = handle_settings_mouse(&mut s, MouseEventKind::ScrollUp, 10, 10);
+    assert!(matches!(
+        s.state.mode,
+        SettingsMode::PickingTools { tool_idx: 0 }
+    ));
+}
+
 #[test]
 fn tools_sheet_pin_toggles_and_dispatches_persist() {
     let mut s = tools_state();

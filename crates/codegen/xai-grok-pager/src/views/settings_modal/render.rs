@@ -1493,6 +1493,9 @@ fn render_picking_group(
     rects
 }
 
+/// Height of one tool row: the name line plus its description line.
+const TOOL_ROW_H: u16 = 2;
+
 /// Render the tools sub-sheet: search hint + one row per catalog tool
 /// (`<marker> <name> … <pinned/on|off>` with the description wrapped on the
 /// line below). Returns per-tool hit-rects for mouse routing. Each tool row
@@ -1524,13 +1527,36 @@ fn render_picking_tools(
     let mut y = area.y + header_rows;
     let area_end = area.y + area.height;
 
-    // Live search line, mirroring the enum picker's filter row.
+    let filtered = state.filtered_tool_catalog();
+    let pins: std::collections::HashSet<&str> =
+        state.pinned_tools().iter().map(String::as_str).collect();
+
+    // Each row is exactly two lines (name + description), so the viewport is
+    // arithmetic rather than a layout pass. A real catalog is taller than the
+    // sheet, so the window has to follow the focus: without this the selection
+    // walked off the bottom edge and every tool below it was unreachable.
+    let list_h = area_end.saturating_sub(y.saturating_add(1));
+    let visible_rows = (list_h / TOOL_ROW_H).max(1) as usize;
+    let first_visible = tool_idx.saturating_sub(visible_rows - 1);
+    let last_visible = (first_visible + visible_rows).min(filtered.len());
+
+    // Live search line, mirroring the enum picker's filter row. When the list
+    // overflows it also carries the window position, so "there is more below"
+    // is visible rather than inferred.
     let query = state.enum_picker_filter.text();
-    let search_label = if query.is_empty() {
+    let mut search_label = if query.is_empty() {
         "Search: (type to filter)".to_string()
     } else {
         format!("Search: {query}")
     };
+    if filtered.len() > visible_rows {
+        search_label.push_str(&format!(
+            "   {}-{} of {}",
+            first_visible + 1,
+            last_visible,
+            filtered.len()
+        ));
+    }
     if y >= area_end {
         return Vec::new();
     }
@@ -1545,23 +1571,43 @@ fn render_picking_tools(
     );
     y = y.saturating_add(1);
 
-    let filtered = state.filtered_tool_catalog();
-    let pins: std::collections::HashSet<&str> =
-        state.pinned_tools().iter().map(String::as_str).collect();
+    // An empty sheet is ambiguous: no catalog yet (the shell advertises it with
+    // the session's first turn) versus a query that matched nothing.
+    if filtered.is_empty() && y < area_end {
+        let hint = if state.pager_snapshot.tool_catalog.is_empty() {
+            "No tool catalog yet — it arrives with the session's first turn."
+        } else {
+            "No tool matches the search."
+        };
+        buf.set_span(
+            area.x.saturating_add(1),
+            y,
+            &Span::styled(
+                truncate_str(hint, area.width.saturating_sub(2) as usize),
+                Style::default().fg(theme.gray),
+            ),
+            area.width.saturating_sub(1),
+        );
+        y = y.saturating_add(1);
+    }
 
     let desc_x = area.x.saturating_add(PICKER_PREFIX_W);
     let desc_room = (area.width as usize).saturating_sub(PICKER_PREFIX_W as usize);
-    let mut rects: Vec<Rect> = Vec::with_capacity(filtered.len());
-    for (i, entry) in filtered.iter().enumerate() {
-        if y >= area_end {
-            break;
-        }
+    // Indexed by *filtered* position, not by row on screen: off-window entries
+    // keep a zero-height rect so the mouse hover/click index stays absolute.
+    let mut rects: Vec<Rect> = vec![Rect::default(); filtered.len()];
+    for (i, entry) in filtered
+        .iter()
+        .enumerate()
+        .skip(first_visible)
+        .take(visible_rows)
+    {
         let is_focused = i == tool_idx;
         let is_pinned = pins.contains(entry.name.as_str());
         let is_hovered = !is_focused && state.hover_row == Some(i);
         let bg = settings_list_row_bg(theme, is_focused, is_hovered);
 
-        let row_height = 2.min(area_end.saturating_sub(y) as usize) as u16;
+        let row_height = TOOL_ROW_H.min(area_end.saturating_sub(y));
         let row_rect = Rect {
             x: area.x,
             y,
@@ -1572,7 +1618,7 @@ fn render_picking_tools(
             break;
         }
         buf.set_style(row_rect, Style::default().bg(bg));
-        rects.push(row_rect);
+        rects[i] = row_rect;
 
         let marker = if is_pinned {
             crate::glyphs::filled_dot()

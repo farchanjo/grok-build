@@ -117,7 +117,9 @@ pub(crate) fn refresh_open_settings_modals(app: &mut AppView) {
                 language_artifact: language_artifact_from_app.clone(),
                 language_artifact_locked: language_artifact_locked_from_app,
                 tool_catalog: agent.session.tool_catalog.clone().unwrap_or_default(),
-                pinned_tools: crate::config_toml_edit::read_pinned_tools(),
+                pinned_tools: crate::config_toml_edit::effective_pinned_tools(
+                    agent.session.tool_catalog.as_deref().unwrap_or_default(),
+                ),
                 ..merge_compaction_and_media_snapshot(
                     &compaction_config_from_app,
                     agent.session.tracker.activity(),
@@ -745,7 +747,7 @@ pub(in crate::app::dispatch) fn dispatch_open_settings(
         .collect();
     let external_ids = external_model_ids(&agent.session.models);
     let tool_catalog = agent.session.tool_catalog.clone().unwrap_or_default();
-    let pinned_tools = crate::config_toml_edit::read_pinned_tools();
+    let pinned_tools = crate::config_toml_edit::effective_pinned_tools(&tool_catalog);
     let pager_snapshot = crate::settings::PagerLocalSnapshot {
         multiline_mode: agent.multiline_mode,
         yolo_mode: agent.session.is_yolo(),

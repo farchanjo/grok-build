@@ -355,6 +355,13 @@ fn handle_picking_group(state: &mut SettingsModalState, key: &KeyEvent) -> Setti
     }
 }
 
+/// Rows a PageUp/PageDown moves in the tools sheet. The renderer keeps the
+/// focused row in view, so the step only has to be smaller than a screen.
+const TOOL_PAGE_STEP: usize = 10;
+
+/// Rows one wheel notch moves in the tools sheet.
+const TOOL_WHEEL_STEP: usize = 3;
+
 /// Tools sub-sheet key routing: search-filter, pin toggle, Esc back.
 /// Space/Enter toggles the focused tool's pin in place (the sheet stays
 /// open) so the user can pin several tools in a row; printable keys feed
@@ -374,6 +381,10 @@ fn handle_picking_tools(state: &mut SettingsModalState, key: &KeyEvent) -> Setti
             state.state.mode = SettingsMode::PickingTools { tool_idx: 0 };
             SettingsKeyOutcome::Changed
         }
+        // Space is the pin key, not a filter character: the footer advertises
+        // `Space/Enter pin` and a stray space in the query matched nothing (tool
+        // names are single tokens). Every other printable char feeds the search.
+        KeyCode::Char(' ') => handle_picking_tools_nav(state, key, tool_idx),
         KeyCode::Char(c) if key.modifiers.is_empty() => {
             let _ = state
                 .enum_picker_filter
@@ -420,6 +431,43 @@ fn handle_picking_tools_nav(
                 SettingsKeyOutcome::Unchanged
             } else {
                 state.state.mode = SettingsMode::PickingTools { tool_idx: prev };
+                SettingsKeyOutcome::Changed
+            }
+        }
+        // The sheet scrolls its window with the focus, so a page key is just a
+        // bigger step. `Home`/`End` land on the ends.
+        KeyCode::PageDown => {
+            let next = (tool_idx + TOOL_PAGE_STEP).min(filtered_len - 1);
+            if next == tool_idx {
+                SettingsKeyOutcome::Unchanged
+            } else {
+                state.state.mode = SettingsMode::PickingTools { tool_idx: next };
+                SettingsKeyOutcome::Changed
+            }
+        }
+        KeyCode::PageUp => {
+            let prev = tool_idx.saturating_sub(TOOL_PAGE_STEP);
+            if prev == tool_idx {
+                SettingsKeyOutcome::Unchanged
+            } else {
+                state.state.mode = SettingsMode::PickingTools { tool_idx: prev };
+                SettingsKeyOutcome::Changed
+            }
+        }
+        KeyCode::Home => {
+            if tool_idx == 0 {
+                SettingsKeyOutcome::Unchanged
+            } else {
+                state.state.mode = SettingsMode::PickingTools { tool_idx: 0 };
+                SettingsKeyOutcome::Changed
+            }
+        }
+        KeyCode::End => {
+            let last = filtered_len - 1;
+            if tool_idx == last {
+                SettingsKeyOutcome::Unchanged
+            } else {
+                state.state.mode = SettingsMode::PickingTools { tool_idx: last };
                 SettingsKeyOutcome::Changed
             }
         }
@@ -1523,13 +1571,33 @@ fn handle_group_mouse(
 
 /// Handle a mouse event while in `PickingTools` mode. Hover tracks the tool
 /// row under the cursor; a left-click focuses the clicked row AND toggles
-/// its pin in one click. Scroll wheel is a no-op (the sub-sheet is bounded).
+/// its pin in one click. The wheel moves the focus, which scrolls the window.
 fn handle_tools_mouse(
     state: &mut SettingsModalState,
     kind: MouseEventKind,
     column: u16,
     row: u16,
 ) -> SettingsKeyOutcome {
+    if matches!(kind, MouseEventKind::ScrollDown | MouseEventKind::ScrollUp) {
+        let len = state.filtered_tool_catalog().len();
+        if len == 0 {
+            return SettingsKeyOutcome::Unchanged;
+        }
+        let tool_idx = match &state.state.mode {
+            SettingsMode::PickingTools { tool_idx } => *tool_idx,
+            _ => return SettingsKeyOutcome::Unchanged,
+        };
+        let next = if matches!(kind, MouseEventKind::ScrollDown) {
+            (tool_idx + TOOL_WHEEL_STEP).min(len - 1)
+        } else {
+            tool_idx.saturating_sub(TOOL_WHEEL_STEP)
+        };
+        if next == tool_idx {
+            return SettingsKeyOutcome::Unchanged;
+        }
+        state.state.mode = SettingsMode::PickingTools { tool_idx: next };
+        return SettingsKeyOutcome::Changed;
+    }
     if matches!(kind, MouseEventKind::Moved) {
         let new_hover = state
             .picker_choice_rects

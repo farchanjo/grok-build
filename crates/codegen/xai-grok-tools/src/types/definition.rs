@@ -19,6 +19,14 @@ pub struct ToolDefinition {
     pub function: FunctionTool,
 }
 
+/// Whether `name` is a built-in client-facing tool name rather than an MCP one.
+///
+/// MCP tools are namespaced `<server>__<tool>`; built-ins are bare names. The
+/// separator is the one contract both sides rely on, so it lives in one place.
+pub fn is_builtin_tool_name(name: &str) -> bool {
+    !name.contains("__")
+}
+
 impl ToolDefinition {
     pub fn function(
         name: impl Into<String>,
