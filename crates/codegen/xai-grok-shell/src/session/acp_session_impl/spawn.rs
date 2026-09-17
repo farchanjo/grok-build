@@ -364,6 +364,9 @@ pub(crate) async fn spawn_session_actor(
     parent_scheduler_handle: Option<
         xai_grok_tools::implementations::grok_build::scheduler::types::SchedulerHandle,
     >,
+    parent_wait_registry: Option<
+        std::sync::Arc<xai_grok_tools::implementations::grok_build::wait_for::WaitForRegistry>,
+    >,
     max_turns: Option<usize>,
     forked_tool_override: Option<Vec<ToolSpec>>,
 ) -> Result<
@@ -1286,6 +1289,11 @@ pub(crate) async fn spawn_session_actor(
         } else {
             None
         },
+        parent_wait_registry: if startup_hints.is_subagent {
+            parent_wait_registry
+        } else {
+            None
+        },
     });
     let agent = rebuild_spec
         .build_agent_with_initial_overrides(
@@ -1332,6 +1340,17 @@ pub(crate) async fn spawn_session_actor(
         res.get::<xai_grok_tools::implementations::grok_build::scheduler::types::SchedulerHandle>()
             .cloned()
     };
+    // Finalize always seeds a registry — the parent's, for a subagent — so this is
+    // Some for every session. It lives on the handle so a subagent passes it to
+    // its own children and the teardown hands the child's watchers to the parent.
+    let wait_registry_for_handle = {
+        let toolset = agent.tool_bridge().toolset();
+        let res = toolset.resources.lock().await;
+        res.get::<std::sync::Arc<
+            xai_grok_tools::implementations::grok_build::wait_for::WaitForRegistry,
+        >>()
+        .cloned()
+    };
     if let Err(e) = workspace_ops.bind_local_session(
         &session_info.id.0,
         tool_context.cwd.as_path().to_path_buf(),
@@ -1352,7 +1371,7 @@ pub(crate) async fn spawn_session_actor(
         crate::session::pinned_tools::refresh_pinned_tools_block(
             &system_prompt,
             &definitions,
-            &crate::session::pinned_tools::pinned_tools_from_disk(),
+            &crate::session::pinned_tools::effective_pinned_tools(&definitions),
         )
     };
     let mut prompt_context = agent.prompt_context().clone();
@@ -2488,6 +2507,7 @@ pub(crate) async fn spawn_session_actor(
             terminal_backend: Some(terminal_backend.clone()),
             tools_notification_handle: Some(tools_notification_handle.clone()),
             scheduler_handle: scheduler_handle_for_handle,
+            wait_registry: wait_registry_for_handle,
             subagent_model_meta,
         },
         permission_events_rx,
@@ -2667,6 +2687,9 @@ pub(crate) async fn spawn_session_on_thread(
     parent_scheduler_handle: Option<
         xai_grok_tools::implementations::grok_build::scheduler::types::SchedulerHandle,
     >,
+    parent_wait_registry: Option<
+        std::sync::Arc<xai_grok_tools::implementations::grok_build::wait_for::WaitForRegistry>,
+    >,
     max_turns: Option<usize>,
     forked_tool_override: Option<Vec<ToolSpec>>,
 ) -> Result<
@@ -2829,6 +2852,7 @@ pub(crate) async fn spawn_session_on_thread(
                         laziness_debug_log,
                         parent_terminal_backend,
                         parent_scheduler_handle,
+                        parent_wait_registry,
                         max_turns,
                         forked_tool_override,
                     )
