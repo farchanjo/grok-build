@@ -439,6 +439,15 @@ fork_worktree_mode = "ask"             # /fork worktree prompt: "ask" | "always"
 | `memory_modal_fullscreen` | bool | `false` | Remembers whether the memory modal was last opened fullscreen. |
 | `new_session_worktree_mode` | string | `"never"` | Worktree prompt for `/new`: `ask` shows the popup, `always` creates a worktree, `never` skips it. |
 | `fork_worktree_mode` | string | `"ask"` | Worktree prompt for `/fork`: `ask`, `always`, or `never`. |
+| `pinned_tools` | array of strings | every built-in | Tools the model should always hear about. Written by Settings → Tools; see below. |
+
+#### Pinned tools
+
+Pinning a tool puts its name and description into the system prompt once (as a `<pinned_tools>` block) instead of re-sending it every turn, so the model reaches for it without hunting.
+
+Open **Settings → Tools** (or run `/settings` and pick **Tools**) to pin and unpin from the live catalog of built-in and MCP tools. `Up`/`Down` or `j`/`k` move, `Space`/`Enter` toggles the focused tool, typing filters, `PageUp`/`PageDown` jump a page, `Home`/`End` go to the ends, and the wheel scrolls; the sheet keeps the focused row on screen and shows the window position (`12-23 of 34`) in its search line.
+
+With no `pinned_tools` key, **every built-in is pinned by default** — the MCP tools (`server__tool`) stay opt-in so a chatty server does not land in the prompt uninvited. The first toggle in the sheet writes the whole list, so from then on the key is the truth: removing a name unpins it, and an explicit `pinned_tools = []` pins nothing. Delete the key to go back to the all-built-ins default.
 
 ### Notifications
 
