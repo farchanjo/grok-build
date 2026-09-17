@@ -16,6 +16,10 @@
 #
 # CPU variants per operating system, published as grok-<target>-<variant>:
 #   macOS  aarch64: m1 (apple-a17 core lineage = M1/M2/M3), m4, generic
+#   macOS  x86_64:  intel (baseline x86-64: runs on every Intel Mac, including
+#                   pre-AVX2 2010-2012 models, which a haswell/skylake tuning
+#                   would SIGILL on). Cross-compiled on the arm64 macos-15
+#                   runner, so it is release-only to keep pushes at three jobs.
 #   Linux  x86_64:  zen4 (AMD znver4), intel (Alder Lake), generic
 #   Windows x86_64: zen4, intel, generic
 # A job-level `if` cannot read `matrix`, so the `prepare` job builds the JSON
@@ -86,6 +90,7 @@ jobs:
               {variant:"generic", os:"windows-2025",  target:"x86_64-pc-windows-msvc",    ext:".exe", release_only:false, rustflags:$w},
               {variant:"m1",      os:"macos-15",      target:"aarch64-apple-darwin",      ext:"",     release_only:true,  rustflags:"\($d) -C target-cpu=apple-a17"},
               {variant:"m4",      os:"macos-15",      target:"aarch64-apple-darwin",      ext:"",     release_only:true,  rustflags:"\($d) -C target-cpu=apple-m4"},
+              {variant:"intel",   os:"macos-15",      target:"x86_64-apple-darwin",       ext:"",     release_only:true,  rustflags:$d},
               {variant:"zen4",    os:"ubuntu-24.04",  target:"x86_64-unknown-linux-gnu",  ext:"",     release_only:true,  rustflags:"\($l) -C target-cpu=znver4"},
               {variant:"intel",   os:"ubuntu-24.04",  target:"x86_64-unknown-linux-gnu",  ext:"",     release_only:true,  rustflags:"\($l) -C target-cpu=alderlake"},
               {variant:"zen4",    os:"windows-2025",  target:"x86_64-pc-windows-msvc",    ext:".exe", release_only:true,  rustflags:"\($w) -C target-cpu=znver4"},
@@ -121,6 +126,13 @@ jobs:
           echo "Installing pinned toolchain: $channel"
           rustup toolchain install "$channel" --profile minimal
           rustup default "$channel"
+
+      - name: Add the macOS cross target
+        # macos-15 runners are arm64: the x86_64 row is cross-compiled. The
+        # target is also pinned in rust-toolchain.toml; this keeps the job
+        # deterministic if that file ever stops declaring it.
+        if: matrix.target == 'x86_64-apple-darwin'
+        run: rustup target add "${{ matrix.target }}"
 
       - uses: Swatinem/rust-cache@v2
         with:

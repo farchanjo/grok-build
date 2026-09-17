@@ -18,6 +18,30 @@ FEATURE_ARGS := $(if $(strip $(FEATURES)),--features $(FEATURES),)
 BINARY_NAME ?= xai-grok-pager
 ARTIFACT := $(abspath $(CARGO_TARGET_DIR))/$(PROFILE)/$(BINARY_NAME)
 
+# Local deploy stays host-arch only (native, no cross build). The Intel slice is
+# published by the GitHub release workflow; build it locally only on demand with
+# `make build-x64`, or deploy a combined binary with `make deploy UNIVERSAL=1`.
+MACOS_X64_TARGET ?= x86_64-apple-darwin
+UNIVERSAL ?= 0
+
+# Local builds are tuned for this workstation's CPU. `apple-m4` matches the M4
+# host; the binary then needs M4 or newer. Override per Apple Silicon generation
+# (`apple-a17` = M1/M2/M3, `native`, or empty to build the generic arm64 slice):
+#   make deploy MACOS_TARGET_CPU=apple-a17
+#
+# RUSTFLAGS REPLACES the per-target list in .cargo/config.toml, so the arm64 base
+# flags are repeated verbatim before the tuning flag. Build scripts and proc
+# macros also see RUSTFLAGS (no `--target` locally), which is safe here because
+# they execute on this same M4.
+MACOS_TARGET_CPU ?= apple-m4
+MACOS_ARM_BASE_FLAGS := -C link-arg=-undefined -C link-arg=dynamic_lookup -C force-unwind-tables=yes -C link-args=-ObjC
+LOCAL_TUNING_FLAGS := $(if $(filter Darwin,$(shell uname -s)),$(if $(filter arm64,$(shell uname -m)),$(MACOS_ARM_BASE_FLAGS) $(if $(MACOS_TARGET_CPU),-C target-cpu=$(MACOS_TARGET_CPU),),),)
+LIPO ?= /usr/bin/lipo
+ARCH ?= /usr/bin/arch
+X64_ARTIFACT := $(abspath $(CARGO_TARGET_DIR))/$(MACOS_X64_TARGET)/$(PROFILE)/$(BINARY_NAME)
+UNIVERSAL_ARTIFACT := $(abspath $(CARGO_TARGET_DIR))/$(PROFILE)/$(BINARY_NAME)-universal
+DEPLOY_SOURCE := $(if $(filter 1,$(UNIVERSAL)),$(UNIVERSAL_ARTIFACT),$(ARTIFACT))
+
 DEPLOY_DIR ?= /opt/grok-custom
 DEPLOY_BINARY ?= $(DEPLOY_DIR)/grok
 WRAPPER_SOURCE ?= $(abspath grok-custom)
@@ -33,22 +57,44 @@ SHASUM ?= /usr/bin/shasum
 BASH ?= /bin/bash
 PYTHON3 ?= /usr/bin/python3
 
-.PHONY: build deploy deploy-binary deploy-wrapper verify help
+.PHONY: build build-x64 build-universal deploy deploy-binary deploy-wrapper verify help
 
 build:
+	@set -eu; \
+	if [ -n "$(LOCAL_TUNING_FLAGS)" ]; then export RUSTFLAGS="$(LOCAL_TUNING_FLAGS)"; echo "RUSTFLAGS=$$RUSTFLAGS"; fi; \
 	$(CARGO) build --locked --jobs $(CARGO_BUILD_JOBS) --timings -p $(PACKAGE) --bin $(BINARY_NAME) --profile $(PROFILE) $(FEATURE_ARGS)
+
+# Intel slice for older Macs. Cross-compiled from Apple Silicon; the macOS SDK
+# and the `[target.x86_64-apple-darwin]` rustflags in .cargo/config.toml already
+# support it.
+build-x64:
+	$(CARGO) build --locked --jobs $(CARGO_BUILD_JOBS) -p $(PACKAGE) --bin $(BINARY_NAME) --profile $(PROFILE) --target $(MACOS_X64_TARGET) $(FEATURE_ARGS)
+
+# One artifact that runs on both Apple Silicon and Intel.
+build-universal: build build-x64
+	@set -eu; \
+	$(LIPO) -create "$(ARTIFACT)" "$(X64_ARTIFACT)" -output "$(UNIVERSAL_ARTIFACT)"; \
+	arches="$$($(LIPO) -archs "$(UNIVERSAL_ARTIFACT)")"; \
+	case "$$arches" in *arm64*) ;; *) echo "error: universal artifact is missing the arm64 slice: $$arches" >&2; exit 1;; esac; \
+	case "$$arches" in *x86_64*) ;; *) echo "error: universal artifact is missing the x86_64 slice: $$arches" >&2; exit 1;; esac; \
+	echo "Universal artifact: $(UNIVERSAL_ARTIFACT) [$$arches]"
 
 deploy: deploy-binary
 	+$(MAKE) deploy-wrapper
 
+ifeq ($(UNIVERSAL),1)
+deploy-binary: build-universal
+else
 deploy-binary: build
+endif
+deploy-binary:
 	@set -eu; \
 	if [ "$$(uname -s)" != "Darwin" ]; then \
 		echo "error: signed deployment is supported only on macOS" >&2; \
 		exit 1; \
 	fi; \
-	if [ ! -x "$(ARTIFACT)" ]; then \
-		echo "error: release artifact not found: $(ARTIFACT)" >&2; \
+	if [ ! -x "$(DEPLOY_SOURCE)" ]; then \
+		echo "error: release artifact not found: $(DEPLOY_SOURCE) (run 'make build-universal' or 'make build')" >&2; \
 		exit 1; \
 	fi; \
 	staged="$$(mktemp "$${TMPDIR:-/tmp}/grok-custom-deploy.XXXXXX")"; \
@@ -62,7 +108,7 @@ deploy-binary: build
 		fi; \
 	}; \
 	trap cleanup EXIT HUP INT TERM; \
-	/bin/cp "$(ARTIFACT)" "$$staged"; \
+	/bin/cp "$(DEPLOY_SOURCE)" "$$staged"; \
 	/bin/chmod 0755 "$$staged"; \
 	identity="$(CODESIGN_IDENTITY)"; \
 	if [ "$$identity" = "-" ]; then \
@@ -79,7 +125,26 @@ deploy-binary: build
 			"$$staged"; \
 	fi; \
 	$(CODESIGN) --verify --strict --verbose=2 "$$staged"; \
+	signed_arches="$$($(LIPO) -archs "$$staged")"; \
+	if [ "$(UNIVERSAL)" = "1" ]; then \
+	case "$$signed_arches" in *arm64*) ;; *) echo "error: signed artifact lost the arm64 slice: $$signed_arches" >&2; exit 1;; esac; \
+	case "$$signed_arches" in *x86_64*) ;; *) echo "error: signed artifact lost the x86_64 slice: $$signed_arches" >&2; exit 1;; esac; \
+	fi; \
 	"$$staged" --version; \
+	if [ "$(UNIVERSAL)" = "1" ]; then \
+	if $(ARCH) -x86_64 /usr/bin/true 2>/dev/null; then \
+	x64_version="$$($(ARCH) -x86_64 "$$staged" --version)"; \
+	native_version="$$("$$staged" --version)"; \
+	if [ "$$x64_version" != "$$native_version" ]; then \
+	echo "error: x86_64 slice reports '$$x64_version' but the native slice reports '$$native_version'" >&2; \
+	exit 1; \
+	fi; \
+	echo "x86_64 slice OK: $$x64_version"; \
+	else \
+	echo "note: Rosetta unavailable, x86_64 slice not executed"; \
+	fi; \
+	fi; \
+	echo "Deployed slices: $$signed_arches"; \
 	$(SUDO) $(INSTALL) -d -m 0755 -o root -g wheel "$(DEPLOY_DIR)"; \
 	deploy_tmp="$(DEPLOY_BINARY).new.$$$$"; \
 	$(SUDO) $(INSTALL) -m 0755 -o root -g wheel "$$staged" "$$deploy_tmp"; \
@@ -137,6 +202,11 @@ verify:
 	test -f "$(WRAPPER_SOURCE)"; \
 	$(BASH) -n "$(WRAPPER_SOURCE)"; \
 	test -x "$(DEPLOY_BINARY)"; \
+	if [ "$(UNIVERSAL)" = "1" ]; then \
+	deployed_arches="$$($(LIPO) -archs "$(DEPLOY_BINARY)")"; \
+	case "$$deployed_arches" in *arm64*) ;; *) echo "error: deployed binary is missing the arm64 slice: $$deployed_arches" >&2; exit 1;; esac; \
+	case "$$deployed_arches" in *x86_64*) ;; *) echo "error: deployed binary is missing the x86_64 slice (older Macs cannot run it): $$deployed_arches" >&2; exit 1;; esac; \
+	fi; \
 	test -f "$(DEPLOY_WRAPPER)"; \
 	test -x "$(DEPLOY_WRAPPER)"; \
 	$(BASH) -n "$(DEPLOY_WRAPPER)"; \
@@ -201,12 +271,17 @@ verify:
 	echo "$$wrapper_version"; \
 	echo "GROK_HOME: $$expected_home ($$home_meta)"; \
 	echo "Compatibility: 18 wrapper variables pinned; 13 runtime cells disabled by env"; \
+	echo "Slices: $$($(LIPO) -archs "$(DEPLOY_BINARY)")"; \
 	$(SHASUM) -a 256 "$(DEPLOY_BINARY)" "$(DEPLOY_WRAPPER)"
 
 help:
-	@echo "make                 Build the optimized release-dist artifact"
+	@echo "make                 Build the optimized release-dist artifact (host arch, tuned for $(MACOS_TARGET_CPU))"
 	@echo "make FEATURES=name   Build with an explicit Cargo feature (for example claude-cli-runtime)"
-	@echo "make deploy          Build/sign the binary and deploy it with the isolated wrapper"
+	@echo "make deploy          Build, sign, and deploy the host-arch binary with the isolated wrapper"
+	@echo "make deploy MACOS_TARGET_CPU=apple-a17   Tune for M1/M2/M3 instead of M4"
+	@echo "make build-x64       Build the Intel slice ($(MACOS_X64_TARGET)) -- mirrors the Actions release asset"
+	@echo "make build-universal Build host + Intel and lipo them into one universal artifact"
+	@echo "make deploy UNIVERSAL=1  Deploy that universal artifact instead of the thin host one"
 	@echo "make deploy-binary   Build, sign, back up, and deploy to $(DEPLOY_BINARY)"
 	@echo "make deploy-wrapper  Back up and deploy the wrapper to $(DEPLOY_WRAPPER)"
 	@echo "make verify          Verify the binary, wrapper, permissions, and isolation"

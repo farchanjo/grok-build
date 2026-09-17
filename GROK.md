@@ -588,9 +588,42 @@ with the `release-dist` profile, `--locked`, `--timings`, `CARGO_BUILD_JOBS`,
 `sccache`/`RUSTC_WRAPPER`, and the optional `FEATURES` Cargo-feature variable.
 
 ```sh
-make build
+make build                      # host arch, CPU-tuned (what `make deploy` uses)
+make build MACOS_TARGET_CPU=apple-a17   # tune for M1/M2/M3 instead of M4
+make build-x64                  # Intel slice (x86_64-apple-darwin), opt-in
+make build-universal            # host + Intel, lipo'd into one artifact, opt-in
 make build FEATURES=claude-cli-runtime
 ```
+
+**Local is `make deploy`, host-arch and CPU-tuned.** It builds, signs, and
+installs the native `release-dist` artifact for this workstation: on an Apple
+Silicon host that is the arm64 slice with `-C target-cpu=apple-m4` by default
+(`MACOS_TARGET_CPU` overrides it, `native` or an empty value are accepted). No
+cross build is in the local loop.
+
+`apple-m4` is additive over rustc's default for this target — verified with
+`rustc --print cfg`: it only adds `target_feature="bf16"`, `"bti"` and
+`"i8mm"` (no SME), so a locally built binary also runs on older Apple Silicon.
+Use `MACOS_TARGET_CPU=apple-a17` to match the release `m1` variant exactly.
+
+`RUSTFLAGS` replaces the per-target list in `.cargo/config.toml`, so the arm64
+base flags are repeated verbatim before the tuning flag; build scripts and proc
+macros inherit them too, which is safe locally because they run on this same
+host. Changing `MACOS_TARGET_CPU` (or toggling it off) re-fingerprints the whole
+graph: expect one full rebuild, then the cache holds.
+
+**The Intel slice belongs to the release pipeline.** `.github/workflows/
+release-build.yml` publishes `grok-x86_64-apple-darwin-intel` (baseline x86-64,
+so pre-AVX2 2010-2012 Macs work; a `haswell`/`skylake` tuning would SIGILL on
+them). Local helpers that mirror it, for parity checks only:
+
+- `make build-x64` — cross-compile it (macOS SDK handles both arches; the
+  target is pinned in `rust-toolchain.toml` and its rustflags already live in
+  `.cargo/config.toml`).
+- `make deploy UNIVERSAL=1` — deploy one `lipo`-combined universal binary
+  (CPU-tuned arm64 + baseline x64) instead of the thin host artifact.
+  `make verify` then also asserts both slices are present and executes the
+  Intel slice under Rosetta when available.
 
 Do not run `make build`, `make deploy`, `make deploy-binary`,
 `make deploy-wrapper`, or `make verify` in ordinary edit loops. Deployment and
