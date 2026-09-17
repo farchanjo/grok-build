@@ -25,7 +25,7 @@ use crate::computer::types::{
 };
 use crate::notification::ToolNotificationHandle;
 
-use super::types::WaitForError;
+use super::types::{WAIT_DISPLAY_PREFIX, WaitForError};
 
 /// Signal name stamped on a watcher that ran out of deadline.
 pub const TIMEOUT_SIGNAL: &str = "timeout";
@@ -53,12 +53,32 @@ pub struct WaitForRegistry {
     /// Snapshots of watchers that already ended, kept so a read after the fact
     /// still resolves instead of reporting an unknown id. Bounded by [`FINISHED_CAP`].
     finished: Mutex<VecDeque<(String, TaskSnapshot)>>,
+    /// Runtime that owns this registry's watcher tasks.
+    ///
+    /// Every session runs on its own single-thread runtime, dropped when the
+    /// session ends, which kills anything spawned there. A subagent inherits the
+    /// parent's registry, so spawning through this handle puts the watcher on the
+    /// *parent's* runtime: the child can then end without reaping it, which is
+    /// what makes `wait_for` inside a subagent more than an inline attempt.
+    runtime: Option<tokio::runtime::Handle>,
 }
 
 /// One live watcher: how to cancel it, and where it publishes its state.
 struct WaitEntry {
     cancel: mpsc::Sender<()>,
     slot: WaitSlot,
+    ownership: Arc<Mutex<WatcherOwnership>>,
+}
+
+/// Which session owns a watcher and where its wake goes.
+///
+/// Shared between the registry entry and the watcher itself so that a parent
+/// session can [`WaitForRegistry::adopt`] a subagent's pending watcher: the
+/// ownership stamp and the notification handle are retargeted in place while the
+/// watcher keeps polling, and the next completion lands on the parent.
+pub struct WatcherOwnership {
+    pub owner_session_id: Option<String>,
+    pub handle: ToolNotificationHandle,
 }
 
 /// Handles a watcher keeps to publish state and to signal its own completion.
@@ -100,8 +120,41 @@ impl std::fmt::Debug for WaitForRegistry {
 }
 
 impl WaitForRegistry {
+    /// A registry whose watchers run on the current runtime.
+    pub fn bound_to_current_runtime() -> Self {
+        Self {
+            runtime: tokio::runtime::Handle::try_current().ok(),
+            ..Default::default()
+        }
+    }
+
+    /// Spawn `task` where this registry's watchers belong: its own runtime when it
+    /// has one (so the task outlives whichever session created it), else the
+    /// caller's.
+    fn spawn_watcher_task<F>(&self, task: F)
+    where
+        F: std::future::Future<Output = ()> + Send + 'static,
+    {
+        match self.runtime.clone() {
+            Some(handle) => {
+                handle.spawn(task);
+            }
+            None => {
+                tokio::spawn(task);
+            }
+        }
+    }
+
     /// Register a watcher and hand back its publish handles.
-    pub fn register(&self, task_id: &str, cancel: mpsc::Sender<()>) -> WaitSlot {
+    ///
+    /// `ownership` is the shared owner/handle cell the watcher reads when it
+    /// publishes or finishes, so an [`Self::adopt`] takes effect immediately.
+    pub fn register(
+        &self,
+        task_id: &str,
+        cancel: mpsc::Sender<()>,
+        ownership: Arc<Mutex<WatcherOwnership>>,
+    ) -> WaitSlot {
         let slot = WaitSlot {
             latest: Arc::new(Mutex::new(None)),
             done: Arc::new(tokio::sync::Notify::new()),
@@ -114,9 +167,35 @@ impl WaitForRegistry {
                 WaitEntry {
                     cancel,
                     slot: slot.clone(),
+                    ownership,
                 },
             );
         slot
+    }
+
+    /// Hand every watcher owned by `old_owner` to `new_owner`, waking `new_handle`.
+    ///
+    /// A subagent's session dies with its turn, which would reap a watcher it
+    /// started: the entries are adopted by the parent instead, and the wake lands
+    /// on the parent's bridge with the parent's ownership stamp (so the
+    /// session-scoped completion filter admits it). Returns how many were adopted.
+    pub fn adopt(
+        &self,
+        old_owner: &str,
+        new_owner: &str,
+        new_handle: ToolNotificationHandle,
+    ) -> usize {
+        let entries = self.entries.lock().unwrap_or_else(|e| e.into_inner());
+        let mut adopted = 0;
+        for entry in entries.values() {
+            let mut ownership = entry.ownership.lock().unwrap_or_else(|e| e.into_inner());
+            if ownership.owner_session_id.as_deref() == Some(old_owner) {
+                ownership.owner_session_id = Some(new_owner.to_owned());
+                ownership.handle = new_handle.clone();
+                adopted += 1;
+            }
+        }
+        adopted
     }
 
     /// Move a finished watcher out of the live set, keeping its last snapshot readable.
@@ -306,8 +385,12 @@ pub struct WatcherSpec {
     pub attempt_timeout: Duration,
     pub output_file: PathBuf,
     pub tool_call_id: String,
+    /// Initial owner; the live value lives in `ownership` so an adoption can
+    /// retarget it while the watcher runs.
     pub owner_session_id: Option<String>,
     pub started_at: SystemTime,
+    /// Shared with the registry entry: who to notify, and under which session.
+    pub ownership: Arc<Mutex<WatcherOwnership>>,
 }
 
 /// How the watcher finished.
@@ -342,31 +425,23 @@ impl WatcherExit {
 /// the cancel senders inside it) alive for the watcher's whole life, so a session teardown that
 /// drops the registry could never close the channel and `cancel_rx.recv()` would never resolve
 /// to `None`. Weak here means: registry dropped → senders dropped → the watcher exits cancelled.
-#[allow(clippy::too_many_arguments)]
 pub fn spawn_watcher(
     backend: Weak<dyn TerminalBackend>,
     registry: Arc<WaitForRegistry>,
     cwd: PathBuf,
     spec: WatcherSpec,
-    notification_handle: ToolNotificationHandle,
 ) -> String {
     let task_id = spec.task_id.clone();
     let (cancel_tx, cancel_rx) = mpsc::channel::<()>(1);
-    let slot = registry.register(&task_id, cancel_tx);
+    let ownership = spec.ownership.clone();
+    let slot = registry.register(&task_id, cancel_tx, ownership.clone());
 
     let registry_for_task = Arc::downgrade(&registry);
     let task_id_for_closure = task_id.clone();
     let slot_for_task = slot.clone();
-    tokio::spawn(async move {
-        let (exit, last_output) = run_watcher(
-            &backend,
-            &cwd,
-            &spec,
-            &notification_handle,
-            &slot_for_task,
-            cancel_rx,
-        )
-        .await;
+    registry.spawn_watcher_task(async move {
+        let (exit, last_output) =
+            run_watcher(&backend, &cwd, &spec, &slot_for_task, cancel_rx).await;
         let snapshot = completion_snapshot(&spec, exit, last_output);
         // Publish the final state before forgetting, so a read racing the exit
         // finds it either live or in the finished ring, never nowhere.
@@ -374,7 +449,14 @@ pub fn spawn_watcher(
         if let Some(registry) = registry_for_task.upgrade() {
             registry.forget(&task_id_for_closure);
         }
-        notification_handle.send_task_complete(snapshot);
+        // The handle is read last: an adoption that landed while the watcher was
+        // finishing still routes this wake to the adopting session.
+        let handle = ownership
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .handle
+            .clone();
+        handle.send_task_complete(snapshot);
     });
 
     task_id
@@ -384,10 +466,10 @@ async fn run_watcher(
     backend: &Weak<dyn TerminalBackend>,
     cwd: &std::path::Path,
     spec: &WatcherSpec,
-    notification_handle: &ToolNotificationHandle,
     slot: &WaitSlot,
     mut cancel_rx: mpsc::Receiver<()>,
 ) -> (WatcherExit, String) {
+    let ownership = spec.ownership.clone();
     let mut delay = spec.retry_initial;
     let mut attempt: u64 = 0;
     let mut last_output = String::new();
@@ -402,6 +484,12 @@ async fn run_watcher(
             return (WatcherExit::Cancelled, last_output);
         };
         let budget = remaining.min(spec.attempt_timeout);
+        // Read the ownership once per attempt: an adoption that landed since the
+        // last one retargets both the attempt's owner and the wake.
+        let (attempt_handle, attempt_owner) = {
+            let ownership = ownership.lock().unwrap_or_else(|e| e.into_inner());
+            (ownership.handle.clone(), ownership.owner_session_id.clone())
+        };
         let attempt_result = tokio::select! {
             biased;
             _ = cancel_rx.recv() => {
@@ -419,9 +507,9 @@ async fn run_watcher(
                 &spec.command,
                 budget,
                 spec.output_file.clone(),
-                notification_handle,
+                &attempt_handle,
                 &spec.tool_call_id,
-                spec.owner_session_id.clone(),
+                attempt_owner,
             ) => result,
         };
         drop(backend);
@@ -531,10 +619,16 @@ fn live_snapshot(spec: &WatcherSpec, output: String, exit_code: Option<i32>) -> 
 }
 
 fn snapshot_base(spec: &WatcherSpec) -> TaskSnapshot {
+    let owner_session_id = spec
+        .ownership
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .owner_session_id
+        .clone();
     TaskSnapshot {
         task_id: spec.task_id.clone(),
         command: spec.command.clone(),
-        display_command: Some(format!("[wait] {}", spec.command)),
+        display_command: Some(format!("{WAIT_DISPLAY_PREFIX}{}", spec.command)),
         cwd: spec.cwd.display().to_string(),
         start_time: spec.started_at,
         end_time: None,
@@ -547,7 +641,7 @@ fn snapshot_base(spec: &WatcherSpec) -> TaskSnapshot {
         kind: TaskKind::Wait,
         block_waited: false,
         explicitly_killed: false,
-        owner_session_id: spec.owner_session_id.clone(),
+        owner_session_id,
     }
 }
 
@@ -675,6 +769,15 @@ mod tests {
         }
     }
 
+    /// The same spec, with its ownership cell routing completions to `handle`.
+    fn spec_with_handle(mut spec: WatcherSpec, handle: &ToolNotificationHandle) -> WatcherSpec {
+        spec.ownership = Arc::new(Mutex::new(WatcherOwnership {
+            owner_session_id: spec.owner_session_id.clone(),
+            handle: handle.clone(),
+        }));
+        spec
+    }
+
     fn spec(task_id: &str, deadline_in: Duration, retry: Duration) -> WatcherSpec {
         WatcherSpec {
             task_id: task_id.to_owned(),
@@ -690,6 +793,10 @@ mod tests {
             tool_call_id: format!("call-{task_id}"),
             owner_session_id: None,
             started_at: SystemTime::now(),
+            ownership: Arc::new(Mutex::new(WatcherOwnership {
+                owner_session_id: None,
+                handle: ToolNotificationHandle::noop(),
+            })),
         }
     }
 
@@ -710,8 +817,7 @@ mod tests {
             Arc::downgrade(&(backend.clone() as Arc<dyn TerminalBackend>)),
             registry.clone(),
             PathBuf::from("/tmp"),
-            spec,
-            handle,
+            spec_with_handle(spec, &handle),
         );
         (backend, registry, rx)
     }
@@ -836,12 +942,12 @@ mod tests {
         let registry = Arc::new(WaitForRegistry::default());
         let backend = ScriptedBackend::new(vec![Script::Exit(1), Script::Exit(0)]);
         let (handle, mut rx) = ToolNotificationHandle::channel();
+        let spec = spec_with_handle(spec, &handle);
         spawn_watcher(
             Arc::downgrade(&(backend.clone() as Arc<dyn TerminalBackend>)),
             registry.clone(),
             PathBuf::from("/tmp"),
             spec,
-            handle,
         );
 
         let snapshot = registry
@@ -867,13 +973,118 @@ mod tests {
         assert!(started.elapsed() < Duration::from_secs(1));
     }
 
+    /// A watcher belongs to the registry's runtime, not the caller's. Every
+    /// session runs on its own runtime and drops it on exit, so a subagent's
+    /// watcher has to run on the parent's to outlive the child.
+    #[test]
+    fn watchers_run_on_the_registrys_runtime_not_the_callers() {
+        let backend = ScriptedBackend::new(vec![Script::Exit(0)]);
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let registry = {
+            let _enter = rt.enter();
+            Arc::new(WaitForRegistry::bound_to_current_runtime())
+        };
+        let (handle, mut rx) = ToolNotificationHandle::channel();
+        let spec = spec_with_handle(
+            spec(
+                "wait-bound",
+                Duration::from_secs(5),
+                Duration::from_millis(1),
+            ),
+            &handle,
+        );
+
+        // Spawn from a plain thread with no runtime of its own: a fallback to
+        // `tokio::spawn` would panic there, so this pins the runtime binding.
+        std::thread::spawn({
+            let registry = registry.clone();
+            let backend = Arc::downgrade(&(backend.clone() as Arc<dyn TerminalBackend>));
+            move || spawn_watcher(backend, registry, PathBuf::from("/tmp"), spec)
+        })
+        .join()
+        .unwrap();
+
+        let notification = rt
+            .block_on(async { tokio::time::timeout(Duration::from_secs(5), rx.recv()).await })
+            .expect("the watcher runs on the bound runtime")
+            .expect("a notification");
+        assert!(matches!(notification, ToolNotification::TaskCompleted(_)));
+        assert_eq!(backend.attempts(), 1);
+    }
+
+    /// A subagent's watcher must survive the child's exit: the parent adopts it,
+    /// and the wake — plus the ownership stamp the session filter reads — follows.
+    #[tokio::test]
+    async fn adopt_retargets_a_child_watcher_to_the_parent() {
+        let registry = WaitForRegistry::default();
+        let (child_handle, mut child_rx) = ToolNotificationHandle::channel();
+        let (parent_handle, mut parent_rx) = ToolNotificationHandle::channel();
+        let ownership = Arc::new(Mutex::new(WatcherOwnership {
+            owner_session_id: Some("child-session".into()),
+            handle: child_handle,
+        }));
+        let (_tx, _rx) = mpsc::channel(1);
+        let slot = registry.register("wait-child", _tx, ownership.clone());
+
+        assert_eq!(
+            registry.adopt("child-session", "parent-session", parent_handle),
+            1
+        );
+        assert_eq!(registry.len(), 1, "adoption moves ownership, not the entry");
+
+        // The watcher finishes after the adoption: it builds the snapshot and
+        // sends through the cell, exactly as the spawned task does.
+        let mut spec = spec(
+            "wait-child",
+            Duration::from_secs(10),
+            Duration::from_millis(1),
+        );
+        spec.ownership = ownership.clone();
+        let snapshot = completion_snapshot(&spec, WatcherExit::Satisfied, "done".into());
+        slot.finish(snapshot.clone());
+        ownership
+            .lock()
+            .unwrap()
+            .handle
+            .clone()
+            .send_task_complete(snapshot.clone());
+
+        assert_eq!(snapshot.owner_session_id.as_deref(), Some("parent-session"));
+        assert!(parent_rx.try_recv().is_ok(), "the wake reaches the parent");
+        assert!(child_rx.try_recv().is_err(), "and no longer the child");
+    }
+
+    /// Adoption is scoped: a watcher the parent started itself keeps its owner.
+    #[test]
+    fn adopt_leaves_other_owners_alone() {
+        let registry = WaitForRegistry::default();
+        let (_tx, _rx) = mpsc::channel(1);
+        let (parent_handle, _parent_rx) = ToolNotificationHandle::channel();
+        let mut own = ownership_stub();
+        own.owner_session_id = Some("parent-session".into());
+        registry.register("wait-parent", _tx, Arc::new(Mutex::new(own)));
+
+        assert_eq!(
+            registry.adopt("child-session", "parent-session", parent_handle.clone()),
+            0,
+            "nothing belonged to the child"
+        );
+        assert_eq!(
+            registry.adopt("parent-session", "parent-session", parent_handle),
+            1
+        );
+    }
+
     #[test]
     fn finished_snapshots_are_capped() {
         let registry = WaitForRegistry::default();
         for i in 0..FINISHED_CAP + 8 {
             let id = format!("wait-{i}");
             let (_tx, _rx) = mpsc::channel(1);
-            let slot = registry.register(&id, _tx);
+            let slot = registry.register(&id, _tx, Arc::new(Mutex::new(ownership_stub())));
             slot.finish(snapshot_stub(&id));
             registry.forget(&id);
         }
@@ -884,6 +1095,13 @@ mod tests {
                 .snapshot(&format!("wait-{}", FINISHED_CAP + 7))
                 .is_some()
         );
+    }
+
+    fn ownership_stub() -> WatcherOwnership {
+        WatcherOwnership {
+            owner_session_id: None,
+            handle: ToolNotificationHandle::noop(),
+        }
     }
 
     fn snapshot_stub(task_id: &str) -> TaskSnapshot {
@@ -911,7 +1129,7 @@ mod tests {
     fn registry_cancel_reports_liveness() {
         let registry = WaitForRegistry::default();
         let (tx, mut rx) = mpsc::channel(1);
-        registry.register("wait-1", tx);
+        registry.register("wait-1", tx, Arc::new(Mutex::new(ownership_stub())));
         assert_eq!(registry.len(), 1);
         assert!(registry.cancel("wait-1"));
         assert_eq!(rx.try_recv(), Ok(()));

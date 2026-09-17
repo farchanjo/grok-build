@@ -551,6 +551,7 @@ impl MvpAgent {
             parent_terminal_backend,
             parent_notification_handle,
             parent_scheduler_handle,
+            parent_wait_registry,
         ) = {
             let sessions = self.sessions.borrow();
             sessions.get(&parent_sid).map(|ps| {
@@ -559,6 +560,7 @@ impl MvpAgent {
                     ps.terminal_backend.clone(),
                     ps.tools_notification_handle.clone(),
                     ps.scheduler_handle.clone(),
+                    ps.wait_registry.clone(),
                 )
             })
         }?;
@@ -845,6 +847,7 @@ impl MvpAgent {
             parent_terminal_backend: parent_terminal_backend.clone(),
             parent_notification_handle: parent_notification_handle.clone(),
             parent_scheduler_handle: parent_scheduler_handle.clone(),
+            parent_wait_registry: parent_wait_registry.clone(),
         })
     }
 }

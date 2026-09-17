@@ -9,6 +9,14 @@ use crate::util::duration::{format_duration, parse_duration, serde_opt_duration}
 /// Canonical tool name advertised by `WaitForTool::id()`.
 pub const WAIT_FOR_TOOL_NAME: &str = "wait_for";
 
+/// Prefix the watcher bakes into its `display_command` (the snapshot's label).
+///
+/// The pager strips it so a completion that arrives without a prior
+/// `TaskBackgrounded` — an adopted subagent watcher — still reads as the bare
+/// condition instead of `[wait] …`. Kept beside [`WAIT_DESCRIPTION_PREFIX`] so
+/// producer and consumer cannot drift.
+pub const WAIT_DISPLAY_PREFIX: &str = "[wait] ";
+
 /// Prefix the tool bakes into the watcher's `monitor_description`.
 ///
 /// The pager keys the "Wait" row kind off it, so the producer here and the

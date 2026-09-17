@@ -56,6 +56,9 @@ pub struct AgentBuilder {
     owner_session_id: Option<String>,
     parent_scheduler_handle:
         Option<xai_grok_tools::implementations::grok_build::scheduler::types::SchedulerHandle>,
+    parent_wait_registry: Option<
+        std::sync::Arc<xai_grok_tools::implementations::grok_build::wait_for::WaitForRegistry>,
+    >,
     /// The agent definition — set via from_definition() or built up
     /// via individual with_*() calls.
     definition: Option<AgentDefinition>,
@@ -235,6 +238,7 @@ impl AgentBuilder {
             notification_handle,
             owner_session_id: None,
             parent_scheduler_handle: None,
+            parent_wait_registry: None,
             definition: None,
             persona_summaries: Vec::new(),
             prompt_audience: crate::prompt::context::PromptAudience::Primary,
@@ -468,6 +472,17 @@ impl AgentBuilder {
         handle: xai_grok_tools::implementations::grok_build::scheduler::types::SchedulerHandle,
     ) -> Self {
         self.parent_scheduler_handle = Some(handle);
+        self
+    }
+    /// Share the parent's watcher registry so a wait started in a subagent
+    /// survives the subagent's exit, exactly like a scheduled task.
+    pub fn with_parent_wait_registry(
+        mut self,
+        registry: std::sync::Arc<
+            xai_grok_tools::implementations::grok_build::wait_for::WaitForRegistry,
+        >,
+    ) -> Self {
+        self.parent_wait_registry = Some(registry);
         self
     }
     /// Set the web search configuration.
@@ -1139,6 +1154,7 @@ impl AgentBuilder {
                 notification_handle: self.notification_handle.clone(),
                 owner_session_id: self.owner_session_id.clone(),
                 parent_scheduler_handle: self.parent_scheduler_handle.take(),
+                parent_wait_registry: self.parent_wait_registry.take(),
                 skills: skill_info.clone(),
                 state_path,
                 memory_backend: self.memory_backend,

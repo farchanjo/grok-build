@@ -1718,6 +1718,7 @@ fn dummy_tracker(
         terminal_backend: None,
         tools_notification_handle: None,
         scheduler_handle: None,
+        wait_registry: None,
         subagent_model_meta: Arc::new(parking_lot::Mutex::new(None)),
     };
     SubagentTracker {

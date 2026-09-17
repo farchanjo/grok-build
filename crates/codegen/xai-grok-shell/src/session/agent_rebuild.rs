@@ -144,6 +144,9 @@ pub(crate) struct AgentRebuildSpec {
     pub owner_session_id: Option<String>,
     pub parent_scheduler_handle:
         Option<xai_grok_tools::implementations::grok_build::scheduler::types::SchedulerHandle>,
+    pub parent_wait_registry: Option<
+        std::sync::Arc<xai_grok_tools::implementations::grok_build::wait_for::WaitForRegistry>,
+    >,
 }
 impl AgentRebuildSpec {
     /// Build a fresh [`Agent`] from this spec and an [`AgentDefinition`].
@@ -244,6 +247,7 @@ impl AgentRebuildSpec {
             system_prompt_label,
             owner_session_id,
             parent_scheduler_handle,
+            parent_wait_registry,
         } = self.as_ref();
         let _ = mcp_state;
         // `cli_agents` feeds the session callability capture lane, not the
@@ -306,6 +310,9 @@ impl AgentRebuildSpec {
         }
         if let Some(handle) = parent_scheduler_handle.clone() {
             builder = builder.with_parent_scheduler_handle(handle);
+        }
+        if let Some(registry) = parent_wait_registry.clone() {
+            builder = builder.with_parent_wait_registry(registry);
         }
         if let Some(memory_backend) = memory_backend.clone() {
             builder = builder.with_memory_backend(memory_backend);
@@ -509,6 +516,7 @@ fn test_rebuild_spec(
         system_prompt_label: xai_grok_agent::DEFAULT_SYSTEM_PROMPT_LABEL.to_string(),
         owner_session_id: Some("test-session".to_string()),
         parent_scheduler_handle: None,
+        parent_wait_registry: None,
     })
 }
 #[cfg(test)]

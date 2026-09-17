@@ -169,6 +169,12 @@ pub struct SessionHandle {
     /// handle so scheduled tasks survive the subagent's exit.
     pub scheduler_handle:
         Option<xai_grok_tools::implementations::grok_build::scheduler::types::SchedulerHandle>,
+    /// Live `wait_for` watcher registry for this session. Subagents inherit the
+    /// parent's registry, so a watcher started in a subagent outlives the child
+    /// session and the parent can adopt it on exit.
+    pub wait_registry: Option<
+        std::sync::Arc<xai_grok_tools::implementations::grok_build::wait_for::WaitForRegistry>,
+    >,
     /// Session-stamped subagent model override (`PromptRequest._meta.subagentModel`,
     /// set by the pager). Shared with the session actor and read synchronously by
     /// `MvpAgent::try_build_subagent_spawn_context` so a TUI-selectable fixed

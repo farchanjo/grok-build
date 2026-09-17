@@ -299,6 +299,43 @@
         );
     }
 
+    /// A completion for a `wait_for` watcher whose `display_command` carries the
+    /// `[wait] ` prefix, with the `Wait` kind the real snapshot sets.
+    fn task_completed_notif_with_wait_label(
+        session_id: &str,
+        task_id: &str,
+        command: &str,
+        display_command: &str,
+    ) -> acp::ExtNotification {
+        let notif = SessionNotification {
+            session_id: acp::SessionId::new(session_id),
+            update: XaiSessionUpdate::TaskCompleted {
+                task_snapshot: xai_grok_tools::types::TaskSnapshot {
+                    task_id: task_id.into(),
+                    command: command.into(),
+                    display_command: Some(display_command.into()),
+                    cwd: "/tmp".into(),
+                    start_time: std::time::SystemTime::now(),
+                    end_time: Some(std::time::SystemTime::now()),
+                    output: String::new(),
+                    output_file: "/tmp/out.log".into(),
+                    truncated: false,
+                    exit_code: Some(0),
+                    signal: None,
+                    completed: true,
+                    kind: xai_grok_tools::computer::types::TaskKind::Wait,
+                    block_waited: false,
+                    explicitly_killed: false,
+                    owner_session_id: None,
+                },
+                will_wake: true,
+            },
+            meta: None,
+        };
+        let raw = serde_json::value::to_raw_value(&notif).unwrap();
+        acp::ExtNotification::new("x.ai/task_completed", std::sync::Arc::from(raw))
+    }
+
     #[test]
     fn task_backgrounded_monitor_prefix_marks_is_monitor() {
         // Reparented monitor / older backend: the command carries the
@@ -450,6 +487,48 @@
             2,
             "a real kill must still render started + failed blocks"
         );
+    }
+
+    /// An adopted subagent watcher completes in a session that never saw its
+    /// `TaskBackgrounded`, so the snapshot's `[wait] ` display label is all the
+    /// pager has: it must be stripped, or the block reads "[wait] test -f …".
+    #[test]
+    fn adopted_wait_completion_strips_the_display_prefix() {
+        let mut app = make_app_with_agent("sess-1");
+        let notif = task_completed_notif_with_wait_label(
+            "sess-1",
+            "wait-call_1",
+            "test -f /tmp/gate",
+            "[wait] test -f /tmp/gate",
+        );
+        handle_task_completed(&notif, &mut app);
+
+        let agent = app.agents.get(&AgentId(0)).unwrap();
+        let task = agent
+            .session
+            .bg_tasks
+            .get("wait-call_1")
+            .expect("the adopted completion registers the task");
+        assert!(
+            task.is_wait,
+            "the Wait kind must survive an unknown-task completion"
+        );
+        assert_eq!(
+            task.description.as_deref(),
+            Some("test -f /tmp/gate"),
+            "the baked display prefix must be stripped"
+        );
+
+        let text: String = (0..agent.scrollback.len())
+            .filter_map(|i| agent.scrollback.entry(i))
+            .map(|e| e.block.searchable_text().unwrap_or_default())
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(
+            !text.contains("[wait] "),
+            "no block may read the raw prefix: {text:?}"
+        );
+        assert!(text.contains("test -f /tmp/gate"), "got: {text:?}");
     }
 
     #[test]

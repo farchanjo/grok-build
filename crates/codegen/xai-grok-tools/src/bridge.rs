@@ -918,6 +918,18 @@ mod tests {
         }
     }
 
+    /// An ownership cell for a registry entry a test registers by hand.
+    fn ownership_cell() -> std::sync::Arc<
+        std::sync::Mutex<crate::implementations::grok_build::wait_for::WatcherOwnership>,
+    > {
+        std::sync::Arc::new(std::sync::Mutex::new(
+            crate::implementations::grok_build::wait_for::WatcherOwnership {
+                owner_session_id: None,
+                handle: crate::notification::ToolNotificationHandle::noop(),
+            },
+        ))
+    }
+
     fn completed_task(id: &str, owner: Option<&str>) -> TaskSnapshot {
         TaskSnapshot {
             task_id: id.into(),
@@ -950,7 +962,7 @@ mod tests {
         let toolset = FinalizedToolset::empty_for_test();
         let registry = Arc::new(WaitForRegistry::default());
         let (cancel_tx, mut cancel_rx) = tokio::sync::mpsc::channel(1);
-        registry.register("wait-abc", cancel_tx);
+        registry.register("wait-abc", cancel_tx, ownership_cell());
         {
             let mut res = toolset.resources.lock().await;
             res.insert(registry);

@@ -1793,6 +1793,11 @@ pub(crate) async fn handle_assigned_subagent_request(
             } else {
                 ctx.parent_scheduler_handle.clone()
             },
+            if request.owner.is_workflow() {
+                None
+            } else {
+                ctx.parent_wait_registry.clone()
+            },
             subagent_max_turns,
             forked_tool_override,
         )
@@ -2635,6 +2640,29 @@ pub(crate) async fn handle_assigned_subagent_request(
                     parent_backend_weak,
                 )
                 .await;
+            // A `wait_for` watcher owns no process, so the reparent above cannot
+            // reach it: the registry entry carries the owner and the wake handle,
+            // and both are retargeted onto the parent here. Without this the
+            // watcher would be reaped by the child's session teardown, which
+            // would make `wait_for` inside a subagent silently inline-only.
+            if let Some(registry) = child_handle
+                .wait_registry
+                .clone()
+                .or_else(|| ctx.parent_wait_registry.clone())
+            {
+                let adopted = registry.adopt(
+                    &child_session_id.0,
+                    &ctx.parent_session_id,
+                    parent_notif_handle.clone(),
+                );
+                if adopted > 0 {
+                    tracing::info!(
+                        child_session_id = %child_session_id.0,
+                        adopted,
+                        "adopted the subagent's pending waits onto the parent"
+                    );
+                }
+            }
         }
         (Some(_), None) | (None, Some(_)) => {
             tracing::warn!(

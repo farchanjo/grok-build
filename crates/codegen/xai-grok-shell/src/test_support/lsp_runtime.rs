@@ -197,6 +197,7 @@ pub(crate) fn ctx_with_toggle(toggle: HashMap<String, bool>) -> SubagentSpawnCon
         parent_terminal_backend: None,
         parent_notification_handle: None,
         parent_scheduler_handle: None,
+        parent_wait_registry: None,
     }
 }
 pub(crate) fn make_request(

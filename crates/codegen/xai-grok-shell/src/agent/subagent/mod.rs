@@ -239,6 +239,12 @@ pub(crate) struct SubagentSpawnContext {
     /// parent's scheduler actor so scheduled tasks survive subagent exit.
     pub parent_scheduler_handle:
         Option<xai_grok_tools::implementations::grok_build::scheduler::types::SchedulerHandle>,
+    /// Parent's watcher registry. When `Some`, the subagent registers its
+    /// watchers there so a `wait_for` survives subagent exit; the parent adopts
+    /// them on teardown. Same shape and purpose as `parent_scheduler_handle`.
+    pub parent_wait_registry: Option<
+        std::sync::Arc<xai_grok_tools::implementations::grok_build::wait_for::WaitForRegistry>,
+    >,
     /// Parent's session environment variables (.envrc + color settings).
     /// Shared so the child inherits the same env without re-loading.
     pub session_env: Arc<HashMap<String, String>>,

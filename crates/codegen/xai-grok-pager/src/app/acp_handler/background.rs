@@ -807,11 +807,12 @@ pub(super) fn handle_task_completed(notif: &acp::ExtNotification, app: &mut AppV
                 .and_then(|end| end.duration_since(task_snapshot.start_time).ok())
                 .unwrap_or_default();
             let description = task_snapshot.display_command.clone().and_then(|d| {
-                // Strip the baked "[monitor] " prefix so the completed label
-                // matches the "Task started" path (which uses the bare
-                // monitor description), not "[monitor] …".
+                // Strip the baked "[monitor] " / "[wait] " prefix so the
+                // completed label matches the "Task started" path (which uses
+                // the bare description), not "[monitor] …" / "[wait] …".
                 let d = d
                     .strip_prefix("[monitor] ")
+                    .or_else(|| d.strip_prefix(xai_grok_tools::implementations::grok_build::wait_for::WAIT_DISPLAY_PREFIX))
                     .map(str::to_string)
                     .unwrap_or(d);
                 let t = d.trim();

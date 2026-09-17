@@ -975,6 +975,17 @@ pub(crate) mod test_helpers {
         }
     }
 
+    /// An ownership cell for a registry entry a test registers by hand.
+    pub(crate) fn ownership_cell()
+    -> Arc<std::sync::Mutex<crate::implementations::grok_build::wait_for::WatcherOwnership>> {
+        Arc::new(std::sync::Mutex::new(
+            crate::implementations::grok_build::wait_for::WatcherOwnership {
+                owner_session_id: None,
+                handle: crate::notification::ToolNotificationHandle::noop(),
+            },
+        ))
+    }
+
     pub(crate) fn make_snapshot(
         task_id: &str,
         completed: bool,
@@ -1040,7 +1051,7 @@ mod tests {
         let mut resources = resources_with_terminal(None);
         let registry = Arc::new(WaitForRegistry::default());
         let (_tx, _rx) = tokio::sync::mpsc::channel(1);
-        let slot = registry.register("wait-live", _tx);
+        let slot = registry.register("wait-live", _tx, ownership_cell());
         slot.publish(make_snapshot("wait-live", false, Some(1)));
         resources.insert(registry);
 
@@ -1072,7 +1083,7 @@ mod tests {
         let mut resources = resources_with_terminal(None);
         let registry = Arc::new(WaitForRegistry::default());
         let (_tx, _rx) = tokio::sync::mpsc::channel(1);
-        let slot = registry.register("wait-soon", _tx);
+        let slot = registry.register("wait-soon", _tx, ownership_cell());
         slot.publish(make_snapshot("wait-soon", false, None));
         resources.insert(registry);
 
@@ -1112,7 +1123,7 @@ mod tests {
         let mut resources = resources_with_terminal(None);
         let registry = Arc::new(WaitForRegistry::default());
         let (_tx, _rx) = tokio::sync::mpsc::channel(1);
-        let slot = registry.register("wait-done", _tx);
+        let slot = registry.register("wait-done", _tx, ownership_cell());
         slot.finish(make_snapshot("wait-done", true, Some(0)));
         registry.forget("wait-done");
         resources.insert(registry);
@@ -1141,7 +1152,7 @@ mod tests {
         let terminal: Arc<dyn TerminalBackend> = Arc::new(MockTerminal::empty());
         let registry = Arc::new(WaitForRegistry::default());
         let (_tx, _rx) = tokio::sync::mpsc::channel(1);
-        let slot = registry.register("wait-pending", _tx);
+        let slot = registry.register("wait-pending", _tx, ownership_cell());
         slot.publish(make_snapshot("wait-pending", false, None));
 
         let resolved = resolve_tasks(

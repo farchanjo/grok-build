@@ -1079,6 +1079,7 @@ async fn file_toolset_override_e2e_to_finalized_toolset() {
         notification_handle: ToolNotificationHandle::noop(),
         owner_session_id: None,
         parent_scheduler_handle: None,
+        parent_wait_registry: None,
         skills: vec![],
         state_path: tmp.path().join("state.json"),
         memory_backend: None,
@@ -1207,6 +1208,7 @@ fn make_test_handle_with_channels(
         terminal_backend: None,
         tools_notification_handle: None,
         scheduler_handle: None,
+        wait_registry: None,
         subagent_model_meta: std::sync::Arc::new(parking_lot::Mutex::new(None)),
     }
 }

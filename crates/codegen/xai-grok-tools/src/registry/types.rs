@@ -252,6 +252,13 @@ pub struct SessionContext {
     /// subagent exit.
     pub parent_scheduler_handle:
         Option<crate::implementations::grok_build::scheduler::types::SchedulerHandle>,
+    /// Parent's live `wait_for` watcher registry. When `Some`, the session
+    /// registers its own watchers there instead of creating a private registry,
+    /// so a wait started inside a subagent survives the subagent's exit and the
+    /// parent adopts it (see `WaitForRegistry::adopt`). Same shape as
+    /// `parent_scheduler_handle`, and for the same reason.
+    pub parent_wait_registry:
+        Option<Arc<crate::implementations::grok_build::wait_for::WaitForRegistry>>,
     /// Available skills for the Skill tool and description templates.
     pub skills: Vec<SkillInfo>,
     /// File path for persisting Resources state across restarts.
@@ -1280,6 +1287,15 @@ impl ToolRegistryBuilder {
         }
         let renderer_arc = Arc::new(renderer.clone());
         resources.insert(renderer);
+        // Always present: a watcher registers here, and the session handle reads
+        // it back so a subagent can hand it to its own children and so the parent
+        // can adopt whatever the child left running.
+        resources.insert(ctx.parent_wait_registry.unwrap_or_else(|| {
+            Arc::new(
+                crate::implementations::grok_build::wait_for::WaitForRegistry
+                    ::bound_to_current_runtime(),
+            )
+        }));
         let (scheduler_cmd_rx, scheduler_cancel_token) =
             if let Some(parent_handle) = ctx.parent_scheduler_handle {
                 resources.insert(parent_handle);
@@ -2148,6 +2164,7 @@ mod tests {
             notification_handle: crate::notification::ToolNotificationHandle::noop(),
             owner_session_id: None,
             parent_scheduler_handle: None,
+            parent_wait_registry: None,
             skills: vec![],
             state_path: tmp.path().join("state.json"),
             memory_backend: None,

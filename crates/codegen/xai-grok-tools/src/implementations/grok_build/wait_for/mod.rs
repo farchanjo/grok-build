@@ -20,12 +20,12 @@ use std::time::{Duration, Instant, SystemTime};
 pub use types::{
     DEFAULT_ATTEMPT_TIMEOUT, DEFAULT_MAX_TIMEOUT, DEFAULT_RETRY_INITIAL,
     DEFAULT_RETRY_JITTER_PERMILLE, DEFAULT_RETRY_MAX, DEFAULT_RETRY_MULTIPLIER, DEFAULT_TIMEOUT,
-    WAIT_DESCRIPTION_PREFIX, WAIT_FOR_TOOL_NAME, WaitForError, WaitForInput, WaitForOutput,
-    WaitForParams, WaitOutcome, parse_until,
+    WAIT_DESCRIPTION_PREFIX, WAIT_DISPLAY_PREFIX, WAIT_FOR_TOOL_NAME, WaitForError, WaitForInput,
+    WaitForOutput, WaitForParams, WaitOutcome, parse_until,
 };
 pub use watcher::{
-    CANCELLED_SIGNAL, TIMEOUT_SIGNAL, WaitForRegistry, WaitSlot, WatcherSpec, spawn_watcher,
-    watcher_task_id,
+    CANCELLED_SIGNAL, TIMEOUT_SIGNAL, WaitForRegistry, WaitSlot, WatcherOwnership, WatcherSpec,
+    spawn_watcher, watcher_task_id,
 };
 
 use crate::types::requirements::{Expr, ToolRequirement};
@@ -293,6 +293,12 @@ impl xai_tool_runtime::Tool for WaitForTool {
             description: None,
         });
 
+        // The owner/handle cell is shared with the registry entry, so a parent
+        // session that adopts this watcher can retarget both in place.
+        let ownership = Arc::new(std::sync::Mutex::new(watcher::WatcherOwnership {
+            owner_session_id: owner_session_id.clone(),
+            handle: notification_handle.clone(),
+        }));
         spawn_watcher(
             Arc::downgrade(&terminal),
             registry,
@@ -315,8 +321,8 @@ impl xai_tool_runtime::Tool for WaitForTool {
                 tool_call_id: ctx.call_id.as_str().to_owned(),
                 owner_session_id,
                 started_at: SystemTime::now(),
+                ownership,
             },
-            notification_handle,
         );
 
         Ok(finish(
