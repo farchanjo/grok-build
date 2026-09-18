@@ -1682,12 +1682,16 @@ impl SessionActor {
             ..current
         };
         self.agent.borrow_mut().set_compaction_policy(updated);
+        // Read at compaction time, so a live reload (TUI toggle or
+        // `x.ai/internal/reload_compaction`) applies without a restart.
+        *self.compaction.jev.borrow_mut() = resolved.jev.clone();
         tracing::info!(
             strategy = ?resolved.strategy,
             trigger_policy = ?resolved.trigger_policy,
             rolling_band_count = resolved.rolling_band_count,
             resolver_tools = resolved.resolver_tools,
             models = ?resolved.models,
+            jev_enabled = resolved.jev.is_enabled(),
             "updated live compaction policy",
         );
     }

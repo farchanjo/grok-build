@@ -440,6 +440,12 @@ pub struct CompactionConfig {
     pub compaction_mode: xai_chat_state::CompactionMode,
     /// When `true`, feed the summarizer the verbatim conversation instead of the lossy rewrite (the retry loop may still fall back).
     pub verbatim_input: bool,
+    /// Resolved `[compaction.jev]` policy, read at compaction time.
+    ///
+    /// `RefCell` so the live `UpdateCompactionConfig` fan-out can refresh it
+    /// without holding `&mut self` on the actor (`SessionActor` is `!Send`).
+    /// Disabled means zero HTTP calls and no behavioural change.
+    pub jev: std::cell::RefCell<crate::session::helpers::jev_prune::ResolvedJevPrune>,
     pub tool_choice: crate::util::config::CompactionToolChoice,
     /// Prefire two-pass state (background NOTE₁ cache + in-flight guard).
     /// `Default` (empty cache, not in-flight).

@@ -6,8 +6,8 @@ use super::setters::{
     set_auto_light_theme_inner, set_auto_update_inner, set_collapsed_edit_blocks_inner,
     set_combine_queued_prompts_inner, set_compact_mode, set_compact_mode_inner,
     set_compaction_band_count_inner, set_compaction_fallback_model_inner,
-    set_compaction_primary_model_inner, set_compaction_strategy_inner,
-    set_compaction_trigger_policy_inner, set_contextual_hint_inner,
+    set_compaction_jev_enabled_inner, set_compaction_primary_model_inner,
+    set_compaction_strategy_inner, set_compaction_trigger_policy_inner, set_contextual_hint_inner,
     set_conversation_language_inner, set_default_model_inner,
     set_default_selected_permission_inner, set_display_refresh_auto_cadence_inner,
     set_fork_secondary_model_inner, set_group_tool_verbs_inner, set_hunk_tracker_mode_inner,
@@ -1292,6 +1292,9 @@ fn compaction_snapshot_fields(
             activity,
             Some(crate::acp::tracker::TurnActivity::AutoCompacting)
         ),
+        // Read from the raw config, not the resolved struct: `[compaction.jev]`
+        // is optional and a missing table means OFF.
+        compaction_jev_enabled: config.jev.as_ref().is_some_and(|jev| jev.enabled),
         ..Default::default()
     }
 }
@@ -1669,6 +1672,10 @@ pub(in crate::app::dispatch) fn action_for_reset(
         }
         // Band count: int round-trip.
         ("compaction_band_count", SettingValue::Int(i)) => Some(Action::SetCompactionBandCount(*i)),
+        // Jev pruning: bool round-trip (registered default is OFF).
+        ("compaction_jev_enabled", SettingValue::Bool(b)) => {
+            Some(Action::SetCompactionJevEnabled(*b))
+        }
         // Primary model: blank or the explicit sentinel → active session route.
         ("compaction_primary_model", SettingValue::String(s)) => {
             if s.is_empty() || s == "@session" {
@@ -2017,6 +2024,9 @@ pub(in crate::app::dispatch) fn apply_setting_rollback(
         }
         ("compaction_band_count", SettingValue::Int(i)) => {
             set_compaction_band_count_inner(app, *i);
+        }
+        ("compaction_jev_enabled", SettingValue::Bool(b)) => {
+            set_compaction_jev_enabled_inner(app, *b);
         }
         ("compaction_primary_model", SettingValue::String(s)) => {
             set_compaction_primary_model_inner(app, s.clone());

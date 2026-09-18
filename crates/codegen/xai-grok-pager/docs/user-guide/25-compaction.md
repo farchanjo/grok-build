@@ -173,6 +173,68 @@ Grok does **not** switch routes for authentication, invalid configuration, priva
 
 ---
 
+## Jev-Guided Pruning
+
+Before the summarizer runs, Grok can ask Jev, TypeSafe's pruning model, which tool calls and tool results are still needed, then drop or truncate the rest from the view the summarizer sees. Jev is served through OpenRouter's decisions endpoint, so the call uses the OpenRouter credential you already have. User and assistant text is never touched.
+
+Pruning is **view-only**. The authoritative conversation, the compaction checkpoint, and `/rewind` are unchanged; only the copy handed to the summarizer is pruned. The summary itself still comes from the model resolved through `[compaction] models`, and Jev never writes summary text.
+
+Jev pruning is unrelated to `[compaction.pruning]`, which trims tool results in the live conversation itself; Jev only shapes the view for one compaction (see [Memory](13-memory.md#pruning-settings-compactionpruning)).
+
+Off by default. Turn it on in `/settings` → **Compaction** → **Jev-guided pruning**, which persists `[compaction.jev] enabled = true`. The change reaches a running session without a restart: toggling in the TUI pushes the new policy to the live session, while editing `config.toml` by hand is picked up live only when Grok runs in leader mode.
+
+### How It Works
+
+1. Grok pins the first conversation item and the newest `preserve_recent_messages` messages, then collects the remaining tool calls and their results as pruning candidates.
+2. For each candidate, Jev answers two questions: whether the tool call is still needed, and whether the tool result is still needed verbatim.
+3. Each answer becomes one of three outcomes: keep the call and the result, keep the call and replace the result with a short head plus a note, or drop the call and the result together.
+4. Grok applies the decisions to the view that goes to the summarizer. Decisions are keyed by tool call ID, so they survive the input fitter's own rewrites and are re-applied when a compaction request steps down to a smaller input stage. Jev is asked once per compaction.
+
+The compaction log records the outcome, the `jev_prune` prep stage, candidate and request counts, kept/truncated/dropped tallies, elapsed time, and the reason whenever pruning is skipped.
+
+### Configuration
+
+```toml
+[compaction.jev]
+enabled = false                     # off by default
+model = "~typesafe/jev-latest"      # plain model string; not a catalog entry
+endpoint = "https://openrouter.ai/api/alpha/decisions"   # optional
+api_key_env = "OPENROUTER_API_KEY"  # optional credential override
+keep_threshold = 0.5                # 0.0-1.0 confidence required to keep
+preserve_recent_messages = 6        # newest messages pinned, never pruned
+max_state_tokens = 25000            # budget for the state sent to Jev
+max_request_tokens = 30000          # budget for state plus questions per request
+truncate_head_chars = 300           # characters kept when a result is truncated
+timeout_ms = 8000                   # per-request budget
+
+# Optional provider routing, mirroring the OpenRouter provider instance
+zdr = true
+data_collection = "deny"
+require_parameters = true
+```
+
+`keep_threshold` must be between `0.0` and `1.0`; `max_state_tokens`, `max_request_tokens`, and `timeout_ms` must be greater than `0`; `model` must not be blank. `endpoint` and `api_key_env` are optional.
+
+### Credentials
+
+Jev is reached through OpenRouter's decisions endpoint. That endpoint is not a chat endpoint, and the Jev model is not a catalog entry, so no `[model.*]` block is needed and `[compaction] models` is unrelated to it.
+
+By default the call uses the OpenRouter credential already stored in `auth.json`, the same one `/providers` manages. Set `api_key_env` to read another environment variable instead; `GROK_JEV_API_KEY` is tried next, then the stored OpenRouter key.
+
+### Fail-Open Behavior
+
+Any Jev failure, including a missing credential, a timeout, an HTTP error, or malformed answers, leaves the compaction input exactly as it is today and never fails the compaction. The fallback reason is logged.
+
+Because `/api/alpha/decisions` is an alpha surface, `endpoint` is a config key: if the path moves, update the key rather than the binary. A `400` that mentions a decisions model not being usable with the chat/completions endpoint means `model` points at a chat model, or `endpoint` at a chat path.
+
+### Privacy
+
+The state sent to Jev is the conversation history with each tool result replaced by a short note (outcome plus character count), alongside a fixed context line and the goal taken from the last few user prompts. Full tool output is not sent; user and assistant text is. The request goes to OpenRouter and honors the `zdr`, `data_collection`, and `require_parameters` routing keys when set.
+
+Jev prices input only, and the state is resent with each question batch, so `max_state_tokens` is the main cost lever.
+
+---
+
 ## External Provider Privacy
 
 When using external providers (non-xAI models) for compaction:
@@ -250,6 +312,7 @@ Access compaction settings from the settings pane:
 | Rolling band count | int | 4 | Bands for rolling compaction (3-8) |
 | Primary compaction model | model | (session) | Model for summarization |
 | Fallback compaction model | model | (empty) | Model when primary fails |
+| Jev-guided pruning | bool | Off | Ask Jev which tool calls and tool results to prune from the summarizer view |
 | Compaction status | status | Idle | Read-only live status; shows Compacting while automatic compaction runs |
 
 Changes made in the TUI settings pane are persisted to `config.toml` under `[compaction]`.
@@ -290,6 +353,9 @@ auto_compact_threshold_percent = 85    # Trigger percentage
 
 [compaction.memory_flush]
 enabled = false    # Flush memory before compaction
+
+[compaction.jev]
+enabled = false    # Jev-guided pruning of tool calls and results (off by default)
 ```
 
 ---
@@ -301,6 +367,7 @@ enabled = false    # Flush memory before compaction
 | `GROK_AUTO_COMPACT_THRESHOLD_PERCENT` | Override auto-compact threshold percentage |
 | `GROK_COMPACTION_MODE` | Override compaction mode (`summary`, `transcript`, `segments`) |
 | `GROK_COMPACTION_DETAIL` | Override segment detail level (`none`, `minimal`, `balanced`, `verbose`) |
+| `GROK_JEV_API_KEY` | Credential for the Jev pruning call when no OpenRouter credential is stored |
 
 ---
 
@@ -324,6 +391,13 @@ enabled = false    # Flush memory before compaction
 - Verify the model's context window in the model configuration
 - Use `/session-info` to see current token usage
 
+### Compaction ran but tool results were not pruned
+
+- Confirm `/settings` → **Compaction** → **Jev-guided pruning** is ON; with the setting off, Grok makes no Jev request at all.
+- Confirm an OpenRouter credential is available, or that `api_key_env` / `GROK_JEV_API_KEY` resolves to a working key, and that `endpoint` is reachable.
+- A Jev failure fails open by design: the compaction still succeeds and the log records the reason. A `400` naming the decisions endpoint means `model` is a chat model or `endpoint` points at a chat path; a `404` means the alpha path moved.
+- Only tool calls outside the pinned first item and the newest `preserve_recent_messages` messages are candidates, so a short conversation with little tool output may have nothing to prune.
+
 ---
 
 ## See Also
@@ -331,5 +405,6 @@ enabled = false    # Flush memory before compaction
 - [Configuration](05-configuration.md) — Full `config.toml` reference
 - [Session Management](17-sessions.md) — Session persistence and rewind
 - [Memory](13-memory.md) — Pre-compaction memory flush
+- [Custom Models](11-custom-models.md) — Provider credentials and OpenRouter endpoint setup
 - [Media Understanding](28-media-understanding.md) — Descriptor persistence and compaction enrichment
 - [Slash Commands](04-slash-commands.md) — `/compact`, `/rewind`, `/session-info`

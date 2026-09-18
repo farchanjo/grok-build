@@ -655,6 +655,11 @@ pub enum Action {
     SetCompactionFallbackModel(acp::ModelId),
     /// Clear the persisted fallback compaction model.
     ClearCompactionFallbackModel,
+    /// Enable/disable Jev-guided compaction pruning.
+    /// SHELL-owned: persisted to `[compaction.jev].enabled` via
+    /// `Effect::PersistSetting`. Live-applied: the reload fan-out picks the
+    /// new value up without a restart.
+    SetCompactionJevEnabled(bool),
     /// Set media routing (`auto` | `tools_only` | `off`).
     /// SHELL-owned: persisted to `[media].mode` via `Effect::PersistSetting`.
     SetMediaRouting(String),

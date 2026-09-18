@@ -1106,6 +1106,8 @@ pub(super) fn action_for_bool(key: SettingKey, new: bool) -> Option<Action> {
         }
         "auto_update" => None,
         "display_refresh_auto_cadence" => Some(Action::SetDisplayRefreshAutoCadence(new)),
+        // Jev-guided compaction pruning: plain bool, no preview.
+        "compaction_jev_enabled" => Some(Action::SetCompactionJevEnabled(new)),
         _ => None,
     }
 }

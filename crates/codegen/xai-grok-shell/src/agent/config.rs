@@ -1124,6 +1124,8 @@ pub enum CompactionConfigError {
     DuplicateModel,
     /// Invalid band count (not in 3..=8).
     InvalidBand(usize),
+    /// Invalid `[compaction.jev]` knob (message names the offending field).
+    InvalidJevPrune(String),
 }
 
 impl std::fmt::Display for CompactionConfigError {
@@ -1133,11 +1135,127 @@ impl std::fmt::Display for CompactionConfigError {
             Self::TooManyModels => write!(f, "compaction models cannot exceed 2"),
             Self::DuplicateModel => write!(f, "compaction models cannot contain duplicates"),
             Self::InvalidBand(n) => write!(f, "compaction band must be between 3 and 8, got {n}"),
+            Self::InvalidJevPrune(msg) => write!(f, "invalid [compaction.jev]: {msg}"),
         }
     }
 }
 
 impl std::error::Error for CompactionConfigError {}
+
+/// Jev-guided compaction pruning (`[compaction.jev]`).
+///
+/// When `enabled`, a compaction asks Jev which stale tool calls and tool
+/// results are no longer needed and prunes them from the view handed to the
+/// summarizer. User and assistant text is never touched, and the authoritative
+/// conversation is left alone — the prune is view-only. Off by default and
+/// fail-open: any Jev failure leaves the summarizer input exactly as it is.
+///
+/// ```toml
+/// [compaction.jev]
+/// enabled = false
+/// model = "~typesafe/jev-latest"
+/// ```
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct JevPruneConfig {
+    /// Master switch. `false` (default) makes zero Jev requests.
+    pub enabled: bool,
+    /// Jev model reference. A plain string: the decisions endpoint is not a
+    /// chat/completions surface, so the model is not a catalog entry.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// Decisions endpoint override. Default: OpenRouter's alpha decisions path.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub endpoint: Option<String>,
+    /// Environment variable holding the credential. Default: the OpenRouter
+    /// key from `auth.json`, then `GROK_JEV_API_KEY`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub api_key_env: Option<String>,
+    /// Confidence threshold in `0.0..=1.0`; answers below it prune.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub keep_threshold: Option<f64>,
+    /// Newest user turns (plus the pinned first item) that are never pruned.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub preserve_recent_messages: Option<usize>,
+    /// Upper bound for the Jev state payload, in estimated tokens.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_state_tokens: Option<usize>,
+    /// Upper bound for one Jev request (state plus questions), in tokens.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_request_tokens: Option<usize>,
+    /// Characters kept from a truncated tool result, plus a one-line note.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub truncate_head_chars: Option<usize>,
+    /// Per-request timeout in milliseconds.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub timeout_ms: Option<u64>,
+    /// Ask the router for zero-data-retention providers.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub zdr: Option<bool>,
+    /// Provider `data_collection` posture (`allow` | `deny`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub data_collection: Option<String>,
+    /// Require providers that support every request parameter.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub require_parameters: Option<bool>,
+}
+
+impl JevPruneConfig {
+    /// Validate the Jev pruning knobs.
+    ///
+    /// Every knob is optional; `None` defers to the client defaults. Only blank
+    /// strings and out-of-range numbers are rejected, so a partially written
+    /// `[compaction.jev]` table still loads.
+    pub fn validate(&self) -> Result<(), CompactionConfigError> {
+        if self.model.as_deref().is_some_and(|m| m.trim().is_empty()) {
+            return Err(CompactionConfigError::InvalidJevPrune(
+                "model cannot be blank".to_owned(),
+            ));
+        }
+        if self
+            .endpoint
+            .as_deref()
+            .is_some_and(|e| e.trim().is_empty())
+        {
+            return Err(CompactionConfigError::InvalidJevPrune(
+                "endpoint cannot be blank".to_owned(),
+            ));
+        }
+        if self
+            .api_key_env
+            .as_deref()
+            .is_some_and(|e| e.trim().is_empty())
+        {
+            return Err(CompactionConfigError::InvalidJevPrune(
+                "api_key_env cannot be blank".to_owned(),
+            ));
+        }
+        if let Some(threshold) = self.keep_threshold
+            && !(0.0..=1.0).contains(&threshold)
+        {
+            return Err(CompactionConfigError::InvalidJevPrune(format!(
+                "keep_threshold must be between 0.0 and 1.0, got {threshold}"
+            )));
+        }
+        for (name, value) in [
+            ("preserve_recent_messages", self.preserve_recent_messages),
+            ("max_state_tokens", self.max_state_tokens),
+            ("max_request_tokens", self.max_request_tokens),
+        ] {
+            if value == Some(0) {
+                return Err(CompactionConfigError::InvalidJevPrune(format!(
+                    "{name} must be greater than 0"
+                )));
+            }
+        }
+        if self.timeout_ms == Some(0) {
+            return Err(CompactionConfigError::InvalidJevPrune(
+                "timeout_ms must be greater than 0".to_owned(),
+            ));
+        }
+        Ok(())
+    }
+}
 
 /// Configuration for compaction.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -1165,6 +1283,10 @@ pub struct CompactionConfig {
     /// Default: true.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub resolver_tools: Option<bool>,
+    /// Jev-guided pruning of the view handed to the summarizer.
+    /// Absent (or `enabled = false`) keeps today's behaviour.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub jev: Option<JevPruneConfig>,
 }
 
 impl CompactionConfig {
@@ -1205,12 +1327,22 @@ impl CompactionConfig {
             return Err(CompactionConfigError::InvalidBand(rolling_band_count));
         }
 
+        // Jev pruning is optional and view-only, but a malformed table must not
+        // silently disable it: reject out-of-range knobs here so the settings
+        // writer and the config reloader share one gate.
+        if let Some(jev) = &self.jev {
+            jev.validate()?;
+        }
+
         Ok(ResolvedCompactionConfig {
             models,
             strategy,
             trigger_policy,
             rolling_band_count,
             resolver_tools: self.resolver_tools.unwrap_or(true),
+            jev: crate::session::helpers::jev_prune::ResolvedJevPrune::from_config(
+                self.jev.as_ref(),
+            ),
         })
     }
 }
@@ -1228,6 +1360,8 @@ pub struct ResolvedCompactionConfig {
     pub rolling_band_count: usize,
     /// Whether the summarizer may run read-only artifact lookups first.
     pub resolver_tools: bool,
+    /// Resolved Jev-guided pruning policy (disabled when `[compaction.jev]` is absent).
+    pub jev: crate::session::helpers::jev_prune::ResolvedJevPrune,
 }
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(default)]
@@ -3289,6 +3423,18 @@ impl Config {
             .default(true)
             .resolve()
             .value
+    }
+    /// Resolve the Jev-guided pruning policy from `[compaction.jev]`.
+    ///
+    /// Absent or `enabled = false` resolves to a disabled policy: zero HTTP
+    /// calls and no behavioural change. Resolved once per session spawn and
+    /// refreshed by the live compaction-config reload.
+    pub(crate) fn resolve_compaction_jev(
+        &self,
+    ) -> crate::session::helpers::jev_prune::ResolvedJevPrune {
+        crate::session::helpers::jev_prune::ResolvedJevPrune::from_config(
+            self.compaction.jev.as_ref(),
+        )
     }
     pub(crate) fn resolve_compaction_tool_choice(
         &self,
@@ -16295,6 +16441,7 @@ default = "grok-4.5"
             trigger_policy: CompactionTriggerPolicy::Fixed,
             rolling_band_count: 4,
             resolver_tools: true,
+            jev: crate::session::helpers::jev_prune::ResolvedJevPrune::disabled(),
         };
         let resolved2 = ResolvedCompactionConfig {
             models: vec![CompactionModelRef::new("@session".to_string()).unwrap()],
@@ -16302,6 +16449,7 @@ default = "grok-4.5"
             trigger_policy: CompactionTriggerPolicy::Fixed,
             rolling_band_count: 4,
             resolver_tools: true,
+            jev: crate::session::helpers::jev_prune::ResolvedJevPrune::disabled(),
         };
         assert_eq!(resolved1, resolved2);
     }
@@ -16347,6 +16495,146 @@ default = "grok-4.5"
         let cfg = Config::new_from_toml_cfg(&raw).expect("config should parse");
         assert_eq!(cfg.compaction.resolver_tools, Some(false));
         assert!(!cfg.compaction.normalize_validate().unwrap().resolver_tools);
+    }
+
+    /// Jev pruning ships off: an absent table resolves to a disabled policy
+    /// with the documented defaults, and the resolved policy is what the
+    /// session carries.
+    #[test]
+    fn compaction_jev_defaults_to_disabled() {
+        let cfg = CompactionConfig::default();
+        assert_eq!(cfg.jev, None);
+        let resolved = cfg.normalize_validate().unwrap();
+        assert!(!resolved.jev.is_enabled());
+        assert_eq!(
+            resolved.jev,
+            crate::session::helpers::jev_prune::ResolvedJevPrune::disabled()
+        );
+        assert_eq!(
+            resolved.jev.endpoint,
+            "https://openrouter.ai/api/alpha/decisions"
+        );
+        assert_eq!(resolved.jev.model, "~typesafe/jev-latest");
+
+        let raw: toml::Value = toml::from_str(
+            r#"
+            [compaction]
+            models = ["@session"]
+            "#,
+        )
+        .unwrap();
+        let cfg = Config::new_from_toml_cfg(&raw).expect("config should parse");
+        assert!(
+            !cfg.compaction
+                .normalize_validate()
+                .unwrap()
+                .jev
+                .is_enabled()
+        );
+    }
+
+    #[test]
+    fn compaction_jev_parses_and_resolves_from_toml() {
+        let raw: toml::Value = toml::from_str(
+            r#"
+            [compaction.jev]
+            enabled = true
+            model = "~typesafe/jev-latest"
+            keep_threshold = 0.75
+            preserve_recent_messages = 3
+            max_state_tokens = 12000
+            max_request_tokens = 15000
+            truncate_head_chars = 120
+            timeout_ms = 1500
+            zdr = true
+            data_collection = "deny"
+            require_parameters = true
+            "#,
+        )
+        .unwrap();
+        let cfg = Config::new_from_toml_cfg(&raw).expect("config should parse");
+        let resolved = cfg.compaction.normalize_validate().unwrap();
+        assert!(resolved.jev.is_enabled());
+        assert_eq!(resolved.jev.keep_threshold, 0.75);
+        assert_eq!(resolved.jev.preserve_recent_messages, 3);
+        assert_eq!(resolved.jev.max_state_tokens, 12_000);
+        assert_eq!(resolved.jev.max_request_tokens, 15_000);
+        assert_eq!(resolved.jev.truncate_head_chars, 120);
+        assert_eq!(resolved.jev.timeout_ms, 1_500);
+        assert_eq!(
+            resolved.jev.provider_block(),
+            Some(serde_json::json!({
+                "zdr": true,
+                "data_collection": "deny",
+                "require_parameters": true,
+            }))
+        );
+    }
+
+    #[test]
+    fn compaction_jev_validation_boundaries() {
+        let cases = [
+            ("keep_threshold", "1.5", "keep_threshold"),
+            ("keep_threshold", "-0.1", "keep_threshold"),
+            ("max_state_tokens", "0", "max_state_tokens"),
+            ("max_request_tokens", "0", "max_request_tokens"),
+            ("preserve_recent_messages", "0", "preserve_recent_messages"),
+            ("timeout_ms", "0", "timeout_ms"),
+            ("model", "\"\"", "model"),
+            ("endpoint", "\"\"", "endpoint"),
+            ("api_key_env", "\"\"", "api_key_env"),
+        ];
+        for (field, value, expected) in cases {
+            let raw: toml::Value = toml::from_str(&format!(
+                "[compaction.jev]\nenabled = true\n{field} = {value}\n"
+            ))
+            .unwrap();
+            let cfg = Config::new_from_toml_cfg(&raw).expect("config should parse");
+            let error = cfg.compaction.normalize_validate().unwrap_err();
+            let message = error.to_string();
+            assert!(
+                matches!(error, CompactionConfigError::InvalidJevPrune(_)),
+                "{field} = {value} should be rejected"
+            );
+            assert!(message.contains(expected), "{message}");
+        }
+
+        // Boundary values are accepted.
+        for (field, value) in [
+            ("keep_threshold", "0.0"),
+            ("keep_threshold", "1.0"),
+            ("max_state_tokens", "1"),
+            ("max_request_tokens", "1"),
+            ("preserve_recent_messages", "1"),
+            ("timeout_ms", "1"),
+        ] {
+            let raw: toml::Value = toml::from_str(&format!(
+                "[compaction.jev]\nenabled = true\n{field} = {value}\n"
+            ))
+            .unwrap();
+            let cfg = Config::new_from_toml_cfg(&raw).expect("config should parse");
+            assert!(
+                cfg.compaction.normalize_validate().is_ok(),
+                "{field} = {value} should be accepted"
+            );
+        }
+    }
+
+    #[test]
+    fn resolve_compaction_jev_reads_the_config_table() {
+        let raw: toml::Value = toml::from_str(
+            r#"
+            [compaction.jev]
+            enabled = true
+            model = "custom/jev"
+            "#,
+        )
+        .unwrap();
+        let cfg = Config::new_from_toml_cfg(&raw).expect("config should parse");
+        let resolved = cfg.resolve_compaction_jev();
+        assert!(resolved.is_enabled());
+        assert_eq!(resolved.model, "custom/jev");
+        assert!(!Config::default().resolve_compaction_jev().is_enabled());
     }
 
     #[test]

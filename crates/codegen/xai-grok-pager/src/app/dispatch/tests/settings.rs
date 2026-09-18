@@ -1497,6 +1497,9 @@ fn move_setting_away_from_default(app: &mut AppView, key: crate::settings::Setti
         "compaction_band_count" => {
             let _ = dispatch(Action::SetCompactionBandCount(6), app);
         }
+        "compaction_jev_enabled" => {
+            let _ = dispatch(Action::SetCompactionJevEnabled(true), app);
+        }
         "compaction_primary_model" => {
             use agent_client_protocol as acp;
             use std::sync::Arc;
@@ -3659,6 +3662,55 @@ fn set_compaction_strategy_emits_persist_setting() {
         }
         other => panic!("expected PersistSetting, got {other:?}"),
     }
+}
+
+/// Test that SetCompactionJevEnabled emits PersistSetting with correct payload
+/// and flips the local snapshot, so the row repaints before the disk write.
+#[test]
+fn set_compaction_jev_enabled_emits_persist_setting() {
+    use crate::settings::SettingValue;
+    let mut app = test_app_with_agent();
+    assert!(
+        !app.compaction_config
+            .jev
+            .as_ref()
+            .is_some_and(|j| j.enabled)
+    );
+    let effects = dispatch(Action::SetCompactionJevEnabled(true), &mut app);
+    assert_eq!(effects.len(), 1);
+    match &effects[0] {
+        Effect::PersistSetting {
+            key,
+            value,
+            rollback_value,
+        } => {
+            assert_eq!(*key, "compaction_jev_enabled");
+            assert_eq!(*value, SettingValue::Bool(true));
+            assert_eq!(*rollback_value, SettingValue::Bool(false));
+        }
+        other => panic!("expected PersistSetting, got {other:?}"),
+    }
+    assert!(
+        app.compaction_config
+            .jev
+            .as_ref()
+            .is_some_and(|j| j.enabled),
+        "local snapshot must flip optimistically"
+    );
+}
+
+/// Toggling to the already-effective value is idempotent (no effects).
+#[test]
+fn set_compaction_jev_enabled_idempotent_when_unchanged() {
+    let mut app = test_app_with_agent();
+    let effects = dispatch(Action::SetCompactionJevEnabled(false), &mut app);
+    assert!(
+        effects.is_empty(),
+        "absent [compaction.jev] already means off"
+    );
+    let _ = dispatch(Action::SetCompactionJevEnabled(true), &mut app);
+    let effects = dispatch(Action::SetCompactionJevEnabled(true), &mut app);
+    assert!(effects.is_empty(), "second enable is a no-op");
 }
 
 /// Test that SetMediaRouting emits PersistSetting with correct payload.

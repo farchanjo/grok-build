@@ -3520,6 +3520,7 @@ impl MvpAgent {
             .cfg
             .borrow()
             .resolve_compaction_verbatim_input();
+        let compaction_jev = self.cfg.borrow().resolve_compaction_jev();
         let compaction_tool_choice = self.cfg.borrow().resolve_compaction_tool_choice();
         let two_pass_enabled = self.cfg.borrow().is_two_pass_compaction_enabled();
         let auto_update = self.cfg.borrow().cli.auto_update;
@@ -3941,6 +3942,7 @@ impl MvpAgent {
                     system_prompt_label,
                     compaction_mode,
                     compaction_verbatim_input,
+                    compaction_jev,
                     compaction_tool_choice,
                     two_pass_enabled,
                     buffering_settings,

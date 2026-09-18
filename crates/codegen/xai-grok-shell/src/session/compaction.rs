@@ -1327,17 +1327,110 @@ impl SessionActor {
             Vec::new()
         };
         self.emit_compaction_prep_stage("media_descriptors", &mut stage_mark, prep_started);
+        // Jev-guided pruning of the view handed to the summarizer.
+        //
+        // CRITICAL INVARIANT: this runs AFTER `source_identity` (which must stay
+        // computed from the authoritative `full_conversation`) and AFTER the
+        // media freeze, and only the *view* is pruned. Moving the prune before
+        // the identity makes every compaction fail with a `Stale` CAS rejection
+        // and a misleading message.
+        //
+        // Decide once here; the input ladder re-applies the same decisions to
+        // whatever it re-fetches, so a one-shot prune of `simplified_messages`
+        // alone would be lost on step-down. Every failure is fail-open: the
+        // unpruned view is used and the compaction never aborts because of Jev.
+        let jev_cfg = self.compaction.jev.borrow().clone();
+        let mut jev_decisions = crate::session::helpers::jev_prune::PruneDecisions::default();
+        let mut jev_stats = crate::session::helpers::jev_prune::PruneStats {
+            outcome: crate::session::helpers::jev_prune::PruneOutcome::SkippedDisabled,
+            ..Default::default()
+        };
+        if jev_cfg.is_enabled() {
+            // Collected once; `decide` receives the pairs instead of walking
+            // the conversation a second time.
+            let calls = crate::session::helpers::jev_prune::collect_candidates(
+                &full_conversation,
+                jev_cfg.preserve_recent_messages,
+            );
+            jev_stats.candidates = calls.iter().filter(|call| !call.pinned).count();
+            jev_stats.pinned = calls.len() - jev_stats.candidates;
+            if jev_stats.candidates == 0 {
+                jev_stats.outcome =
+                    crate::session::helpers::jev_prune::PruneOutcome::SkippedNoCandidates;
+            } else {
+                match crate::session::helpers::jev_prune::JevClient::new(
+                    &jev_cfg,
+                    &xai_grok_config::grok_home(),
+                ) {
+                    Ok(client) => {
+                        match crate::session::helpers::jev_prune::decide(
+                            &full_conversation,
+                            &calls,
+                            &jev_cfg,
+                            &client,
+                            &cancel,
+                        )
+                        .await
+                        {
+                            Ok((decisions, stats)) => {
+                                jev_decisions = decisions;
+                                jev_stats = stats;
+                            }
+                            Err(failure) => {
+                                tracing::warn!(
+                                    session_id = %self.session_info.id.0,
+                                    error = %failure.error,
+                                    "jev prune failed; continuing with the unpruned view"
+                                );
+                                // The failure carries the counters reached
+                                // before it (candidates, pinned, requests, ms).
+                                jev_stats = failure.stats;
+                            }
+                        }
+                    }
+                    Err(error) => {
+                        tracing::warn!(
+                            session_id = %self.session_info.id.0,
+                            %error,
+                            "jev client unavailable; continuing with the unpruned view"
+                        );
+                        jev_stats.outcome =
+                            crate::session::helpers::jev_prune::PruneOutcome::Failed(
+                                error.to_string(),
+                            );
+                    }
+                }
+            }
+        }
+        // One summary line with the counters, always — with the toggle off it
+        // reports `outcome=skipped_disabled` and zeros rather than going
+        // silent. Never an error out of here.
+        tracing::info!(
+            session_id = %self.session_info.id.0,
+            jev = %jev_stats.summary(),
+            "jev prune finished"
+        );
+        self.emit_compaction_prep_stage("jev_prune", &mut stage_mark, prep_started);
+        let summarizer_view = if jev_decisions.is_empty() {
+            full_conversation
+        } else {
+            crate::session::helpers::jev_prune::apply_decisions(
+                &full_conversation,
+                &jev_decisions,
+                jev_cfg.truncate_head_chars,
+            )
+        };
         const SUMMARY_BUDGET_RESERVE_TOKENS: u64 = 32_768;
         let verbatim_input_enabled = self.compaction.verbatim_input;
         let simplified_messages = if verbatim_input_enabled {
             xai_chat_state::compaction_utils::prepare_conversation_for_verbatim_summarization_with_descriptors(
-                full_conversation,
+                summarizer_view,
                 summary_strips_reasoning,
                 &media_descriptors,
             )
         } else {
             xai_chat_state::compaction_utils::prepare_conversation_for_summarization_with_descriptors(
-                full_conversation,
+                summarizer_view,
                 &media_descriptors,
             )
         };
@@ -1588,6 +1681,19 @@ impl SessionActor {
                                 "Compaction input overflowed deterministically; stepping down the input ladder to avoid an incompactable state"
                             );
                             let conv = self.chat_state_handle.get_conversation().await;
+                            // Re-apply the SAME decisions: the ladder refetches
+                            // the conversation from chat state, so a one-shot
+                            // prune of `simplified_messages` would be lost here.
+                            // No second Jev call.
+                            let conv = if jev_decisions.is_empty() {
+                                conv
+                            } else {
+                                crate::session::helpers::jev_prune::apply_decisions(
+                                    &conv,
+                                    &jev_decisions,
+                                    jev_cfg.truncate_head_chars,
+                                )
+                            };
                             request_turns = match stage {
                                 InputStage::VerbatimFitted => {
                                     let budget = context_window
@@ -2847,6 +2953,9 @@ mod inline_auto_compact_flow_tests {
                 previous_model: std::cell::Cell::new(None),
                 compaction_mode: xai_chat_state::CompactionMode::Transcript,
                 verbatim_input: true,
+                jev: std::cell::RefCell::new(
+                    crate::session::helpers::jev_prune::ResolvedJevPrune::disabled(),
+                ),
                 tool_choice: crate::util::config::CompactionToolChoice::Auto,
                 prefire: crate::session::compaction_config::PrefireState::default(),
                 prefix_released: std::sync::atomic::AtomicBool::new(false),

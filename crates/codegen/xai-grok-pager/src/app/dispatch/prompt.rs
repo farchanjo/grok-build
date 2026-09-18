@@ -601,6 +601,13 @@ pub(super) fn dispatch_send_prompt_inner(
                     auto_mode_gate: auto_mode_gate_from_app,
                     ask_user_question_timeout_enabled: ask_user_question_timeout_enabled_from_app,
                     voice_stt_language: voice_stt_language_from_app,
+                    // `/jev status` reads the live mirror (same source as the
+                    // settings modal), not a defaulted snapshot.
+                    compaction_jev_enabled: app
+                        .compaction_config
+                        .jev
+                        .as_ref()
+                        .is_some_and(|jev| jev.enabled),
                     ..Default::default()
                 },
             };

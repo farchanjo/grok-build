@@ -2324,6 +2324,53 @@ pub(in crate::app::dispatch) fn set_compaction_band_count(
     }]
 }
 
+/// State-only mutation for `compaction_jev_enabled`.
+///
+/// Creates the `[compaction.jev]` table on first enable; `enabled` is the only
+/// field the modal owns, so the sibling knobs stay untouched.
+pub(super) fn set_compaction_jev_enabled_inner(app: &mut AppView, value: bool) {
+    app.compaction_config
+        .jev
+        .get_or_insert_with(Default::default)
+        .enabled = value;
+}
+
+/// Outer dispatcher for `Action::SetCompactionJevEnabled`.
+///
+/// View-only pruning: the local snapshot flips immediately and the persisted
+/// write rides the existing `[compaction]` reload fan-out, so no restart is
+/// required.
+pub(in crate::app::dispatch) fn set_compaction_jev_enabled(
+    app: &mut AppView,
+    new: bool,
+) -> Vec<Effect> {
+    let prev = app
+        .compaction_config
+        .jev
+        .as_ref()
+        .is_some_and(|jev| jev.enabled);
+    if prev == new {
+        return vec![];
+    }
+    set_compaction_jev_enabled_inner(app, new);
+    refresh_open_settings_modals(app);
+    tracing::info!(
+        target: "settings",
+        key = "compaction_jev_enabled",
+        value = new,
+        "setting changed",
+    );
+    app.show_toast(&format!(
+        "\u{2713} Jev-guided pruning: {}",
+        if new { "on" } else { "off" }
+    ));
+    vec![Effect::PersistSetting {
+        key: "compaction_jev_enabled",
+        value: crate::settings::SettingValue::Bool(new),
+        rollback_value: crate::settings::SettingValue::Bool(prev),
+    }]
+}
+
 /// State-only mutation for `compaction_primary_model`.
 pub(super) fn set_compaction_primary_model_inner(app: &mut AppView, value: String) {
     let mut models = current_compaction_models(app);

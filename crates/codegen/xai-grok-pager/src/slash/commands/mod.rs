@@ -32,6 +32,7 @@ pub mod home;
 pub mod imagine;
 pub mod imagine_video;
 pub mod import_claude;
+pub mod jev;
 pub mod jump;
 pub mod loop_cmd;
 pub mod mcps;
@@ -105,6 +106,7 @@ pub fn builtin_commands() -> Vec<Arc<dyn SlashCommand>> {
         Arc::new(auto::AutoCommand),
         Arc::new(multiline::MultilineCommand),
         Arc::new(compact_mode::CompactModeCommand),
+        Arc::new(jev::JevCommand),
         Arc::new(vim_mode::VimModeCommand),
         Arc::new(tersify_cmd::TersifyCommand),
         Arc::new(subagents_cmd::SubagentsCommand),
@@ -291,6 +293,7 @@ mod tests {
             "imagine",
             "imagine-video",
             "import-claude",
+            "jev",
             "jump",
             "log",
             "loop",

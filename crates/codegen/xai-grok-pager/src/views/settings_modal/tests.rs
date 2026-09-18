@@ -919,6 +919,7 @@ fn rows_contain_categories_and_settings_through_pr_14() {
             "compaction_band_count",
             "compaction_primary_model",
             "compaction_fallback_model",
+            "compaction_jev_enabled",
             "compaction_status",
             // `auto_compact_threshold_percent` (Session category) is
             // not exposed in the modal.

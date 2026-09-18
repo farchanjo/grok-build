@@ -198,6 +198,9 @@ async fn create_test_actor_with_memory(
             previous_model: std::cell::Cell::new(None),
             compaction_mode: xai_chat_state::CompactionMode::Transcript,
             verbatim_input: true,
+            jev: std::cell::RefCell::new(
+                crate::session::helpers::jev_prune::ResolvedJevPrune::disabled(),
+            ),
             tool_choice: crate::util::config::CompactionToolChoice::Auto,
             prefire: crate::session::compaction_config::PrefireState::default(),
             prefix_released: std::sync::atomic::AtomicBool::new(false),

@@ -2197,10 +2197,17 @@ pub(crate) fn execute(
                 );
         }
         Effect::PersistSetting { key, value, rollback_value } => {
+            let tx = acp_tx.clone();
             tasks
                 .spawn(async move {
                     match persist_setting(key, value.clone()).await {
                         Ok(()) => {
+                            // The in-process agent installs no config-file
+                            // watcher, so a compaction toggle would otherwise
+                            // only reach a running session after a restart.
+                            if setting_changes_compaction(key) {
+                                notify_compaction_reload(&tx).await;
+                            }
                             TaskResult::SettingPersisted {
                                 key,
                                 value,

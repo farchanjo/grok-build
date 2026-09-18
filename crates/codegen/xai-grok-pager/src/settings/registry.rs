@@ -666,6 +666,8 @@ pub struct PagerLocalSnapshot {
     pub compaction_fallback_model: String,
     /// Whether compaction is currently in progress for the active session.
     pub compaction_in_progress: bool,
+    /// `[compaction.jev].enabled`: Jev-guided pruning of the summarizer view.
+    pub compaction_jev_enabled: bool,
     /// Media routing mode (`auto` | `tools_only` | `off`).
     pub media_routing: String,
     /// Stable image understanding model ID. `@session` reuses the active model.
@@ -723,6 +725,9 @@ impl Default for PagerLocalSnapshot {
             compaction_primary_model: "@session".to_string(),
             compaction_fallback_model: String::new(),
             compaction_in_progress: false,
+            // Jev pruning ships OFF: the pruning path stays byte-identical to
+            // today's summarizer input until the user opts in.
+            compaction_jev_enabled: false,
             media_routing: "auto".to_string(),
             tool_catalog: Vec::new(),
             pinned_tools: Vec::new(),
@@ -1216,6 +1221,8 @@ pub fn current_value_for(
         "compaction_fallback_model" => Some(SettingValue::String(
             pager.compaction_fallback_model.clone(),
         )),
+        // Jev pruning is a plain bool; absent `[compaction.jev]` means off.
+        "compaction_jev_enabled" => Some(SettingValue::Bool(pager.compaction_jev_enabled)),
         "compaction_status" => Some(SettingValue::String(if pager.compaction_in_progress {
             "Compacting".to_string()
         } else {
@@ -1762,6 +1769,14 @@ mod tests {
                     assert_eq!(
                         *default, "",
                         "compaction_fallback_model registry default must be empty string"
+                    );
+                }
+                // Jev pruning: SHELL-owned bool, no UiConfig mirror. Ships OFF
+                // so the summarizer input stays byte-identical until opted in.
+                ("compaction_jev_enabled", SettingKind::Bool { default }) => {
+                    assert!(
+                        !*default,
+                        "compaction_jev_enabled registry default must be false"
                     );
                 }
                 ("compaction_status", SettingKind::Status) => {}

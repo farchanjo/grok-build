@@ -2216,6 +2216,26 @@ pub fn default_settings() -> Vec<SettingMeta> {
             restart_required: false,
             hidden_in_minimal: false,
         },
+        SettingMeta {
+            key: "compaction_jev_enabled",
+            category: SettingCategory::Compaction,
+            owner: SettingOwner::Shell,
+            label: "Jev-guided pruning",
+            description: "Let Jev decide which stale tool calls and tool results are dropped or truncated from what the summarizer sees. User and assistant text is untouched; off keeps today's behaviour.",
+            keywords: &[
+                "compaction",
+                "jev",
+                "prune",
+                "pruning",
+                "tool",
+                "result",
+                "summarizer",
+                "view",
+            ],
+            kind: SettingKind::Bool { default: false },
+            restart_required: false,
+            hidden_in_minimal: false,
+        },
         // ── Runtime status row (non-editable) ─────────────────────────────
         //
         // This is a special status row that shows whether automatic

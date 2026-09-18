@@ -84,12 +84,14 @@ const ALL_SETTINGS_EXERCISED: &[&str] = &[
     "media_video_model",
     "media_file_model",
     "media_status",
-    // Dedicated compaction strategy, trigger, bands, model routes, and status.
+    // Dedicated compaction strategy, trigger, bands, model routes, Jev pruning,
+    // and status.
     "compaction_strategy",
     "compaction_trigger_policy",
     "compaction_band_count",
     "compaction_primary_model",
     "compaction_fallback_model",
+    "compaction_jev_enabled",
     "compaction_status",
     // Model-language group + its two Enum children (exercised via the
     // group sub-sheet, which opens each child's enum picker).
@@ -320,6 +322,12 @@ fn assert_set_bool_action(outcome: SettingsKeyOutcome, key: &str, expected: bool
             assert_eq!(
                 b, expected,
                 "SetDisplayRefreshAutoCadence value differs from expected"
+            )
+        }
+        ("compaction_jev_enabled", Action::SetCompactionJevEnabled(b)) => {
+            assert_eq!(
+                b, expected,
+                "SetCompactionJevEnabled value differs from expected"
             )
         }
         (key, action) => panic!(
@@ -2086,6 +2094,8 @@ fn registry_kind_membership_through_pr_14() {
             "toolset.ask_user_question.timeout_enabled",
             "auto_update",
             "show_tips",
+            // Jev-guided compaction pruning (SHELL-owned, default OFF).
+            "compaction_jev_enabled",
             // Per-tip contextual-hint children (hidden from the top-level list,
             // toggled inside the group sub-sheet) are still Bool settings.
             "contextual_hints.undo",
@@ -2306,6 +2316,7 @@ fn defaults_round_trip_through_registry() {
             "compaction_band_count" => SettingValue::Int(4),
             "compaction_primary_model" => SettingValue::String("@session".to_string()),
             "compaction_fallback_model" => SettingValue::String(String::new()),
+            "compaction_jev_enabled" => SettingValue::Bool(false),
             "compaction_status" => SettingValue::String("Idle".to_string()),
             "media_routing" => SettingValue::Enum("auto"),
             "media_image_model" => SettingValue::String("@session".to_string()),
@@ -2423,6 +2434,7 @@ fn settings_value_payload_matches_kind() {
             | SettingsKeyOutcome::Action(Action::SetCollapsedEditBlocks(_))
             | SettingsKeyOutcome::Action(Action::SetInvertScroll(_))
             | SettingsKeyOutcome::Action(Action::SetDisplayRefreshAutoCadence(_))
+            | SettingsKeyOutcome::Action(Action::SetCompactionJevEnabled(_))
             | SettingsKeyOutcome::Action(Action::SetRepetitionGuard(_)) => {}
             other => panic!(
                 "expected a typed bool setter for `{}`, got {:?}",
@@ -8409,6 +8421,81 @@ fn compaction_fallback_model_is_dynamic_enum_with_empty_default() {
         DynamicEnumSource::CompactionFallbackModelCatalog,
         "compaction_fallback_model must use CompactionFallbackModelCatalog source"
     );
+}
+
+/// Test that compaction_jev_enabled is a Bool, Compaction-category,
+/// SHELL-owned, live (no restart) and OFF by default.
+#[test]
+fn compaction_jev_enabled_is_off_by_default_shell_owned_bool() {
+    let reg = SettingsRegistry::defaults();
+    let meta = reg
+        .find("compaction_jev_enabled")
+        .expect("compaction_jev_enabled registered");
+
+    assert_eq!(meta.category, SettingCategory::Compaction);
+    assert_eq!(meta.owner, SettingOwner::Shell);
+    assert!(
+        !meta.restart_required,
+        "Jev pruning is live-applied via the [compaction] reload fan-out"
+    );
+    assert_eq!(meta.label, "Jev-guided pruning");
+    match &meta.kind {
+        SettingKind::Bool { default } => {
+            assert!(*default == false, "compaction_jev_enabled must default OFF")
+        }
+        other => panic!("compaction_jev_enabled must be Bool, got {other:?}"),
+    }
+    assert!(
+        meta.description.contains("summarizer"),
+        "description must say the prune targets the summarizer view"
+    );
+    assert!(
+        meta.keywords.contains(&"jev"),
+        "keywords must make the row findable by `/settings jev`"
+    );
+}
+
+#[test]
+fn compaction_jev_enabled_space_dispatches_typed_setter() {
+    let mut s = make_state();
+    navigate_to(&mut s, "compaction_jev_enabled");
+    let outcome = handle_settings_key(&mut s, &press(KeyCode::Char(' ')));
+    assert_set_bool_action(outcome, "compaction_jev_enabled", true);
+}
+
+#[test]
+fn compaction_jev_enabled_enter_dispatches_typed_setter() {
+    // Seed on so Enter toggles off.
+    let mut s = make_state();
+    s.pager_snapshot.compaction_jev_enabled = true;
+    s.rebuild_rows();
+    navigate_to(&mut s, "compaction_jev_enabled");
+    let outcome = handle_settings_key(&mut s, &press(KeyCode::Enter));
+    assert_set_bool_action(outcome, "compaction_jev_enabled", false);
+}
+
+#[test]
+fn compaction_jev_enabled_mouse_click_two_stage_toggles() {
+    let mut s = make_state();
+    synth_rects(&mut s);
+    let row_y = row_idx_for(&s, "compaction_jev_enabled") as u16;
+    let outcome = handle_settings_mouse(
+        &mut s,
+        MouseEventKind::Down(crossterm::event::MouseButton::Left),
+        10,
+        row_y,
+    );
+    assert!(
+        matches!(outcome, SettingsKeyOutcome::Changed),
+        "first body-click should only select, got {outcome:?}"
+    );
+    let outcome = handle_settings_mouse(
+        &mut s,
+        MouseEventKind::Down(crossterm::event::MouseButton::Left),
+        10,
+        row_y,
+    );
+    assert_set_bool_action(outcome, "compaction_jev_enabled", true);
 }
 
 /// Test that compaction_status is read-only (Status kind).

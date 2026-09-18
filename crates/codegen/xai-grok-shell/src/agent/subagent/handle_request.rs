@@ -1673,6 +1673,10 @@ pub(crate) async fn handle_assigned_subagent_request(
             xai_grok_agent::DEFAULT_SYSTEM_PROMPT_LABEL.to_string(),
             xai_chat_state::CompactionMode::Summary,
             ctx.resolve_compaction_verbatim_input(),
+            ctx.agent_config
+                .as_ref()
+                .map(|cfg| cfg.resolve_compaction_jev())
+                .unwrap_or_default(),
             ctx.resolve_compaction_tool_choice(),
             false,
             None,

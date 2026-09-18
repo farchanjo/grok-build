@@ -831,6 +831,58 @@ pub(super) async fn send_authenticate(
         }
     }
 }
+/// Whether a persisted setting key changes the `[compaction]` policy and must
+/// therefore be fanned out to the live sessions.
+pub(super) fn setting_changes_compaction(key: &str) -> bool {
+    key.starts_with("compaction_")
+}
+
+/// The `[compaction]` table of `config.toml` as the JSON payload of the
+/// `x.ai/internal/reload_compaction` extension request. `None` when the file
+/// is unreadable or holds no `[compaction]` table.
+///
+/// Reads the file back (rather than reusing the written value) so every
+/// `compaction_*` key, including the nested `[compaction.jev]` knobs, ships the
+/// same full-table shape the shell's `handle_reload_compaction` validates and
+/// fans out.
+pub(super) fn compaction_table_json(path: &Path) -> Option<serde_json::Value> {
+    let text = std::fs::read_to_string(path).ok()?;
+    let document: toml::Value = toml::from_str(&text).ok()?;
+    let table = document.get("compaction")?.as_table()?.clone();
+    serde_json::to_value(toml::Value::Table(table)).ok()
+}
+
+/// After a `compaction_*` setting write, ask the shell to re-read the policy
+/// and fan it out to the active sessions.
+///
+/// The in-process (`--no-leader`) agent has no config-file watcher, so without
+/// this the toggle would only take effect on the next restart. Leader mode
+/// additionally hot-reloads through its own watcher; the reload is idempotent,
+/// so the double delivery is harmless. Best-effort: a failure never fails the
+/// persist.
+pub(super) async fn notify_compaction_reload(tx: &AcpAgentTx) {
+    let path = xai_grok_shell::util::grok_home::grok_home().join("config.toml");
+    let Some(params) = compaction_table_json(&path) else {
+        tracing::debug!(
+            path = %path.display(),
+            "no [compaction] table to reload after setting write"
+        );
+        return;
+    };
+    let req = acp::ExtRequest::new(
+        "x.ai/internal/reload_compaction",
+        serde_json::value::to_raw_value(&params)
+            .expect("serialize reload_compaction params")
+            .into(),
+    );
+    match acp_send(req, tx).await {
+        Ok(_) => tracing::debug!("reloaded compaction policy for active sessions"),
+        Err(error) => {
+            tracing::warn!(%error, "failed to reload compaction policy for active sessions")
+        }
+    }
+}
+
 /// Translate a settings-registry key + value into the matching shell
 /// helper call. Type mismatches return an error (not panic) so a
 /// spawned task doesn't crash the pager. Unknown keys also return
@@ -1299,6 +1351,14 @@ pub(crate) async fn persist_setting(
                 .await
                 .map_err(|e| e.to_string())
         }
+        "compaction_jev_enabled" => {
+            let SettingValue::Bool(enabled) = value else {
+                return Err(kind_mismatch("compaction_jev_enabled", "Bool", &value));
+            };
+            xai_grok_shell::util::config::set_compaction_jev_enabled(enabled)
+                .await
+                .map_err(|e| e.to_string())
+        }
         "media_routing" => {
             let SettingValue::Enum(s) = value else {
                 return Err(kind_mismatch("media_routing", "Enum", &value));
@@ -1701,5 +1761,56 @@ pub(super) fn unregister_active_session_best_effort_in(
         )
         }
         Err(e) => tracing::warn!(?e, "Failed to unregister active session"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn config_file(contents: &str) -> (tempfile::TempDir, std::path::PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, contents).unwrap();
+        (dir, path)
+    }
+
+    /// The payload of `x.ai/internal/reload_compaction` is the whole
+    /// `[compaction]` table, nested `[compaction.jev]` included, in the shape
+    /// the shell deserializes into `CompactionConfig`.
+    #[test]
+    fn compaction_table_is_read_back_as_a_reload_payload() {
+        let (_dir, path) = config_file(
+            "show_timestamps = true\n\
+             [compaction]\n\
+             models = [\"@session\"]\n\
+             \n\
+             [compaction.jev]\n\
+             enabled = true\n",
+        );
+        let params = compaction_table_json(&path).expect("compaction table");
+        assert_eq!(params["models"], serde_json::json!(["@session"]));
+        assert_eq!(params["jev"]["enabled"], serde_json::json!(true));
+        assert!(params.get("show_timestamps").is_none());
+        let config: xai_grok_shell::agent::config::CompactionConfig =
+            serde_json::from_value(params).expect("payload shape");
+        assert_eq!(config.jev.map(|jev| jev.enabled), Some(true));
+        assert_eq!(config.models.len(), 1);
+    }
+
+    #[test]
+    fn missing_compaction_table_is_not_a_payload() {
+        let (_dir, path) = config_file("show_timestamps = true\n");
+        assert!(compaction_table_json(&path).is_none());
+    }
+
+    /// Only `compaction_*` keys fan the policy out; every other persisted
+    /// setting keeps the in-process agent untouched.
+    #[test]
+    fn only_compaction_keys_trigger_the_reload() {
+        assert!(setting_changes_compaction("compaction_jev_enabled"));
+        assert!(setting_changes_compaction("compaction_strategy"));
+        assert!(!setting_changes_compaction("show_timestamps"));
+        assert!(!setting_changes_compaction("media_routing"));
     }
 }

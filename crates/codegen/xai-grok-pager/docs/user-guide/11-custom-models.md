@@ -704,6 +704,32 @@ The exact balance never leaves the process except as a bucket label on the
 `grok_code.openrouter_credits` OTEL event (see
 [Monitoring Usage](24-monitoring-usage.md)).
 
+#### Jev-guided pruning (compaction)
+
+Optional, off-by-default compaction step that asks TypeSafe's Jev model which
+tool calls and tool results are still needed before a summary is written. Jev is
+served through OpenRouter's **decisions** endpoint
+(`https://openrouter.ai/api/alpha/decisions`) with the OpenRouter credential
+already stored in `auth.json`, so there is nothing new to connect.
+
+The decisions endpoint is not a chat endpoint, so Jev is **not** a `[model.*]`
+entry: it never appears in the model picker and `[compaction] models` stays
+unrelated. It has its own config section instead:
+
+```toml
+[compaction.jev]
+enabled = true
+model = "~typesafe/jev-latest"
+# `endpoint` and `api_key_env` are optional; the defaults use OpenRouter's
+# decisions endpoint and the stored OpenRouter key
+```
+
+`api_key_env` reads a different environment variable instead, and the optional
+`zdr`, `data_collection`, and `require_parameters` keys route the call the same
+way the OpenRouter provider block does. Any Jev failure fails open: compaction
+proceeds exactly as it would without the feature. See
+[Compaction Settings](25-compaction.md#jev-guided-pruning).
+
 ### OpenAI: ChatGPT subscription (OAuth) or API key
 
 OpenAI is a **single provider** with two independently stored credentials:

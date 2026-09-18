@@ -469,6 +469,24 @@ async fn set_compaction_model_at(index: usize, value: String) -> Result<()> {
     .await
 }
 
+/// Persist `[compaction.jev].enabled`.
+///
+/// Jev-guided pruning is view-only and fail-open, so the write only flips the
+/// switch and creates the `[compaction.jev]` table on first toggle. Validation
+/// still runs through `normalize_validate` so a broken sibling knob in a
+/// hand-written `[compaction.jev]` cannot be masked by the write.
+pub async fn set_compaction_jev_enabled(value: bool) -> Result<()> {
+    update_config_checked(|cfg| {
+        cfg.compaction
+            .jev
+            .get_or_insert_with(Default::default)
+            .enabled = value;
+        cfg.compaction.normalize_validate()?;
+        Ok(())
+    })
+    .await
+}
+
 /// Persist the primary compaction route. Empty restores `@session`.
 pub async fn set_compaction_primary_model(value: String) -> Result<()> {
     set_compaction_model_at(0, value).await

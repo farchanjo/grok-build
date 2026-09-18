@@ -2,6 +2,7 @@ pub mod chat;
 pub mod compaction_context;
 pub mod compaction_tools;
 pub mod full_replace_compaction;
+pub mod jev_prune;
 pub mod memory_context;
 pub mod memory_flush;
 pub mod prompt_suggest;
