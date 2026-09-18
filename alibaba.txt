@@ -1,0 +1,6 @@
+API Host
+ws-huo8to34r8zohrts.ap-southeast-1.maas.aliyuncs.com
+OpenAI Compatible Endpoint
+https://ws-huo8to34r8zohrts.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1
+DashScope
+https://ws-huo8to34r8zohrts.ap-southeast-1.maas.aliyuncs.com/api/v1

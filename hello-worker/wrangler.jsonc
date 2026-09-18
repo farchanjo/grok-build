@@ -1,0 +1,10 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "hello-worker",
+  "main": "src/index.js",
+  "compatibility_date": "2026-08-30",
+  // Captures console.log output in the Cloudflare dashboard.
+  "observability": {
+    "enabled": true
+  }
+}
