@@ -856,12 +856,14 @@ See [xAI-hosted surfaces](#xai-hosted-surfaces) for the matching config keys, th
 | Variable | Description |
 |----------|-------------|
 | `GROK_MEMORY` | Enable (`1`) or disable (`0`) cross-session memory |
+| `GROK_MEMORY_NOTE_SCOPE` | Write `/remember` notes to the workspace `MEMORY.md` (`workspace`) instead of the global one (default) |
 | `GROK_SUBAGENTS` | Enable (`1`) or disable (`0`) subagents |
 | `GROK_WORKFLOWS` | Enable (`1`) or disable (`0`) background workflows and select the `/goal` driver (default on: host-owned workflow driver; off: legacy `update_goal`) |
 | `GROK_WEB_FETCH` | Enable (`1`) or disable (`0`) the web_fetch tool |
 | `GROK_WEB_FETCH_ALLOW_LOCAL` | Allow `web_fetch` to explicit loopback hosts only (`localhost` / `127.0.0.0/8` / `::1`). Same as `[toolset.web_fetch] allow_local`. Default off; private/metadata stay blocked. |
 | `GROK_AGENT` | Custom agent definition path or name |
 | `GROK_SANDBOX` | Sandbox profile (off, workspace, devbox, read-only, strict; or a custom profile name) |
+| `GROK_BASH_EXEC_FLOOR` | Keep (`1`, default) or disarm (`0`) the bash exec confirmation floor, which prompts before a command that may run an unvetted program even when the auto classifier would allow it |
 
 ### Logging
 
@@ -981,7 +983,7 @@ Session following is automatic: every request carries the session's `session_id`
 (and, for SGLang, a `bootstrap_room` rank pin), so a session keeps hitting the
 same worker and its prefix cache stays warm. No `session_affinity` flag is
 needed. `dialect` is only about reasoning-key shaping, not sessions. See
-[Local and gateway providers](providers/local-gateways.md#session-affinity-and-prompt-caching).
+[Local and gateway providers](../providers/local-gateways.md#session-affinity-and-prompt-caching).
 
 Hot reload watches `[model_providers]` as well as `[model]` / `[models]`.
 
