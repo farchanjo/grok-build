@@ -658,6 +658,12 @@ pub async fn drop_dead_clients(
             continue;
         };
         if d.closed.contains(&current.client_id()) {
+            // Keep the owners of the streams this client held: the replacement
+            // is built only after this eviction (see `pending_restore_owners`),
+            // so the re-subscribe sweep would otherwise stamp them all with the
+            // respawning session.
+            let owners = current.subscription_owners();
+            state.stash_subscription_owners(&d.server, owners);
             state.owned_clients.remove(&d.server);
             tracing::info!(
                 server = %d.server,

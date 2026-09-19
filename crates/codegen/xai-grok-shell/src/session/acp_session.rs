@@ -2194,6 +2194,7 @@ mod tool_meta_stamp_tests {
                     yolo_pin: None,
                     deny_read_globs: Arc::new(vec![]),
                     in_flight: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+                    floor_prompts: Arc::new(Default::default()),
                 };
                 let captured: Arc<tokio::sync::Mutex<Option<acp::ToolCallUpdate>>> =
                     Arc::new(tokio::sync::Mutex::new(None));

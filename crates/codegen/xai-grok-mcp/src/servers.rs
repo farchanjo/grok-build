@@ -376,6 +376,16 @@ pub struct McpState {
     /// Stashed registrations for disabled tools so they can be re-enabled
     /// without a full MCP re-init (no need to call `list_tools` again).
     pub disabled_tool_registrations: HashMap<String, McpToolRegistration>,
+    /// Subscription owners of a client that was evicted *before* its
+    /// replacement was built, keyed by server.
+    ///
+    /// The status dispatcher drops a dead client from `owned_clients` as soon as
+    /// it observes `TransportClosed`, and only then does the auto-restart build
+    /// the replacement — so by respawn time the dying client (and its owner map)
+    /// is already gone. Without this stash the re-subscribe sweep would stamp
+    /// every URI with the respawning session, migrating a subagent's streams to
+    /// the parent on every reconnect.
+    pub pending_restore_owners: HashMap<McpServerName, HashMap<String, String>>,
     event_writer: xai_file_utils::events::EventWriter,
     /// Sender wired by the session actor to its `StatusDispatcher`
     /// task.  When `Some`, the state — and every [`McpClient`] reached
@@ -413,6 +423,27 @@ pub struct McpState {
 }
 
 impl McpState {
+    /// Keep a client's subscription owners after the client itself is dropped.
+    ///
+    /// Lives on `McpState` (not `McpClient`): the eviction path drops the client
+    /// first and the auto-restart builds the replacement only afterwards, so the
+    /// owners need a home that outlives the client. See
+    /// [`Self::pending_restore_owners`].
+    pub fn stash_subscription_owners(&mut self, server: &str, owners: HashMap<String, String>) {
+        if !owners.is_empty() {
+            self.pending_restore_owners
+                .insert(server.to_string(), owners);
+        }
+    }
+
+    /// Take (and clear) the owners stashed for `server`, if any.
+    pub fn take_stashed_subscription_owners(
+        &mut self,
+        server: &str,
+    ) -> Option<HashMap<String, String>> {
+        self.pending_restore_owners.remove(server)
+    }
+
     pub fn new(configs: Vec<acp::McpServer>) -> Self {
         Self::new_with_meta(configs, McpMetaConfigMap::new())
     }
@@ -431,6 +462,7 @@ impl McpState {
             init_failed: HashMap::new(),
             disabled_tools: HashMap::new(),
             disabled_tool_registrations: HashMap::new(),
+            pending_restore_owners: HashMap::new(),
             event_writer: xai_file_utils::events::EventWriter::noop(),
             client_event_tx: None,
             owner_session_id: None,
@@ -647,6 +679,13 @@ impl McpState {
         }
 
         for name in &removed {
+            // A changed server is dropped here and re-created by the caller's
+            // re-init, whose sweep runs with the session as owner: keep the
+            // owners so a child's streams survive the config change.
+            if let Some(client) = self.owned_clients.get(name) {
+                let owners = client.subscription_owners();
+                self.stash_subscription_owners(name, owners);
+            }
             self.owned_clients.remove(name);
             self.auth_required.remove(name);
             self.init_progress.mark_handshake_complete(name);

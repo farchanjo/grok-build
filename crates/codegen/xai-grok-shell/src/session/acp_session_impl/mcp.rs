@@ -473,14 +473,26 @@ impl SessionActor {
     /// with an empty owner map, so without carrying these over the re-subscribe
     /// sweep would stamp every URI with whichever session ran the respawn — on a
     /// shared client that silently migrates a subagent's streams to the parent.
+    ///
+    /// Falls back to the stash left by the dispatcher's eviction: a respawn runs
+    /// *after* the dead client was dropped from `owned_clients`, so at that
+    /// point the live map is already empty.
     pub(crate) async fn subscription_owners_of(
         &self,
         server: &str,
     ) -> std::collections::HashMap<String, String> {
-        let state = self.mcp_state.lock().await;
-        state
+        let mut state = self.mcp_state.lock().await;
+        let live = state
             .get_client(server)
             .map(|client| client.subscription_owners())
+            .unwrap_or_default();
+        if !live.is_empty() {
+            // The live client supersedes any stash from an earlier eviction.
+            state.take_stashed_subscription_owners(server);
+            return live;
+        }
+        state
+            .take_stashed_subscription_owners(server)
             .unwrap_or_default()
     }
 

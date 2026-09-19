@@ -341,6 +341,115 @@ async fn respawn_restores_previous_subscription_owners() {
         .await;
 }
 
+/// The dispatcher evicts a dead client *before* the auto-restart builds the
+/// replacement, so the owners must survive the eviction.
+///
+/// This is the failure a live respawn exposed: with the capture reading only the
+/// installed client, the map was already empty by respawn time, the sweep
+/// stamped every URI with the parent, and the child's stream silently migrated.
+#[tokio::test(flavor = "current_thread")]
+async fn dead_client_eviction_keeps_owners_for_the_respawn() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let (actor, client) = setup_unwired().await;
+            client
+                .subscribe_all_resources(Some("child-session"))
+                .await
+                .expect("stub handshake + subscribe must succeed");
+
+            // The dispatcher observes TransportClosed and evicts the client.
+            crate::session::mcp_dispatcher::drop_dead_clients(
+                &actor.mcp_state,
+                &[crate::session::mcp_dispatcher::DeadClient {
+                    server: SERVER.to_string(),
+                    closed: [client.client_id()].into_iter().collect(),
+                }],
+            )
+            .await;
+            assert!(
+                actor.mcp_state.lock().await.get_client(SERVER).is_none(),
+                "the dead client must be evicted"
+            );
+
+            let previous = actor.subscription_owners_of(SERVER).await;
+            assert_eq!(
+                previous.get(URI).map(String::as_str),
+                Some("child-session"),
+                "the owners must survive the eviction so the respawn can restore them"
+            );
+
+            // Respawn: fresh client, sweep by the holder, then the restore.
+            let fresh = McpClient::new_acp(
+                SERVER.to_string(),
+                "stub-server".to_string(),
+                Arc::new(StubResourceServer),
+                None,
+                None,
+            );
+            fresh
+                .subscribe_all_resources(Some(actor.session_info.id.0.as_ref()))
+                .await
+                .expect("fresh transport subscribes");
+            assert_ne!(
+                fresh.subscription_owner(URI).as_deref(),
+                Some("child-session"),
+                "the sweep alone stamps the respawner"
+            );
+            crate::session::acp_session::SessionActor::restore_subscription_owners(
+                &fresh, &previous,
+            );
+            assert_eq!(
+                fresh.subscription_owner(URI).as_deref(),
+                Some("child-session"),
+                "the child's stream must survive the respawn"
+            );
+
+            // The stash is consumed, so a later capture does not resurrect it.
+            assert!(
+                actor.subscription_owners_of(SERVER).await.is_empty(),
+                "taking the stash must clear it"
+            );
+        })
+        .await;
+}
+
+/// A live client's owners win over a stale stash from an earlier eviction.
+#[tokio::test(flavor = "current_thread")]
+async fn live_owners_supersede_a_stale_stash() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let (actor, client) = setup_unwired().await;
+            {
+                let mut state = actor.mcp_state.lock().await;
+                state.stash_subscription_owners(
+                    SERVER,
+                    [("res://stale/1".to_string(), "ghost".to_string())].into(),
+                );
+            }
+            client
+                .subscribe_all_resources(Some("child-session"))
+                .await
+                .expect("subscribe");
+
+            let owners = actor.subscription_owners_of(SERVER).await;
+            assert_eq!(owners.get(URI).map(String::as_str), Some("child-session"));
+            assert!(
+                !owners.contains_key("res://stale/1"),
+                "the live client supersedes the stash"
+            );
+            assert!(
+                actor
+                    .mcp_state
+                    .lock()
+                    .await
+                    .pending_restore_owners
+                    .is_empty(),
+                "the superseded stash is cleared"
+            );
+        })
+        .await;
+}
+
 /// A push owned by a session that already exited is delivered locally and
 /// re-stamped onto the holder, so delivery and the sheet stay consistent
 /// (adoption, matching the task/wait paths).
