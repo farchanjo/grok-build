@@ -1637,6 +1637,32 @@ impl SessionActor {
         .await;
         SessionActor::maybe_start_running_task(self.clone(), completion_tx).await;
     }
+    /// Line of the first `old_string` match in the edit target, for the diff
+    /// `_meta`. `None` for non-edit inputs, an empty anchor, or an unreadable
+    /// file — the diff still renders, just without line numbers.
+    ///
+    /// Stays async (needs the fs handle) while the rest of the tool-call
+    /// presentation is pure; see [`tool_call_presentation`].
+    async fn search_replace_old_line(&self, input: &ToolInput) -> Option<u64> {
+        let ToolInput::SearchReplace(sr) = input else {
+            return None;
+        };
+        if sr.old_string.is_empty() {
+            return None;
+        }
+        let display_path = self.tool_context.cwd.join(&sr.file_path).to_path_buf();
+        let _span = tracing::info_span!("tool.sr_line_lookup").entered();
+        self.tool_context
+            .fs
+            .read_to_string(&display_path)
+            .await
+            .ok()
+            .and_then(|file_content| {
+                let pos = file_content.find(&sr.old_string)?;
+                Some(file_content[..pos].matches('\n').count() as u64 + 1)
+            })
+    }
+
     /// Refine the initial (minimal) ToolCall that was registered during
     /// tool preparation.  Now that we have a fully parsed `ToolInput`
     /// we can send a `ToolCallUpdate` with a human-readable title, the correct
@@ -1654,327 +1680,12 @@ impl SessionActor {
         #[allow(unused_mut)]
         let mut raw_input = serde_json::to_value(&tool_call_input)?;
         let canonical_meta = self.stamp_tool_meta(None, wire_name, Some(&tool_call_input));
-        let (title, kind, locations, content) = match tool_call_input {
-            ToolInput::ListDir(list_dir) => (
-                format!("List `{}`", list_dir.target_directory),
-                acp::ToolKind::Other,
-                vec![acp::ToolCallLocation::new(
-                    list_dir.target_directory.clone(),
-                )],
-                vec![],
-            ),
-            ToolInput::SearchReplace(sr) => {
-                let display_path = self.tool_context.cwd.join(&sr.file_path).to_path_buf();
-                let meta = if !sr.old_string.is_empty() {
-                    let _span = tracing::info_span!("tool.sr_line_lookup").entered();
-                    self.tool_context
-                        .fs
-                        .read_to_string(&display_path)
-                        .await
-                        .ok()
-                        .and_then(|file_content| {
-                            let pos = file_content.find(&sr.old_string)?;
-                            let line = file_content[..pos].matches('\n').count() + 1;
-                            serde_json::json!({ "old_line" : line, "new_line" : line, })
-                                .as_object()
-                                .cloned()
-                        })
-                } else {
-                    None
-                };
-                (
-                    format!("Edit `{}`", sr.file_path.as_str()),
-                    acp::ToolKind::Edit,
-                    vec![acp::ToolCallLocation::new(sr.file_path.clone())],
-                    vec![acp::ToolCallContent::from(
-                        acp::Diff::new(display_path, sr.new_string)
-                            .old_text(Some(sr.old_string))
-                            .meta(meta),
-                    )],
-                )
-            }
-            ToolInput::Bash(bash_tool) => execute_tool_call_parts(
-                &bash_tool.command,
-                Some(bash_tool.description.as_str()),
-                self.tool_context.cwd.as_path(),
-            ),
-            ToolInput::ReadFile(read_file) => {
-                (
-                    format!("Read `{}`", read_file.path.clone()),
-                    acp::ToolKind::Read,
-                    vec![
-                        acp::ToolCallLocation::new(read_file.path)
-                            // Same normalization as the canonical `_meta` input, so one
-                            // event can't show two start lines.
-                            .line(
-                                xai_grok_tools::normalization::norm_offset_i64(read_file.offset)
-                                    .map(|l| l as u32),
-                            ),
-                    ],
-                    Vec::new(),
-                )
-            }
-            ToolInput::TodoWrite(_) => (
-                "Updating plan".to_string(),
-                acp::ToolKind::Think,
-                Vec::new(),
-                Vec::new(),
-            ),
-            ToolInput::Grep(gs) => (gs.pattern.clone(), acp::ToolKind::Search, vec![], vec![]),
-            ToolInput::WebSearch(ws) => (
-                format!("Web search: \"{}\"", ws.query),
-                acp::ToolKind::Search,
-                vec![],
-                vec![],
-            ),
-            ToolInput::ImageGen(ig) => (
-                format!("imagine: {}", ig.prompt),
-                acp::ToolKind::Other,
-                vec![],
-                vec![],
-            ),
-            ToolInput::ImageEdit(ie) => (
-                format!("imagine-edit: {}", ie.prompt),
-                acp::ToolKind::Other,
-                vec![],
-                vec![],
-            ),
-            ToolInput::ImageToVideo(i2v) => (
-                format!(
-                    "image-to-video: {}",
-                    i2v.prompt.as_deref().unwrap_or(&i2v.image)
-                ),
-                acp::ToolKind::Other,
-                vec![],
-                vec![],
-            ),
-            ToolInput::ReferenceToVideo(r2v) => (
-                format!("reference-to-video: {}", r2v.prompt),
-                acp::ToolKind::Other,
-                vec![],
-                vec![],
-            ),
-            ToolInput::MCPTool(mcp_tool) => (
-                mcp_tool.tool_name.to_owned(),
-                acp::ToolKind::Other,
-                vec![],
-                vec![],
-            ),
-            ToolInput::TaskOutput(task_output) => {
-                let ids = task_output.resolved_task_ids();
-                let label = match ids.as_slice() {
-                    [] => "Get task output".to_string(),
-                    [one] => format!("Get task output: {one}"),
-                    many => format!("Get task output: {} tasks", many.len()),
-                };
-                (label, acp::ToolKind::Other, vec![], vec![])
-            }
-            ToolInput::WaitTasks(wait) => (
-                format!(
-                    "Wait tasks: {} ids, mode={}",
-                    wait.task_ids.len(),
-                    match wait.mode {
-                        xai_tool_types::WaitMode::WaitAny => "wait_any",
-                        xai_tool_types::WaitMode::WaitAll => "wait_all",
-                    }
-                ),
-                acp::ToolKind::Other,
-                vec![],
-                vec![],
-            ),
-            ToolInput::KillTask(kill_task) => (
-                format!("Kill task: {}", kill_task.task_id),
-                acp::ToolKind::Other,
-                vec![],
-                vec![],
-            ),
-            ToolInput::Skill(skill) => {
-                xai_grok_telemetry::session_ctx::log_event(
-                    xai_grok_telemetry::events::SkillDispatched {
-                        skill_name: skill.skill.clone(),
-                        plugin_source: None,
-                    },
-                );
-                tracing::info_span!(
-                    "skill.activated",
-                    skill_name = %skill.skill,
-                    invocation_trigger = "skill_tool",
-                )
-                .in_scope(|| {});
-                (
-                    format!("Skill: {}", skill.skill),
-                    acp::ToolKind::Other,
-                    vec![],
-                    vec![],
-                )
-            }
-            ToolInput::ApplyPatch(_) => (
-                "Apply patch".to_string(),
-                acp::ToolKind::Edit,
-                vec![],
-                vec![],
-            ),
-            ToolInput::Dynamic(_) => (
-                "Dynamic tool call".to_string(),
-                acp::ToolKind::Other,
-                vec![],
-                vec![],
-            ),
-            ToolInput::MemorySearch(ms) => {
-                let end = ms
-                    .query
-                    .char_indices()
-                    .nth(60)
-                    .map_or(ms.query.len(), |(i, _)| i);
-                let display = &ms.query[..end];
-                (
-                    format!("Memory search: \"{display}\""),
-                    acp::ToolKind::Other,
-                    vec![],
-                    vec![],
-                )
-            }
-            ToolInput::MemoryGet(mg) => (
-                format!("Memory read: {}", mg.path),
-                acp::ToolKind::Read,
-                vec![],
-                vec![],
-            ),
-            ToolInput::HashlineEdit(he) => (
-                format!("Edit `{}`", he.file_path),
-                acp::ToolKind::Edit,
-                vec![acp::ToolCallLocation::new(he.file_path.clone())],
-                vec![],
-            ),
-            ToolInput::Task(task) => (
-                task.description.clone(),
-                acp::ToolKind::Other,
-                vec![],
-                vec![],
-            ),
-            ToolInput::EnterPlanMode(_) => (
-                "Plan: Enter".to_string(),
-                acp::ToolKind::Other,
-                vec![],
-                vec![],
-            ),
-            ToolInput::ExitPlanMode(_) => (
-                "Plan: Exit".to_string(),
-                acp::ToolKind::Other,
-                vec![],
-                vec![],
-            ),
-            ToolInput::AskUserQuestion(ref ask) => {
-                let title = if ask.questions.len() == 1 {
-                    format!("Ask: {}", ask.questions[0].question)
-                } else {
-                    format!("Ask {} questions", ask.questions.len())
-                };
-                (title, acp::ToolKind::Other, vec![], vec![])
-            }
-            ToolInput::WebFetch(wf) => (
-                format!("Fetch: {}", wf.url),
-                acp::ToolKind::Fetch,
-                vec![],
-                vec![],
-            ),
-            ToolInput::SearchTool(st) => (
-                format!("Search tools: \"{}\"", st.query),
-                acp::ToolKind::Other,
-                vec![],
-                vec![],
-            ),
-            ToolInput::UseTool(ut) => (ut.tool_name.clone(), acp::ToolKind::Other, vec![], vec![]),
-            ToolInput::Write(ref w) => (
-                format!("Write `{}`", w.file_path),
-                acp::ToolKind::Edit,
-                vec![acp::ToolCallLocation::new(w.file_path.clone())],
-                vec![acp::ToolCallContent::from(
-                    acp::Diff::new(
-                        self.tool_context.cwd.join(&w.file_path).to_path_buf(),
-                        w.content.clone(),
-                    )
-                    .old_text(Some(String::new())),
-                )],
-            ),
-            ToolInput::Workflow(ref w) => {
-                let script_name = |script: &str| -> Option<String> {
-                    let head = script.get(..600).unwrap_or(script);
-                    let rest = &head[head.find("name:")? + 5..];
-                    let rest = &rest[rest.find('"')? + 1..];
-                    Some(rest[..rest.find('"')?].to_string())
-                };
-                let inline_name = w.script.as_deref().and_then(script_name);
-                let title = if w.validate_only {
-                    match inline_name.or_else(|| w.name.clone()) {
-                        Some(n) => format!("Validating workflow '{n}'"),
-                        None => "Validating workflow script".to_string(),
-                    }
-                } else if w.script.is_some() {
-                    match inline_name {
-                        Some(n) => format!("Creating workflow '{n}'"),
-                        None => "Creating workflow".to_string(),
-                    }
-                } else if let Some(ref name) = w.name {
-                    format!("Workflow: {name}")
-                } else if w.resume_from_run_id.is_some() {
-                    "Workflow: resume run".to_string()
-                } else {
-                    "Workflow: launch script".to_string()
-                };
-                (title, acp::ToolKind::Other, vec![], vec![])
-            }
-            ToolInput::UpdateGoal(ref ug) => {
-                let title = if ug.completed == Some(true) {
-                    "Goal: marking complete".to_string()
-                } else if let Some(ref reason) = ug.blocked_reason {
-                    format!("Goal: blocked — {reason}")
-                } else if let Some(ref msg) = ug.message {
-                    format!("Goal: {msg}")
-                } else {
-                    "Goal: update".to_string()
-                };
-                (title, acp::ToolKind::Other, vec![], vec![])
-            }
-            ToolInput::Monitor(ref m) => (
-                format!("Start monitor: {}", m.description),
-                acp::ToolKind::Other,
-                vec![],
-                vec![],
-            ),
-            ToolInput::SchedulerCreate(ref sc) => {
-                let title = match (&sc.task_id, &sc.interval) {
-                    (Some(id), Some(interval)) => {
-                        format!("Update scheduled task {id} (every {interval})")
-                    }
-                    (Some(id), None) => format!("Update scheduled task {id}"),
-                    (None, Some(interval)) => {
-                        format!("Create scheduled task (every {interval})")
-                    }
-                    (None, None) => "Create scheduled task".to_string(),
-                };
-                (title, acp::ToolKind::Other, vec![], vec![])
-            }
-            ToolInput::SchedulerDelete(ref sd) => (
-                format!("Delete scheduled task: {}", sd.id),
-                acp::ToolKind::Other,
-                vec![],
-                vec![],
-            ),
-            ToolInput::SchedulerList(_) => (
-                "List scheduled tasks".to_string(),
-                acp::ToolKind::Other,
-                vec![],
-                vec![],
-            ),
-            #[allow(unreachable_patterns)]
-            _ => (
-                "Tool call".to_string(),
-                acp::ToolKind::Other,
-                vec![],
-                vec![],
-            ),
-        };
+        let sr_old_line = self.search_replace_old_line(&tool_call_input).await;
+        let (title, kind, locations, content) = tool_call_presentation(
+            tool_call_input,
+            self.tool_context.cwd.as_path(),
+            sr_old_line,
+        );
         let tool_call_update = acp::ToolCallUpdate::new(
             tool_call_id.clone(),
             acp::ToolCallUpdateFields::new()
@@ -3407,6 +3118,431 @@ fn execute_tool_call_parts(
         ))],
     )
 }
+/// Human-readable title, ACP kind, file locations and inline content for a
+/// parsed tool call.
+///
+/// Pure over the typed input: `cwd` only resolves display paths and
+/// `sr_old_line` carries the async edit-anchor lookup, so the title contract
+/// stays unit-testable. The match is exhaustive, so a new `ToolInput` variant
+/// must decide its own title instead of silently inheriting a generic one.
+fn tool_call_presentation(
+    input: ToolInput,
+    cwd: &std::path::Path,
+    sr_old_line: Option<u64>,
+) -> (
+    String,
+    acp::ToolKind,
+    Vec<acp::ToolCallLocation>,
+    Vec<acp::ToolCallContent>,
+) {
+    match input {
+        ToolInput::ListDir(list_dir) => (
+            format!("List `{}`", list_dir.target_directory),
+            acp::ToolKind::Other,
+            vec![acp::ToolCallLocation::new(
+                list_dir.target_directory.clone(),
+            )],
+            vec![],
+        ),
+        ToolInput::SearchReplace(sr) => {
+            let display_path = cwd.join(&sr.file_path).to_path_buf();
+            let meta = sr_old_line.and_then(|line| {
+                serde_json::json!({ "old_line": line, "new_line": line })
+                    .as_object()
+                    .cloned()
+            });
+            (
+                format!("Edit `{}`", sr.file_path.as_str()),
+                acp::ToolKind::Edit,
+                vec![acp::ToolCallLocation::new(sr.file_path.clone())],
+                vec![acp::ToolCallContent::from(
+                    acp::Diff::new(display_path, sr.new_string)
+                        .old_text(Some(sr.old_string))
+                        .meta(meta),
+                )],
+            )
+        }
+        ToolInput::Bash(bash_tool) => execute_tool_call_parts(
+            &bash_tool.command,
+            Some(bash_tool.description.as_str()),
+            cwd,
+        ),
+        ToolInput::ReadFile(read_file) => {
+            (
+                format!("Read `{}`", read_file.path.clone()),
+                acp::ToolKind::Read,
+                vec![
+                    acp::ToolCallLocation::new(read_file.path)
+                        // Same normalization as the canonical `_meta` input, so one
+                        // event can't show two start lines.
+                        .line(
+                            xai_grok_tools::normalization::norm_offset_i64(read_file.offset)
+                                .map(|l| l as u32),
+                        ),
+                ],
+                Vec::new(),
+            )
+        }
+        ToolInput::TodoWrite(_) => (
+            "Updating plan".to_string(),
+            acp::ToolKind::Think,
+            Vec::new(),
+            Vec::new(),
+        ),
+        ToolInput::Grep(gs) => (gs.pattern.clone(), acp::ToolKind::Search, vec![], vec![]),
+        ToolInput::WebSearch(ws) => (
+            format!("Web search: \"{}\"", ws.query),
+            acp::ToolKind::Search,
+            vec![],
+            vec![],
+        ),
+        ToolInput::ImageGen(ig) => (
+            format!("imagine: {}", ig.prompt),
+            acp::ToolKind::Other,
+            vec![],
+            vec![],
+        ),
+        ToolInput::ImageEdit(ie) => (
+            format!("imagine-edit: {}", ie.prompt),
+            acp::ToolKind::Other,
+            vec![],
+            vec![],
+        ),
+        ToolInput::ImageToVideo(i2v) => (
+            format!(
+                "image-to-video: {}",
+                i2v.prompt.as_deref().unwrap_or(&i2v.image)
+            ),
+            acp::ToolKind::Other,
+            vec![],
+            vec![],
+        ),
+        ToolInput::ReferenceToVideo(r2v) => (
+            format!("reference-to-video: {}", r2v.prompt),
+            acp::ToolKind::Other,
+            vec![],
+            vec![],
+        ),
+        ToolInput::MCPTool(mcp_tool) => (
+            mcp_tool.tool_name.to_owned(),
+            acp::ToolKind::Other,
+            vec![],
+            vec![],
+        ),
+        ToolInput::TaskOutput(task_output) => {
+            let ids = task_output.resolved_task_ids();
+            let label = match ids.as_slice() {
+                [] => "Get task output".to_string(),
+                [one] => format!("Get task output: {one}"),
+                many => format!("Get task output: {} tasks", many.len()),
+            };
+            (label, acp::ToolKind::Other, vec![], vec![])
+        }
+        ToolInput::WaitTasks(wait) => (
+            format!(
+                "Wait tasks: {} ids, mode={}",
+                wait.task_ids.len(),
+                match wait.mode {
+                    xai_tool_types::WaitMode::WaitAny => "wait_any",
+                    xai_tool_types::WaitMode::WaitAll => "wait_all",
+                }
+            ),
+            acp::ToolKind::Other,
+            vec![],
+            vec![],
+        ),
+        ToolInput::KillTask(kill_task) => (
+            format!("Kill task: {}", kill_task.task_id),
+            acp::ToolKind::Other,
+            vec![],
+            vec![],
+        ),
+        ToolInput::Skill(skill) => {
+            xai_grok_telemetry::session_ctx::log_event(
+                xai_grok_telemetry::events::SkillDispatched {
+                    skill_name: skill.skill.clone(),
+                    plugin_source: None,
+                },
+            );
+            tracing::info_span!(
+                "skill.activated",
+                skill_name = %skill.skill,
+                invocation_trigger = "skill_tool",
+            )
+            .in_scope(|| {});
+            (
+                format!("Skill: {}", skill.skill),
+                acp::ToolKind::Other,
+                vec![],
+                vec![],
+            )
+        }
+        ToolInput::ApplyPatch(_) => (
+            "Apply patch".to_string(),
+            acp::ToolKind::Edit,
+            vec![],
+            vec![],
+        ),
+        ToolInput::Dynamic(_) => (
+            "Dynamic tool call".to_string(),
+            acp::ToolKind::Other,
+            vec![],
+            vec![],
+        ),
+        ToolInput::MemorySearch(ms) => {
+            let end = ms
+                .query
+                .char_indices()
+                .nth(60)
+                .map_or(ms.query.len(), |(i, _)| i);
+            let display = &ms.query[..end];
+            (
+                format!("Memory search: \"{display}\""),
+                acp::ToolKind::Other,
+                vec![],
+                vec![],
+            )
+        }
+        ToolInput::MemoryGet(mg) => (
+            format!("Memory read: {}", mg.path),
+            acp::ToolKind::Read,
+            vec![],
+            vec![],
+        ),
+        ToolInput::HashlineEdit(he) => (
+            format!("Edit `{}`", he.file_path),
+            acp::ToolKind::Edit,
+            vec![acp::ToolCallLocation::new(he.file_path.clone())],
+            vec![],
+        ),
+        ToolInput::Task(task) => (
+            task.description.clone(),
+            acp::ToolKind::Other,
+            vec![],
+            vec![],
+        ),
+        ToolInput::EnterPlanMode(_) => (
+            "Plan: Enter".to_string(),
+            acp::ToolKind::Other,
+            vec![],
+            vec![],
+        ),
+        ToolInput::ExitPlanMode(_) => (
+            "Plan: Exit".to_string(),
+            acp::ToolKind::Other,
+            vec![],
+            vec![],
+        ),
+        ToolInput::AskUserQuestion(ref ask) => {
+            let title = if ask.questions.len() == 1 {
+                format!("Ask: {}", ask.questions[0].question)
+            } else {
+                format!("Ask {} questions", ask.questions.len())
+            };
+            (title, acp::ToolKind::Other, vec![], vec![])
+        }
+        ToolInput::WebFetch(wf) => (
+            format!("Fetch: {}", wf.url),
+            acp::ToolKind::Fetch,
+            vec![],
+            vec![],
+        ),
+        ToolInput::SearchTool(st) => (
+            format!("Search tools: \"{}\"", st.query),
+            acp::ToolKind::Other,
+            vec![],
+            vec![],
+        ),
+        ToolInput::UseTool(ut) => (ut.tool_name.clone(), acp::ToolKind::Other, vec![], vec![]),
+        ToolInput::Write(ref w) => (
+            format!("Write `{}`", w.file_path),
+            acp::ToolKind::Edit,
+            vec![acp::ToolCallLocation::new(w.file_path.clone())],
+            vec![acp::ToolCallContent::from(
+                acp::Diff::new(cwd.join(&w.file_path).to_path_buf(), w.content.clone())
+                    .old_text(Some(String::new())),
+            )],
+        ),
+        ToolInput::Workflow(ref w) => {
+            let script_name = |script: &str| -> Option<String> {
+                let head = script.get(..600).unwrap_or(script);
+                let rest = &head[head.find("name:")? + 5..];
+                let rest = &rest[rest.find('"')? + 1..];
+                Some(rest[..rest.find('"')?].to_string())
+            };
+            let inline_name = w.script.as_deref().and_then(script_name);
+            let title = if w.validate_only {
+                match inline_name.or_else(|| w.name.clone()) {
+                    Some(n) => format!("Validating workflow '{n}'"),
+                    None => "Validating workflow script".to_string(),
+                }
+            } else if w.script.is_some() {
+                match inline_name {
+                    Some(n) => format!("Creating workflow '{n}'"),
+                    None => "Creating workflow".to_string(),
+                }
+            } else if let Some(ref name) = w.name {
+                format!("Workflow: {name}")
+            } else if w.resume_from_run_id.is_some() {
+                "Workflow: resume run".to_string()
+            } else {
+                "Workflow: launch script".to_string()
+            };
+            (title, acp::ToolKind::Other, vec![], vec![])
+        }
+        ToolInput::UpdateGoal(ref ug) => {
+            let title = if ug.completed == Some(true) {
+                "Goal: marking complete".to_string()
+            } else if let Some(ref reason) = ug.blocked_reason {
+                format!("Goal: blocked — {reason}")
+            } else if let Some(ref msg) = ug.message {
+                format!("Goal: {msg}")
+            } else {
+                "Goal: update".to_string()
+            };
+            (title, acp::ToolKind::Other, vec![], vec![])
+        }
+        ToolInput::Monitor(ref m) => (
+            format!("Start monitor: {}", m.description),
+            acp::ToolKind::Other,
+            vec![],
+            vec![],
+        ),
+        ToolInput::SchedulerCreate(ref sc) => {
+            let title = match (&sc.task_id, &sc.interval) {
+                (Some(id), Some(interval)) => {
+                    format!("Update scheduled task {id} (every {interval})")
+                }
+                (Some(id), None) => format!("Update scheduled task {id}"),
+                (None, Some(interval)) => {
+                    format!("Create scheduled task (every {interval})")
+                }
+                (None, None) => "Create scheduled task".to_string(),
+            };
+            (title, acp::ToolKind::Other, vec![], vec![])
+        }
+        ToolInput::SchedulerDelete(ref sd) => (
+            format!("Delete scheduled task: {}", sd.id),
+            acp::ToolKind::Other,
+            vec![],
+            vec![],
+        ),
+        ToolInput::SchedulerList(_) => (
+            "List scheduled tasks".to_string(),
+            acp::ToolKind::Other,
+            vec![],
+            vec![],
+        ),
+        // `wait_for`: the condition/duration is the subject, not the tool name.
+        ToolInput::WaitFor(ref wait) => (
+            format!("Wait: {}", wait.until),
+            acp::ToolKind::Other,
+            vec![],
+            vec![],
+        ),
+        // LSP operations: name the operation, then the file it runs against.
+        ToolInput::Lsp(ref lsp) => {
+            let subject = lsp
+                .file_path
+                .as_deref()
+                .map(|p| format!(" `{p}`"))
+                .unwrap_or_default();
+            (
+                format!("Code intelligence: {}{subject}", lsp.operation),
+                acp::ToolKind::Other,
+                vec![],
+                vec![],
+            )
+        }
+        // Codex-namespace mirrors of read / list / grep.
+        ToolInput::CodexReadFile(ref read) => (
+            format!("Read `{}`", read.file_path),
+            acp::ToolKind::Read,
+            vec![acp::ToolCallLocation::new(read.file_path.clone())],
+            vec![],
+        ),
+        ToolInput::CodexListDir(ref list) => (
+            format!("List `{}`", list.dir_path),
+            acp::ToolKind::Other,
+            vec![acp::ToolCallLocation::new(list.dir_path.clone())],
+            vec![],
+        ),
+        ToolInput::CodexGrepFiles(ref grep) => {
+            (grep.pattern.clone(), acp::ToolKind::Search, vec![], vec![])
+        }
+        // Asset store: the key (or local path) identifies the object.
+        ToolInput::AssetUpload(ref upload) => (
+            format!(
+                "Upload asset: {}",
+                upload.key.as_deref().unwrap_or(&upload.path)
+            ),
+            acp::ToolKind::Other,
+            vec![],
+            vec![],
+        ),
+        ToolInput::AssetShare(ref share) => (
+            format!("Share asset: {}", share.key),
+            acp::ToolKind::Other,
+            vec![],
+            vec![],
+        ),
+        ToolInput::AssetList(ref list) => (
+            match list.prefix.as_deref() {
+                Some(prefix) => format!("List assets: {prefix}"),
+                None => "List assets".to_string(),
+            },
+            acp::ToolKind::Other,
+            vec![],
+            vec![],
+        ),
+        ToolInput::AssetDelete(ref delete) => (
+            format!("Delete asset: {}", delete.key),
+            acp::ToolKind::Other,
+            vec![],
+            vec![],
+        ),
+        ToolInput::AssetSetVisibility(ref set) => (
+            format!(
+                "Set asset visibility: {} \u{2192} {}",
+                set.key, set.visibility
+            ),
+            acp::ToolKind::Other,
+            vec![],
+            vec![],
+        ),
+        ToolInput::AssetDownload(ref download) => (
+            format!("Download asset: {}", download.key),
+            acp::ToolKind::Other,
+            vec![],
+            vec![],
+        ),
+        ToolInput::AssetJobStatus(ref job) => (
+            format!("Transfer job: {}", job.job_id),
+            acp::ToolKind::Other,
+            vec![],
+            vec![],
+        ),
+        ToolInput::AssetJobList(_) => (
+            "List transfer jobs".to_string(),
+            acp::ToolKind::Other,
+            vec![],
+            vec![],
+        ),
+        ToolInput::AssetJobCancel(ref job) => (
+            format!("Cancel transfer: {}", job.job_id),
+            acp::ToolKind::Other,
+            vec![],
+            vec![],
+        ),
+        ToolInput::AssetJobSubscribe(ref job) => (
+            format!("Watch transfer: {}", job.job_id),
+            acp::ToolKind::Other,
+            vec![],
+            vec![],
+        ),
+    }
+}
+
 #[cfg(test)]
 mod execute_tool_call_parts_tests {
     use super::execute_tool_call_parts;
@@ -3832,5 +3968,167 @@ mod wait_interrupt_tests {
         );
         drop(new);
         assert_eq!(depth.depth(), 0);
+    }
+}
+#[cfg(test)]
+mod tool_call_presentation_tests {
+    use super::tool_call_presentation;
+    use agent_client_protocol as acp;
+    use std::path::Path;
+    use xai_grok_tools::types::ToolInput;
+    /// Build an input from its wire JSON: `ToolInput` is internally tagged with
+    /// `variant`, so this tracks the model-facing schema, not struct literals.
+    fn input(json: serde_json::Value) -> ToolInput {
+        serde_json::from_value(json).expect("tool input deserializes")
+    }
+    fn title(json: serde_json::Value) -> String {
+        tool_call_presentation(input(json), Path::new("/proj"), None).0
+    }
+    /// `wait_for` is the tool that surfaced this bug: it rendered as the
+    /// generic "Tool call" placeholder instead of naming the condition.
+    #[test]
+    fn wait_for_titles_the_condition() {
+        assert_eq!(
+            title(serde_json::json!({"variant": "WaitFor", "until": "6s"})),
+            "Wait: 6s"
+        );
+        assert_eq!(
+            title(serde_json::json!({
+                "variant": "WaitFor",
+                "until": "curl -sf localhost:3000"
+            })),
+            "Wait: curl -sf localhost:3000"
+        );
+    }
+    #[test]
+    fn lsp_titles_the_operation_and_optional_file() {
+        assert_eq!(
+            title(serde_json::json!({
+                "variant": "Lsp",
+                "operation": "goToDefinition",
+                "file_path": "/proj/src/lib.rs"
+            })),
+            "Code intelligence: goToDefinition `/proj/src/lib.rs`"
+        );
+        assert_eq!(
+            title(serde_json::json!({"variant": "Lsp", "operation": "workspaceSymbol"})),
+            "Code intelligence: workspaceSymbol"
+        );
+    }
+    #[test]
+    fn codex_mirrors_reuse_grok_titles_and_kinds() {
+        let (title, kind, locations, _) = tool_call_presentation(
+            input(serde_json::json!({
+                "variant": "CodexReadFile",
+                "file_path": "/proj/src/lib.rs"
+            })),
+            Path::new("/proj"),
+            None,
+        );
+        assert_eq!(title, "Read `/proj/src/lib.rs`");
+        assert_eq!(kind, acp::ToolKind::Read);
+        assert_eq!(locations.len(), 1);
+        let (title, kind, ..) = tool_call_presentation(
+            input(serde_json::json!({"variant": "CodexListDir", "dir_path": "/proj"})),
+            Path::new("/proj"),
+            None,
+        );
+        assert_eq!(title, "List `/proj`");
+        assert_eq!(kind, acp::ToolKind::Other);
+        let (title, kind, ..) = tool_call_presentation(
+            input(serde_json::json!({"variant": "CodexGrepFiles", "pattern": "fn main"})),
+            Path::new("/proj"),
+            None,
+        );
+        assert_eq!(title, "fn main");
+        assert_eq!(kind, acp::ToolKind::Search);
+    }
+    #[test]
+    fn asset_tools_name_the_object_they_touch() {
+        assert_eq!(
+            title(serde_json::json!({"variant": "AssetUpload", "path": "/tmp/shot.png"})),
+            "Upload asset: /tmp/shot.png"
+        );
+        assert_eq!(
+            title(serde_json::json!({
+                "variant": "AssetUpload",
+                "path": "/tmp/shot.png",
+                "key": "reports/shot.png"
+            })),
+            "Upload asset: reports/shot.png"
+        );
+        assert_eq!(
+            title(serde_json::json!({"variant": "AssetShare", "key": "reports/shot.png"})),
+            "Share asset: reports/shot.png"
+        );
+        assert_eq!(
+            title(serde_json::json!({"variant": "AssetList"})),
+            "List assets"
+        );
+        assert_eq!(
+            title(serde_json::json!({"variant": "AssetList", "prefix": "reports/"})),
+            "List assets: reports/"
+        );
+        assert_eq!(
+            title(serde_json::json!({"variant": "AssetDelete", "key": "k"})),
+            "Delete asset: k"
+        );
+        assert_eq!(
+            title(serde_json::json!({
+                "variant": "AssetSetVisibility",
+                "key": "k",
+                "visibility": "public"
+            })),
+            "Set asset visibility: k \u{2192} public"
+        );
+        assert_eq!(
+            title(serde_json::json!({"variant": "AssetDownload", "key": "k"})),
+            "Download asset: k"
+        );
+        assert_eq!(
+            title(serde_json::json!({"variant": "AssetJobStatus", "job_id": "job-1"})),
+            "Transfer job: job-1"
+        );
+        assert_eq!(
+            title(serde_json::json!({"variant": "AssetJobList"})),
+            "List transfer jobs"
+        );
+        assert_eq!(
+            title(serde_json::json!({"variant": "AssetJobCancel", "job_id": "job-1"})),
+            "Cancel transfer: job-1"
+        );
+        assert_eq!(
+            title(serde_json::json!({"variant": "AssetJobSubscribe", "job_id": "job-1"})),
+            "Watch transfer: job-1"
+        );
+    }
+    /// The edit arm still stamps the diff line it now receives as a parameter.
+    #[test]
+    fn search_replace_stamps_the_precomputed_diff_line() {
+        let search_replace = || {
+            input(serde_json::json!({
+                "variant": "SearchReplace",
+                "file_path": "src/lib.rs",
+                "old_string": "old",
+                "new_string": "new"
+            }))
+        };
+        let (title, kind, locations, content) =
+            tool_call_presentation(search_replace(), Path::new("/proj"), Some(42));
+        assert_eq!(title, "Edit `src/lib.rs`");
+        assert_eq!(kind, acp::ToolKind::Edit);
+        assert_eq!(locations.len(), 1);
+        let acp::ToolCallContent::Diff(diff) = &content[0] else {
+            panic!("edit must carry a diff, got {:?}", content[0]);
+        };
+        let meta = diff.meta.as_ref().expect("line meta is stamped");
+        assert_eq!(meta.get("old_line"), Some(&serde_json::json!(42)));
+        assert_eq!(meta.get("new_line"), Some(&serde_json::json!(42)));
+        // Without a resolved anchor the diff still renders, just unlined.
+        let (_, _, _, content) = tool_call_presentation(search_replace(), Path::new("/proj"), None);
+        let acp::ToolCallContent::Diff(diff) = &content[0] else {
+            panic!("edit must carry a diff");
+        };
+        assert!(diff.meta.is_none());
     }
 }
