@@ -3,6 +3,7 @@ use super::*;
 fn removed(task_id: &str) -> ScheduledTaskRemoved {
     ScheduledTaskRemoved {
         task_id: task_id.into(),
+        owner_session_id: None,
         generation: String::new(),
         revision: 0,
     }
@@ -11,6 +12,7 @@ fn removed(task_id: &str) -> ScheduledTaskRemoved {
 fn created(task_id: &str) -> ScheduledTaskCreated {
     ScheduledTaskCreated {
         task_id: task_id.into(),
+        owner_session_id: None,
         prompt: task_id.into(),
         human_schedule: "every 5 minutes".into(),
         next_fire_at: None,

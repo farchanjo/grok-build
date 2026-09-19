@@ -327,6 +327,10 @@ pub struct ScheduledTaskFired {
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct ScheduledTaskRemoved {
     pub task_id: String,
+    /// Session that created the schedule, when known. Lets the bridge route
+    /// the card to that session instead of the scheduler's holder.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub owner_session_id: Option<String>,
     #[cfg_attr(feature = "serde", serde(default))]
     pub generation: String,
     #[cfg_attr(feature = "serde", serde(default))]
@@ -339,6 +343,10 @@ pub struct ScheduledTaskRemoved {
 pub struct ScheduledTaskCreated {
     /// The scheduled task's unique ID.
     pub task_id: String,
+    /// Session that created the schedule, when known. Lets the bridge route
+    /// the card to that session instead of the scheduler's holder.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub owner_session_id: Option<String>,
     /// The prompt to execute.
     pub prompt: String,
     /// Human-readable schedule description, e.g. "every 5 minutes".
@@ -686,6 +694,7 @@ mod tests {
 
         let current = ScheduledTaskRemoved {
             task_id: "loop-1".into(),
+            owner_session_id: None,
             generation: "019b0000-0000-7000-8000-000000000000".into(),
             revision: 7,
         };

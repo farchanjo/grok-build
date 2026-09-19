@@ -262,6 +262,20 @@ fn stamp_event_id(config: &NotificationBridgeConfig, meta: &mut Option<acp::Meta
 fn stamp_event_id_for(session_id: &acp::SessionId, meta: &mut Option<acp::Meta>) {
     crate::util::event_id::ensure_event_id_meta(&session_id.0, meta);
 }
+
+/// Session a notification's frame must be addressed to.
+///
+/// A subagent inherits the parent's scheduler, so a schedule it created is
+/// announced on the parent's bridge. The owner stamp routes the card to the
+/// creating session while it is alive; a dead owner falls back to this bridge.
+fn frame_session_for(owner: Option<&str>, config: &NotificationBridgeConfig) -> acp::SessionId {
+    match crate::session::delivery::route(owner, config.session_id.0.as_ref()) {
+        crate::session::delivery::Delivery::Routed(target) => {
+            acp::SessionId::new(target.session_id)
+        }
+        crate::session::delivery::Delivery::Local => config.session_id.clone(),
+    }
+}
 fn stamp_scheduler_meta(
     session_id: &acp::SessionId,
     meta: &mut Option<acp::Meta>,
@@ -353,15 +367,16 @@ async fn handle_scheduled_task_removed(
 ) -> Result<(), String> {
     tracing::info!(task_id = %removed.task_id, "Scheduled task removed");
     let result: Result<Box<serde_json::value::RawValue>, String> = async {
+        let frame_session_id = frame_session_for(removed.owner_session_id.as_deref(), config);
         let mut meta = None;
         stamp_scheduler_meta(
-            &config.session_id,
+            &frame_session_id,
             &mut meta,
             &removed.generation,
             removed.revision,
         );
         let notification = crate::extensions::notification::SessionNotification {
-            session_id: config.session_id.clone(),
+            session_id: frame_session_id,
             update: crate::extensions::notification::SessionUpdate::ScheduledTaskDeleted {
                 task_id: removed.task_id,
             },
@@ -1009,17 +1024,30 @@ async fn handle_notification(
         }
         ToolNotification::MonitorEvent(event) => {
             let my_session = config.session_id.0.as_ref();
-            if let Some(owner) = event.owner_session_id.as_deref()
-                && owner != my_session
-            {
-                tracing::warn!(
+            // A monitor runs on the backend of whoever started it, so the event
+            // normally reaches the owner's bridge. When it lands here instead
+            // (a reparent race, a handle captured before an adoption) route it
+            // rather than dropping it: the owner still has the task and its
+            // conversation is where the event belongs.
+            let routed = match crate::session::delivery::route(
+                event.owner_session_id.as_deref(),
+                my_session,
+            ) {
+                crate::session::delivery::Delivery::Routed(target) => Some(target),
+                crate::session::delivery::Delivery::Local => None,
+            };
+            let frame_session_id = routed.as_ref().map_or_else(
+                || config.session_id.clone(),
+                |t| acp::SessionId::new(t.session_id.clone()),
+            );
+            if let Some(target) = &routed {
+                tracing::debug!(
                     task_id = %event.task_id,
                     description = %event.description,
-                    monitor_owner = %owner,
+                    monitor_owner = %target.session_id,
                     bridge_session = %my_session,
-                    "Dropped cross-session monitor event: owner does not match this bridge's session"
+                    "monitor event routed to its owning session"
                 );
-                return;
             }
             tracing::debug!(
                 task_id = %event.task_id,
@@ -1027,7 +1055,7 @@ async fn handle_notification(
                 "Monitor event received, injecting into session"
             );
             let notification = crate::extensions::notification::SessionNotification {
-                session_id: config.session_id.clone(),
+                session_id: frame_session_id,
                 update: crate::extensions::notification::SessionUpdate::MonitorEvent {
                     task_id: event.task_id.clone(),
                     description: event.description.clone(),
@@ -1046,7 +1074,19 @@ async fn handle_notification(
                         params.into(),
                     ));
             }
-            if config.task_completion_reservations.contains(&event.task_id) {
+            // The owner's own bookkeeping decides whether the model still needs
+            // the inject: its reservation is set when the task auto-woke.
+            let (reservations, cmd_tx) = match &routed {
+                Some(target) => (
+                    target.task_completion_reservations.clone(),
+                    target.cmd_tx.clone(),
+                ),
+                None => (
+                    config.task_completion_reservations.clone(),
+                    config.session_cmd_tx.clone(),
+                ),
+            };
+            if reservations.contains(&event.task_id) {
                 tracing::debug!(
                     task_id = %event.task_id,
                     "skipping model inject for monitor event: task already auto-woke via TaskCompleted"
@@ -1057,16 +1097,14 @@ async fn handle_notification(
             let prompt_blocks = vec![acp::ContentBlock::Text(acp::TextContent::new(
                 event.event_text,
             ))];
-            let _ = config
-                .session_cmd_tx
-                .send(SessionCommand::InjectNotification {
-                    prompt_id,
-                    prompt_blocks,
-                    priority: NotificationPriority::Next,
-                    source: NotificationSource::MonitorEvent {
-                        task_id: event.task_id.clone(),
-                    },
-                });
+            let _ = cmd_tx.send(SessionCommand::InjectNotification {
+                prompt_id,
+                prompt_blocks,
+                priority: NotificationPriority::Next,
+                source: NotificationSource::MonitorEvent {
+                    task_id: event.task_id.clone(),
+                },
+            });
         }
         ToolNotification::ScheduledTaskRemoved(removed) => {
             if let Err(error) = handle_scheduled_task_removed(config, removed, None).await {
@@ -1111,15 +1149,16 @@ async fn handle_notification(
         }
         ToolNotification::ScheduledTaskCreated(created) => {
             tracing::info!(task_id = %created.task_id, "Scheduled task created");
+            let frame_session_id = frame_session_for(created.owner_session_id.as_deref(), config);
             let mut meta = None;
             stamp_scheduler_meta(
-                &config.session_id,
+                &frame_session_id,
                 &mut meta,
                 &created.generation,
                 created.revision,
             );
             let notification = crate::extensions::notification::SessionNotification {
-                session_id: config.session_id.clone(),
+                session_id: frame_session_id,
                 update: crate::extensions::notification::SessionUpdate::ScheduledTaskCreated {
                     task_id: created.task_id,
                     prompt: created.prompt,
@@ -1381,6 +1420,176 @@ mod tests {
         assert!(
             event_id.starts_with("child-session-"),
             "the event id prefix must name the frame's own session, got {event_id}"
+        );
+        crate::session::delivery::unregister("child-session");
+    }
+
+    /// A schedule a subagent created is announced on the subagent, not on the
+    /// parent whose scheduler holds it: the card names the owner in both places
+    /// that identify a frame.
+    #[tokio::test]
+    async fn scheduled_created_card_is_routed_to_its_owner() {
+        let (config, mut gateway_rx, _persistence_rx, _cmd_rx) = make_test_config_full();
+        let (owner_tx, _owner_rx) = mpsc::unbounded_channel();
+        let (owner_persistence_tx, _owner_persistence_rx) = mpsc::unbounded_channel();
+        crate::session::delivery::register(crate::session::delivery::SessionDeliveryTarget {
+            session_id: "child-session".to_string(),
+            cmd_tx: owner_tx,
+            persistence_tx: owner_persistence_tx,
+            mcp_state: std::sync::Weak::new(),
+            push_stats: Arc::new(parking_lot::Mutex::new(Default::default())),
+            subscription_registry: Arc::new(parking_lot::Mutex::new(Default::default())),
+            task_completion_reservations: Default::default(),
+        });
+
+        let created = xai_grok_tools::notification::types::ScheduledTaskCreated {
+            task_id: "sched-1".to_string(),
+            owner_session_id: Some("child-session".to_string()),
+            prompt: "watch ci".to_string(),
+            human_schedule: "every 5 minutes".to_string(),
+            next_fire_at: None,
+            generation: "gen-1".to_string(),
+            revision: 1,
+        };
+        let mut state = BridgeState::default();
+        handle_notification(
+            &config,
+            ToolNotification::ScheduledTaskCreated(created),
+            &mut state,
+        )
+        .await;
+
+        let frame = loop {
+            match gateway_rx.try_recv() {
+                Ok(xai_acp_lib::AcpClientMessage::ExtNotification(args)) => {
+                    if args.request.method.as_ref() == "x.ai/scheduled_task_created" {
+                        let json: serde_json::Value =
+                            serde_json::from_str(args.request.params.get()).expect("params JSON");
+                        break json;
+                    }
+                }
+                Ok(_) => {}
+                Err(_) => panic!("created card was never forwarded"),
+            }
+        };
+        assert_eq!(
+            frame.get("sessionId").and_then(|v| v.as_str()),
+            Some("child-session"),
+            "the card belongs to the creating session"
+        );
+        let event_id = frame
+            .get("_meta")
+            .and_then(|m| m.get("eventId"))
+            .and_then(|v| v.as_str())
+            .expect("frame carries an event id");
+        assert!(
+            event_id.starts_with("child-session-"),
+            "the event id prefix must name the frame's own session, got {event_id}"
+        );
+        crate::session::delivery::unregister("child-session");
+    }
+
+    /// A dead owner falls back to the bridge's own session, like the fire.
+    #[tokio::test]
+    async fn scheduled_created_card_without_owner_stays_local() {
+        let (config, mut gateway_rx, _persistence_rx, _cmd_rx) = make_test_config_full();
+        let created = xai_grok_tools::notification::types::ScheduledTaskCreated {
+            task_id: "sched-2".to_string(),
+            owner_session_id: Some("gone-session".to_string()),
+            prompt: "watch ci".to_string(),
+            human_schedule: "every 5 minutes".to_string(),
+            next_fire_at: None,
+            generation: "gen-2".to_string(),
+            revision: 2,
+        };
+        let mut state = BridgeState::default();
+        handle_notification(
+            &config,
+            ToolNotification::ScheduledTaskCreated(created),
+            &mut state,
+        )
+        .await;
+
+        let frame = loop {
+            match gateway_rx.try_recv() {
+                Ok(xai_acp_lib::AcpClientMessage::ExtNotification(args)) => {
+                    if args.request.method.as_ref() == "x.ai/scheduled_task_created" {
+                        let json: serde_json::Value =
+                            serde_json::from_str(args.request.params.get()).expect("params JSON");
+                        break json;
+                    }
+                }
+                Ok(_) => {}
+                Err(_) => panic!("created card was never forwarded"),
+            }
+        };
+        assert_eq!(
+            frame.get("sessionId").and_then(|v| v.as_str()),
+            Some("test-session"),
+            "an owner that is not a live session falls back to this bridge"
+        );
+    }
+
+    /// A monitor event that lands on a bridge which is not the owner is routed to
+    /// the owner instead of being dropped: the owner's conversation is where the
+    /// event belongs, and its reservations decide whether the model still needs the
+    /// inject.
+    #[tokio::test]
+    async fn monitor_event_is_routed_to_its_owner() {
+        let (config, mut gateway_rx, _persistence_rx, mut bridge_cmd_rx) = make_test_config_full();
+        let (owner_tx, mut owner_rx) = mpsc::unbounded_channel();
+        let (owner_persistence_tx, _owner_persistence_rx) = mpsc::unbounded_channel();
+        crate::session::delivery::register(crate::session::delivery::SessionDeliveryTarget {
+            session_id: "child-session".to_string(),
+            cmd_tx: owner_tx,
+            persistence_tx: owner_persistence_tx,
+            mcp_state: std::sync::Weak::new(),
+            push_stats: Arc::new(parking_lot::Mutex::new(Default::default())),
+            subscription_registry: Arc::new(parking_lot::Mutex::new(Default::default())),
+            task_completion_reservations: Default::default(),
+        });
+
+        let event = xai_grok_tools::notification::types::MonitorEvent {
+            task_id: "mon-1".to_string(),
+            description: "errors in deploy.log".to_string(),
+            event_text: "<monitor-event>boom</monitor-event>".to_string(),
+            raw_text: "boom".to_string(),
+            owner_session_id: Some("child-session".to_string()),
+        };
+        let mut state = BridgeState::default();
+        handle_notification(&config, ToolNotification::MonitorEvent(event), &mut state).await;
+
+        let frame = loop {
+            match gateway_rx.try_recv() {
+                Ok(xai_acp_lib::AcpClientMessage::ExtNotification(args)) => {
+                    if args.request.method.as_ref() == "x.ai/monitor_event" {
+                        let json: serde_json::Value =
+                            serde_json::from_str(args.request.params.get()).expect("params JSON");
+                        break json;
+                    }
+                }
+                Ok(_) => {}
+                Err(_) => panic!("monitor event was never forwarded"),
+            }
+        };
+        assert_eq!(
+            frame.get("sessionId").and_then(|v| v.as_str()),
+            Some("child-session"),
+            "the monitor frame belongs to the owning session"
+        );
+        assert!(
+            matches!(
+                owner_rx.try_recv(),
+                Ok(SessionCommand::InjectNotification { .. })
+            ),
+            "the model inject must land in the owner's queue"
+        );
+        assert!(
+            !matches!(
+                bridge_cmd_rx.try_recv(),
+                Ok(SessionCommand::InjectNotification { .. })
+            ),
+            "the bridge's own session must not also inject it"
         );
         crate::session::delivery::unregister("child-session");
     }
@@ -2023,6 +2232,7 @@ mod tests {
         let notification = ToolNotification::ScheduledTaskCreated(
             xai_grok_tools::notification::types::ScheduledTaskCreated {
                 task_id: "loop-1".into(),
+                owner_session_id: None,
                 prompt: "check deploy".into(),
                 human_schedule: "every 5 minutes".into(),
                 next_fire_at: Some("2026-01-01T00:00:00Z".into()),
@@ -2107,6 +2317,7 @@ mod tests {
         let (config, _gateway_rx, mut persistence_rx, _cmd_rx) = make_test_config_full();
         let removed = xai_grok_tools::notification::ScheduledTaskRemoved {
             task_id: "loop-1".into(),
+            owner_session_id: None,
             generation: "generation-a".into(),
             revision: 2,
         };
@@ -2138,6 +2349,7 @@ mod tests {
         let (config, mut gateway_rx, mut persistence_rx, _cmd_rx) = make_test_config_full();
         let removed = xai_grok_tools::notification::ScheduledTaskRemoved {
             task_id: "loop-ack".into(),
+            owner_session_id: None,
             generation: "generation-a".into(),
             revision: 17,
         };

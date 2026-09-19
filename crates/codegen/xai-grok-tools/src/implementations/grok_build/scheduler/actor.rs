@@ -40,6 +40,9 @@ enum ExpiryPersistenceOutcome {
 
 pub(crate) struct PendingDurableRemoval {
     task_id: String,
+    /// Session that created the task, carried so the removal card is routed to
+    /// its owner rather than to the scheduler's holder.
+    owner_session_id: Option<String>,
     reservation: super::types::SchedulerReservation,
 }
 
@@ -54,6 +57,7 @@ fn truncate_chars(s: &str, max_chars: usize) -> String {
 fn task_created_payload(task: &ScheduledTask, version: SchedulerVersion) -> ScheduledTaskCreated {
     ScheduledTaskCreated {
         task_id: task.id.clone(),
+        owner_session_id: task.owner_session_id.clone(),
         prompt: task.prompt.clone(),
         human_schedule: interval_to_human(task.interval_secs),
         next_fire_at: Some(task.next_fire_at().to_rfc3339()),
@@ -62,9 +66,14 @@ fn task_created_payload(task: &ScheduledTask, version: SchedulerVersion) -> Sche
     }
 }
 
-fn task_removed_payload(task_id: String, version: SchedulerVersion) -> ScheduledTaskRemoved {
+fn task_removed_payload(
+    task_id: String,
+    owner_session_id: Option<String>,
+    version: SchedulerVersion,
+) -> ScheduledTaskRemoved {
     ScheduledTaskRemoved {
         task_id,
+        owner_session_id,
         generation: version.generation(),
         revision: version.revision(),
     }
@@ -138,11 +147,16 @@ impl SchedulerActor {
     async fn publish_durable_removal(
         &self,
         task_id: String,
+        owner_session_id: Option<String>,
         version: SchedulerVersion,
     ) -> Result<(), SchedulerError> {
         let acknowledgements = self
             .notification_handle
-            .send_scheduled_task_removed_acknowledged(task_removed_payload(task_id, version));
+            .send_scheduled_task_removed_acknowledged(task_removed_payload(
+                task_id,
+                owner_session_id,
+                version,
+            ));
         self.await_bounded(acknowledgements.wait(), SchedulerError::Notification)
             .await
     }
@@ -161,14 +175,19 @@ impl SchedulerActor {
 
         self.persist_resources().await?;
 
-        let (task_id, version) = {
+        let (task_id, owner_session_id, version) = {
             let pending = self
                 .pending_removal
                 .as_ref()
                 .expect("pending durable removal exists");
-            (pending.task_id.clone(), pending.reservation.version_at(0))
+            (
+                pending.task_id.clone(),
+                pending.owner_session_id.clone(),
+                pending.reservation.version_at(0),
+            )
         };
-        self.publish_durable_removal(task_id, version).await?;
+        self.publish_durable_removal(task_id, owner_session_id, version)
+            .await?;
         let mut pending = self
             .pending_removal
             .take()
@@ -203,21 +222,31 @@ impl SchedulerActor {
             }
         }
 
-        let task_ids: Vec<String> = {
+        let tasks: Vec<(String, Option<String>)> = {
             let res = self.resources.lock().await;
             res.get::<State<SchedulerState>>()
-                .map(|state| state.tasks.iter().map(|task| task.id.clone()).collect())
+                .map(|state| {
+                    state
+                        .tasks
+                        .iter()
+                        .map(|task| (task.id.clone(), task.owner_session_id.clone()))
+                        .collect()
+                })
                 .unwrap_or_default()
         };
-        if task_ids.is_empty() {
+        if tasks.is_empty() {
             return;
         }
-        let mut reservation = self.clock.prepare_transition(task_ids.len());
-        for task_id in task_ids {
+        let mut reservation = self.clock.prepare_transition(tasks.len());
+        for (task_id, owner_session_id) in tasks {
             let commit = reservation.commit_next(&mut self.clock);
             log_rollover("shutdown", None, commit.rollover);
             self.notification_handle
-                .send_scheduled_task_removed(task_removed_payload(task_id, commit.version));
+                .send_scheduled_task_removed(task_removed_payload(
+                    task_id,
+                    owner_session_id,
+                    commit.version,
+                ));
         }
     }
 
@@ -316,6 +345,8 @@ impl SchedulerActor {
             }
             let mut reservation = self.clock.prepare_transition(1);
             let expired_task = state.tasks.remove(idx);
+            // The card must reach the session that created the schedule.
+            let expired_owner = expired_task.owner_session_id.clone();
             let acknowledgement = self
                 .resources_persistence
                 .enqueue_save_and_flush(res.serialize());
@@ -377,7 +408,10 @@ impl SchedulerActor {
             }
 
             let version = reservation.version_at(0);
-            if let Err(error) = self.publish_durable_removal(task_id.clone(), version).await {
+            if let Err(error) = self
+                .publish_durable_removal(task_id.clone(), expired_owner, version)
+                .await
+            {
                 tracing::warn!(
                     %task_id,
                     %error,
@@ -393,13 +427,18 @@ impl SchedulerActor {
         let mut reservation = self.clock.prepare_transition(transition_count);
 
         if is_expired {
-            state.tasks.remove(idx);
+            let expired = state.tasks.remove(idx);
+            let expired_owner = expired.owner_session_id.clone();
             drop(res);
             tracing::info!(task_id = %task_id, "Scheduled task expired; removing without firing");
             let commit = reservation.commit_next(&mut self.clock);
             log_rollover(transition, Some(&task_id), commit.rollover);
             self.notification_handle
-                .send_scheduled_task_removed(task_removed_payload(task_id, commit.version));
+                .send_scheduled_task_removed(task_removed_payload(
+                    task_id,
+                    expired_owner,
+                    commit.version,
+                ));
             return;
         }
 
@@ -510,8 +549,13 @@ impl SchedulerActor {
         if let Some(task_id) = removed_task_id {
             let removal = reservation.commit_next(&mut self.clock);
             debug_assert!(removal.rollover.is_none());
+            // The one-shot just fired: its owner is the fire's owner.
             self.notification_handle
-                .send_scheduled_task_removed(task_removed_payload(task_id, removal.version));
+                .send_scheduled_task_removed(task_removed_payload(
+                    task_id,
+                    fire_owner_session_id.clone(),
+                    removal.version,
+                ));
         }
     }
 
@@ -864,10 +908,11 @@ impl SchedulerActor {
                     let _ = reply.send(Err(SchedulerError::NoDurableNotificationConsumer));
                     return;
                 }
-                state.tasks.remove(index);
+                let removed_task = state.tasks.remove(index);
                 drop(res);
                 self.pending_removal = Some(PendingDurableRemoval {
                     task_id: id,
+                    owner_session_id: removed_task.owner_session_id,
                     reservation: self.clock.prepare_transition(1),
                 });
                 let _ = reply.send(self.complete_pending_removal().await);
@@ -1823,6 +1868,50 @@ mod tests {
         task_id
     }
 
+    /// The creation card carries the creating session, so a schedule a subagent
+    /// created is announced on the subagent rather than on the parent that holds
+    /// the scheduler.
+    #[tokio::test]
+    async fn created_card_carries_the_creating_session() {
+        let (handle, cancel, mut notifications, _subagent_rx) = make_test_actor_with_subagents();
+        create_due_task_owned(&handle, "watch ci", "child-session").await;
+
+        let created = loop {
+            match next_event(&mut notifications).await {
+                ToolNotification::ScheduledTaskCreated(created) => break created,
+                other => panic!("expected a ScheduledTaskCreated, got {other:?}"),
+            }
+        };
+        assert_eq!(
+            created.owner_session_id.as_deref(),
+            Some("child-session"),
+            "the card must name the session that created the schedule"
+        );
+        cancel.cancel();
+    }
+
+    /// Same for the removal card, which the expiry and one-shot paths emit.
+    #[tokio::test]
+    async fn removed_card_carries_the_creating_session() {
+        let (handle, cancel, mut notifications, _subagent_rx) = make_test_actor_with_subagents();
+        let task_id = create_due_one_shot_owned(&handle, "one shot", "child-session").await;
+
+        let removed = loop {
+            match next_event(&mut notifications).await {
+                ToolNotification::ScheduledTaskRemoved(removed) if removed.task_id == task_id => {
+                    break removed;
+                }
+                _ => {}
+            }
+        };
+        assert_eq!(
+            removed.owner_session_id.as_deref(),
+            Some("child-session"),
+            "the removal card must name the session that created the schedule"
+        );
+        cancel.cancel();
+    }
+
     /// A loop iteration is attributed to the session that created the schedule.
     ///
     /// The actor belongs to whichever session holds the scheduler — the parent,
@@ -1855,6 +1944,28 @@ mod tests {
         };
         assert_eq!(request.parent_session_id, "parent-session");
         cancel.cancel();
+    }
+
+    /// Same, as a one-shot: firing removes it, so the removal card is emitted.
+    async fn create_due_one_shot_owned(
+        handle: &SchedulerHandle,
+        prompt: &str,
+        owner: &str,
+    ) -> String {
+        let mut task = ScheduledTask::new(1, prompt.into(), false, false);
+        task.created_at = chrono::Utc::now() - chrono::Duration::seconds(10);
+        task.owner_session_id = Some(owner.to_string());
+        let task_id = task.id.clone();
+        let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+        handle
+            .0
+            .send(SchedulerCommand::Create {
+                task,
+                reply: reply_tx,
+            })
+            .unwrap();
+        reply_rx.await.unwrap().unwrap();
+        task_id
     }
 
     async fn next_event<T>(rx: &mut mpsc::UnboundedReceiver<T>) -> T {

@@ -209,6 +209,7 @@ fn lsp_lifecycle_variants_round_trip() {
 fn scheduled_task_variants_round_trip() {
     let fired = ToolNotification::ScheduledTaskFired(ScheduledTaskFired {
         task_id: "s-1".into(),
+        owner_session_id: Some("owner-1".into()),
         prompt: "do thing".into(),
         human_schedule: "every 5 minutes".into(),
         next_fire_at: Some("2025-01-01T00:00:00Z".into()),
@@ -217,11 +218,13 @@ fn scheduled_task_variants_round_trip() {
 
     let removed = ToolNotification::ScheduledTaskRemoved(ScheduledTaskRemoved {
         task_id: "s-1".into(),
+        owner_session_id: Some("owner-1".into()),
     });
     round_trip(&removed);
 
     let created = ToolNotification::ScheduledTaskCreated(ScheduledTaskCreated {
         task_id: "s-2".into(),
+        owner_session_id: Some("owner-1".into()),
         prompt: "another".into(),
         human_schedule: "once".into(),
         next_fire_at: None,
@@ -236,6 +239,7 @@ fn monitor_event_round_trip() {
         description: "errors in deploy.log".into(),
         event_text: "<monitor-event>...</monitor-event>".into(),
         raw_text: "...".into(),
+        owner_session_id: Some("owner-1".into()),
     });
     let json = round_trip(&n);
     assert_type_tag(&json, "MonitorEvent");
@@ -332,15 +336,18 @@ fn variant_count_matches_variant_name() {
         }),
         ToolNotification::ScheduledTaskFired(ScheduledTaskFired {
             task_id: String::new(),
+            owner_session_id: None,
             prompt: String::new(),
             human_schedule: String::new(),
             next_fire_at: None,
         }),
         ToolNotification::ScheduledTaskRemoved(ScheduledTaskRemoved {
             task_id: String::new(),
+            owner_session_id: None,
         }),
         ToolNotification::ScheduledTaskCreated(ScheduledTaskCreated {
             task_id: String::new(),
+            owner_session_id: None,
             prompt: String::new(),
             human_schedule: String::new(),
             next_fire_at: None,
@@ -350,6 +357,7 @@ fn variant_count_matches_variant_name() {
             description: String::new(),
             event_text: String::new(),
             raw_text: String::new(),
+            owner_session_id: None,
         }),
         ToolNotification::AssetJobEvent(AssetJobEvent {
             job_id: String::new(),

@@ -230,6 +230,9 @@ pub struct LspServerFailed {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ScheduledTaskFired {
     pub task_id: String,
+    /// Session that created the schedule, when known.
+    #[serde(default)]
+    pub owner_session_id: Option<String>,
     pub prompt: String,
     pub human_schedule: String,
     /// RFC 3339 timestamp of the next fire, when the task is recurring.
@@ -241,12 +244,18 @@ pub struct ScheduledTaskFired {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ScheduledTaskRemoved {
     pub task_id: String,
+    /// Session that created the schedule, when known.
+    #[serde(default)]
+    pub owner_session_id: Option<String>,
 }
 
 /// Sent when a scheduled task is created.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ScheduledTaskCreated {
     pub task_id: String,
+    /// Session that created the schedule, when known.
+    #[serde(default)]
+    pub owner_session_id: Option<String>,
     pub prompt: String,
     pub human_schedule: String,
     /// RFC 3339 timestamp of the upcoming first fire.
@@ -264,6 +273,9 @@ pub struct MonitorEvent {
     pub event_text: String,
     /// Raw text without XML wrapping.
     pub raw_text: String,
+    /// Session that owns the monitor task, when known.
+    #[serde(default)]
+    pub owner_session_id: Option<String>,
 }
 
 /// Streaming state/progress event for an async asset transfer job.
