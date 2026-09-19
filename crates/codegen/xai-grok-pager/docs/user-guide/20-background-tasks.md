@@ -173,7 +173,9 @@ Exit code `0` satisfies the wait. Any other exit code retries until the deadline
 
 Every attempt runs through the session terminal, in the session working directory.
 
-The watcher appears in the tasks pane (`Ctrl+G`) under **Watchers** and is cancelled from there like any background task, or with `kill_command_or_subagent(task_id)`.
+The call stays visible while it runs: it renders as a `Wait <condition>` row in the scrollback, and the turn parks on it. A message sent during the inline attempt aborts the wait (the watcher, if one was already spawned, keeps polling); the transcript marks the park with a `Worked for …` boundary.
+
+The watcher appears in the tasks pane (`Ctrl+G`) under **Watchers** and is cancelled from there like any background task, or with `kill_command_or_subagent(task_id)`. Its row takes over the call's own row once the wait is backgrounded.
 
 The watcher's `task_id` also works with `get_command_or_subagent_output`: while the wait runs it reports the last attempt's output and exit code, and after it ends it reports the final state. Adding a `timeout_ms` blocks the read until the wait finishes. In scrollback and in the wake the wait reads with its own verbs — `satisfied`, `expired`, `cancelled` — so a deadline that ran out is not reported as a task failure.
 
