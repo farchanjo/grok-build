@@ -841,8 +841,10 @@ pub(crate) struct SessionActor {
     /// Per-`(server, uri)` MCP push stats, updated by the resource pump and
     /// surfaced through `ListMcpSubscriptions` (the TUI "Subscribed Tools"
     /// sheet's status column).
-    pub(crate) mcp_push_stats: parking_lot::Mutex<
-        std::collections::HashMap<(String, String), crate::session::acp_session::McpPushStats>,
+    pub(crate) mcp_push_stats: std::sync::Arc<
+        parking_lot::Mutex<
+            std::collections::HashMap<(String, String), crate::session::acp_session::McpPushStats>,
+        >,
     >,
     /// Session subscription registry, keyed `(server, uri)`. Recorded at
     /// subscribe time (display label + first-seen) and by the resource pump's
@@ -1822,6 +1824,9 @@ mod external_runtime_preflight_tests;
 #[cfg(test)]
 #[path = "acp_session_tests/external_runtime_session_tests.rs"]
 mod external_runtime_session_tests;
+#[cfg(test)]
+#[path = "acp_session_tests/mcp_owner_routing_tests.rs"]
+mod mcp_owner_routing_tests;
 #[cfg(test)]
 #[path = "acp_session_tests/mcp_subscription_sheet_tests.rs"]
 mod mcp_subscription_sheet_tests;

@@ -43,6 +43,10 @@ struct PendingUpdate {
     truncated: bool,
     first_at: std::time::Instant,
     last_at: std::time::Instant,
+    /// Session that owns the subscription, when it is *not* this one.
+    /// Resolved at accept time so a burst keeps its destination even if the
+    /// owner's registration disappears mid-window.
+    target: Option<crate::session::delivery::SessionDeliveryTarget>,
 }
 
 impl PendingUpdate {
@@ -225,12 +229,19 @@ pub(crate) fn spawn_mcp_resource_pump(
                         }
                         match read_resource_text(&session, &server, &uri).await {
                             Ok(text) => {
-                                record_push(&session, &key);
+                                // The subscription carries the session that
+                                // asked for it. On a shared transport (a
+                                // subagent inheriting the parent's client)
+                                // this is the child, so the push must land
+                                // there instead of in the transport holder.
+                                let target = resolve_push_target(&session, &server, &uri).await;
+                                record_push(&session, target.as_ref(), &key);
                                 let entry = pending.entry(key).or_insert_with(|| PendingUpdate {
                                     text: String::new(),
                                     truncated: false,
                                     first_at: now,
                                     last_at: now,
+                                    target: target.clone(),
                                 });
                                 entry.append(&text);
                                 entry.last_at = now;
@@ -281,19 +292,19 @@ pub(crate) fn spawn_mcp_resource_pump(
                         .map(|(k, _)| k.clone())
                         .collect();
                     for (server, uri) in ready_keys {
-                        // A user unsubscribe parked mid-burst wins: drop the
-                        // buffered text instead of injecting after the fact.
-                        if session
-                            .mcp_push_stats
-                            .lock()
-                            .get(&(server.clone(), uri.clone()))
-                            .is_some_and(|stats| stats.unsubscribed)
-                        {
-                            pending.remove(&(server, uri));
-                            continue;
-                        }
                         if let Some(update) = pending.remove(&(server.clone(), uri.clone())) {
-                            inject_resource_update(&session, &server, &uri, &update);
+                            // A user unsubscribe parked mid-burst wins: drop
+                            // the buffered text instead of injecting after
+                            // the fact. Checked on the burst's own stats map
+                            // (the owner's when the push was routed).
+                            if stats_for(&session, update.target.as_ref())
+                                .lock()
+                                .get(&(server.clone(), uri.clone()))
+                                .is_some_and(|stats| stats.unsubscribed)
+                            {
+                                continue;
+                            }
+                            inject_resource_update(&session, &server, &uri, &update).await;
                         }
                     }
                 }
@@ -302,10 +313,71 @@ pub(crate) fn spawn_mcp_resource_pump(
     });
 }
 
-/// Record an accepted push in the session's stats map (feeds the
+/// Stats map a push belongs to: the owner's when the burst was routed,
+/// this session's otherwise.
+fn stats_for<'a>(
+    session: &'a SessionActor,
+    target: Option<&'a crate::session::delivery::SessionDeliveryTarget>,
+) -> &'a parking_lot::Mutex<
+    std::collections::HashMap<(String, String), crate::session::acp_session::McpPushStats>,
+> {
+    match target {
+        Some(target) => target.push_stats.as_ref(),
+        None => session.mcp_push_stats.as_ref(),
+    }
+}
+
+/// Resolve where a push for `(server, uri)` must be delivered.
+///
+/// Reads the owning session recorded on the subscription (stamped by
+/// whichever session issued the `resources/subscribe`) and routes to it when
+/// it is a different, still-live session. A missing owner (legacy
+/// subscription) or a dead owner delivers locally — the same adoption rule
+/// the task and wait paths use, so output is never lost.
+async fn resolve_push_target(
+    session: &SessionActor,
+    server: &str,
+    uri: &str,
+) -> Option<crate::session::delivery::SessionDeliveryTarget> {
+    let me = session.session_info.id.0.to_string();
+    let (owner, client) = {
+        let state = session.mcp_state.lock().await;
+        let client = state.get_client(server).cloned();
+        let owner = client
+            .as_ref()
+            .and_then(|client| client.subscription_owner(uri));
+        (owner, client)
+    };
+    match crate::session::delivery::route(owner.as_deref(), me.as_str()) {
+        crate::session::delivery::Delivery::Local => {
+            // A stamped owner that is no longer registered means the session
+            // is gone: adopt the stream onto this one so delivery and the
+            // sheet's owner filter agree from here on.
+            if let (Some(owner), Some(client)) = (owner, client)
+                && owner != me
+            {
+                tracing::info!(
+                    server = %server,
+                    uri = %uri,
+                    owner = %owner,
+                    "mcp push owner is gone; adopting the stream onto this session"
+                );
+                client.reassign_subscription_owner(uri, me.as_str());
+            }
+            None
+        }
+        crate::session::delivery::Delivery::Routed(target) => Some(target),
+    }
+}
+
+/// Record an accepted push in the owning session's stats map (feeds the
 /// "Subscribed Tools" sheet's status column).
-fn record_push(session: &SessionActor, key: &(String, String)) {
-    let mut stats = session.mcp_push_stats.lock();
+fn record_push(
+    session: &SessionActor,
+    target: Option<&crate::session::delivery::SessionDeliveryTarget>,
+    key: &(String, String),
+) {
+    let mut stats = stats_for(session, target).lock();
     let entry = stats.entry(key.clone()).or_default();
     entry.pushes = entry.pushes.saturating_add(1);
     entry.last_push = Some(std::time::Instant::now());
@@ -367,7 +439,17 @@ async fn read_resource_text(
 /// Park the coalesced burst as a pending notification. The drain delivers it
 /// as (part of) the next synthetic turn when the session is idle or the turn
 /// ends — `Later` priority defers to turn end and never interrupts mid-turn.
-fn inject_resource_update(session: &SessionActor, server: &str, uri: &str, update: &PendingUpdate) {
+///
+/// A burst owned by another session is sent down that session's command
+/// channel instead. If the owner is already gone the send fails and the
+/// burst is re-stamped as this session's, so an adopted stream keeps being
+/// delivered (and its sheet row comes back) rather than silently stopping.
+async fn inject_resource_update(
+    session: &SessionActor,
+    server: &str,
+    uri: &str,
+    update: &PendingUpdate,
+) {
     let body = format!(
         "MCP push from server `{server}` (subscribed resource `{uri}`) — output arrived \
          automatically via the subscription; do NOT poll for it with other tools. If the \
@@ -375,20 +457,60 @@ fn inject_resource_update(session: &SessionActor, server: &str, uri: &str, updat
         update.text
     );
     let message = xai_grok_tools::reminders::wrap_reminder(&body);
-    let sent = session
-        .session_cmd_tx
-        .send(SessionCommand::InjectNotification {
-            prompt_id: format!("mcp-resource-{}", uuid::Uuid::now_v7()),
-            prompt_blocks: vec![acp::ContentBlock::Text(acp::TextContent::new(message))],
-            priority: crate::session::commands::NotificationPriority::Later,
-            source: NotificationSource::McpResourceUpdated {
-                server: server.to_string(),
-                uri: uri.to_string(),
-            },
-        });
-    if let Err(error) = sent {
+    // `SessionCommand` is not `Clone`, and a routed send may need a second
+    // attempt after the owner turns out to be gone.
+    let command = |message: String| SessionCommand::InjectNotification {
+        prompt_id: format!("mcp-resource-{}", uuid::Uuid::now_v7()),
+        prompt_blocks: vec![acp::ContentBlock::Text(acp::TextContent::new(message))],
+        priority: crate::session::commands::NotificationPriority::Later,
+        source: NotificationSource::McpResourceUpdated {
+            server: server.to_string(),
+            uri: uri.to_string(),
+        },
+    };
+    if let Some(target) = &update.target {
+        // Mirror the subscribe-time metadata into the owner's sheet registry
+        // so a routed row renders exactly like a locally delivered one.
+        if let Some(label) = update_label(session, server, uri).await {
+            let mut registry = target.subscription_registry.lock();
+            upsert_subscription_record(
+                &mut registry,
+                server,
+                uri,
+                Some(label),
+                std::time::Instant::now(),
+            );
+        }
+        if target.cmd_tx.send(command(message.clone())).is_ok() {
+            return;
+        }
+        // Owner gone: adopt the stream onto this session so the next push
+        // resolves locally.
+        {
+            let state = session.mcp_state.lock().await;
+            if let Some(client) = state.get_client(server) {
+                client.reassign_subscription_owner(uri, &session.session_info.id.0);
+            }
+        }
+        tracing::info!(
+            server = %server,
+            uri = %uri,
+            owner = %target.session_id,
+            "mcp push owner gone; adopting the stream onto this session"
+        );
+    }
+    if let Err(error) = session.session_cmd_tx.send(command(message)) {
         tracing::debug!(%error, "mcp push injection skipped (session command channel closed)");
     }
+}
+
+/// Subscribe-time display label for one URI, read back from the client that
+/// holds the subscription.
+async fn update_label(session: &SessionActor, server: &str, uri: &str) -> Option<String> {
+    let state = session.mcp_state.lock().await;
+    state
+        .get_client(server)
+        .and_then(|client| client.label_for_uri(uri))
 }
 
 /// Record subscribe-time metadata (display label, first-seen) for one
@@ -496,6 +618,16 @@ impl SessionActor {
         for (server, client) in &ordered_clients {
             for uri in client.subscribed_uris() {
                 let key = (server.clone(), uri.clone());
+                // A shared client carries rows for more than one session: the
+                // stream belongs to whoever subscribed it, so a session that
+                // did not ask for it must not list it (nor claim its pushes).
+                let owner = client.subscription_owner(&uri);
+                if owner
+                    .as_deref()
+                    .is_some_and(|owner| owner != self.session_info.id.0.as_ref())
+                {
+                    continue;
+                }
                 let record = registry.get(&key);
                 let stat = stats.get(&key);
                 // Tombstoned rows keep staying out of the listing (the user
@@ -522,6 +654,7 @@ impl SessionActor {
                 entries.push(crate::extensions::mcp::McpSubscriptionEntry {
                     server: server.clone(),
                     uri,
+                    owner_session_id: owner.clone(),
                     label: record.and_then(|r| r.label.clone()),
                     pushes_seen,
                     last_push_ms_ago,
@@ -562,6 +695,9 @@ impl SessionActor {
             entries.push(crate::extensions::mcp::McpSubscriptionEntry {
                 server: server.clone(),
                 uri: uri.clone(),
+                // The registry does not track ownership; a dead row is shown
+                // wherever the transport's session lists it.
+                owner_session_id: None,
                 label: record.label.clone(),
                 pushes_seen,
                 last_push_ms_ago,
@@ -617,6 +753,7 @@ mod tests {
             truncated: false,
             first_at: std::time::Instant::now(),
             last_at: std::time::Instant::now(),
+            target: None,
         }
     }
 
@@ -655,6 +792,7 @@ mod tests {
             truncated: false,
             first_at: std::time::Instant::now() - MAX_WINDOW,
             last_at: std::time::Instant::now(),
+            target: None,
         };
         assert!(streaming.ready(std::time::Instant::now()));
         let _ = &mut streaming;

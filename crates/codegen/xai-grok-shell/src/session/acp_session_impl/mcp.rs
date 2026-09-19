@@ -260,7 +260,10 @@ impl SessionActor {
             .map_err(|e| format!("re-handshake failed: {e}"))?;
         // Best-effort resource subscribe after the managed-client
         // re-handshake; failure must not fail the refresh.
-        if let Err(e) = client.subscribe_all_resources().await {
+        if let Err(e) = client
+            .subscribe_all_resources(Some(self.session_info.id.0.as_ref()))
+            .await
+        {
             tracing::warn!(
                 server = %server_name,
                 error = %e,
@@ -480,7 +483,10 @@ impl SessionActor {
             .map_err(|e| format!("Failed to get tools after auth: {}", e))?;
         // Best-effort resource subscribe after a successful re-auth
         // handshake; failure must not fail the auth flow.
-        if let Err(e) = client.subscribe_all_resources().await {
+        if let Err(e) = client
+            .subscribe_all_resources(Some(self.session_info.id.0.as_ref()))
+            .await
+        {
             tracing::warn!(
                 server = %server_name,
                 error = %e,
@@ -1089,7 +1095,10 @@ impl SessionActor {
         // Re-subscribe to resource updates on the fresh transport. Best
         // effort: a failure here must not fail the respawn — the server is
         // already installed and serving tools.
-        if let Err(e) = new_client.subscribe_all_resources().await {
+        if let Err(e) = new_client
+            .subscribe_all_resources(Some(self.session_info.id.0.as_ref()))
+            .await
+        {
             tracing::warn!(
                 server = %server,
                 error = %e,
@@ -1461,6 +1470,9 @@ impl SessionActor {
                     .unwrap_or_default();
                 let task_event_tx = dispatcher_event_tx.clone();
                 let subscription_registry = std::sync::Arc::clone(&mcp_subscription_registry_bg);
+                // Per-future clone: the sweep below needs the id after this
+                // future has moved its own copy in.
+                let session_id_owned = session_id_owned.clone();
                 futs.push(async move {
                     let server_name = client.server_name().to_string();
                     let server_start = std::time::Instant::now();
@@ -1493,7 +1505,10 @@ impl SessionActor {
                         Ok(handles) => {
                             // Best-effort resource subscribe after a healthy
                             // handshake: a failure must not fail init.
-                            if let Err(e) = client.subscribe_all_resources().await {
+                            if let Err(e) = client
+                                .subscribe_all_resources(Some(session_id_owned.as_ref()))
+                                .await
+                            {
                                 tracing::warn!(
                                     server = %server_name,
                                     error = %e,
@@ -1838,7 +1853,10 @@ impl SessionActor {
                     }
                 };
                 // Best-effort resource subscribe for shared clients too.
-                if let Err(e) = client.subscribe_all_resources().await {
+                if let Err(e) = client
+                    .subscribe_all_resources(Some(session_id_owned.as_ref()))
+                    .await
+                {
                     tracing::warn!(
                         server = %server_name,
                         error = %e,

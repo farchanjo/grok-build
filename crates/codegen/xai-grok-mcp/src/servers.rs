@@ -402,6 +402,14 @@ pub struct McpState {
     /// dropping `tools/list_changed`, `Ready`, and `HandshakeFailed`
     /// emits for them. Read access is via [`Self::client_event_tx`].
     client_event_tx: Option<tokio::sync::mpsc::UnboundedSender<McpClientEvent>>,
+    /// Session id that owns this state.
+    ///
+    /// Read at subscription time so a `resources/subscribe` issued from a
+    /// tool call (post-call refresh) or from an init sweep can be stamped
+    /// with the *calling* session even when the transport itself is shared
+    /// with a parent session. `None` for snapshots and test fixtures built
+    /// without a session.
+    owner_session_id: Option<String>,
 }
 
 impl McpState {
@@ -425,7 +433,18 @@ impl McpState {
             disabled_tool_registrations: HashMap::new(),
             event_writer: xai_file_utils::events::EventWriter::noop(),
             client_event_tx: None,
+            owner_session_id: None,
         }
+    }
+
+    /// Session id owning this state, if stamped by the spawn path.
+    pub fn owner_session_id(&self) -> Option<&str> {
+        self.owner_session_id.as_deref()
+    }
+
+    /// Stamp the owning session id (set once, at session spawn).
+    pub fn set_owner_session_id(&mut self, session_id: impl Into<String>) {
+        self.owner_session_id = Some(session_id.into());
     }
 
     /// Install (or remove) the [`McpClientEvent`] sender owned by the
@@ -1478,8 +1497,20 @@ impl xai_tool_runtime::Tool for McpErasedTool {
         // resource pump. Rate-limited per client; failures logged inside.
         if !is_timeout {
             let client_for_sub = Arc::clone(&client);
+            // The calling session's state is the owner of anything this tool
+            // call created: a shared transport (subagent inheriting the
+            // parent's client) must stamp the child, not the transport owner.
+            let owner_for_sub = self
+                .tool
+                .mcp_state
+                .lock()
+                .await
+                .owner_session_id()
+                .map(str::to_string);
             tokio::spawn(async move {
-                client_for_sub.subscribe_new_resources().await;
+                client_for_sub
+                    .subscribe_new_resources(owner_for_sub.as_deref())
+                    .await;
             });
         }
 
@@ -2766,6 +2797,22 @@ pub struct McpClient {
     /// handshake-time `resources/list`). `parking_lot::Mutex` is fine: never
     /// held across an `.await`.
     subscribed_uris: parking_lot::Mutex<std::collections::HashSet<String>>,
+    /// Owning session id per subscribed URI, captured at subscribe time from
+    /// the session whose `McpState` requested the subscription.
+    ///
+    /// A client can be shared across session actors (a subagent inherits the
+    /// parent's `Arc<McpClient>` through `SharedMcpPool`), and the client's
+    /// single `notify_tx` slot points at the parent. Without this map a
+    /// `resources/updated` push for a stream the *child* created would be
+    /// delivered to the parent's resource pump, and the child would get
+    /// nothing. The owner is authoritative at delivery time: the pump routes
+    /// the push to the owning session and falls back to local delivery only
+    /// when the owner is gone (the same adoption rule the task/wait paths
+    /// use). First writer wins, so a later re-subscribe by another session
+    /// (e.g. a subagent's init sweep over an already-tracked URI) cannot
+    /// steal ownership. `parking_lot::Mutex` is fine: never held across an
+    /// `.await`.
+    subscribed_owners: parking_lot::Mutex<HashMap<String, String>>,
     /// Tombstones: URIs the user explicitly unsubscribed via the TUI. Both
     /// subscribe paths skip them so a post-tool-call refresh (or re-handshake
     /// subscribe) does not silently re-subscribe an intentionally-dropped
@@ -2918,6 +2965,7 @@ impl McpClient {
             reconnect,
             notify_tx: Arc::new(parking_lot::Mutex::new(None)),
             subscribed_uris: parking_lot::Mutex::new(std::collections::HashSet::new()),
+            subscribed_owners: parking_lot::Mutex::new(HashMap::new()),
             unsubscribed_uris: parking_lot::Mutex::new(std::collections::HashSet::new()),
             subscribed_labels: parking_lot::Mutex::new(HashMap::new()),
             last_subscription_refresh_ms: std::sync::atomic::AtomicU64::new(0),
@@ -3593,8 +3641,15 @@ impl McpClient {
     /// must never fail the owning handshake path.
     ///
     /// Returns the per-uri outcome (new subscriptions vs. already-tracked).
-    pub async fn subscribe_all_resources(&self) -> Result<SubscribeResourcesOutcome, McpError> {
-        self.subscribe_resources_filtered(false).await
+    ///
+    /// `owner_session_id` stamps every URI subscribed by this sweep so a
+    /// shared client can route each push to the session that asked for it.
+    pub async fn subscribe_all_resources(
+        &self,
+        owner_session_id: Option<&str>,
+    ) -> Result<SubscribeResourcesOutcome, McpError> {
+        self.subscribe_resources_filtered(false, owner_session_id)
+            .await
     }
 
     /// Best-effort post-tool-call refresh: subscribe to any listed resource
@@ -3606,7 +3661,10 @@ impl McpClient {
     /// already-tracked URIs are idempotently skipped (counted as
     /// `already_subscribed`, never re-sent or duplicated). Returns the
     /// per-uri outcome (zeroed when rate-limited or when nothing is new).
-    pub async fn subscribe_new_resources(&self) -> SubscribeResourcesOutcome {
+    pub async fn subscribe_new_resources(
+        &self,
+        owner_session_id: Option<&str>,
+    ) -> SubscribeResourcesOutcome {
         let now_ms = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_millis() as u64)
@@ -3619,7 +3677,10 @@ impl McpClient {
         }
         self.last_subscription_refresh_ms
             .store(now_ms, std::sync::atomic::Ordering::Relaxed);
-        match self.subscribe_resources_filtered(true).await {
+        match self
+            .subscribe_resources_filtered(true, owner_session_id)
+            .await
+        {
             Ok(outcome) => outcome,
             Err(e) => {
                 tracing::debug!(
@@ -3635,6 +3696,7 @@ impl McpClient {
     async fn subscribe_resources_filtered(
         &self,
         only_new: bool,
+        owner_session_id: Option<&str>,
     ) -> Result<SubscribeResourcesOutcome, McpError> {
         let service = self.ensure_initialized().await?;
         let subscribe_capable = service.peer_info().is_some_and(|info| {
@@ -3688,6 +3750,14 @@ impl McpClient {
             {
                 Ok(_) => {
                     self.subscribed_uris.lock().insert(uri.clone());
+                    // First writer wins: a re-subscribe by another session
+                    // over an already-tracked URI keeps the original owner.
+                    if let Some(owner) = owner_session_id {
+                        self.subscribed_owners
+                            .lock()
+                            .entry(uri.clone())
+                            .or_insert_with(|| owner.to_string());
+                    }
                     // Capture the display label at subscribe time (title
                     // preferred over the programmatic name). Never overwrite:
                     // re-subscribing an already-tracked URI keeps the
@@ -3748,6 +3818,36 @@ impl McpClient {
         self.subscribed_labels.lock().get(uri).cloned()
     }
 
+    /// Session id that asked for one subscribed URI, if it was stamped.
+    ///
+    /// `None` means the URI was subscribed before owner stamping existed (or
+    /// through a path that carried no session) — callers treat that as
+    /// "deliver wherever the transport lives", preserving the old behavior.
+    pub fn subscription_owner(&self, uri: &str) -> Option<String> {
+        self.subscribed_owners.lock().get(uri).cloned()
+    }
+
+    /// Snapshot of tracked subscriptions as `(uri, owner_session_id)` pairs,
+    /// in the same order as [`Self::subscribed_uris`].
+    pub fn subscription_owners(&self) -> HashMap<String, String> {
+        self.subscribed_owners.lock().clone()
+    }
+
+    /// Re-stamp one subscribed URI onto another session.
+    ///
+    /// Used when the original owner is gone: the session that inherits the
+    /// stream becomes its owner so the push keeps being delivered (and its
+    /// sheet row stays visible there) instead of being routed to a dead
+    /// session.
+    pub fn reassign_subscription_owner(&self, uri: &str, owner_session_id: &str) {
+        if !self.subscribed_uris.lock().contains(uri) {
+            return;
+        }
+        self.subscribed_owners
+            .lock()
+            .insert(uri.to_string(), owner_session_id.to_string());
+    }
+
     /// Unsubscribe from one resource URI: sends `resources/unsubscribe`,
     /// drops the tracked subscription, and tombstones the URI so neither
     /// subscribe path re-subscribes it. Returns `true` when the server
@@ -3759,6 +3859,7 @@ impl McpClient {
             .unsubscribe(rmcp::model::UnsubscribeRequestParams::new(uri.to_string()))
             .await;
         self.subscribed_uris.lock().remove(uri);
+        self.subscribed_owners.lock().remove(uri);
         self.unsubscribed_uris.lock().insert(uri.to_string());
         match result {
             Ok(_) => {
@@ -8407,6 +8508,102 @@ mod tests {
     }
 }
 
+/// Owner stamping on subscriptions: the session that subscribed a URI is
+/// recorded, a later re-subscribe by another session does not steal it, an
+/// explicit reassign moves it, and an unsubscribe clears it.
+///
+/// This is what lets a shared client (a subagent inheriting the parent's
+/// `Arc<McpClient>`) route each push back to the session that asked for it.
+#[tokio::test]
+async fn subscription_owner_is_stamped_first_writer_wins_and_clearable() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let script = dir.path().join("fixture.py");
+    std::fs::write(
+        &script,
+        r#"
+import json, sys
+PROTOCOL = "2025-06-18"
+RESOURCES = [{"uri": "res://demo/1", "name": "demo", "mimeType": "text/plain"}]
+def reply(id_, result):
+    print(json.dumps({"jsonrpc": "2.0", "id": id_, "result": result}), flush=True)
+for line in sys.stdin:
+    line = line.strip()
+    if not line:
+        continue
+    req = json.loads(line)
+    method = req.get("method", "")
+    id_ = req.get("id")
+    if method == "initialize":
+        reply(id_, {
+            "protocolVersion": PROTOCOL,
+            "capabilities": {"resources": {"subscribe": True, "listChanged": True}},
+            "serverInfo": {"name": "subscribe-fixture", "version": "0.1.0"},
+        })
+    elif id_ is not None:
+        if method == "resources/list":
+            reply(id_, {"resources": RESOURCES})
+        else:
+            reply(id_, {})
+"#,
+    )
+    .expect("write fixture");
+
+    let mut cmd = Command::new("python3");
+    cmd.arg(&script).kill_on_drop(true);
+    xai_grok_tools::util::detach_command(&mut cmd);
+    let (transport, _stderr) = SafeTokioChildProcess::spawn(
+        cmd,
+        "subscribe-fixture".to_string(),
+        xai_file_utils::events::EventWriter::noop(),
+    )
+    .expect("spawn fixture server");
+
+    let client = McpClient::new_stdio("subscribe-fixture".to_string(), transport, None, None);
+    client
+        .subscribe_all_resources(Some("child-session"))
+        .await
+        .expect("subscribe must succeed");
+
+    assert_eq!(
+        client.subscription_owner("res://demo/1").as_deref(),
+        Some("child-session"),
+        "the subscribing session must be recorded"
+    );
+
+    // A second session's sweep over the same client must not steal ownership.
+    client
+        .subscribe_all_resources(Some("parent-session"))
+        .await
+        .expect("re-subscribe must succeed");
+    assert_eq!(
+        client.subscription_owner("res://demo/1").as_deref(),
+        Some("child-session"),
+        "first writer wins so a re-subscribe cannot reassign a live stream"
+    );
+
+    // Adoption path: an explicit reassign moves it.
+    client.reassign_subscription_owner("res://demo/1", "parent-session");
+    assert_eq!(
+        client.subscription_owner("res://demo/1").as_deref(),
+        Some("parent-session")
+    );
+
+    // Unsubscribe clears the stamp along with the tracked uri.
+    client
+        .unsubscribe_resource("res://demo/1")
+        .await
+        .expect("unsubscribe must succeed");
+    assert_eq!(client.subscription_owner("res://demo/1"), None);
+    assert!(
+        client.subscribed_uris().is_empty(),
+        "the tracked set must drop the uri"
+    );
+
+    // Reassigning an untracked uri is a no-op.
+    client.reassign_subscription_owner("res://nope", "someone");
+    assert_eq!(client.subscription_owner("res://nope"), None);
+}
+
 /// End-to-end `subscribe_all_resources` proof against a real stdio MCP
 /// server process: spawn the fixture (advertises `resources.subscribe`),
 /// handshake, subscribe, and assert every resource URI was acknowledged.
@@ -8461,7 +8658,7 @@ for line in sys.stdin:
     let client = McpClient::new_stdio("subscribe-fixture".to_string(), transport, None, None);
 
     let subscribed = client
-        .subscribe_all_resources()
+        .subscribe_all_resources(Some("owner-session"))
         .await
         .expect("subscribe must succeed against a subscribe-capable server");
     assert_eq!(
@@ -8541,7 +8738,7 @@ for line in sys.stdin:
 
     // Handshake-path subscribe: only the base resource exists.
     let first = client
-        .subscribe_all_resources()
+        .subscribe_all_resources(Some("owner-session"))
         .await
         .expect("subscribe_all_resources must succeed");
     assert_eq!(
@@ -8551,7 +8748,7 @@ for line in sys.stdin:
 
     // Post-tool-call refresh: the list now grows by one NEW uri; only that
     // one may be subscribed.
-    let second = client.subscribe_new_resources().await;
+    let second = client.subscribe_new_resources(Some("owner-session")).await;
     assert_eq!(
         second.subscribed, 1,
         "refresh subscribes exactly the new uri"
@@ -8566,7 +8763,7 @@ for line in sys.stdin:
     client
         .last_subscription_refresh_ms
         .store(0, std::sync::atomic::Ordering::Relaxed);
-    let third = client.subscribe_new_resources().await;
+    let third = client.subscribe_new_resources(Some("owner-session")).await;
     assert_eq!(
         third.subscribed, 0,
         "tracked uris must never be re-subscribed"

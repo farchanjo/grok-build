@@ -31,6 +31,9 @@ impl MvpAgent {
     }
     /// Remove a session without finalizing; it stays resumable on disk.
     pub(crate) fn remove_session(&self, id: &acp::SessionId) {
+        // Stop routing owner-stamped pushes to a session that no longer
+        // drains them; late senders fall back to local delivery.
+        crate::session::delivery::unregister(id.0.as_ref());
         if let Some(handle) = self.sessions.borrow().get(id) {
             handle
                 .tool_context

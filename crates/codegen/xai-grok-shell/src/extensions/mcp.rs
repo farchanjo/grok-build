@@ -335,6 +335,12 @@ pub enum McpSubscriptionState {
 pub struct McpSubscriptionEntry {
     pub server: String,
     pub uri: String,
+    /// Session that asked for the subscription. Set when the subscription is
+    /// owned by a different session than the one listing (a subagent's stream
+    /// on a shared MCP client); `None` for legacy stamps and the agent-level
+    /// listing.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub owner_session_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1299,6 +1305,8 @@ async fn handle_subscriptions(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtRe
                     .map(move |(uri, label)| McpSubscriptionEntry {
                         server: server.clone(),
                         uri,
+                        // Agent-level listing: no session pump, so no owner.
+                        owner_session_id: None,
                         label,
                         pushes_seen: None,
                         last_push_ms_ago: None,

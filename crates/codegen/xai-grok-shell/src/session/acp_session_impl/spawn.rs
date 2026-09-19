@@ -1171,6 +1171,9 @@ pub(crate) async fn spawn_session_actor(
     });
     let mcp_state = {
         let mut state = McpState::new_with_meta(mcp_servers.clone(), mcp_meta_config_map);
+        // Stamp the owning session: subscription owners and push routing read
+        // this even when the transport is inherited from a parent session.
+        state.set_owner_session_id(session_info.id.0.to_string());
         if let Some(ref pool) = parent_mcp_pool {
             state.import_shared_clients(pool);
             tracing::info!(
@@ -2135,6 +2138,22 @@ pub(crate) async fn spawn_session_actor(
         subagent_token_records: parking_lot::Mutex::new(HashMap::new()),
         workspace_ops: workspace_ops.clone(),
         trace_config_template: std::cell::RefCell::new(None),
+    });
+    // Publish this session as a delivery target so owner-stamped pushes
+    // created on a *shared* transport (a subagent's stream on the parent's
+    // MCP client, a reparented task, a scheduled fire) reach the owning
+    // session instead of the transport holder. Removed on session exit.
+    crate::session::delivery::register(crate::session::delivery::SessionDeliveryTarget {
+        session_id: session.session_info.id.0.to_string(),
+        cmd_tx: session.session_cmd_tx.clone(),
+        persistence_tx: session.notifications.persistence_tx.clone(),
+        push_stats: std::sync::Arc::clone(&session.mcp_push_stats),
+        subscription_registry: std::sync::Arc::clone(&session.mcp_subscription_registry),
+        task_completion_reservations: session
+            .tool_context
+            .task_completion_reservations
+            .clone()
+            .unwrap_or_default(),
     });
     if goal_was_restored {
         let current_tokens = session.chat_state_handle.get_total_tokens().await as i64;

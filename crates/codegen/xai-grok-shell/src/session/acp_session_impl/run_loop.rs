@@ -29,7 +29,12 @@ mod yolo_toggle_report_tests {
 }
 /// Best-effort removal of this session's per-session scratch staging on
 /// teardown. A no-op in builds without a scratch producer.
-fn cleanup_session_scratch(_session: &SessionActor) {}
+fn cleanup_session_scratch(session: &SessionActor) {
+    // Every run-loop exit path funnels through here. The run loop is the
+    // drain for routed pushes, so the session must stop being a delivery
+    // target the moment it can no longer deliver.
+    crate::session::delivery::unregister(session.session_info.id.0.as_ref());
+}
 impl SessionActor {
     /// Canonical selection plus frozen wire model for ACP prompt setup.
     ///

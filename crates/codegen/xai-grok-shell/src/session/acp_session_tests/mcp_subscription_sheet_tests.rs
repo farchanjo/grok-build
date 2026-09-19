@@ -342,6 +342,7 @@ fn subscription_entry_wire_keeps_label_and_state_optional() {
     let labeled = McpSubscriptionEntry {
         server: "ssh".to_string(),
         uri: "command://1".to_string(),
+        owner_session_id: Some("child-session".to_string()),
         label: Some("session output".to_string()),
         pushes_seen: Some(3),
         last_push_ms_ago: Some(1200),
@@ -360,6 +361,7 @@ fn subscription_entry_wire_keeps_label_and_state_optional() {
     let bare = McpSubscriptionEntry {
         server: "ssh".to_string(),
         uri: "command://1".to_string(),
+        owner_session_id: None,
         label: None,
         pushes_seen: None,
         last_push_ms_ago: None,
