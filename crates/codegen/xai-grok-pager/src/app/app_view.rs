@@ -6528,7 +6528,11 @@ pub(crate) mod tests {
         assert!(app.usage_visible);
     }
     #[test]
+    #[serial_test::serial]
     fn apply_auth_meta_api_key_enables_voice_and_skips_tier_gate() {
+        let _env = xai_grok_test_support::env::EnvGuard::unset(
+            xai_grok_shell::tier::TIER_RESTRICTIONS_DISABLED_ENV,
+        );
         let mut app = test_app();
         advertise_media_tools(&mut app);
         assert!(!app.voice_mode_enabled);
@@ -6620,7 +6624,11 @@ pub(crate) mod tests {
         assert!(app.usage_visible);
     }
     #[test]
+    #[serial_test::serial]
     fn apply_auth_meta_restricts_usage_for_x_basic_tier() {
+        let _env = xai_grok_test_support::env::EnvGuard::unset(
+            xai_grok_shell::tier::TIER_RESTRICTIONS_DISABLED_ENV,
+        );
         let mut app = test_app();
         advertise_media_tools(&mut app);
         let meta = xai_grok_shell::auth::AuthMeta {
@@ -6662,8 +6670,14 @@ pub(crate) mod tests {
         app.apply_auth_meta(&meta);
         assert!(app.tier_restricted_commands.is_empty());
     }
+    /// Pins the shell's env override off: a session that exports it would
+    /// otherwise fail a test about the *stock* classification.
     #[test]
+    #[serial_test::serial]
     fn is_restricted_tier_classification() {
+        let _env = xai_grok_test_support::env::EnvGuard::unset(
+            xai_grok_shell::tier::TIER_RESTRICTIONS_DISABLED_ENV,
+        );
         assert!(is_restricted_tier(None));
         assert!(is_restricted_tier(Some("")));
         assert!(is_restricted_tier(Some("Free")));

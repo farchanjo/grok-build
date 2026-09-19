@@ -60,8 +60,14 @@
         assert!(app.tier_restricted_commands.is_empty());
     }
 
+    /// Pins the shell's env override off: a session that exports it would
+    /// otherwise never mark the tier-restricted commands.
     #[test]
+    #[serial_test::serial]
     fn settings_non_api_key_tier_clears_stale_api_key_flag() {
+        let _env = xai_grok_test_support::env::EnvGuard::unset(
+            xai_grok_shell::tier::TIER_RESTRICTIONS_DISABLED_ENV,
+        );
         let mut app = make_app_with_agent("sess-stale-key");
         assert!(handle_ext_notification(
             &tier_settings_update("API Key"),

@@ -59,8 +59,12 @@ pub fn is_restricted_tier_name(tier: &str) -> bool {
 mod tests {
     use super::*;
 
+    /// Pins the env override off: a shell that exports
+    /// [`TIER_RESTRICTIONS_DISABLED_ENV`] would otherwise fail a test about the
+    /// *stock* classification.
     #[test]
     fn restricted_names() {
+        let _guard = EnvGuard::set(TIER_RESTRICTIONS_DISABLED_ENV, None);
         assert!(is_restricted_tier_name(""));
         assert!(is_restricted_tier_name("   "));
         assert!(is_restricted_tier_name("Free"));
