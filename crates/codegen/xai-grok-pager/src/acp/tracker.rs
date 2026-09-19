@@ -1023,6 +1023,9 @@ impl AcpUpdateTracker {
     ) -> bool {
         self.finish_thinking(scrollback);
         self.current_agent_msg = None;
+        // Classified once: the suppressed branch and the visible-wait
+        // registration below share it.
+        let wait_reason = blocking_wait_reason(&tc);
         if is_todo_tool(&tc)
             || is_bg_plumbing_tool(&tc)
             || is_task_tool(&tc)
@@ -1045,7 +1048,7 @@ impl AcpUpdateTracker {
                         },
                     );
                 }
-            } else if let Some(reason) = blocking_wait_reason(&tc) {
+            } else if let Some(reason) = wait_reason {
                 self.blocking_waits.insert(
                     tc.tool_call_id.0.to_string(),
                     BlockingWait {
@@ -1058,6 +1061,19 @@ impl AcpUpdateTracker {
             return false;
         }
         let tc_id = tc.tool_call_id.0.to_string();
+        // A visible wait (`wait_for`) blocks the turn like the suppressed ones,
+        // but keeps its row. Registering the wait is what parks the turn
+        // (sendable wait) and what lets a send abort it, instead of reading as
+        // a tool "running" under a raw title.
+        if let Some(reason) = wait_reason {
+            self.blocking_waits.insert(
+                tc_id.clone(),
+                BlockingWait {
+                    reason,
+                    stream_start_ms: self.last_stream_start_ms,
+                },
+            );
+        }
         if let Some(orphan) = self.orphan_updates.remove(&tc_id) {
             let merged = merge_tool_call_update(tc, orphan);
             let block = tool_call_to_block(&merged, self.session_cwd.as_deref());
@@ -1096,6 +1112,16 @@ impl AcpUpdateTracker {
         is_replay: bool,
     ) -> bool {
         let tc_id_str = tcu.tool_call_id.0.to_string();
+        // Release the wait this call registered before the early returns below:
+        // a wait demoted to a watcher keeps receiving updates that
+        // `bg_deferred_tools` swallows, and a stale entry would pin the turn
+        // parked for the rest of it.
+        if matches!(
+            tcu.fields.status,
+            Some(acp::ToolCallStatus::Completed) | Some(acp::ToolCallStatus::Failed)
+        ) {
+            self.blocking_waits.remove(&tc_id_str);
+        }
         if self.bg_deferred_tools.contains_key(&tc_id_str) {
             return false;
         }
@@ -2209,11 +2235,24 @@ fn is_bg_plumbing_tool(tc: &acp::ToolCall) -> bool {
             .and_then(|v| v.as_str())
             .is_some_and(|v| matches!(v, "TaskOutput" | "KillTask" | "WaitTasks"))
 }
-/// Classify a *blocking* suppressed tool into the [`WaitingReason`] the turn is
-/// waiting on, or `None` for suppressed tools that don't block the turn (e.g.
-/// `kill_*`, todo/goal/scheduler). Mirrors the title/variant matches in
+/// Classify a *blocking* tool into the [`WaitingReason`] the turn is waiting
+/// on, or `None` for tools that don't block the turn (e.g. `kill_*`,
+/// todo/goal/scheduler). Mirrors the title/variant matches in
 /// [`is_bg_plumbing_tool`] so the spinner can name the wait instead of falling
 /// back to a generic "Waiting…".
+///
+/// `wait_for` is deliberately absent from [`is_bg_plumbing_tool`]: its row names
+/// the condition and is demoted into a "Wait" row when a watcher takes over, so
+/// nothing would otherwise tell the turn it is waiting. It therefore also
+/// registers from the visible path — see
+/// [`AcpUpdateTracker::handle_tool_call`].
+///
+/// `Sleep` is a sendable wait (`turn_status::is_sendable_wait`), so a `wait_for`
+/// parks the turn: the transcript gets its "Worked for …" boundary and a send
+/// aborts the wait, which is what the shell's interruptible wait expects.
+///
+/// Matches the wire function name (the title of the shell's initial, minimal
+/// `ToolCall`), the refined title, and the `variant` tag (replayed updates).
 fn blocking_wait_reason(tc: &acp::ToolCall) -> Option<WaitingReason> {
     let title = tc.title.as_str();
     let variant = tc
@@ -2245,9 +2284,11 @@ fn blocking_wait_reason(tc: &acp::ToolCall) -> Option<WaitingReason> {
     {
         return Some(WaitingReason::TasksComplete);
     }
-    if matches!(title, "Await" | "AwaitShell")
+    if matches!(title, "Await" | "AwaitShell" | "wait_for")
         || title.starts_with("Await:")
         || title.starts_with("Sleep ")
+        || title.starts_with("Wait: ")
+        || variant == Some("WaitFor")
     {
         return Some(WaitingReason::Sleep);
     }
@@ -5171,6 +5212,94 @@ mod tests {
             );
         }
     }
+    /// `wait_for` is a *visible* wait: unlike the suppressed plumbing it keeps
+    /// its scrollback row (which names the condition), and the wait it registers
+    /// is what parks the turn so a send can abort it.
+    #[test]
+    fn visible_wait_parks_the_turn_and_keeps_its_row() {
+        for title in ["wait_for", "Wait: curl -sf localhost:3000"] {
+            let mut sb = ScrollbackState::new();
+            let mut tracker = AcpUpdateTracker::new();
+            tracker.handle_update(
+                tool_call("t1", acp::ToolKind::Other, title),
+                &meta(),
+                &mut sb,
+            );
+            let activity = tracker.activity();
+            assert_eq!(
+                activity,
+                Some(TurnActivity::Waiting(WaitingReason::Sleep)),
+                "{title:?} must read as a wait"
+            );
+            assert!(
+                crate::views::turn_status::is_sendable_wait(&activity),
+                "{title:?} must park the turn so a send aborts the wait"
+            );
+            assert_eq!(sb.len(), 1, "{title:?} keeps its row");
+            assert!(
+                !tracker.suppressed_tools.contains("t1"),
+                "{title:?} must not be suppressed"
+            );
+        }
+    }
+    /// Sessions recorded before the wait tool had a title carry the `variant`
+    /// tag behind the old placeholder title — the wait must still be named.
+    #[test]
+    fn wait_variant_names_the_wait_behind_a_placeholder_title() {
+        let mut sb = ScrollbackState::new();
+        let mut tracker = AcpUpdateTracker::new();
+        let tc = initial_tool_call("t1", "Tool call").raw_input(Some(
+            serde_json::json!({ "variant": "WaitFor", "until": "5s" }),
+        ));
+        tracker.handle_update(acp::SessionUpdate::ToolCall(tc), &meta(), &mut sb);
+        assert_eq!(
+            tracker.activity(),
+            Some(TurnActivity::Waiting(WaitingReason::Sleep))
+        );
+    }
+    /// The wait is released the moment the call completes.
+    #[test]
+    fn visible_wait_cleared_on_completion() {
+        let mut sb = ScrollbackState::new();
+        let mut tracker = AcpUpdateTracker::new();
+        tracker.handle_update(
+            tool_call("t1", acp::ToolKind::Other, "wait_for"),
+            &meta(),
+            &mut sb,
+        );
+        assert_eq!(
+            tracker.activity(),
+            Some(TurnActivity::Waiting(WaitingReason::Sleep))
+        );
+        tracker.handle_update(tool_update_completed("t1"), &meta(), &mut sb);
+        assert_eq!(tracker.activity(), None);
+    }
+    /// A wait demoted to a watcher stops receiving updates — `bg_deferred_tools`
+    /// swallows them, and the demotion already dropped the pending tool — so its
+    /// completion must still release the wait.
+    #[test]
+    fn demoted_wait_releases_the_wait_on_completion() {
+        let mut sb = ScrollbackState::new();
+        let mut tracker = AcpUpdateTracker::new();
+        tracker.handle_update(
+            tool_call("t1", acp::ToolKind::Other, "wait_for"),
+            &meta(),
+            &mut sb,
+        );
+        assert_eq!(
+            tracker.activity(),
+            Some(TurnActivity::Waiting(WaitingReason::Sleep))
+        );
+        // What `handle_task_backgrounded` does before the swallowed completion.
+        tracker.bg_deferred_tools.insert("t1".to_string(), None);
+        tracker.remove_pending_tool("t1");
+        tracker.handle_update(tool_update_completed("t1"), &meta(), &mut sb);
+        assert_eq!(
+            tracker.activity(),
+            None,
+            "a swallowed completion must not pin the spinner on the wait"
+        );
+    }
     /// A known-blocking wait must beat an open (residual/pre-created) thought entry.
     #[test]
     fn activity_known_blocking_wait_outranks_thinking() {
@@ -5930,6 +6059,10 @@ mod tests {
             "t13",
             "spawn_subagent"
         )));
+        assert!(
+            !is_bg_plumbing_tool(&initial_tool_call("t14", "wait_for")),
+            "the wait tool keeps its row; only the spinner names the wait"
+        );
     }
     #[test]
     fn pascal_case_task_tool_call_is_suppressed_from_scrollback() {
