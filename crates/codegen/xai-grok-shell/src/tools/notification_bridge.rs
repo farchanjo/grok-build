@@ -263,6 +263,64 @@ fn stamp_scheduler_meta(
     meta.insert("x.ai/schedulerGeneration".to_owned(), generation.into());
     meta.insert("x.ai/schedulerRevision".to_owned(), revision.into());
 }
+/// Hand a completion to the session that owns the task, when that is not the
+/// session this bridge belongs to.
+///
+/// A shared terminal backend (a subagent reusing the parent's) or a reparented
+/// task can deliver a completion on a handle whose session is not the owner.
+/// The owner is authoritative: the completion is queued on its command channel
+/// as a deferred notification and its task id is reserved there so the owner's
+/// own reminder does not surface the same completion twice.
+///
+/// Returns the target when the delivery was queued — the caller then skips the
+/// local auto-wake/inject paths. `None` means the owner is gone (channel
+/// closed), so the caller falls back to delivering locally.
+fn deliver_completion_to_owner(
+    config: &NotificationBridgeConfig,
+    target: &crate::session::delivery::SessionDeliveryTarget,
+    task_snapshot: &xai_grok_tools::computer::types::TaskSnapshot,
+    completion_kind: CompletedTaskKind,
+    is_monitor: bool,
+    task_id: &str,
+) -> Option<crate::session::delivery::SessionDeliveryTarget> {
+    let tool_name = resolved_tool_name(&config.task_output_tool_name);
+    let read_name = resolved_tool_name(&config.read_tool_name);
+    let message = xai_grok_tools::reminders::wrap_reminder(&completion_kind.body(
+        task_snapshot,
+        tool_name,
+        read_name,
+    ));
+    let source = if is_monitor {
+        NotificationSource::MonitorCompleted {
+            task_id: task_id.to_string(),
+        }
+    } else {
+        NotificationSource::BashTaskCompleted {
+            task_id: task_id.to_string(),
+        }
+    };
+    let sent = target.cmd_tx.send(SessionCommand::InjectNotification {
+        prompt_id: completion_kind.fallback_prompt_id(task_id),
+        prompt_blocks: vec![acp::ContentBlock::Text(acp::TextContent::new(message))],
+        priority: NotificationPriority::Later,
+        source,
+    });
+    if sent.is_err() {
+        return None;
+    }
+    target
+        .task_completion_reservations
+        .reserve(task_id.to_string());
+    tracing::info!(
+        task_id = %task_id,
+        owner = %target.session_id,
+        bridge_session = %config.session_id.0,
+        is_monitor,
+        "task completion routed to its owning session"
+    );
+    Some(target.clone())
+}
+
 fn durable_append_landed(result: Result<(), DurableAppendError>) -> Result<(), String> {
     match result {
         Ok(()) => Ok(()),
@@ -533,7 +591,26 @@ async fn handle_notification(
                 .goal_loop_active
                 .load(std::sync::atomic::Ordering::Relaxed);
             let mut will_wake = false;
-            if task_snapshot.block_waited || task_snapshot.explicitly_killed {
+            // Owner routing: when the completion arrives on a handle that
+            // belongs to another session (shared backend, reparented task),
+            // deliver it to the owning session instead of this one.
+            let routed = match crate::session::delivery::route(
+                task_snapshot.owner_session_id.as_deref(),
+                config.session_id.0.as_ref(),
+            ) {
+                crate::session::delivery::Delivery::Routed(target) => deliver_completion_to_owner(
+                    config,
+                    &target,
+                    &task_snapshot,
+                    completion_kind,
+                    is_monitor,
+                    &task_id,
+                ),
+                crate::session::delivery::Delivery::Local => None,
+            };
+            if routed.is_some() {
+                // Queued on the owner's channel; its drain owns the wording.
+            } else if task_snapshot.block_waited || task_snapshot.explicitly_killed {
             } else if goal_loop_active {
                 tracing::info!(
                     task_id = %task_id,
@@ -717,7 +794,12 @@ async fn handle_notification(
                     });
             }
             let mut notification = crate::extensions::notification::SessionNotification {
-                session_id: config.session_id.clone(),
+                // A routed completion belongs to the owner's transcript, so
+                // the frontend frame carries the owner's session id.
+                session_id: routed.as_ref().map_or_else(
+                    || config.session_id.clone(),
+                    |t| acp::SessionId::new(t.session_id.clone()),
+                ),
                 update: crate::extensions::notification::SessionUpdate::TaskCompleted {
                     task_snapshot,
                     will_wake,
@@ -729,7 +811,12 @@ async fn handle_notification(
                 stamp_event_id(config, &mut meta_map);
                 notification.meta = meta_map.map(serde_json::Value::Object);
             }
-            let _ = config.persistence.tx.send(PersistenceMsg::Update(
+            // A routed frame belongs to the owner's transcript and the owner's
+            // hook registry, not to the bridge's session.
+            let frame_persistence = routed
+                .as_ref()
+                .map_or(&config.persistence.tx, |target| &target.persistence_tx);
+            let _ = frame_persistence.send(PersistenceMsg::Update(
                 crate::session::storage::SessionUpdate::Xai(Box::new(notification.clone())),
             ));
             let params = serde_json::to_value(&notification)
@@ -740,14 +827,15 @@ async fn handle_notification(
                     acp::ExtNotification::new("x.ai/task_completed", params.into());
                 config.gateway.forward_fire_and_forget(notification);
             }
-            let _ = config
-                .session_cmd_tx
-                .send(SessionCommand::DispatchNotificationHook {
-                    notification_type: "task_complete".into(),
-                    message: Some(format!("Background task completed: {task_id}")),
-                    title: None,
-                    level: Some("info".into()),
-                });
+            let hook_tx = routed
+                .as_ref()
+                .map_or(&config.session_cmd_tx, |target| &target.cmd_tx);
+            let _ = hook_tx.send(SessionCommand::DispatchNotificationHook {
+                notification_type: "task_complete".into(),
+                message: Some(format!("Background task completed: {task_id}")),
+                title: None,
+                level: Some("info".into()),
+            });
         }
         ToolNotification::PlanModeEntered(entered) => {
             let activated = config.plan_mode.lock().activate_from_tool();
@@ -831,9 +919,32 @@ async fn handle_notification(
                 subagent_id = fired.subagent_id.as_deref().unwrap_or(""),
                 "Scheduled task fired"
             );
+            // A subagent inherits the parent's scheduler, so a schedule it
+            // created fires on the parent's bridge. The owner stamp routes
+            // the fire (and its injected prompt) to the creating session
+            // while it is alive; a dead owner falls back to this bridge.
+            let routed = match crate::session::delivery::route(
+                fired.owner_session_id.as_deref(),
+                config.session_id.0.as_ref(),
+            ) {
+                crate::session::delivery::Delivery::Routed(target) => Some(target),
+                crate::session::delivery::Delivery::Local => None,
+            };
+            let frame_session_id = routed.as_ref().map_or_else(
+                || config.session_id.clone(),
+                |t| acp::SessionId::new(t.session_id.clone()),
+            );
+            if let Some(target) = &routed {
+                tracing::info!(
+                    task_id = %fired.task_id,
+                    owner = %target.session_id,
+                    bridge_session = %config.session_id.0,
+                    "scheduled fire routed to its owning session"
+                );
+            }
             if fired.subagent_id.is_none() {
                 let inject_payload = serde_json::json!({
-                    "sessionId": config.session_id,
+                    "sessionId": frame_session_id,
                     "taskId": &fired.task_id,
                     "prompt": &fired.prompt,
                     "humanSchedule": &fired.human_schedule,
@@ -851,7 +962,7 @@ async fn handle_notification(
             let mut meta = None;
             stamp_scheduler_meta(config, &mut meta, &fired.generation, fired.revision);
             let fired_notif = crate::extensions::notification::SessionNotification {
-                session_id: config.session_id.clone(),
+                session_id: frame_session_id,
                 update: crate::extensions::notification::SessionUpdate::ScheduledTaskFired {
                     task_id: fired.task_id,
                     prompt: fired.prompt,
@@ -1121,6 +1232,87 @@ mod tests {
             owner_session_id: None,
         }
     }
+    /// A completion delivered on this bridge's handle but owned by another,
+    /// still-live session (shared terminal backend / reparented task) must be
+    /// queued on the owner's channel — not auto-woken here.
+    #[tokio::test]
+    async fn task_completed_owned_by_another_session_routes_to_it() {
+        let (config, mut cmd_rx) = make_test_config();
+        let (owner_tx, mut owner_rx) = mpsc::unbounded_channel();
+        let (owner_persistence_tx, _owner_persistence_rx) = mpsc::unbounded_channel();
+        crate::session::delivery::register(crate::session::delivery::SessionDeliveryTarget {
+            session_id: "child-session".to_string(),
+            cmd_tx: owner_tx,
+            persistence_tx: owner_persistence_tx,
+            push_stats: Arc::new(parking_lot::Mutex::new(Default::default())),
+            subscription_registry: Arc::new(parking_lot::Mutex::new(Default::default())),
+            task_completion_reservations:
+                xai_grok_tools::reminders::task_completion::TaskCompletionReservations::default(),
+        });
+
+        let mut snapshot = make_task_snapshot("bg-child", TaskKind::Bash);
+        snapshot.owner_session_id = Some("child-session".to_string());
+        let mut state = BridgeState::default();
+        handle_notification(
+            &config,
+            ToolNotification::TaskCompleted(snapshot),
+            &mut state,
+        )
+        .await;
+
+        let command = owner_rx
+            .try_recv()
+            .expect("the owner must receive the completion");
+        match command {
+            SessionCommand::InjectNotification {
+                prompt_id, source, ..
+            } => {
+                assert_eq!(prompt_id, "bash-completed-bg-child");
+                assert!(matches!(
+                    source,
+                    NotificationSource::BashTaskCompleted { .. }
+                ));
+            }
+            _ => panic!("expected InjectNotification"),
+        }
+        match cmd_rx.try_recv() {
+            Ok(SessionCommand::Prompt { .. }) => panic!("holder got a wake Prompt"),
+            Ok(SessionCommand::InjectNotification { .. }) => {
+                panic!("holder got an InjectNotification")
+            }
+            Ok(_) => panic!("holder got another command"),
+            Err(_) => {}
+        }
+        let target = crate::session::delivery::resolve("child-session").expect("registered");
+        assert!(
+            target.task_completion_reservations.contains("bg-child"),
+            "the owner's reservation must be set so its reminder does not duplicate"
+        );
+        crate::session::delivery::unregister("child-session");
+    }
+
+    /// With no owner stamp the completion stays local (legacy behavior).
+    #[tokio::test]
+    async fn task_completed_without_owner_stays_local() {
+        let (config, mut cmd_rx) = make_test_config();
+        config
+            .task_output_tool_name
+            .set(Some("get_command_or_subagent_output".to_string()))
+            .expect("slot is fresh in this test fixture");
+        let snapshot = make_task_snapshot("bg-local", TaskKind::Bash);
+        let mut state = BridgeState::default();
+        handle_notification_with_admission(
+            &config,
+            ToolNotification::TaskCompleted(snapshot),
+            &mut state,
+            &mut cmd_rx,
+            true,
+        )
+        .await;
+        let command = cmd_rx.try_recv().expect("expected local Prompt");
+        assert!(matches!(command, SessionCommand::Prompt { .. }));
+    }
+
     #[tokio::test]
     async fn bash_task_completed_injects_bash_task_completed_source() {
         let (config, mut cmd_rx) = make_test_config();
@@ -1986,6 +2178,7 @@ mod tests {
         let (config, mut gateway_rx, mut persistence_rx, _cmd_rx) = make_test_config_full();
         let notification = ToolNotification::ScheduledTaskFired(
             xai_grok_tools::notification::types::ScheduledTaskFired {
+                owner_session_id: None,
                 task_id: "loop-1".into(),
                 prompt: "check deploy".into(),
                 human_schedule: "every 5 minutes".into(),

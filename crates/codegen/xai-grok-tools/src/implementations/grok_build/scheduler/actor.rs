@@ -406,6 +406,7 @@ impl SchedulerActor {
         // Advance the cadence before releasing actor state to avoid immediate reselection.
         let task = &mut state.tasks[idx];
         task.last_fired_at = Some(now);
+        let fire_owner_session_id = task.owner_session_id.clone();
         let next_fire_at = task.recurring.then(|| task.next_fire_at().to_rfc3339());
         if should_remove {
             state.tasks.remove(idx);
@@ -477,6 +478,7 @@ impl SchedulerActor {
                         prompt,
                         human_schedule,
                         next_fire_at,
+                        owner_session_id: fire_owner_session_id.clone(),
                         subagent_id: None,
                         generation: fire_version.generation(),
                         revision: fire_version.revision(),
@@ -492,6 +494,7 @@ impl SchedulerActor {
                         prompt,
                         human_schedule,
                         next_fire_at,
+                        owner_session_id: fire_owner_session_id.clone(),
                         subagent_id: Some(id),
                         generation: fire_version.generation(),
                         revision: fire_version.revision(),
@@ -1158,6 +1161,28 @@ mod tests {
         assert!(result.is_err());
 
         cancel.cancel();
+    }
+
+    /// A fire carries the schedule's creating session.
+    ///
+    /// The scheduler handle is inherited from the parent, so without the
+    /// owner stamp a subagent's schedule would fire into the parent while the
+    /// child is still alive.
+    #[tokio::test]
+    async fn fired_notification_carries_the_creating_session() {
+        let mut task = ScheduledTask::new(1, "owned".into(), false, false);
+        task.created_at = Utc::now() - chrono::Duration::seconds(10);
+        task.owner_session_id = Some("child-session".to_string());
+        let (mut actor, mut notifications) = make_boundary_actor(vec![task], u64::MAX - 1);
+
+        actor.fire_next_task().await;
+
+        let fired = notification!(notifications.try_recv().unwrap(), ScheduledTaskFired);
+        assert_eq!(
+            fired.owner_session_id.as_deref(),
+            Some("child-session"),
+            "the fire must carry the creating session for owner routing"
+        );
     }
 
     #[tokio::test]

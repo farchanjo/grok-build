@@ -255,6 +255,14 @@ impl xai_tool_runtime::Tool for SchedulerCreateTool {
             input.fire_immediately,
         );
         task.foreground = input.foreground.unwrap_or(false);
+        // Stamp the creating session: the scheduler handle is inherited from
+        // the parent, so without this a subagent's schedule would fire into
+        // the parent while the child is still alive.
+        task.owner_session_id = resources
+            .lock()
+            .await
+            .get::<crate::types::resources::OwnerSessionId>()
+            .map(|owner| owner.0.clone());
 
         let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
         let created = send_and_wait(
@@ -317,6 +325,36 @@ mod tests {
         res.get::<State<super::super::types::SchedulerState>>()
             .map(|s| s.tasks.len())
             .unwrap_or(0)
+    }
+
+    /// The create tool stamps the owning session on the new task.
+    #[tokio::test]
+    async fn create_stamps_the_owning_session() {
+        use crate::types::resources::OwnerSessionId;
+        let (resources, cancel) = scheduler_resources();
+        resources
+            .lock()
+            .await
+            .insert(OwnerSessionId("child-session".to_string()));
+
+        SchedulerCreateTool
+            .run(
+                test_ctx(resources.clone()),
+                input(serde_json::json!({"interval": "5m", "prompt": "owned"})),
+            )
+            .await
+            .expect("create succeeds");
+
+        let res = resources.lock().await;
+        let state = res
+            .get::<State<super::super::types::SchedulerState>>()
+            .expect("scheduler state");
+        assert_eq!(
+            state.tasks[0].owner_session_id.as_deref(),
+            Some("child-session"),
+            "the creating session must be recorded on the schedule"
+        );
+        cancel.cancel();
     }
 
     #[tokio::test]

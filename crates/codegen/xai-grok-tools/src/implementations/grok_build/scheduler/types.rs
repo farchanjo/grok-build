@@ -225,6 +225,14 @@ pub struct ScheduledTask {
     /// iteration.
     #[serde(default)]
     pub chain_reset_pending: bool,
+    /// Session that created the schedule.
+    ///
+    /// A subagent inherits the parent's scheduler, so a schedule it creates
+    /// lives in the parent's actor while it is still the child's work: the
+    /// owner lets a fire be delivered to the creating session while it is
+    /// alive, and to the parent (adoption) once it is gone.
+    #[serde(default)]
+    pub owner_session_id: Option<String>,
 }
 
 pub const LOOP_FRESH_CHAIN_EVERY: u32 = 10;
@@ -274,6 +282,7 @@ impl ScheduledTask {
             last_subagent_id: None,
             iterations_since_fresh: 0,
             chain_reset_pending: false,
+            owner_session_id: None,
         }
     }
 

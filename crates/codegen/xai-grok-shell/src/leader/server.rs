@@ -2287,15 +2287,23 @@ pub async fn run_leader_server(
                     trace!(
                         "Dropping notification for relay-owned session (already delivered via WS)"
                     );
-                } else if let Some(client_id) = last_active_client
-                    && let Some(client) = clients.get(&client_id)
-                {
+                } else if !clients.is_empty() {
+                    // Session-less notification (no `sessionId` to route on —
+                    // e.g. `agent/progress`). Every attached client applies it
+                    // to its own state, so fan it out to all of them instead
+                    // of picking one: with a single client the old
+                    // last-active fallback happened to be right, with several
+                    // it silently left the others stale. `last_active_client`
+                    // stays as the tie-breaker log for debugging.
                     debug!(
-                        client_id = client_id.0,
-                        "Using fallback routing to last active client"
+                        clients = clients.len(),
+                        last_active = last_active_client.map(|id| id.0).unwrap_or_default(),
+                        "Fanning out session-less notification to all clients"
                     );
-                    if let Err(e) = client.tx.try_send(ClientOutbound::Acp(payload)) {
-                        warn!(client_id = client_id.0, error = %e, "Failed to send notification via fallback routing (channel closed)");
+                    for (client_id, client) in clients.iter() {
+                        if let Err(e) = client.tx.try_send(ClientOutbound::Acp(payload.clone())) {
+                            warn!(client_id = client_id.0, error = %e, "Failed to send notification via fallback routing (channel closed)");
+                        }
                     }
                 } else {
                     debug!("No client available for notification routing, message dropped");
@@ -4707,6 +4715,55 @@ mod tests {
         }
         cancel.cancel();
     }
+    /// A notification with no `sessionId` (nothing to route on) must reach
+    /// EVERY attached client, not just the last active one: each client
+    /// applies it to its own state, and picking one silently left the others
+    /// stale.
+    #[tokio::test]
+    async fn session_less_notification_reaches_every_client() {
+        let temp = TempDir::new().unwrap();
+        let (sock_path, cancel, response_tx) = setup_persistent_server(&temp).await;
+        let (mut reader_a, mut writer_a) = connect_and_register(&sock_path, "test-a").await;
+        let (mut reader_b, mut writer_b) = connect_and_register(&sock_path, "test-b").await;
+        // Register both clients with a session so neither is "detached".
+        for (writer, sid) in [(&mut writer_a, "sess-A"), (&mut writer_b, "sess-B")] {
+            write_message(
+                writer,
+                &ClientMessage::Acp {
+                    payload: format!(
+                        r#"{{"jsonrpc":"2.0","method":"session/prompt","id":1,"params":{{"sessionId":"{sid}","prompt":[]}}}}"#
+                    ),
+                },
+            )
+            .await
+            .unwrap();
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        response_tx
+            .send(
+                r#"{"jsonrpc":"2.0","method":"agent/progress","params":{"status":"working"}}"#
+                    .into(),
+            )
+            .unwrap();
+
+        for (name, reader) in [("a", &mut reader_a), ("b", &mut reader_b)] {
+            let msg: ServerMessage =
+                tokio::time::timeout(Duration::from_millis(300), read_message(reader))
+                    .await
+                    .unwrap_or_else(|_| panic!("client {name} must receive the notification"))
+                    .unwrap();
+            match msg {
+                ServerMessage::Acp { payload } => {
+                    let json: serde_json::Value = serde_json::from_str(&payload).unwrap();
+                    assert_eq!(json["method"], "agent/progress");
+                    assert!(json["params"].get("sessionId").is_none());
+                }
+                other => panic!("Expected Acp message for client {name}, got {other:?}"),
+            }
+        }
+        cancel.cancel();
+    }
+
     /// When a client disconnects while its session streams, notifications for
     /// that session must NOT leak to another client via `last_active_client`.
     #[tokio::test]

@@ -305,6 +305,10 @@ pub struct LspServerFailed {
 pub struct ScheduledTaskFired {
     /// The scheduled task's unique ID.
     pub task_id: String,
+    /// Session that created the schedule, when known. Lets the bridge route
+    /// the fire to that session instead of the scheduler's holder.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub owner_session_id: Option<String>,
     /// The prompt to execute.
     pub prompt: String,
     /// Human-readable schedule description, e.g. "every 5 minutes".

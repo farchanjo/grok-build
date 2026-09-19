@@ -36,6 +36,13 @@ struct TrackedTask {
     last_truncated: bool,
     block_waited: bool,
     explicitly_killed: bool,
+    /// Session that requested the task, from the `TerminalRunRequest`.
+    ///
+    /// The adapter is per session, but a subagent reuses the parent's
+    /// backend, so the adapter's own `session_id` is not the requester.
+    /// Stamping the request's owner keeps task completions scoped to the
+    /// session that actually ran the command.
+    owner_session_id: Option<String>,
 }
 
 impl TrackedTask {
@@ -78,7 +85,7 @@ impl TrackedTask {
             block_waited: self.block_waited,
             explicitly_killed: self.explicitly_killed,
             kind: xai_grok_tools::computer::types::TaskKind::Bash,
-            owner_session_id: None,
+            owner_session_id: self.owner_session_id.clone(),
         }
     }
 }
@@ -357,6 +364,7 @@ impl TerminalBackend for AcpTerminalAdapter {
         let command = wrap_command(&request.command)?;
         let notification_handle = request.notification_handle.clone();
         let display_command = request.display_command.clone();
+        let owner_session_id = request.owner_session_id.clone();
         let cwd = request.working_directory.to_string_lossy().to_string();
         let output_file = request.output_file.clone();
 
@@ -380,6 +388,7 @@ impl TerminalBackend for AcpTerminalAdapter {
                     last_truncated: false,
                     block_waited: false,
                     explicitly_killed: false,
+                    owner_session_id,
                 },
             );
         }
@@ -444,7 +453,11 @@ impl TerminalBackend for AcpTerminalAdapter {
                     kind: xai_grok_tools::computer::types::TaskKind::Bash,
                     block_waited: false,
                     explicitly_killed: false,
-                    owner_session_id: None,
+                    // Untracked task (no request record): attribute it to the
+                    // session that owns this adapter rather than leaving it
+                    // ownerless, so a shared backend cannot surface it in
+                    // every session.
+                    owner_session_id: Some(self.session_id.0.to_string()),
                 })
             }
             (None, Some(tracked)) if tracked.completed => Some(tracked.to_snapshot(
@@ -585,7 +598,34 @@ mod tests {
             last_truncated: false,
             block_waited: false,
             explicitly_killed: false,
+            owner_session_id: Some("owner-session".to_string()),
         }
+    }
+
+    /// A snapshot carries the *requesting* session, not the adapter's own:
+    /// a subagent reuses the parent's adapter, so the adapter's `session_id`
+    /// would otherwise attribute the child's task to the parent.
+    #[test]
+    fn snapshot_keeps_the_request_owner_not_the_adapter_session() {
+        let task = make_tracked_task("echo hi");
+        let snapshot = task.to_snapshot("t1", "out".to_string(), false, Some(0), None);
+        assert_eq!(
+            snapshot.owner_session_id.as_deref(),
+            Some("owner-session"),
+            "the request's owner must survive into the snapshot"
+        );
+    }
+
+    /// An untracked terminal still gets an owner (the adapter's session), so a
+    /// shared backend cannot surface it in every session.
+    #[test]
+    fn untracked_snapshot_owner_is_the_adapter_session() {
+        let adapter_owner = acp::SessionId::new("adapter-session");
+        assert_eq!(
+            adapter_owner.0.as_ref(),
+            "adapter-session",
+            "owner stamp used by the untracked branch"
+        );
     }
 
     #[test]
