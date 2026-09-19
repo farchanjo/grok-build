@@ -1029,6 +1029,11 @@ const OAUTH_DISCOVERY_TIMEOUT: std::time::Duration = std::time::Duration::from_s
 /// a chatty tool cannot trigger a `resources/list` per call.
 const SUBSCRIBE_REFRESH_MIN_GAP: std::time::Duration = std::time::Duration::from_millis(500);
 
+/// Per-owner refresh slots kept before stale ones are pruned (see
+/// [`McpClient::claim_refresh_slot`]). A process rarely has more than a handful
+/// of live sessions, so this is only a growth bound, not a tuning knob.
+const REFRESH_SLOT_PRUNE_AT: usize = 64;
+
 /// Per-uri outcome of one subscribe sweep over a client's resource list.
 /// `subscribed` counts URIs newly subscribed this sweep; `already_subscribed`
 /// counts URIs that were already tracked and were idempotently skipped
@@ -2826,9 +2831,16 @@ pub struct McpClient {
     /// and keeps the original label). `parking_lot::Mutex` is fine:
     /// never held across an `.await`.
     subscribed_labels: parking_lot::Mutex<HashMap<String, String>>,
-    /// Millis-since-epoch of the last `subscribe_new_resources` refresh, for
-    /// the min-gap guard so chatty tools do not trigger a list per call.
-    last_subscription_refresh_ms: std::sync::atomic::AtomicU64,
+    /// Millis-since-epoch of the last `subscribe_new_resources` refresh, **per
+    /// owner**, for the min-gap guard so chatty tools do not trigger a list per
+    /// call.
+    ///
+    /// Keyed by owner (empty string for an unstamped sweep) because the client
+    /// may be shared by several sessions: with one slot per client, a refresh
+    /// skipped on behalf of one session left a URI of that session unsubscribed
+    /// until the *next* session's sweep claimed it, and first-writer-wins made
+    /// the mis-stamp stick.
+    last_subscription_refresh_ms: parking_lot::Mutex<HashMap<String, u64>>,
     /// RAII handle for the per-client transport-liveness poller.
     ///
     /// `Some` after [`Self::arm_liveness_watcher`] succeeds; `None`
@@ -2968,7 +2980,7 @@ impl McpClient {
             subscribed_owners: parking_lot::Mutex::new(HashMap::new()),
             unsubscribed_uris: parking_lot::Mutex::new(std::collections::HashSet::new()),
             subscribed_labels: parking_lot::Mutex::new(HashMap::new()),
-            last_subscription_refresh_ms: std::sync::atomic::AtomicU64::new(0),
+            last_subscription_refresh_ms: parking_lot::Mutex::new(HashMap::new()),
             liveness_handle: Arc::new(parking_lot::Mutex::new(None)),
         }
     }
@@ -3657,7 +3669,7 @@ impl McpClient {
     /// resources (e.g. the ssh server's `command://<id>/output` stream after
     /// `sub_open`) that were absent from the handshake-time `resources/list`;
     /// without this refresh their `resources/updated` pushes would never be
-    /// requested. Rate-limited per client (see [`SUBSCRIBE_REFRESH_MIN_GAP`]);
+    /// requested. Rate-limited **per owner** (see [`SUBSCRIBE_REFRESH_MIN_GAP`]);
     /// already-tracked URIs are idempotently skipped (counted as
     /// `already_subscribed`, never re-sent or duplicated). Returns the
     /// per-uri outcome (zeroed when rate-limited or when nothing is new).
@@ -3669,14 +3681,9 @@ impl McpClient {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_millis() as u64)
             .unwrap_or(0);
-        let last = self
-            .last_subscription_refresh_ms
-            .load(std::sync::atomic::Ordering::Relaxed);
-        if now_ms.saturating_sub(last) < SUBSCRIBE_REFRESH_MIN_GAP.as_millis() as u64 {
+        if !self.claim_refresh_slot(owner_session_id, now_ms) {
             return SubscribeResourcesOutcome::default();
         }
-        self.last_subscription_refresh_ms
-            .store(now_ms, std::sync::atomic::Ordering::Relaxed);
         match self
             .subscribe_resources_filtered(true, owner_session_id)
             .await
@@ -3691,6 +3698,33 @@ impl McpClient {
                 SubscribeResourcesOutcome::default()
             }
         }
+    }
+
+    /// Take this owner's refresh slot, or report that its min-gap has not
+    /// elapsed yet.
+    ///
+    /// Per owner, not per client: a shared client serves several sessions, and
+    /// skipping one session's refresh because another refreshed a moment ago
+    /// would leave that session's freshly created URI unsubscribed until the
+    /// next sweep — by which time a *different* session owns the subscribe and
+    /// first-writer-wins stamps it with the wrong session.
+    fn claim_refresh_slot(&self, owner_session_id: Option<&str>, now_ms: u64) -> bool {
+        let gap_ms = SUBSCRIBE_REFRESH_MIN_GAP.as_millis() as u64;
+        let key = owner_session_id.unwrap_or_default();
+        let mut slots = self.last_subscription_refresh_ms.lock();
+        if slots
+            .get(key)
+            .is_some_and(|last| now_ms.saturating_sub(*last) < gap_ms)
+        {
+            return false;
+        }
+        // Long-lived processes spawn many short-lived subagents; drop slots that
+        // could not have gated anything anymore so the map stays bounded.
+        if slots.len() > REFRESH_SLOT_PRUNE_AT {
+            slots.retain(|_, last| now_ms.saturating_sub(*last) < gap_ms * 8);
+        }
+        slots.insert(key.to_string(), now_ms);
+        true
     }
 
     async fn subscribe_resources_filtered(
@@ -8760,9 +8794,7 @@ for line in sys.stdin:
 
     // A further refresh (rate-limit guard reset for the assertion) must be a
     // no-op: every listed uri is already tracked.
-    client
-        .last_subscription_refresh_ms
-        .store(0, std::sync::atomic::Ordering::Relaxed);
+    client.last_subscription_refresh_ms.lock().clear();
     let third = client.subscribe_new_resources(Some("owner-session")).await;
     assert_eq!(
         third.subscribed, 0,
@@ -8771,5 +8803,105 @@ for line in sys.stdin:
     assert_eq!(
         third.already_subscribed, 2,
         "both listed uris are already subscribed — idempotent dedup"
+    );
+}
+
+/// The post-tool-call refresh throttle is per owner, not per client.
+///
+/// A shared client serves several sessions (a subagent runs tools on the
+/// parent's). With one slot per client, session B's refresh right after
+/// session A's was skipped, leaving B's freshly created URI unsubscribed until
+/// the next sweep — and that next sweep, by whichever session ran a tool
+/// first, claimed the URI and stamped it with the wrong owner.
+#[tokio::test]
+async fn refresh_throttle_is_per_owner_on_a_shared_client() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let script = dir.path().join("fixture.py");
+    std::fs::write(
+        &script,
+        r#"
+import json, sys
+PROTOCOL = "2025-06-18"
+BASE = [{"uri": "res://base/1", "name": "base", "mimeType": "text/plain"}]
+EXTRA = [{"uri": "res://extra/1", "name": "extra", "mimeType": "text/plain"}]
+STATE = {"subs": 0}
+def reply(id_, result):
+    print(json.dumps({"jsonrpc": "2.0", "id": id_, "result": result}), flush=True)
+for line in sys.stdin:
+    line = line.strip()
+    if not line:
+        continue
+    req = json.loads(line)
+    method = req.get("method", "")
+    id_ = req.get("id")
+    if method == "initialize":
+        reply(id_, {
+            "protocolVersion": PROTOCOL,
+            "capabilities": {"resources": {"subscribe": True, "listChanged": True}},
+            "serverInfo": {"name": "subscribe-fixture", "version": "0.1.0"},
+        })
+    elif id_ is not None:
+        if method == "resources/list":
+            # The parent's tool call "created" EXTRA before the child's sweep.
+            resources = BASE + EXTRA if STATE["subs"] > 0 else BASE
+            reply(id_, {"resources": resources})
+        elif method == "resources/subscribe":
+            STATE["subs"] += 1
+            reply(id_, {})
+        else:
+            reply(id_, {})
+"#,
+    )
+    .expect("write fixture");
+
+    let mut cmd = Command::new("python3");
+    cmd.arg(&script).kill_on_drop(true);
+    xai_grok_tools::util::detach_command(&mut cmd);
+    let (transport, _stderr) = SafeTokioChildProcess::spawn(
+        cmd,
+        "subscribe-fixture".to_string(),
+        xai_file_utils::events::EventWriter::noop(),
+    )
+    .expect("spawn fixture server");
+
+    let client = McpClient::new_stdio("subscribe-fixture".to_string(), transport, None, None);
+
+    // The parent's tool-call refresh subscribes the base uri.
+    let parent = client.subscribe_new_resources(Some("parent-session")).await;
+    assert_eq!(parent.subscribed, 1, "parent subscribes the base uri");
+
+    // The child's tool call created EXTRA and refreshes right away — well
+    // inside the parent's min-gap. It must not be skipped.
+    let child = client.subscribe_new_resources(Some("child-session")).await;
+    assert_eq!(
+        child.subscribed, 1,
+        "the child's refresh must run even though the parent just refreshed"
+    );
+    assert_eq!(
+        client.subscription_owner("res://extra/1").as_deref(),
+        Some("child-session"),
+        "the child's own stream belongs to the child, not to the transport holder"
+    );
+    assert_eq!(
+        client.subscription_owner("res://base/1").as_deref(),
+        Some("parent-session"),
+        "first writer keeps the parent's stream"
+    );
+
+    // The throttle still works, per owner: an immediate second refresh for the
+    // child is skipped, and the parent's slot is independent of it.
+    let child_again = client.subscribe_new_resources(Some("child-session")).await;
+    assert_eq!(
+        child_again.subscribed, 0,
+        "a second refresh by the same owner inside the gap is skipped"
+    );
+    assert_eq!(
+        child_again.already_subscribed, 0,
+        "a skipped refresh does not even list"
+    );
+    let parent_again = client.subscribe_new_resources(Some("parent-session")).await;
+    assert_eq!(
+        parent_again.subscribed, 0,
+        "the parent's own slot gates the parent independently of the child's"
     );
 }
