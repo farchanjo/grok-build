@@ -420,7 +420,12 @@ impl SchedulerActor {
         } else {
             let events = res.get::<SubagentEventSender>().cloned();
             let session = res.get::<SessionIdResource>().map(|s| s.0.clone());
-            events.zip(session)
+            // A schedule a subagent created runs on the parent's actor: the
+            // iteration is the creating session's work, so it is attributed to
+            // that session while it is alive (the shell re-homes the stamp to
+            // the holder when the owner is already gone).
+            let parent = fire_owner_session_id.clone().or(session);
+            events.zip(parent)
         };
 
         drop(res);
@@ -1797,6 +1802,59 @@ mod tests {
             .unwrap();
         reply_rx.await.unwrap().unwrap();
         task_id
+    }
+
+    /// Like [`create_due_task`], with the creating session stamped — the shape a
+    /// subagent's `scheduler_create` produces on the parent's actor.
+    async fn create_due_task_owned(handle: &SchedulerHandle, prompt: &str, owner: &str) -> String {
+        let mut task = ScheduledTask::new(1, prompt.into(), true, false);
+        task.created_at = chrono::Utc::now() - chrono::Duration::seconds(10);
+        task.owner_session_id = Some(owner.to_string());
+        let task_id = task.id.clone();
+        let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+        handle
+            .0
+            .send(SchedulerCommand::Create {
+                task,
+                reply: reply_tx,
+            })
+            .unwrap();
+        reply_rx.await.unwrap().unwrap();
+        task_id
+    }
+
+    /// A loop iteration is attributed to the session that created the schedule.
+    ///
+    /// The actor belongs to whichever session holds the scheduler — the parent,
+    /// when a subagent created the schedule. Without the owner stamp the loop's
+    /// subagent would report to the parent, which never asked for it.
+    #[tokio::test]
+    async fn loop_fire_is_attributed_to_the_schedule_owner() {
+        let (handle, cancel, _notif_rx, mut subagent_rx) = make_test_actor_with_subagents();
+        create_due_task_owned(&handle, "watch ci", "child-session").await;
+
+        let SubagentEvent::Spawn(request) = next_event(&mut subagent_rx).await else {
+            panic!("expected a loop Spawn");
+        };
+        assert_eq!(
+            request.parent_session_id, "child-session",
+            "the iteration belongs to the creating session"
+        );
+        cancel.cancel();
+    }
+
+    /// An unowned schedule keeps the previous attribution: the actor's own
+    /// session (legacy payloads, non-tool creators).
+    #[tokio::test]
+    async fn loop_fire_without_owner_uses_the_holder() {
+        let (handle, cancel, _notif_rx, mut subagent_rx) = make_test_actor_with_subagents();
+        create_due_task(&handle, "watch ci", false).await;
+
+        let SubagentEvent::Spawn(request) = next_event(&mut subagent_rx).await else {
+            panic!("expected a loop Spawn");
+        };
+        assert_eq!(request.parent_session_id, "parent-session");
+        cancel.cancel();
     }
 
     async fn next_event<T>(rx: &mut mpsc::UnboundedReceiver<T>) -> T {

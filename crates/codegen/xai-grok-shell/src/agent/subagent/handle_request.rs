@@ -319,6 +319,21 @@ pub(crate) async fn handle_subagent_request(
     handle_assigned_subagent_request(request, None, ctx, coordinator, gateway).await;
 }
 
+/// Parent session to stamp on a spawn, given the one the caller asked for and
+/// the session running the spawn.
+///
+/// Normally the requested parent is the spawner itself. It differs for a loop
+/// iteration, which names the session that created its schedule — that session
+/// may be gone while the schedule survives on the holder's actor, and a
+/// completion addressed to a dead id is drained by nobody.
+pub(crate) fn live_parent_session_id(requested: &str, spawner: &str) -> String {
+    if crate::session::delivery::resolve(requested).is_some() {
+        requested.to_string()
+    } else {
+        spawner.to_string()
+    }
+}
+
 pub(crate) async fn handle_assigned_subagent_request(
     mut request: SubagentRequest,
     assigned_route: Option<crate::agent::subagent::AssignedRoute>,
@@ -327,6 +342,22 @@ pub(crate) async fn handle_assigned_subagent_request(
     gateway: &GatewaySender,
 ) {
     let start = std::time::Instant::now();
+    // A spawn may name a parent that is no longer live: a loop iteration whose
+    // creating session finished while the schedule survives on the holder's
+    // actor. Re-home the stamp onto the spawning session, so the completion, the
+    // cancel scope and the admission pool all point at a live session instead of
+    // a dead id nothing drains. The on-disk parent stays the spawning session
+    // (see `parent_session_dir`), which is also what `resume_from` looks under.
+    let live_parent = live_parent_session_id(&request.parent_session_id, &ctx.parent_session_id);
+    if live_parent != request.parent_session_id {
+        tracing::debug!(
+            subagent_id = %request.id,
+            stale_parent = %request.parent_session_id,
+            live_parent = %live_parent,
+            "subagent parent is not a live session; re-homing to the spawner"
+        );
+        request.parent_session_id = live_parent;
+    }
     let parent_session_dir = session::persistence::session_dir(&SessionInfo {
         id: acp::SessionId::new(ctx.parent_session_id.clone()),
         cwd: ctx.parent_cwd.to_string_lossy().to_string(),

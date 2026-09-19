@@ -3,9 +3,9 @@ use super::*;
 use super::exact_route::ExactRoute;
 use super::handle_request::{
     assigned_platform_error, assigned_route_matches_final, assigned_unknown_model_error,
-    apply_tool_allow_deny, canonical_total_tokens, format_bytes, prioritize_skills,
-    record_tool_gating_on_definition, render_attachments_context, resolve_attachments,
-    resolve_final_exact_route, usage_is_incomplete,
+    apply_tool_allow_deny, canonical_total_tokens, format_bytes, live_parent_session_id,
+    prioritize_skills, record_tool_gating_on_definition, render_attachments_context,
+    resolve_attachments, resolve_final_exact_route, usage_is_incomplete,
 };
 use crate::test_support::lsp_runtime::{
     DummyLspDispatch, ctx_with_toggle, make_request, test_gateway,
@@ -21,6 +21,44 @@ fn canonical_total_tokens_does_not_double_count_reasoning() {
         ..Default::default()
     };
     assert_eq!(canonical_total_tokens(&totals), 140);
+}
+
+/// A spawn whose named parent is gone is re-homed onto the spawner.
+///
+/// A loop iteration names the session that created its schedule; that session
+/// may have finished while the schedule survives on the holder's actor, and a
+/// completion addressed to a dead id is drained by nobody.
+#[test]
+fn spawn_parent_is_rehomed_when_the_named_parent_is_gone() {
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    let (persistence_tx, _persistence_rx) = tokio::sync::mpsc::unbounded_channel();
+    crate::session::delivery::register(crate::session::delivery::SessionDeliveryTarget {
+        session_id: "live-parent".to_string(),
+        cmd_tx: tx,
+        persistence_tx,
+        mcp_state: std::sync::Weak::new(),
+        push_stats: std::sync::Arc::new(parking_lot::Mutex::new(Default::default())),
+        subscription_registry: std::sync::Arc::new(parking_lot::Mutex::new(Default::default())),
+        task_completion_reservations: Default::default(),
+    });
+
+    assert_eq!(
+        live_parent_session_id("live-parent", "spawner"),
+        "live-parent",
+        "a live parent is kept as named"
+    );
+    assert_eq!(
+        live_parent_session_id("dead-child", "spawner"),
+        "spawner",
+        "a dead parent is replaced by the spawner"
+    );
+    assert_eq!(
+        live_parent_session_id("", "spawner"),
+        "spawner",
+        "an empty parent (legacy payload) is replaced by the spawner"
+    );
+
+    crate::session::delivery::unregister("live-parent");
 }
 #[test]
 fn cancellation_makes_an_otherwise_complete_usage_snapshot_incomplete() {

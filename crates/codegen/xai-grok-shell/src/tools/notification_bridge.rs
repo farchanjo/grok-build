@@ -250,15 +250,25 @@ pub(crate) fn resolved_tool_name(slot: &std::sync::OnceLock<Option<String>>) -> 
 /// Stamp a bridge-emitted notification's meta before it forks into
 /// persistence + broadcast — see `util::event_id::ensure_event_id_meta`.
 fn stamp_event_id(config: &NotificationBridgeConfig, meta: &mut Option<acp::Meta>) {
-    crate::util::event_id::ensure_event_id_meta(&config.session_id.0, meta);
+    stamp_event_id_for(&config.session_id, meta);
+}
+
+/// Same, for a frame addressed to `session_id`.
+///
+/// A routed frame carries the *owner's* `sessionId`, so its `eventId` prefix
+/// must match that session: the id is `"{sessionId}-{counter}"` and clients
+/// parse the suffix only, but a frame whose prefix disagrees with its own
+/// `sessionId` reads as a foreign event in the transcript.
+fn stamp_event_id_for(session_id: &acp::SessionId, meta: &mut Option<acp::Meta>) {
+    crate::util::event_id::ensure_event_id_meta(&session_id.0, meta);
 }
 fn stamp_scheduler_meta(
-    config: &NotificationBridgeConfig,
+    session_id: &acp::SessionId,
     meta: &mut Option<acp::Meta>,
     generation: &str,
     revision: u64,
 ) {
-    stamp_event_id(config, meta);
+    stamp_event_id_for(session_id, meta);
     let meta = meta.get_or_insert_with(acp::Meta::new);
     meta.insert("x.ai/schedulerGeneration".to_owned(), generation.into());
     meta.insert("x.ai/schedulerRevision".to_owned(), revision.into());
@@ -344,7 +354,12 @@ async fn handle_scheduled_task_removed(
     tracing::info!(task_id = %removed.task_id, "Scheduled task removed");
     let result: Result<Box<serde_json::value::RawValue>, String> = async {
         let mut meta = None;
-        stamp_scheduler_meta(config, &mut meta, &removed.generation, removed.revision);
+        stamp_scheduler_meta(
+            &config.session_id,
+            &mut meta,
+            &removed.generation,
+            removed.revision,
+        );
         let notification = crate::extensions::notification::SessionNotification {
             session_id: config.session_id.clone(),
             update: crate::extensions::notification::SessionUpdate::ScheduledTaskDeleted {
@@ -808,7 +823,9 @@ async fn handle_notification(
             };
             {
                 let mut meta_map = None;
-                stamp_event_id(config, &mut meta_map);
+                // Routed frames belong to the owner: the event id prefix must
+                // name the frame's session, not the bridge's.
+                stamp_event_id_for(&notification.session_id, &mut meta_map);
                 notification.meta = meta_map.map(serde_json::Value::Object);
             }
             // A routed frame belongs to the owner's transcript and the owner's
@@ -960,7 +977,14 @@ async fn handle_notification(
                 }
             }
             let mut meta = None;
-            stamp_scheduler_meta(config, &mut meta, &fired.generation, fired.revision);
+            // `frame_session_id` is the owner's when the fire was routed; the
+            // event id must agree with the frame it belongs to.
+            stamp_scheduler_meta(
+                &frame_session_id,
+                &mut meta,
+                &fired.generation,
+                fired.revision,
+            );
             let fired_notif = crate::extensions::notification::SessionNotification {
                 session_id: frame_session_id,
                 update: crate::extensions::notification::SessionUpdate::ScheduledTaskFired {
@@ -1088,7 +1112,12 @@ async fn handle_notification(
         ToolNotification::ScheduledTaskCreated(created) => {
             tracing::info!(task_id = %created.task_id, "Scheduled task created");
             let mut meta = None;
-            stamp_scheduler_meta(config, &mut meta, &created.generation, created.revision);
+            stamp_scheduler_meta(
+                &config.session_id,
+                &mut meta,
+                &created.generation,
+                created.revision,
+            );
             let notification = crate::extensions::notification::SessionNotification {
                 session_id: config.session_id.clone(),
                 update: crate::extensions::notification::SessionUpdate::ScheduledTaskCreated {
@@ -1244,6 +1273,7 @@ mod tests {
             session_id: "child-session".to_string(),
             cmd_tx: owner_tx,
             persistence_tx: owner_persistence_tx,
+            mcp_state: std::sync::Weak::new(),
             push_stats: Arc::new(parking_lot::Mutex::new(Default::default())),
             subscription_registry: Arc::new(parking_lot::Mutex::new(Default::default())),
             task_completion_reservations:
@@ -1287,6 +1317,70 @@ mod tests {
         assert!(
             target.task_completion_reservations.contains("bg-child"),
             "the owner's reservation must be set so its reminder does not duplicate"
+        );
+        crate::session::delivery::unregister("child-session");
+    }
+
+    /// A routed frame must be addressed to its owner in *both* places that name
+    /// a session: `sessionId` and the `_meta.eventId` prefix. Clients parse the
+    /// counter suffix only, but a frame whose prefix disagrees with its own
+    /// `sessionId` reads as a foreign event in the owner's transcript.
+    #[tokio::test]
+    async fn routed_completion_frame_carries_the_owner_identity() {
+        let (config, mut gateway_rx, _persistence_rx, _cmd_rx) = make_test_config_full();
+        let (owner_tx, mut owner_rx) = mpsc::unbounded_channel();
+        let (owner_persistence_tx, _owner_persistence_rx) = mpsc::unbounded_channel();
+        crate::session::delivery::register(crate::session::delivery::SessionDeliveryTarget {
+            session_id: "child-session".to_string(),
+            cmd_tx: owner_tx,
+            persistence_tx: owner_persistence_tx,
+            mcp_state: std::sync::Weak::new(),
+            push_stats: Arc::new(parking_lot::Mutex::new(Default::default())),
+            subscription_registry: Arc::new(parking_lot::Mutex::new(Default::default())),
+            task_completion_reservations:
+                xai_grok_tools::reminders::task_completion::TaskCompletionReservations::default(),
+        });
+
+        let mut snapshot = make_task_snapshot("bg-owned", TaskKind::Bash);
+        snapshot.owner_session_id = Some("child-session".to_string());
+        let mut state = BridgeState::default();
+        handle_notification(
+            &config,
+            ToolNotification::TaskCompleted(snapshot),
+            &mut state,
+        )
+        .await;
+        assert!(
+            owner_rx.try_recv().is_ok(),
+            "the owner must receive the routed completion"
+        );
+
+        let frame = loop {
+            match gateway_rx.try_recv() {
+                Ok(xai_acp_lib::AcpClientMessage::ExtNotification(args)) => {
+                    if args.request.method.as_ref() == "x.ai/task_completed" {
+                        let json: serde_json::Value =
+                            serde_json::from_str(args.request.params.get()).expect("params JSON");
+                        break json;
+                    }
+                }
+                Ok(_) => {}
+                Err(_) => panic!("routed completion was never forwarded"),
+            }
+        };
+        assert_eq!(
+            frame.get("sessionId").and_then(|v| v.as_str()),
+            Some("child-session"),
+            "the frame belongs to the owner's session"
+        );
+        let event_id = frame
+            .get("_meta")
+            .and_then(|m| m.get("eventId"))
+            .and_then(|v| v.as_str())
+            .expect("frame carries an event id");
+        assert!(
+            event_id.starts_with("child-session-"),
+            "the event id prefix must name the frame's own session, got {event_id}"
         );
         crate::session::delivery::unregister("child-session");
     }
