@@ -236,6 +236,9 @@ impl SessionActor {
         if fresh_configs.is_empty() {
             return Err("managed re-fetch returned no configs".into());
         }
+        // Owners of the streams subscribed on the *previous* transport, before
+        // the refresh below swaps the client out.
+        let previous_owners = self.subscription_owners_of(server_name).await;
         {
             let mut st = self.mcp_state.lock().await;
             st.refresh_managed_clients(
@@ -273,7 +276,12 @@ impl SessionActor {
             // Labels captured at subscribe time go into the session
             // subscription registry for the "Subscribed Tools" sheet.
             self.sync_mcp_subscription_registry(server_name, &client);
+            // The sweep stamped every URI with *this* session; put the recorded
+            // owners back so a shared client keeps routing each stream home.
+            Self::restore_subscription_owners(&client, &previous_owners);
         }
+        // A rebuilt transport invalidates the `Arc` every importer holds.
+        crate::session::delivery::broadcast_shared_client(server_name, &client).await;
         let mut mcp_state = self.mcp_state.lock().await;
         mcp_state.auth_required.remove(server_name);
         mcp_state.clear_init_failed(server_name);
@@ -458,6 +466,38 @@ impl SessionActor {
             }
         }
     }
+    /// Subscription owners recorded on the client currently installed for
+    /// `server`, keyed by URI.
+    ///
+    /// Captured *before* a transport is replaced: a fresh `McpClient` starts
+    /// with an empty owner map, so without carrying these over the re-subscribe
+    /// sweep would stamp every URI with whichever session ran the respawn — on a
+    /// shared client that silently migrates a subagent's streams to the parent.
+    pub(crate) async fn subscription_owners_of(
+        &self,
+        server: &str,
+    ) -> std::collections::HashMap<String, String> {
+        let state = self.mcp_state.lock().await;
+        state
+            .get_client(server)
+            .map(|client| client.subscription_owners())
+            .unwrap_or_default()
+    }
+
+    /// Re-apply owners captured before a transport was replaced.
+    ///
+    /// URIs that the fresh transport no longer lists are skipped (the method is
+    /// a no-op for an untracked URI), so a removed stream cannot resurrect an
+    /// owner entry.
+    pub(crate) fn restore_subscription_owners(
+        client: &crate::session::mcp_servers::McpClient,
+        previous: &std::collections::HashMap<String, String>,
+    ) {
+        for (uri, owner) in previous {
+            client.reassign_subscription_owner(uri, owner);
+        }
+    }
+
     /// Handle explicit auth trigger from the client (x.ai/mcp/auth_trigger).
     ///
     /// Runs force_reauth (browser flow), then re-initializes the server
@@ -466,6 +506,9 @@ impl SessionActor {
         if server_name.starts_with(crate::session::managed_mcp::MANAGED_MCP_PREFIX) {
             return Err("To authenticate, visit grok.com".to_string());
         }
+        // Owners of the streams subscribed on the transport being replaced (the
+        // re-auth path may rebuild the client below).
+        let previous_owners = self.subscription_owners_of(server_name).await;
         let client = match self.mcp_state.lock().await.get_client(server_name).cloned() {
             Some(c) if c.has_auth() => c,
             _ => self.recreate_http_client_with_oauth(server_name).await?,
@@ -496,7 +539,13 @@ impl SessionActor {
             // Labels captured at subscribe time go into the session
             // subscription registry for the "Subscribed Tools" sheet.
             self.sync_mcp_subscription_registry(server_name, &client);
+            // See `restore_subscription_owners`: the sweep stamps this session,
+            // the recorded owners are authoritative.
+            Self::restore_subscription_owners(&client, &previous_owners);
         }
+        // The re-auth may have rebuilt the transport; importers must not keep
+        // calling the dead one.
+        crate::session::delivery::broadcast_shared_client(server_name, &client).await;
         let mut mcp_state = self.mcp_state.lock().await;
         mcp_state.auth_required.remove(server_name);
         mcp_state.init_failed.remove(server_name);
@@ -1021,6 +1070,9 @@ impl SessionActor {
     /// SIGKILLs the spawned child — and returns an explicit error so
     /// the auto-restart loop can emit `Reason::Disabled`.
     pub(crate) async fn respawn_stdio(&self, server: &str) -> Result<(), String> {
+        // Owners recorded on the dying transport: the fresh client starts with
+        // an empty owner map, so they are restored after the re-subscribe sweep.
+        let previous_owners = self.subscription_owners_of(server).await;
         let (server_config, meta_config, event_tx) = {
             let mcp_state = self.mcp_state.lock().await;
             let server_config = mcp_state
@@ -1109,6 +1161,9 @@ impl SessionActor {
             // subscription registry; the fresh transport also clears any
             // stale dead mark from the respawned client.
             self.sync_mcp_subscription_registry(server, &new_client);
+            // The sweep stamped this session on every URI; a shared transport
+            // must keep each stream on the session that asked for it.
+            Self::restore_subscription_owners(&new_client, &previous_owners);
         }
         let arc_client = std::sync::Arc::new(new_client);
         let _ = arc_client
@@ -1118,8 +1173,11 @@ impl SessionActor {
             let mut mcp_state = self.mcp_state.lock().await;
             mcp_state
                 .owned_clients
-                .insert(server.to_string(), arc_client);
+                .insert(server.to_string(), Arc::clone(&arc_client));
         }
+        // Sessions that imported this client through the shared pool still hold
+        // the dead transport; hand them the fresh one.
+        crate::session::delivery::broadcast_shared_client(server, &arc_client).await;
         Ok(())
     }
     pub(super) async fn maybe_inject_mcp_connecting_reminder(&self) {

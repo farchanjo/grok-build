@@ -23,13 +23,14 @@
 //! spawning on their own threads merge instead of overwriting.
 
 use std::collections::HashMap;
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, OnceLock, Weak};
 
 use parking_lot::Mutex;
 use tokio::sync::mpsc::UnboundedSender;
 
 use crate::session::acp_session::{McpPushStats, McpSubscriptionRecord};
 use crate::session::commands::SessionCommand;
+use crate::session::mcp_servers::{McpClient, McpState};
 use crate::session::persistence::PersistenceMsg;
 use xai_grok_tools::reminders::task_completion::TaskCompletionReservations;
 
@@ -46,6 +47,10 @@ pub(crate) struct SessionDeliveryTarget {
     /// The owner's persistence channel: a routed frame is written to the
     /// owner's transcript, not to the transport holder's.
     pub(crate) persistence_tx: UnboundedSender<PersistenceMsg>,
+    /// The owner's MCP state, so a shared transport that reconnects under the
+    /// holder can be re-pointed here instead of leaving this session on the
+    /// dead client. `Weak`: a target never keeps a session alive.
+    pub(crate) mcp_state: Weak<tokio::sync::Mutex<McpState>>,
     pub(crate) push_stats: Arc<Mutex<HashMap<(String, String), McpPushStats>>>,
     pub(crate) subscription_registry: Arc<Mutex<HashMap<(String, String), McpSubscriptionRecord>>>,
     /// The owner's task-completion reservations. A routed completion reserves
@@ -100,6 +105,56 @@ pub(crate) fn resolve(owner: &str) -> Option<SessionDeliveryTarget> {
     targets().load().get(owner).cloned()
 }
 
+/// Drop a session's target only when it still belongs to `cmd_tx`.
+///
+/// Registration is keyed by session id, and an id can be reused (a caller
+/// pinning `task_id`, a client re-sending `session/new` with the same
+/// `_meta.sessionId`). A plain [`unregister`] from the *old* actor's teardown
+/// would then delete the entry the new actor just published, silently dropping
+/// that session's routing back to the transport holder. `same_channel`
+/// distinguishes the two actors.
+pub(crate) fn unregister_if_same(session_id: &str, cmd_tx: &UnboundedSender<SessionCommand>) {
+    targets().rcu(|current| {
+        match current.get(session_id) {
+            Some(target) if target.cmd_tx.same_channel(cmd_tx) => {
+                let mut next = DeliveryTargetMap::clone(current);
+                next.remove(session_id);
+                Arc::new(next)
+            }
+            // Absent, or already replaced by a newer actor for this id.
+            _ => Arc::clone(current),
+        }
+    });
+}
+
+/// Hand a freshly connected shared client to every live session that imported
+/// it.
+///
+/// A respawn builds a new `McpClient` and installs it in the *respawning*
+/// session's `owned_clients`; sessions that imported the old one through
+/// `SharedMcpPool` keep the dead `Arc` and would run their next tool call on a
+/// closed transport. Only `shared_clients` entries are touched — the respawner
+/// already holds it as owned.
+pub(crate) async fn broadcast_shared_client(server: &str, client: &Arc<McpClient>) {
+    let registered: Vec<SessionDeliveryTarget> = targets().load().values().cloned().collect();
+    for target in registered {
+        let Some(state) = target.mcp_state.upgrade() else {
+            continue;
+        };
+        let mut state = state.lock().await;
+        if state.shared_clients.contains_key(server) {
+            state
+                .shared_clients
+                .insert(server.to_string(), Arc::clone(client));
+            tracing::info!(
+                server,
+                session_id = %target.session_id,
+                "shared MCP client re-pointed at the fresh transport"
+            );
+        }
+    }
+}
+
 /// Decide where a notification owned by `owner` must be delivered, given the
 /// session that currently holds the event.
 ///
@@ -131,6 +186,7 @@ mod tests {
             session_id: id.to_string(),
             cmd_tx: tx,
             persistence_tx,
+            mcp_state: Weak::new(),
             push_stats: Arc::new(Mutex::new(HashMap::new())),
             subscription_registry: Arc::new(Mutex::new(HashMap::new())),
             task_completion_reservations: TaskCompletionReservations::default(),
@@ -204,5 +260,115 @@ mod tests {
             route(Some("child-unregister-test"), "parent"),
             Delivery::Local
         ));
+    }
+
+    /// A session id reused by a newer actor must survive the older actor's
+    /// teardown: the old cleanup removes only its own entry.
+    #[test]
+    fn unregister_if_same_spares_a_newer_actor_for_the_same_id() {
+        let (older, _older_rx) = target("reused-id");
+        register(older.clone());
+        let (newer, _newer_rx) = target("reused-id");
+        register(newer.clone());
+
+        unregister_if_same("reused-id", &older.cmd_tx);
+        assert!(
+            matches!(route(Some("reused-id"), "parent"), Delivery::Routed(_)),
+            "the newer actor's target must survive the older actor's teardown"
+        );
+
+        unregister_if_same("reused-id", &newer.cmd_tx);
+        assert!(matches!(
+            route(Some("reused-id"), "parent"),
+            Delivery::Local
+        ));
+    }
+
+    /// An unknown id (or one whose entry was already replaced) is a no-op.
+    #[test]
+    fn unregister_if_same_ignores_absent_and_foreign_entries() {
+        let (mine, _mine_rx) = target("absent-probe");
+        unregister_if_same("absent-probe", &mine.cmd_tx);
+        assert!(matches!(
+            route(Some("absent-probe"), "parent"),
+            Delivery::Local
+        ));
+
+        let (owner, _owner_rx) = target("kept-id");
+        register(owner.clone());
+        let (foreign, _foreign_rx) = target("foreign-id");
+        unregister_if_same("kept-id", &foreign.cmd_tx);
+        assert!(
+            matches!(route(Some("kept-id"), "parent"), Delivery::Routed(_)),
+            "a mismatched channel must not delete the entry"
+        );
+        unregister("kept-id");
+    }
+
+    /// A respawned shared client is handed to the sessions that imported it,
+    /// and only to them.
+    #[tokio::test]
+    async fn broadcast_shared_client_repoints_only_importers() {
+        let importer_state = Arc::new(tokio::sync::Mutex::new(
+            crate::session::mcp_servers::McpState::new(vec![]),
+        ));
+        let holder_state = Arc::new(tokio::sync::Mutex::new(
+            crate::session::mcp_servers::McpState::new(vec![]),
+        ));
+        let bystander_state = Arc::new(tokio::sync::Mutex::new(
+            crate::session::mcp_servers::McpState::new(vec![]),
+        ));
+        let dead = Arc::new(crate::session::mcp_servers::McpClient::stub("srv"));
+        importer_state
+            .lock()
+            .await
+            .shared_clients
+            .insert("srv".to_string(), Arc::clone(&dead));
+        holder_state
+            .lock()
+            .await
+            .owned_clients
+            .insert("srv".to_string(), Arc::clone(&dead));
+
+        for (id, state) in [
+            ("importer", &importer_state),
+            ("holder", &holder_state),
+            ("bystander", &bystander_state),
+        ] {
+            let (mut t, _rx) = target(id);
+            t.mcp_state = Arc::downgrade(state);
+            register(t);
+        }
+
+        let fresh = Arc::new(crate::session::mcp_servers::McpClient::stub("srv"));
+        broadcast_shared_client("srv", &fresh).await;
+
+        assert!(
+            Arc::ptr_eq(&importer_state.lock().await.shared_clients["srv"], &fresh),
+            "an importer must be re-pointed at the fresh transport"
+        );
+        assert!(
+            Arc::ptr_eq(&holder_state.lock().await.owned_clients["srv"], &dead),
+            "the respawner already installed it as owned; broadcast must not touch it"
+        );
+        assert!(
+            bystander_state.lock().await.shared_clients.is_empty(),
+            "a session without the client stays untouched"
+        );
+
+        for id in ["importer", "holder", "bystander"] {
+            unregister(id);
+        }
+    }
+
+    /// A target whose session is gone (dropped `Arc`) is skipped, not fatal.
+    #[tokio::test]
+    async fn broadcast_shared_client_skips_dropped_sessions() {
+        let (mut t, _rx) = target("gone");
+        t.mcp_state = Weak::new();
+        register(t);
+        let fresh = Arc::new(crate::session::mcp_servers::McpClient::stub("srv"));
+        broadcast_shared_client("srv", &fresh).await;
+        unregister("gone");
     }
 }

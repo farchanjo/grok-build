@@ -84,14 +84,27 @@ async fn wait_for_command(rx: &mut ChildQueue) -> crate::session::commands::Sess
     panic!("owner never received the parked notification");
 }
 
-async fn setup() -> (
+/// Actor with the stub client installed as an *owned* server, plus the event
+/// lane left unwired so a test can wire it itself.
+async fn setup_unwired() -> (
     Arc<crate::session::acp_session::SessionActor>,
     Arc<McpClient>,
-    tokio::sync::mpsc::UnboundedSender<McpClientEvent>,
+) {
+    setup_unwired_with(false).await
+}
+
+/// Same, with the subagent hint applied before the actor is shared (the field
+/// is plain, so it must be set while the actor is still owned).
+async fn setup_unwired_with(
+    is_subagent: bool,
+) -> (
+    Arc<crate::session::acp_session::SessionActor>,
+    Arc<McpClient>,
 ) {
     let (gateway_tx, _gateway_rx) = tokio::sync::mpsc::unbounded_channel();
     let (persistence_tx, _persistence_rx) = mpsc::unbounded_channel();
-    let (actor, _ev) = create_test_actor_ex(0, 256_000, 85, gateway_tx, persistence_tx).await;
+    let (mut actor, _ev) = create_test_actor_ex(0, 256_000, 85, gateway_tx, persistence_tx).await;
+    actor.startup_hints.is_subagent = is_subagent;
     let actor = Arc::new(actor);
 
     let client = Arc::new(McpClient::new_acp(
@@ -113,7 +126,15 @@ async fn setup() -> (
             .owned_clients
             .insert(SERVER.to_string(), Arc::clone(&client));
     }
+    (actor, client)
+}
 
+async fn setup() -> (
+    Arc<crate::session::acp_session::SessionActor>,
+    Arc<McpClient>,
+    tokio::sync::mpsc::UnboundedSender<McpClientEvent>,
+) {
+    let (actor, client) = setup_unwired().await;
     let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel::<McpClientEvent>();
     crate::session::acp_session::spawn_mcp_resource_pump(actor.clone(), event_rx);
     (actor, client, event_tx)
@@ -127,6 +148,7 @@ fn register_child(id: &str) -> (ChildQueue, crate::session::delivery::SessionDel
         session_id: id.to_string(),
         cmd_tx: tx,
         persistence_tx,
+        mcp_state: std::sync::Weak::new(),
         push_stats: Arc::new(parking_lot::Mutex::new(Default::default())),
         subscription_registry: Arc::new(parking_lot::Mutex::new(Default::default())),
         task_completion_reservations: Default::default(),
@@ -228,10 +250,100 @@ async fn push_without_owner_stays_local() {
         .await;
 }
 
+/// A subagent's own MCP server has no other consumer for its client events.
+///
+/// Shared clients keep the parent's sender, so the child's *own* clients need
+/// the session's own lane; a client with no sender drops every
+/// `ResourceUpdated` in `emit`, and the child's own streams would never arrive.
+#[tokio::test(flavor = "current_thread")]
+async fn subagent_own_client_events_reach_its_pump() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let (actor, client) = setup_unwired_with(true).await;
+            assert!(
+                actor.mcp_state.lock().await.client_event_tx().is_none(),
+                "no lane before wiring: the client would drop its events"
+            );
+
+            actor.wire_mcp_client_event_lane().await;
+            let lane = actor
+                .mcp_state
+                .lock()
+                .await
+                .client_event_tx()
+                .expect("a subagent must get its own client event lane");
+            client
+                .subscribe_all_resources(Some(actor.session_info.id.0.as_ref()))
+                .await
+                .expect("stub handshake + subscribe must succeed");
+
+            // Emitted through the lane the wiring installed, not a test channel.
+            lane.send(McpClientEvent::ResourceUpdated {
+                server: SERVER.to_string(),
+                uri: URI.to_string(),
+            })
+            .expect("send push");
+
+            let stats = Arc::clone(&actor.mcp_push_stats);
+            wait_for(
+                || stats.lock().get(&key()).is_some_and(|s| s.pushes == 1),
+                "the subagent's own pump must accept its client's push",
+            )
+            .await;
+        })
+        .await;
+}
+
+/// A respawn builds a fresh client with an empty owner map; the re-subscribe
+/// sweep then stamps the *respawning* session on every URI. The recorded owners
+/// must be put back, or a shared transport migrates a child's streams to the
+/// parent on every reconnect.
+#[tokio::test(flavor = "current_thread")]
+async fn respawn_restores_previous_subscription_owners() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let (actor, client) = setup_unwired().await;
+            // The child's tool call subscribed on the shared transport.
+            client
+                .subscribe_all_resources(Some("child-session"))
+                .await
+                .expect("stub handshake + subscribe must succeed");
+            let previous = actor.subscription_owners_of(SERVER).await;
+            assert_eq!(previous.get(URI).map(String::as_str), Some("child-session"));
+
+            // Respawn: a fresh client, re-subscribed by the holder.
+            let fresh = McpClient::new_acp(
+                SERVER.to_string(),
+                "stub-server".to_string(),
+                Arc::new(StubResourceServer),
+                None,
+                None,
+            );
+            fresh
+                .subscribe_all_resources(Some(actor.session_info.id.0.as_ref()))
+                .await
+                .expect("fresh transport subscribes");
+            assert_ne!(
+                fresh.subscription_owner(URI).as_deref(),
+                Some("child-session"),
+                "the sweep alone stamps the respawner"
+            );
+
+            crate::session::acp_session::SessionActor::restore_subscription_owners(
+                &fresh, &previous,
+            );
+            assert_eq!(
+                fresh.subscription_owner(URI).as_deref(),
+                Some("child-session"),
+                "the child's stream must survive the transport respawn"
+            );
+        })
+        .await;
+}
+
 /// A push owned by a session that already exited is delivered locally and
 /// re-stamped onto the holder, so delivery and the sheet stay consistent
 /// (adoption, matching the task/wait paths).
-#[tokio::test(flavor = "current_thread")]
 async fn push_with_dead_owner_is_adopted_locally() {
     tokio::task::LocalSet::new()
         .run_until(async {

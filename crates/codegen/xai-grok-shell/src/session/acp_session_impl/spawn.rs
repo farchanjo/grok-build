@@ -2147,6 +2147,7 @@ pub(crate) async fn spawn_session_actor(
         session_id: session.session_info.id.0.to_string(),
         cmd_tx: session.session_cmd_tx.clone(),
         persistence_tx: session.notifications.persistence_tx.clone(),
+        mcp_state: std::sync::Arc::downgrade(&session.mcp_state),
         push_stats: std::sync::Arc::clone(&session.mcp_push_stats),
         subscription_registry: std::sync::Arc::clone(&session.mcp_subscription_registry),
         task_completion_reservations: session

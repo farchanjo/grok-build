@@ -32,10 +32,89 @@ mod yolo_toggle_report_tests {
 fn cleanup_session_scratch(session: &SessionActor) {
     // Every run-loop exit path funnels through here. The run loop is the
     // drain for routed pushes, so the session must stop being a delivery
-    // target the moment it can no longer deliver.
-    crate::session::delivery::unregister(session.session_info.id.0.as_ref());
+    // target the moment it can no longer deliver. `if_same`: a session id
+    // reused by a newer actor keeps its own, newer entry.
+    crate::session::delivery::unregister_if_same(
+        session.session_info.id.0.as_ref(),
+        &session.session_cmd_tx,
+    );
 }
 impl SessionActor {
+    /// Install this session's MCP client event lane: a tee that fans client
+    /// events into the status dispatcher and the resource pump.
+    ///
+    /// Every session gets the lane, subagents included. A subagent that
+    /// declares its own MCP servers owns those clients — `import_shared_clients`
+    /// skips any name the child configures — and a client with no sender drops
+    /// every `ResourceUpdated` on the floor, so the child's own streams would
+    /// never reach the child's pump.
+    ///
+    /// Clients imported from the parent keep the parent's sender
+    /// ([`McpState::set_client_event_tx`] never touches `shared_clients`), so
+    /// nothing is delivered twice and the parent stays the single owner of the
+    /// shared transports' status flow.
+    pub(crate) async fn wire_mcp_client_event_lane(self: &Arc<Self>) {
+        let (event_tx, event_rx) =
+            tokio::sync::mpsc::unbounded_channel::<xai_grok_mcp::servers::McpClientEvent>();
+        // Tee: clients emit into one channel; every event fans out to the
+        // status dispatcher AND the session's MCP resource pump (async
+        // subscription delivery to the model).
+        let (tee_tx, mut tee_rx) =
+            tokio::sync::mpsc::unbounded_channel::<xai_grok_mcp::servers::McpClientEvent>();
+        let (actor_event_tx, actor_event_rx) =
+            tokio::sync::mpsc::unbounded_channel::<xai_grok_mcp::servers::McpClientEvent>();
+        {
+            let dispatcher_tx = event_tx.clone();
+            let pump_tx = actor_event_tx.clone();
+            tokio::task::spawn_local(async move {
+                while let Some(event) = tee_rx.recv().await {
+                    let _ = dispatcher_tx.send(event.clone());
+                    let _ = pump_tx.send(event);
+                }
+            });
+        }
+        {
+            let mut mcp_state = self.mcp_state.lock().await;
+            mcp_state.set_client_event_tx(Some(tee_tx));
+        }
+        let dispatcher_session_id = self.session_info.id.0.to_string();
+        let dispatcher_cwd = std::path::PathBuf::from(self.session_info.cwd.as_str());
+        let dispatcher_gateway = self.notifications.gateway.clone();
+        let dispatcher_mcp_state = Arc::clone(&self.mcp_state);
+        let shutdown_state = crate::session::mcp_dispatcher::new_shutdown_state();
+        let auto_restart_enabled = {
+            let user_cfg = crate::config::load_effective_config().ok();
+            let requirements = crate::agent::config::read_requirements_toml();
+            crate::util::config::resolve_mcp_auto_restart(
+                requirements.as_ref(),
+                user_cfg.as_ref(),
+                None,
+            )
+        };
+        let restart_actions: Option<std::rc::Rc<dyn crate::session::mcp_restart::RestartActions>> =
+            if auto_restart_enabled {
+                Some(std::rc::Rc::new(SessionRestartActions::new(
+                    Arc::clone(self),
+                    Arc::clone(&shutdown_state),
+                )))
+            } else {
+                None
+            };
+        tokio::task::spawn_local(async move {
+            crate::session::mcp_dispatcher::run_dispatcher(
+                dispatcher_session_id,
+                event_rx,
+                dispatcher_gateway,
+                dispatcher_mcp_state,
+                shutdown_state,
+                restart_actions,
+                dispatcher_cwd,
+            )
+            .await;
+        });
+        crate::session::acp_session::spawn_mcp_resource_pump(Arc::clone(self), actor_event_rx);
+    }
+
     /// Canonical selection plus frozen wire model for ACP prompt setup.
     ///
     /// Missing-key preflight must use `selection_model_id`. Persistence,
@@ -609,66 +688,10 @@ pub(super) async fn run_session(
             None,
         )
     };
-    if !session.startup_hints.is_subagent && liveness_watchers_enabled {
-        let (event_tx, event_rx) =
-            tokio::sync::mpsc::unbounded_channel::<xai_grok_mcp::servers::McpClientEvent>();
-        // Tee: clients emit into one channel; every event fans out to the
-        // status dispatcher AND the session's MCP resource pump (async
-        // subscription delivery to the model).
-        let (tee_tx, mut tee_rx) =
-            tokio::sync::mpsc::unbounded_channel::<xai_grok_mcp::servers::McpClientEvent>();
-        let (actor_event_tx, actor_event_rx) =
-            tokio::sync::mpsc::unbounded_channel::<xai_grok_mcp::servers::McpClientEvent>();
-        {
-            let dispatcher_tx = event_tx.clone();
-            let pump_tx = actor_event_tx.clone();
-            tokio::task::spawn_local(async move {
-                while let Some(event) = tee_rx.recv().await {
-                    let _ = dispatcher_tx.send(event.clone());
-                    let _ = pump_tx.send(event);
-                }
-            });
-        }
-        {
-            let mut mcp_state = session.mcp_state.lock().await;
-            mcp_state.set_client_event_tx(Some(tee_tx));
-        }
-        let dispatcher_session_id = session.session_info.id.0.to_string();
-        let dispatcher_cwd = std::path::PathBuf::from(session.session_info.cwd.as_str());
-        let dispatcher_gateway = session.notifications.gateway.clone();
-        let dispatcher_mcp_state = Arc::clone(&session.mcp_state);
-        let shutdown_state = crate::session::mcp_dispatcher::new_shutdown_state();
-        let auto_restart_enabled = {
-            let user_cfg = crate::config::load_effective_config().ok();
-            let requirements = crate::agent::config::read_requirements_toml();
-            crate::util::config::resolve_mcp_auto_restart(
-                requirements.as_ref(),
-                user_cfg.as_ref(),
-                None,
-            )
-        };
-        let restart_actions: Option<std::rc::Rc<dyn crate::session::mcp_restart::RestartActions>> =
-            if auto_restart_enabled {
-                Some(std::rc::Rc::new(SessionRestartActions::new(
-                    session.clone(),
-                    Arc::clone(&shutdown_state),
-                )))
-            } else {
-                None
-            };
-        tokio::task::spawn_local(async move {
-            crate::session::mcp_dispatcher::run_dispatcher(
-                dispatcher_session_id,
-                event_rx,
-                dispatcher_gateway,
-                dispatcher_mcp_state,
-                shutdown_state,
-                restart_actions,
-                dispatcher_cwd,
-            )
-            .await;
-        });
-        crate::session::acp_session::spawn_mcp_resource_pump(session.clone(), actor_event_rx);
+    if liveness_watchers_enabled {
+        // Subagents included: the lane serves only this session's own clients,
+        // and a child's own MCP servers have no other consumer.
+        session.wire_mcp_client_event_lane().await;
     }
     let session_for_mcp = session.clone();
     let completion_tx_for_mcp = completion_tx.clone();
