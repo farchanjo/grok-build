@@ -448,6 +448,82 @@ impl Default for PruningConfig {
     }
 }
 
+/// Memory write-gate configuration (`[memory.gate]`).
+///
+/// Off by default: with the gate off the write path is byte-for-byte the
+/// historical one. The thresholds default to the measured band (0.20 for
+/// `worth`, 0.50 for `covered`) and are clamped to [0.0, 1.0] at parse time.
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+#[serde(default)]
+pub struct MemoryGateConfig {
+    /// Master switch. `false` makes zero Jev requests.
+    pub enabled: bool,
+    /// Route memory search reranking through the gate's own decisions client
+    /// instead of the retrieval protocol slot. Works with `enabled = false`:
+    /// it picks the owner of the search call, not the append gate. Both routes
+    /// ask the same questions, so the default keeps today's retrieval path.
+    pub rerank: bool,
+    /// Jev model reference; the decisions endpoint is not a chat surface.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// Decisions endpoint override.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub endpoint: Option<String>,
+    /// Environment variable holding the credential.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub api_key_env: Option<String>,
+    /// OpenRouter `provider.zdr`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub zdr: Option<bool>,
+    /// OpenRouter `provider.data_collection`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub data_collection: Option<String>,
+    /// OpenRouter `provider.require_parameters`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub require_parameters: Option<bool>,
+    /// Minimum `worth` for a note to be kept.
+    #[serde(deserialize_with = "deserialize_clamped_unit")]
+    pub worth_threshold: f64,
+    /// Minimum `covered` for a note to be dropped as a restatement.
+    #[serde(deserialize_with = "deserialize_clamped_unit")]
+    pub covered_threshold: f64,
+    /// Per-request timeout in milliseconds.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub timeout_ms: Option<u64>,
+    /// Entries carried in the state before it degrades to a summary.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub store_max_entries: Option<usize>,
+    /// Characters carried in the state before it degrades to a summary.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub store_max_chars: Option<usize>,
+}
+
+impl Default for MemoryGateConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            rerank: false,
+            model: None,
+            endpoint: None,
+            api_key_env: None,
+            zdr: None,
+            data_collection: None,
+            require_parameters: None,
+            worth_threshold: DEFAULT_GATE_WORTH_THRESHOLD,
+            covered_threshold: DEFAULT_GATE_COVERED_THRESHOLD,
+            timeout_ms: None,
+            store_max_entries: None,
+            store_max_chars: None,
+        }
+    }
+}
+
+/// Measured `worth` threshold: below 0.20 the gate loses valuable notes,
+/// above it noise starts arriving (`script-test/FINDINGS-MEMORY.md` §4.2).
+pub const DEFAULT_GATE_WORTH_THRESHOLD: f64 = 0.20;
+/// Measured `covered` threshold: at or above it a note is a restatement.
+pub const DEFAULT_GATE_COVERED_THRESHOLD: f64 = 0.50;
+
 #[cfg(test)]
 mod tests {
     use super::*;

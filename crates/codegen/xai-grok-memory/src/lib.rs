@@ -29,6 +29,8 @@ pub mod dream;
 pub mod dream_lock;
 pub mod embedding;
 pub mod fingerprint;
+pub mod gate;
+pub mod gate_client;
 pub mod index;
 pub mod metadata_index;
 pub mod mirror;
@@ -54,6 +56,11 @@ pub use embedding::{
 pub use fingerprint::{
     EmbeddingSourceSpec, NORMALIZATION_L2_V1, VECTOR_SCHEMA_VERSION, VectorFingerprint,
 };
+pub use gate::{
+    Candidate, DecisionClient, DropReason, GateConfig, GateError, GateOutcome, MemoryGate, Store,
+    WriteScope,
+};
+pub use gate_client::JevDecisionsClient;
 pub use index::{MemoryIndex, init_sqlite_vec};
 pub use metadata_index::{
     CollectionKind, MetadataFtsHit, MetadataIndex, MetadataIndexError, MetadataItem,
@@ -69,7 +76,9 @@ pub use mirror::{
     similarity_to_l2_distance,
 };
 pub use retrieval::{MemoryRetrieval, RetrievalError, RetrievalErrorKind};
-pub use storage::{MemoryScope, MemoryStorage};
+pub use storage::{
+    LONG_TERM_END_MARKER, MemoryScope, MemoryStorage, markdown_sections, note_scope,
+};
 pub use workspace_identity::{workspace_identity_hash16, workspace_storage_identity};
 
 /// Embed all chunks that don't have embeddings yet.

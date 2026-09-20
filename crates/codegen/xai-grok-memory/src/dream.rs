@@ -1018,9 +1018,98 @@ mod tests {
         assert!(matches!(result.status, DreamStatus::Completed { .. }));
 
         let memory = fs::read_to_string(ws.join("MEMORY.md")).unwrap();
-        // write_long_term overwrites: old content is replaced
+        // The curated body is replaced wholesale; the end marker is re-added.
+        // The pre-populated file carried no marker, so nothing was preserved.
         assert!(!memory.contains("Old content."));
-        assert_eq!(memory.trim(), response);
+        assert!(memory.starts_with(response));
+        assert!(
+            memory
+                .trim_end()
+                .ends_with(super::super::storage::LONG_TERM_END_MARKER)
+        );
+    }
+
+    /// A note appended after the last consolidation survives the next one:
+    /// `write_long_term` preserves everything below the end marker.
+    #[test]
+    fn execute_dream_preserves_notes_appended_since_last_run() {
+        let dir = TempDir::new().unwrap();
+        let (storage, ws) = test_storage(&dir);
+        let sdir = empty_sessions_dir(&dir);
+        fs::create_dir_all(&ws).unwrap();
+
+        // Curate once so the file carries the marker an append hangs off, then
+        // append the way a `#note` does.
+        storage
+            .write_long_term(
+                super::super::storage::MemoryScope::Workspace,
+                "## Existing\n\nOld content.",
+            )
+            .unwrap();
+        storage
+            .append_to_memory(
+                super::super::storage::MemoryScope::Workspace,
+                "note saved in between",
+            )
+            .unwrap();
+
+        let lock = DreamLock::new(dir.path());
+        let result = execute_dream(
+            &lock,
+            &storage,
+            "## New Topic\n\nFresh insight.",
+            2,
+            300,
+            &sdir,
+            &[],
+        );
+
+        assert!(matches!(result.status, DreamStatus::Completed { .. }));
+        let memory = fs::read_to_string(ws.join("MEMORY.md")).unwrap();
+        assert!(memory.contains("Fresh insight."));
+        assert!(!memory.contains("Old content."));
+        assert!(
+            memory.contains("## note saved in between"),
+            "append must survive the consolidation"
+        );
+    }
+
+    /// A failed write must not consume the sessions it read — they are the only
+    /// remaining copy of that knowledge — and the lock must roll back so the
+    /// next dream retries.
+    #[test]
+    fn execute_dream_write_failure_keeps_sessions_and_rolls_back_lock() {
+        let dir = TempDir::new().unwrap();
+        let (storage, ws) = test_storage(&dir);
+        let sessions = dir.path().join("sessions");
+        write_old_session_content(&sessions, "sess-a", "Content A");
+
+        // A directory at the MEMORY.md path fails `fs::write` with EISDIR on
+        // every platform and uid — unlike a read-only file, which root writes.
+        fs::create_dir_all(&ws).unwrap();
+        fs::create_dir(ws.join("MEMORY.md")).unwrap();
+
+        let lock = DreamLock::new(dir.path());
+        let result = execute_dream(
+            &lock,
+            &storage,
+            "## Topic\n\nBody.",
+            1,
+            300,
+            &sessions,
+            &["sess-a".to_string()],
+        );
+
+        assert!(matches!(result.status, DreamStatus::Failed(_)));
+        assert!(result.cleaned_stems.is_empty());
+        assert!(
+            sessions.join("sess-a.md").exists(),
+            "a failed write must not consume the sessions"
+        );
+        assert!(
+            !dir.path().join(".dream-lock").exists(),
+            "lock must roll back so the next dream retries"
+        );
     }
 
     // -------------------------------------------------------------------

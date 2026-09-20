@@ -18,6 +18,30 @@ pub enum MemoryScope {
     Workspace,
 }
 
+/// Env knob selecting the write scope of a remember-note (`#note`).
+pub const NOTE_SCOPE_ENV: &str = "GROK_MEMORY_NOTE_SCOPE";
+
+/// Write scope for a remember-note (`#note`).
+///
+/// Deliberately a decision instead of a call-site constant: the pager effect
+/// used to hardcode [`MemoryScope::Global`], so a workspace-scoped policy could
+/// never land without editing the effect. Defaults to [`MemoryScope::Global`] —
+/// with the knob unset the write path is byte-for-byte the historical one.
+///
+/// `GROK_MEMORY_NOTE_SCOPE=workspace` routes notes to the workspace `MEMORY.md`.
+/// An ephemeral CWD (temp-dir subagent worktree) always stays `Global`:
+/// [`MemoryStorage`] skips workspace writes there, so the note would otherwise
+/// vanish. Read per call — a cached value would race the in-process env tests.
+pub fn note_scope(cwd: &Path) -> MemoryScope {
+    if is_ephemeral_cwd(cwd) {
+        return MemoryScope::Global;
+    }
+    match std::env::var(NOTE_SCOPE_ENV) {
+        Ok(v) if v.trim().eq_ignore_ascii_case("workspace") => MemoryScope::Workspace,
+        _ => MemoryScope::Global,
+    }
+}
+
 /// Handles file I/O for the memory storage layer.
 ///
 /// Memory files are human-readable/editable Markdown stored under
@@ -194,7 +218,11 @@ impl MemoryStorage {
 
     /// Write the curated long-term `MEMORY.md` for the given scope.
     ///
-    /// Creates parent directories as needed. Overwrites any existing content.
+    /// Creates parent directories as needed. The curated body replaces the
+    /// previous one, but notes appended by [`Self::append_to_memory`] since the
+    /// last long-term write are re-attached below it. Dream owns the curated
+    /// region and the [`LONG_TERM_END_MARKER`] that delimits it, so a
+    /// consolidation can no longer drop a note saved in between.
     pub fn write_long_term(&self, scope: MemoryScope, content: &str) -> std::io::Result<()> {
         if self.ephemeral && scope == MemoryScope::Workspace {
             tracing::debug!("MEMORY_EPHEMERAL_SKIP: workspace long-term write skipped");
@@ -212,8 +240,24 @@ impl MemoryStorage {
             }
         };
 
-        std::fs::write(&path, content)?;
-        tracing::debug!(path = %path.display(), scope = ?scope, "wrote long-term memory");
+        let appended = appended_tail(&path);
+        let mut out = String::with_capacity(content.len() + appended.len() + 64);
+        out.push_str(content.trim_end());
+        if !appended.is_empty() {
+            out.push_str("\n\n");
+            out.push_str(&appended);
+        }
+        out.push('\n');
+        out.push_str(LONG_TERM_END_MARKER);
+        out.push('\n');
+
+        std::fs::write(&path, out)?;
+        tracing::debug!(
+            path = %path.display(),
+            scope = ?scope,
+            appended_lines = appended.lines().count(),
+            "wrote long-term memory"
+        );
 
         Ok(())
     }
@@ -326,6 +370,15 @@ impl MemoryStorage {
             files.push(global_file);
         }
 
+        // Global topic files: the siblings of the global `MEMORY.md` it links
+        // to (e.g. `short-sleeps-in-verification.md`). Without these their
+        // bodies are unreachable by search — only the link line is indexed.
+        // Top level only: subdirectories under the memory root are
+        // per-workspace hashes, not topics.
+        if self.global_dir.is_dir() {
+            files.extend(top_level_markdown_files(&self.global_dir, "MEMORY.md")?);
+        }
+
         // Workspace MEMORY.md
         let workspace_file = self.workspace_memory_file();
         if workspace_file.is_file() {
@@ -352,6 +405,21 @@ impl MemoryStorage {
         }
 
         Ok(files)
+    }
+
+    /// Entry-level view of what memory already says: the sections of the
+    /// global and the workspace `MEMORY.md`, global first.
+    ///
+    /// The write gate's `covered` question needs the entries, not the whole
+    /// file; capping and summarizing is the gate's job.
+    pub fn existing_entries(&self) -> Vec<String> {
+        let mut entries = Vec::new();
+        for path in [self.global_memory_file(), self.workspace_memory_file()] {
+            if let Ok(content) = std::fs::read_to_string(&path) {
+                entries.extend(markdown_sections(&content));
+            }
+        }
+        entries
     }
 
     /// Ensure the global memory directory exists and create a template
@@ -506,6 +574,81 @@ impl MemoryStorage {
 
         Ok(removed)
     }
+}
+
+/// Split markdown into heading-delimited sections, dropping the preamble and
+/// the long-term marker line.
+pub fn markdown_sections(content: &str) -> Vec<String> {
+    let mut sections: Vec<String> = Vec::new();
+    let mut current = String::new();
+    let mut started = false;
+    for line in content.lines() {
+        let heading = line.trim_start().starts_with('#');
+        if line.trim() == LONG_TERM_END_MARKER {
+            continue;
+        }
+        if heading {
+            if started {
+                push_section(&mut sections, &mut current);
+            }
+            started = true;
+        }
+        if started {
+            current.push_str(line);
+            current.push('\n');
+        }
+    }
+    push_section(&mut sections, &mut current);
+    sections
+}
+
+/// Push `current` when it holds content, then clear it.
+fn push_section(sections: &mut Vec<String>, current: &mut String) {
+    let trimmed = current.trim();
+    if !trimmed.is_empty() {
+        sections.push(trimmed.to_owned());
+    }
+    current.clear();
+}
+
+/// Marker line that closes the curated region of a long-term `MEMORY.md`.
+///
+/// Everything below the last marker was appended by
+/// [`MemoryStorage::append_to_memory`] after the curated body was written, and
+/// survives the next [`MemoryStorage::write_long_term`]. An HTML comment so it
+/// stays invisible in rendered Markdown. A file without the marker (hand-written,
+/// or written before the marker existed) is treated as fully curated.
+pub const LONG_TERM_END_MARKER: &str = "<!-- memory:long-term-end -->";
+
+/// Content of `path` below its last [`LONG_TERM_END_MARKER`], trimmed.
+///
+/// Empty when the file is missing, unreadable, or carries no marker.
+fn appended_tail(path: &Path) -> String {
+    let Ok(existing) = std::fs::read_to_string(path) else {
+        return String::new();
+    };
+    let Some(pos) = existing.rfind(LONG_TERM_END_MARKER) else {
+        return String::new();
+    };
+    existing[pos + LONG_TERM_END_MARKER.len()..]
+        .trim()
+        .to_string()
+}
+
+/// Sorted top-level `.md` files in `dir`, excluding `skip` and subdirectories.
+fn top_level_markdown_files(dir: &Path, skip: &str) -> std::io::Result<Vec<PathBuf>> {
+    let mut files = Vec::new();
+    for entry in std::fs::read_dir(dir)? {
+        let path = entry?.path();
+        if !path.is_file() || path.file_name().and_then(|n| n.to_str()) == Some(skip) {
+            continue;
+        }
+        if path.extension().and_then(|e| e.to_str()) == Some("md") {
+            files.push(path);
+        }
+    }
+    files.sort();
+    Ok(files)
 }
 
 /// A workspace directory is "empty" if its `sessions/` subdirectory either
@@ -780,7 +923,8 @@ mod tests {
         let path = global_dir.join("MEMORY.md");
         assert!(path.exists());
         let content = std::fs::read_to_string(&path).unwrap();
-        assert_eq!(content, "# Global\n\nSome knowledge.");
+        assert!(content.starts_with("# Global\n\nSome knowledge."));
+        assert!(content.trim_end().ends_with(LONG_TERM_END_MARKER));
     }
 
     #[test]
@@ -797,7 +941,8 @@ mod tests {
         let path = workspace_dir.join("MEMORY.md");
         assert!(path.exists());
         let content = std::fs::read_to_string(&path).unwrap();
-        assert_eq!(content, "# Project\n\nProject info.");
+        assert!(content.starts_with("# Project\n\nProject info."));
+        assert!(content.trim_end().ends_with(LONG_TERM_END_MARKER));
     }
 
     #[test]
@@ -1747,5 +1892,173 @@ mod tests {
         )
         .unwrap();
         assert_eq!(storage.total_chunk_count(), 0);
+    }
+
+    // -----------------------------------------------------------------------
+    // Global topic indexing
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_list_memory_files_indexes_global_topics() {
+        let tmp = TempDir::new().unwrap();
+        let global_dir = tmp.path().join("memory");
+        let workspace_dir = global_dir.join("abc123");
+        let storage = MemoryStorage::with_paths(global_dir.clone(), workspace_dir.clone());
+
+        storage
+            .write_long_term(MemoryScope::Global, "# Global")
+            .unwrap();
+        std::fs::write(global_dir.join("topic-b.md"), "# B").unwrap();
+        std::fs::write(global_dir.join("topic-a.md"), "# A").unwrap();
+        std::fs::write(global_dir.join("notes.txt"), "not markdown").unwrap();
+        // A topic file one level down is a workspace file, not a global topic.
+        std::fs::create_dir_all(&workspace_dir).unwrap();
+        std::fs::write(workspace_dir.join("workspace-topic.md"), "# W").unwrap();
+
+        let names: Vec<String> = storage
+            .list_memory_files()
+            .unwrap()
+            .iter()
+            .filter_map(|p| p.file_name()?.to_str().map(str::to_owned))
+            .collect();
+        assert_eq!(names, ["MEMORY.md", "topic-a.md", "topic-b.md"]);
+        assert_eq!(
+            storage.classify_source(&global_dir.join("topic-a.md")),
+            "global"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // write_long_term merge (appends survive a rewrite)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_write_long_term_preserves_appended_notes() {
+        let tmp = TempDir::new().unwrap();
+        let global_dir = tmp.path().join("memory");
+        let workspace_dir = global_dir.join("abc123");
+        let storage = MemoryStorage::with_paths(global_dir, workspace_dir.clone());
+
+        storage
+            .write_long_term(MemoryScope::Workspace, "## Curated\n\nFirst pass.")
+            .unwrap();
+        storage
+            .append_to_memory(MemoryScope::Workspace, "saved after the dream")
+            .unwrap();
+
+        // A later consolidation must not drop the note appended in between.
+        storage
+            .write_long_term(MemoryScope::Workspace, "## Curated\n\nSecond pass.")
+            .unwrap();
+
+        let content = std::fs::read_to_string(workspace_dir.join("MEMORY.md")).unwrap();
+        assert!(content.contains("Second pass."), "curated body replaced");
+        assert!(!content.contains("First pass."), "old curated body dropped");
+        assert!(
+            content.contains("## saved after the dream"),
+            "append survived"
+        );
+        assert!(content.trim_end().ends_with(LONG_TERM_END_MARKER));
+        assert_eq!(
+            content.matches(LONG_TERM_END_MARKER).count(),
+            1,
+            "exactly one marker keeps the next rewrite's tail unambiguous"
+        );
+    }
+
+    #[test]
+    fn test_write_long_term_without_marker_replaces_whole_file() {
+        let tmp = TempDir::new().unwrap();
+        let global_dir = tmp.path().join("memory");
+        let workspace_dir = global_dir.join("abc123");
+        let storage = MemoryStorage::with_paths(global_dir, workspace_dir.clone());
+        std::fs::create_dir_all(&workspace_dir).unwrap();
+        // Hand-written file, or one written before the marker existed.
+        std::fs::write(workspace_dir.join("MEMORY.md"), "## Legacy\n\nOld.").unwrap();
+
+        storage
+            .write_long_term(MemoryScope::Workspace, "## New\n\nFresh.")
+            .unwrap();
+
+        let content = std::fs::read_to_string(workspace_dir.join("MEMORY.md")).unwrap();
+        assert!(content.starts_with("## New"));
+        assert!(
+            !content.contains("Old."),
+            "an unmarked file is fully curated"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // note_scope decision
+    // -----------------------------------------------------------------------
+
+    /// Serializes the env tests below and restores the previous value on drop.
+    /// Fields drop in declaration order, so the restore lands under the lock.
+    struct NoteScopeEnv {
+        prev: Option<std::ffi::OsString>,
+        _lock: std::sync::MutexGuard<'static, ()>,
+    }
+
+    static NOTE_SCOPE_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    impl NoteScopeEnv {
+        /// `None` unsets the knob (the production default).
+        fn set(value: Option<&str>) -> Self {
+            let _lock = NOTE_SCOPE_ENV_LOCK
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            let prev = std::env::var_os(NOTE_SCOPE_ENV);
+            match value {
+                Some(v) => unsafe { std::env::set_var(NOTE_SCOPE_ENV, v) },
+                None => unsafe { std::env::remove_var(NOTE_SCOPE_ENV) },
+            }
+            Self { prev, _lock }
+        }
+    }
+
+    impl Drop for NoteScopeEnv {
+        fn drop(&mut self) {
+            match self.prev.take() {
+                Some(prev) => unsafe { std::env::set_var(NOTE_SCOPE_ENV, prev) },
+                None => unsafe { std::env::remove_var(NOTE_SCOPE_ENV) },
+            }
+        }
+    }
+
+    #[test]
+    fn test_note_scope_defaults_to_global() {
+        let _env = NoteScopeEnv::set(None);
+        assert_eq!(
+            note_scope(Path::new("/home/user/project")),
+            MemoryScope::Global
+        );
+    }
+
+    #[test]
+    fn test_note_scope_env_opts_into_workspace() {
+        let _env = NoteScopeEnv::set(Some("workspace"));
+        assert_eq!(
+            note_scope(Path::new("/home/user/project")),
+            MemoryScope::Workspace
+        );
+    }
+
+    #[test]
+    fn test_note_scope_unknown_value_stays_global() {
+        let _env = NoteScopeEnv::set(Some("bogus"));
+        assert_eq!(
+            note_scope(Path::new("/home/user/project")),
+            MemoryScope::Global
+        );
+    }
+
+    #[test]
+    fn test_note_scope_ephemeral_cwd_stays_global() {
+        // A temp-dir worktree would silently drop a workspace note.
+        let _env = NoteScopeEnv::set(Some("workspace"));
+        assert_eq!(
+            note_scope(Path::new("/tmp/worktree-123")),
+            MemoryScope::Global
+        );
     }
 }

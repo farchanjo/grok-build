@@ -276,6 +276,16 @@ impl SessionActor {
             }
         };
 
+        // Consolidation inside dream: drop the sections memory already
+        // covers, reusing the gate's `covered` question. Fail-open — on any
+        // failure the raw response is written untouched.
+        let model_response =
+            match crate::session::memory::gate::consolidate_covered(storage, &model_response).await
+            {
+                Some(consolidated) => consolidated,
+                None => model_response,
+            };
+
         let result = execute_dream(
             lock,
             storage,

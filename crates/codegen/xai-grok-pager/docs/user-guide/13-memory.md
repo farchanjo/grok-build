@@ -86,10 +86,13 @@ Memory is stored as Markdown files under `~/.grok/memory/`:
 | Location | Scope | Description |
 |----------|-------|-------------|
 | `~/.grok/memory/MEMORY.md` | Global | Facts that apply across all your projects |
+| `~/.grok/memory/*.md` | Global | Topic files linked from `MEMORY.md` |
 | `~/.grok/memory/<project-slug>-<hash8>/MEMORY.md` | Workspace | Project-specific conventions and context |
 | `~/.grok/memory/<project-slug>-<hash8>/sessions/` | Sessions | Per-session summaries and logs |
 
 Grok suffixes each workspace directory with a short hash of the repository's identity. The identity is the `origin` remote in `org/repo` form when the directory is a Git repository with an `origin` remote, or the directory path otherwise. Because clones and worktrees of the same repository share an `origin` remote, they also share one memory directory.
+
+Markdown files sitting next to `MEMORY.md` at the memory root are **topic files**: `MEMORY.md` links to them, and their full bodies are indexed and searchable like any other memory file. Only the top level is treated this way -- the subdirectories under the memory root are per-workspace directories.
 
 An SQLite index supports hybrid search across all memory files:
 - **FTS5** provides full-text search for keyword matching.
@@ -184,7 +187,7 @@ Use `/flush` when you want to preserve important context:
 
 ### Remember
 
-Ask Grok to remember something, and it appends the note to a `MEMORY.md` file -- the workspace file for project-specific items, or the global `~/.grok/memory/MEMORY.md` for cross-project preferences:
+Ask Grok to remember something, and it appends the note to the global `~/.grok/memory/MEMORY.md`, so the note is available in every project:
 
 ```
 > remember to always open PR links after pushing
@@ -199,6 +202,10 @@ You can also save a note directly with the `/remember` command:
 ```
 
 Run `/remember` with no text to enter remember mode, where the next line you type becomes the note. Either way, Grok opens a review panel showing the note (with an optional rewritten version you can toggle with `Tab`); the note is written only after you confirm. On save, Grok shows `Memory saved to ~/.grok/memory/MEMORY.md`.
+
+Set `GROK_MEMORY_NOTE_SCOPE=workspace` to write notes to the workspace `MEMORY.md` instead. An ephemeral working directory (a temp-dir subagent worktree) always uses the global file, because workspace writes are skipped there.
+
+Notes appended this way survive the next Dream run: Dream rewrites only the consolidated region of `MEMORY.md` and re-attaches anything saved below its end marker.
 
 ### Forget
 
@@ -283,6 +290,8 @@ The `/dream` command consolidates scattered memory fragments into organized topi
 ```
 
 Dream reorganizes individual session logs and memory entries into a coherent, deduplicated knowledge base, which reduces noise and improves search quality over time. `/dream` requires memory to be enabled.
+
+Dream owns the consolidated region of `MEMORY.md`. Entries you saved since the last run are preserved below it, so a consolidation never drops a fresh note.
 
 ### Auto-Dream
 
@@ -409,6 +418,33 @@ To edit memory from the shell, open the files in your editor directly -- for exa
 | `session.save_on_end` | `true` | Write metadata summary on session end |
 | `watcher.enabled` | `true` | Watch `~/.grok/memory/` for external edits and reindex |
 | `vector_store` | unset | Named `[vector_stores.<id>]` entry the memory index mirrors to. Unset keeps memory sqlite-only. |
+
+### Write-Gate Settings (`[memory.gate]`)
+
+The write gate rules on a note before it is appended to `MEMORY.md`. It asks
+Jev three atomic questions — whether the note is worth recalling, whether
+memory already says it, and whether it belongs to this folder or to global
+memory — and drops what is momentary or already covered. Off by default:
+with `enabled = false`, with no credential, or on any Jev failure, the note is
+written exactly as it was before the gate existed.
+
+| Key | Default | Description |
+|-----|---------|-------------|
+| `enabled` | `false` | Run the gate before an append. `false` makes zero Jev requests. |
+| `rerank` | `false` | Order memory-search results through the gate's decisions client instead of the retrieval rerank slot. Works with `enabled = false`; both routes ask the same questions, so this picks the owner of the call |
+| `model` | `~typesafe/jev-latest` | Jev model reference (the decisions endpoint is not a chat surface) |
+| `endpoint` | OpenRouter decisions | Decisions endpoint override |
+| `api_key_env` | unset | Environment variable holding the credential; falls back to `GROK_JEV_API_KEY`, then the OpenRouter key in `auth.json` |
+| `worth_threshold` | `0.20` | Minimum worth for a note to be kept |
+| `covered_threshold` | `0.50` | At or above it the note is a restatement and is dropped |
+| `timeout_ms` | `8000` | Per-request timeout |
+| `store_max_entries` | `40` | Entries carried in the state before it degrades to a summary |
+| `store_max_chars` | `6000` | Characters carried in the state before it degrades to a summary |
+
+`worth_threshold` is deliberately not `0.5`: the measured band is 0.20–0.22,
+and 0.5 loses seven of thirty-six valuable notes on the sample. The same
+`covered` question also runs inside Dream, so a consolidation does not re-add
+what `MEMORY.md` already says.
 
 ### Vector-Store Settings (`[vector_stores.<id>]`)
 

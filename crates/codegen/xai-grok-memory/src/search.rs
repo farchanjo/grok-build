@@ -782,23 +782,70 @@ pub async fn remote_rerank(
     max_body_chars: usize,
 ) {
     let Some(r) = retrieval else { return };
-    let n = results.len();
-    if n == 0 {
+    let Some((k, docs)) = rerank_prefix(results, max_body_chars) else {
         return;
-    }
-    let k = n.min(REMOTE_RERANK_PREFIX_CAP);
-    let docs: Vec<String> = results[..k]
-        .iter()
-        .map(|res| snippet_bounded(&res.snippet, max_body_chars))
-        .collect();
+    };
     let perm = match r.rerank(query, &docs).await {
         Ok(Some(p)) => super::retrieval::validate_rerank_permutation(Some(&p), k),
         _ => None,
     };
+    apply_prefix_permutation(results, relevance, perm);
+}
+
+/// Gate-side twin of [`remote_rerank`]: same bounded prefix, same permutation
+/// validation, same fail-open, but the call goes through the gate's own
+/// decisions client and carries the workspace path in its state.
+///
+/// Both routes stay on purpose. `[memory.gate] rerank = true` selects this one,
+/// so the two ends remain one mechanism behind a switch instead of two orders
+/// that drift apart.
+pub async fn gate_rerank(
+    results: &mut Vec<SearchResult>,
+    relevance: &mut Vec<f64>,
+    gate: Option<&super::gate::MemoryGate>,
+    query: &str,
+    workspace_path: &str,
+    max_body_chars: usize,
+) {
+    let Some(gate) = gate else { return };
+    let Some((k, docs)) = rerank_prefix(results, max_body_chars) else {
+        return;
+    };
+    let perm = gate
+        .rerank(query, workspace_path, &docs)
+        .await
+        .and_then(|p| super::retrieval::validate_rerank_permutation(Some(&p), k));
+    apply_prefix_permutation(results, relevance, perm);
+}
+
+/// The bounded top-K prefix both routes send, or `None` when there is nothing
+/// to order.
+fn rerank_prefix(results: &[SearchResult], max_body_chars: usize) -> Option<(usize, Vec<String>)> {
+    if results.is_empty() {
+        return None;
+    }
+    let k = results.len().min(REMOTE_RERANK_PREFIX_CAP);
+    let docs = results[..k]
+        .iter()
+        .map(|res| snippet_bounded(&res.snippet, max_body_chars))
+        .collect();
+    Some((k, docs))
+}
+
+/// Apply a validated prefix permutation: the prefix is reordered, the suffix
+/// keeps its exact local order, and `relevance` stays aligned. `None` leaves
+/// the complete exact local pre-rerank order in place.
+fn apply_prefix_permutation(
+    results: &mut Vec<SearchResult>,
+    relevance: &mut Vec<f64>,
+    perm: Option<Vec<usize>>,
+) {
     let Some(perm) = perm else {
         // Invalid/unavailable: complete exact local pre-rerank order stays.
         return;
     };
+    let k = perm.len();
+    let n = results.len();
     // Reorder the prefix only; the suffix stays in its exact local order.
     let mut prefix: Vec<SearchResult> = results[..k].to_vec();
     let suffix: Vec<SearchResult> = results[k..].to_vec();
@@ -1859,6 +1906,90 @@ mod tests {
             "truncation must still apply after rerank"
         );
         assert!(final_order[0].chunk_id.ends_with("a.md:0"));
+    }
+
+    /// Answers by question name, mirroring the gate's own fake.
+    struct ScriptedDecisions {
+        answers: serde_json::Value,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::gate::DecisionClient for ScriptedDecisions {
+        async fn ask(
+            &self,
+            _state: &serde_json::Value,
+            _questions: &serde_json::Value,
+        ) -> Result<serde_json::Value, crate::gate::GateError> {
+            Ok(self.answers.clone())
+        }
+    }
+
+    #[tokio::test]
+    async fn gate_rerank_reorders_the_prefix_and_keeps_the_order_without_a_gate() {
+        let tmp = TempDir::new().unwrap();
+        let (mut results, mut relevance) = two_chunk_local_candidates(&tmp).await;
+        assert!(
+            results[0].chunk_id.ends_with("b.md:0"),
+            "local order boosts b.md"
+        );
+
+        // One `noul` per candidate index, as the gate asks them.
+        let client = std::sync::Arc::new(ScriptedDecisions {
+            answers: serde_json::json!({ "0": { "noul": 0.1 }, "1": { "noul": 0.9 } }),
+        });
+        let gate = crate::gate::MemoryGate::new(
+            client,
+            crate::gate::GateConfig {
+                enabled: true,
+                ..crate::gate::GateConfig::disabled()
+            },
+        );
+        super::gate_rerank(
+            &mut results,
+            &mut relevance,
+            Some(&gate),
+            "rust ownership",
+            "/w",
+            4000,
+        )
+        .await;
+        assert!(
+            results[0].chunk_id.ends_with("a.md:0"),
+            "the gate route must apply its permutation"
+        );
+        assert!(results[1].chunk_id.ends_with("b.md:0"));
+
+        // No gate: the complete exact local pre-rerank order stays.
+        let (mut untouched, mut other_relevance) = two_chunk_local_candidates(&tmp).await;
+        super::gate_rerank(&mut untouched, &mut other_relevance, None, "q", "/w", 4000).await;
+        assert!(untouched[0].chunk_id.ends_with("b.md:0"));
+
+        // The search route stands alone: `rerank = true` with the append gate
+        // off still orders the prefix.
+        let (mut routed, mut routed_relevance) = two_chunk_local_candidates(&tmp).await;
+        let standalone = crate::gate::MemoryGate::new(
+            std::sync::Arc::new(ScriptedDecisions {
+                answers: serde_json::json!({ "0": { "noul": 0.1 }, "1": { "noul": 0.9 } }),
+            }),
+            crate::gate::GateConfig {
+                enabled: false,
+                rerank: true,
+                ..crate::gate::GateConfig::disabled()
+            },
+        );
+        super::gate_rerank(
+            &mut routed,
+            &mut routed_relevance,
+            Some(&standalone),
+            "q",
+            "/w",
+            4000,
+        )
+        .await;
+        assert!(
+            routed[0].chunk_id.ends_with("a.md:0"),
+            "the route must not depend on the append gate"
+        );
     }
 
     #[tokio::test]

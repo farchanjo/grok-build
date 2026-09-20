@@ -176,6 +176,11 @@ pub struct MemoryBackendParams {
     /// shell-synthesized legacy source) instead of the legacy
     /// `[memory.embedding]` provider. `None` keeps the legacy path.
     pub retrieval: Option<Arc<dyn super::retrieval::MemoryRetrieval>>,
+    /// Write gate, when one is configured. Present here only for its rerank
+    /// route: with `[memory.gate] rerank = true` the search prefix is ordered
+    /// through the gate's decisions client instead of `retrieval`. `None`
+    /// keeps the retrieval route.
+    pub gate: Option<Arc<super::gate::MemoryGate>>,
     /// The exact `MemoryIndexConfig` every chunk writer uses. Both the vector
     /// fingerprint's doc-preparation determinant and the search index must use
     /// this one value; a non-default prep change therefore rebuilds.
@@ -341,6 +346,7 @@ pub struct MemoryBackendImpl {
     pub search_counter: std::sync::Arc<std::sync::atomic::AtomicU64>,
     embedding_credentials: EndpointScopedCredentials,
     retrieval: Option<Arc<dyn super::retrieval::MemoryRetrieval>>,
+    gate: Option<Arc<super::gate::MemoryGate>>,
     index_config: xai_grok_config_types::MemoryIndexConfig,
     rebuild_backoff_secs: i64,
     vector_mirror: Option<Arc<crate::mirror::MirrorHandle>>,
@@ -381,6 +387,7 @@ impl MemoryBackendImpl {
             search_source: "tool",
             embedding_credentials: EndpointScopedCredentials::none(),
             retrieval: None,
+            gate: None,
             index_config: xai_grok_config_types::MemoryIndexConfig::default(),
             rebuild_backoff_secs: 0,
             vector_mirror: None,
@@ -467,6 +474,7 @@ impl MemoryBackendImpl {
         }
         backend.embedding_credentials = params.embedding_credentials.clone();
         backend.retrieval = params.retrieval.clone();
+        backend.gate = params.gate.clone();
         backend.index_config = params.index_config.clone();
         backend.rebuild_backoff_secs = params.rebuild_backoff_secs;
         backend.vector_mirror = params.vector_mirror.clone();
@@ -480,6 +488,13 @@ impl MemoryBackendImpl {
         retrieval: Option<Arc<dyn super::retrieval::MemoryRetrieval>>,
     ) -> Self {
         self.retrieval = retrieval;
+        self
+    }
+
+    /// Attach the write gate so `[memory.gate] rerank = true` can route the
+    /// search prefix through it.
+    pub fn with_gate(mut self, gate: Option<Arc<super::gate::MemoryGate>>) -> Self {
+        self.gate = gate;
         self
     }
 
@@ -1030,15 +1045,29 @@ impl MemoryBackend for MemoryBackendImpl {
         // ── Async phase: optional remote rerank through the pinned source
         // (no &index borrow). Feed bounded text only. On any failure the
         // complete exact local pre-rerank order is restored and MMR/
-        // truncation continue. ──
-        super::search::remote_rerank(
-            &mut candidates,
-            &mut relevance,
-            self.retrieval.as_deref(),
-            query,
-            RERANK_BODY_CHAR_BOUND,
-        )
-        .await;
+        // truncation continue. `[memory.gate] rerank = true` sends the same
+        // call through the gate's decisions client instead. ──
+        if self.gate.as_ref().is_some_and(|gate| gate.config().rerank) {
+            let workspace_path = self.storage.workspace_dir().to_string_lossy().into_owned();
+            super::search::gate_rerank(
+                &mut candidates,
+                &mut relevance,
+                self.gate.as_deref(),
+                query,
+                &workspace_path,
+                RERANK_BODY_CHAR_BOUND,
+            )
+            .await;
+        } else {
+            super::search::remote_rerank(
+                &mut candidates,
+                &mut relevance,
+                self.retrieval.as_deref(),
+                query,
+                RERANK_BODY_CHAR_BOUND,
+            )
+            .await;
+        }
 
         // ── Sync phase 4: finalize (MMR + truncation) ──
         let results = super::search::finalize_order(candidates, relevance, &search_config);
@@ -1157,6 +1186,7 @@ mod factory_tests {
             search_source: "tool",
             embedding_credentials: EndpointScopedCredentials::none(),
             retrieval: None,
+            gate: None,
             index_config: xai_grok_config_types::MemoryIndexConfig::default(),
             rebuild_backoff_secs: 0,
             vector_mirror: None,
@@ -1771,6 +1801,7 @@ mod factory_tests {
                 Some(probe),
             ),
             retrieval: None,
+            gate: None,
             index_config: xai_grok_config_types::MemoryIndexConfig::default(),
             rebuild_backoff_secs: 0,
             vector_mirror: None,
