@@ -297,8 +297,9 @@ pub(crate) mod chat_rebuild {
                         writer.seek(std::io::SeekFrom::Start(0))?;
                         writer.get_mut().set_len(0)?;
                         for item in checkpoint.compacted_history {
-                            serde_json::to_writer(&mut writer, &item)
-                                .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+                            serde_json::to_writer(&mut writer, &item).map_err(|error| {
+                                io::Error::new(io::ErrorKind::InvalidData, error)
+                            })?;
                             writer.write_all(b"\n")?;
                         }
                     }
@@ -314,8 +315,7 @@ pub(crate) mod chat_rebuild {
                             .any(|component| {
                                 matches!(
                                     component,
-                                    std::path::Component::ParentDir
-                                        | std::path::Component::RootDir
+                                    std::path::Component::ParentDir | std::path::Component::RootDir
                                 )
                             });
                         if escapes {
