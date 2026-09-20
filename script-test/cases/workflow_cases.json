@@ -1,0 +1,92 @@
+[
+  {
+    "intent": "Um workflow que varre o repositório procurando chamadas de API depreciadas, classifica por severidade e abre issues para as graves.",
+    "candidates": ["deprecated-api-sweep", "repo-scan", "api-audit-flow", "find-deprecated"],
+    "gold": "deprecated-api-sweep",
+    "why": "names the object (deprecated API) and the action (sweep), not the mechanism"
+  },
+  {
+    "intent": "Um workflow que roda os testes em três sistemas operacionais em paralelo e agrega o resultado num único relatório.",
+    "candidates": ["test-matrix", "cross-platform-tests", "parallel-ci", "run-tests-everywhere"],
+    "gold": "test-matrix",
+    "why": "the established term for this shape, short and precise"
+  },
+  {
+    "intent": "Um workflow que lê um incidente, extrai a linha do tempo e propõe itens de ação.",
+    "candidates": ["incident-postmortem", "incident-review", "postmortem-builder", "blameless-review"],
+    "gold": "incident-postmortem",
+    "why": "names the artifact produced, which is what a reader searches for"
+  },
+  {
+    "intent": "Um workflow que traduz arquivos de localização, valida placeholders e falha se um deles se perder.",
+    "candidates": ["i18n-check", "translation-validation", "localization-guard", "i18n-translate-verify"],
+    "gold": "i18n-check",
+    "why": "short, covers validation and translation without listing both"
+  },
+  {
+    "intent": "Um workflow que compara o custo mensal de nuvem antes e depois de uma mudança de infraestrutura.",
+    "candidates": ["cost-delta", "cloud-cost-diff", "spend-comparison", "infra-cost-review"],
+    "gold": "cost-delta",
+    "why": "delta is the precise word for the comparison"
+  },
+  {
+    "intent": "Um workflow que sincroniza issues de dois rastreadores nos dois sentidos e resolve conflitos por precedência.",
+    "candidates": ["issue-sync", "tracker-bridge", "bidirectional-issues", "issue-mirror"],
+    "gold": "issue-sync",
+    "why": "sync is what it does; the rest is detail"
+  },
+  {
+    "intent": "Um workflow que gera o changelog a partir das mensagens de commit desde a última tag.",
+    "candidates": ["changelog", "release-notes", "commit-digest", "changelog-from-tags"],
+    "gold": "changelog",
+    "why": "the artifact name alone is enough; the source is obvious"
+  },
+  {
+    "intent": "Um workflow que audita dependências procurando licenças incompatíveis e vulnerabilidades conhecidas.",
+    "candidates": ["dependency-audit", "license-scan", "supply-chain-check", "deps-review"],
+    "gold": "dependency-audit",
+    "why": "audit is the operation, dependency the object"
+  },
+  {
+    "intent": "Um workflow que roda um experimento A/B em dois prompts e decide o vencedor por uma métrica.",
+    "candidates": ["prompt-ab", "ab-test", "prompt-bakeoff", "experiment-runner"],
+    "gold": "prompt-ab",
+    "why": "names both the object and the method in two tokens"
+  },
+  {
+    "intent": "Um workflow que prepara o ambiente local de um novo dev: instala ferramentas, clona repositórios e valida a build.",
+    "candidates": ["dev-bootstrap", "onboarding-setup", "local-provision", "dev-env-setup"],
+    "gold": "dev-bootstrap",
+    "why": "bootstrap is the established word for one-shot environment setup"
+  },
+  {
+    "intent": "Um workflow que monitora filas e escala workers quando o backlog passa de um limite.",
+    "candidates": ["queue-autoscale", "backlog-scaler", "worker-scaling", "queue-pressure"],
+    "gold": "queue-autoscale",
+    "why": "object plus mechanism, unambiguous"
+  },
+  {
+    "intent": "Um workflow que extrai dados de PDFs de faturas e valida os totais contra a planilha do fornecedor.",
+    "candidates": ["invoice-extract", "pdf-invoices", "invoice-reconcile", "billing-extract-verify"],
+    "gold": "invoice-reconcile",
+    "why": "reconcile captures the validation against the other source, which is the hard part"
+  },
+  {
+    "intent": "Um workflow que roda uma verificação de segurança nos manifestos antes de aplicar no cluster.",
+    "candidates": ["manifest-security", "k8s-security-gate", "admission-check", "secure-apply"],
+    "gold": "manifest-security",
+    "why": "plain and searchable"
+  },
+  {
+    "intent": "Um workflow que gera relatório semanal de métricas de produto a partir de três fontes.",
+    "candidates": ["weekly-metrics", "product-report", "metrics-digest", "weekly-product-report"],
+    "gold": "weekly-metrics",
+    "why": "cadence plus object; the sources are detail"
+  },
+  {
+    "intent": "Um workflow que migra um banco grande em lotes, com verificação de integridade entre cada lote.",
+    "candidates": ["batched-migration", "db-migrate-verify", "chunked-migration", "data-migration"],
+    "gold": "batched-migration",
+    "why": "batching is the defining property, not an implementation note"
+  }
+]

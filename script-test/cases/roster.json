@@ -1,0 +1,690 @@
+[
+  {
+    "name": "ag-search",
+    "description": "ag (The Silver Searcher) code search — C-based, Pthreads+mmap, respects .gitignore/.agignore/.hgignore. TRIGGER on: ag, silver searcher, agignore, silver-search, the_silver_searcher. SKIP: faster alternative in CI pipelines (prefer ripgrep); in-place replacement (use sd-search); POSIX portability requirements (use grep-search)."
+  },
+  {
+    "name": "ansible",
+    "description": "Ansible playbook. ansible-core 2.19+/2.20, collections, roles, inventory (static/dynamic), Vault, Jinja2, Molecule, ansible-lint, Execution Environments, AAP/AWX. TRIGGER `.yml`/`.yaml` with `hosts:`/`tasks:`/`roles:`, `ansible.cfg`, `inventory`/`hosts.ini`, `playbook.yml`, `site.yml`, `roles/`, `group_vars/`, `host_vars/`, `collections/`, `molecule/`, `requirements.yml` (with `collections:`/`roles:`), `galaxy.yml`, `meta/main.yml`, commands `ansible`/`ansible-playbook`/`ansible-galaxy`/`ansible-vault`/`ansible-lint`/`molecule`/`ansible-navigator`, keywords playbook/role/collection/inventory/handler/vault/AAP/AWX/Tower/EE. SKIP Terraform (terraform-engineer), pure shell, PowerShell DSC."
+  },
+  {
+    "name": "arch-advisor",
+    "description": "Architecture advisor — Hexagonal (Ports & Adapters) + DDD + GoF, project-pragmatic. Enforces Structurizr DSL, MADR 4.0, DBML, OpenAPI, AIL/apfgen. TRIGGER on architecture, ADR, contract, modeling, diagram, validation, hexagonal, DDD, aggregate, use case, port, adapter, design pattern, \"how do I/what is/is this right\"; or edits docs/architecture/workspace.dsl, docs/decisions/*.md, docs/data/*.dbml, docs/api/*; or runs pnpm validate/render/db:sql. SKIP for feature implementation, business logic, runtime code, UI — advise on boundaries/contracts only."
+  },
+  {
+    "name": "archive",
+    "description": "Handles tar, gzip, bzip2, xz, zstd, 7z, 7zip, zip, unzip, bsdtar, compress, decompress, archive, and extract operations. Routes to the right variant skill based on the tool and format in scope. TRIGGER: tar, tarball, gzip, bzip2, xz, zstd, 7z, 7zip, p7zip, zip, unzip, bsdtar, bsdunzip, compress, decompress, archive, extract, .tar.gz, .tar.bz2, .tar.xz, .tar.zst, .7z, .zip, .zst. SKIP: cloud object storage (use object-storage hub); deduplicating backup tools such as restic or borg (out of scope)."
+  },
+  {
+    "name": "arithma",
+    "description": "arithma MCP — high-precision calculator, 174 tools across 23 categories. TRIGGER any arithmetic (NEVER inline math even 2+2): basic/scientific, evaluate/evaluateWithVariables/evaluateExact/solveEquation, calculus (derivative/definiteIntegral/tangentLine/findRoots), matrix ops, stats (descriptive/regression/hypothesis/distributions), unit convert, datetime, finance, networking (subnet/IPv6/throughput), analog/digital electronics, physics, chemistry, geometry, complex numbers, encoding/hashing, tape, graphing. SKIP non-numeric. Resolve the schema via `search_tool` before call. Response: `TOOL: OK | KEY: value` inline OR block w/ ROW_N keys. Errors: `TOOL: ERROR | REASON: [CODE] text`."
+  },
+  {
+    "name": "arm-templates",
+    "description": "Legacy ARM JSON template variant of the azure-cli topic hub. NOT user-invocable; inlines via the azure-cli hub when ARM JSON signals fire (cwd contains azuredeploy.json or *.parameters.json, or prompt mentions arm-template, azuredeploy, deploymentTemplate, schema.management.azure.com). Prefer Bicep for new work; ARM JSON for legacy/CI integrations. SKIP Bicep DSL — see bicep-cli; Terraform/Pulumi — out of scope."
+  },
+  {
+    "name": "autonomous-mode",
+    "description": "Autonomous-execution posture for end-to-end task delivery. When active, finish in-scope tasks without pausing for \"continue?\" / \"proceed with task?\" / mid-task confirmation questions. Pauses still happen for destructive/irreversible actions, actions visible outside the workstation, genuine ambiguity that materially changes the outcome, missing credentials. TRIGGER when user asks to enable/disable autonomous execution, says \"stop asking\" / \"just do it\" / \"/auto\", or wants end-to-end delivery. SKIP question-driven collaboration; behavioral directive, not enforcement."
+  },
+  {
+    "name": "aws-secrets",
+    "description": "AWS Secrets Manager and SSM Parameter Store variant of the secrets-vault hub. NOT user-invocable; inlines via secrets-vault hub when AWS secrets signals fire (prompt mentions aws-secrets, aws-secretsmanager, parameter-store, ssm-parameter, secretsmanager, or kms-key-id). Covers Secrets Manager vs Parameter Store tradeoffs, CLI create/get/rotate, IAM least-priv policy, KMS key policy, rotation Lambda, cross-account access, and cost model. SKIP non-AWS secret stores."
+  },
+  {
+    "name": "az-cli",
+    "description": "Official cross-platform Azure CLI (az) variant of the azure-cli topic hub. NOT user-invocable; inlines via the azure-cli hub when az-cli signals fire (prompt mentions az, az-cli, az-login, az-account, or azure-cli-bash). For Az PowerShell see azure-powershell. For Bicep DSL see bicep-cli. For legacy ARM JSON see arm-templates."
+  },
+  {
+    "name": "azure-cli",
+    "description": "Azure CLI topic hub. Auto-routes to the right implementation variant based on environment signals (cwd files, prompt keywords). Variants: az-cli (cross-platform az command), azure-powershell (Az PowerShell module), bicep-cli (Bicep DSL authoring), arm-templates (legacy ARM JSON). TRIGGER azure, az-cli, az-login, resource-group, subscription, vnet, vm, storage-account, key-vault, aks, app-service, function-app, deployment, arm, bicep, azure-powershell, az-ad, azuread. SKIP non-Azure cloud (aws-cli, gcp-cli — out of scope); Azure SDK programming (use python/dotnet skill)."
+  },
+  {
+    "name": "azure-powershell",
+    "description": "Az PowerShell module variant of the azure-cli topic hub. NOT user-invocable; inlines via the azure-cli hub when Azure PowerShell signals fire (prompt mentions azure-powershell, az-pwsh, Connect-AzAccount, Get-AzResourceGroup, or New-AzVM). Runs cross-platform via pwsh 7+ (Linux/macOS/Windows). For the az bash CLI see az-cli. For Bicep DSL see bicep-cli. For legacy ARM JSON see arm-templates."
+  },
+  {
+    "name": "bb-forge",
+    "description": "Bitbucket CLI bb — PR/issue/pipeline workflow ops on Bitbucket Cloud. Variant of the forge topic hub. NOT user-invocable; inlines via the forge hub when Bitbucket signals fire (cwd contains bitbucket-pipelines.yml; prompt mentions bitbucket, bb, bitbucket.org). SKIP local git ops; GitHub/GitLab (see gh-forge/glab-forge); Bitbucket Server / Data Center (use atlas-cli, this skill covers Cloud only)."
+  },
+  {
+    "name": "betterdisplaycli",
+    "description": "BetterDisplay CLI (betterdisplaycli, macOS, waydabber/BetterDisplay v4.x) for scripting display control from the terminal. TRIGGER betterdisplaycli, BetterDisplay, set brightness/contrast/volume/temperature from CLI, DDC/VCP commands, virtual screen create/discard, display rotation/resolution/refreshRate/HDR/mirror/main, display groups, gamma/gain color tables, list display identifiers (tagID/UUID/displayID), per-display brightness on external monitors. SKIP non-macOS display control; GUI-only BetterDisplay config; generic ddcutil on Linux (different tool)."
+  },
+  {
+    "name": "bgp",
+    "description": "BGP configuration topic hub. Auto-routes to the right implementation variant based on environment signals (cwd files, prompt keywords). Variants today, frr-bgp (Linux FRR daemon) and cisco-bgp (Cisco IOS via serial/SSH). Hub stub never inlines a variant content; the matcher picks the variant whose paths or triggers score highest against current context. TRIGGER bgp, BGP, neighbor, peer, AS-path, advertised, route-map, prefix-list, ebgp, ibgp, multipath. SKIP non-BGP routing protocols (OSPF, IS-IS, EIGRP)."
+  },
+  {
+    "name": "bicep-cli",
+    "description": "Azure Bicep DSL variant of the azure-cli topic hub. NOT user-invocable; inlines via the azure-cli hub when Bicep signals fire (cwd contains *.bicep or bicepconfig.json, or prompt mentions bicep, @bicep, param, module, targetScope). Bicep transpiles to ARM JSON and deploys via az or Az PowerShell. SKIP non-Azure IaC (Terraform, Pulumi — out of scope for this variant); raw ARM JSON — see arm-templates."
+  },
+  {
+    "name": "bind9-dns",
+    "description": "ISC BIND 9 variant of the dns topic hub. Authoritative + recursive name server on Linux. Targets /etc/bind/ (Debian/Ubuntu) and /var/named/ (RHEL/Fedora) layouts. NOT user-invocable; inlines via the dns hub when BIND signals fire (cwd contains named.conf; prompt mentions bind, bind9, named, rndc). For CoreDNS see coredns-dns; for lightweight resolver see dnsmasq-dns; for validating recursive see unbound-dns."
+  },
+  {
+    "name": "brew-mac",
+    "description": "Homebrew macOS package manager variant of the mac-ops topic hub. NOT user-invocable; inlines via mac-ops when Homebrew signals fire (prompt mentions brew, homebrew, formula, cask, tap, brewfile). Covers install/upgrade/cleanup, cask GUI apps, taps, declarative Brewfile env sync, and brew services. Primary platform is macOS; Linux support exists but is secondary. SKIP non-Homebrew package managers (apt/dnf/pacman → linux skill)."
+  },
+  {
+    "name": "buildah-image",
+    "description": "Buildah variant of the image-build topic hub. Targets Buildah v1.43+ — daemonless OCI image builder (Red Hat); rootless-capable; integrates with Podman and OpenShift S2I. TRIGGER buildah, buildah-bud, rootless-build, podman-build, bud, Containerfile, buildah-from, buildah-copy, buildah-run, buildah-commit, buildah-push, s2i, openshift-build. SKIP Docker-daemon builds (use buildx-image); Kubernetes pod builds (use kaniko-image); Go-only builds (use ko-image); runtime ops (use container hub)."
+  },
+  {
+    "name": "buildx-image",
+    "description": "Docker Buildx variant of the image-build topic hub. Targets Docker Buildx (BuildKit-backed, default since Docker 20.10) for multi-platform image builds, registry cache, BuildKit cache-mounts, secret mounts, and SBOM/provenance attestations. TRIGGER buildx, docker-buildx, buildkit, docker-build, --platform, --cache-from, --cache-to, --provenance, --sbom, RUN --mount=type=cache, RUN --mount=type=secret. SKIP runtime ops (use container hub); rootless daemonless builds (use buildah-image); Kubernetes pod builds (use kaniko-image); Go-only builds (use ko-image)."
+  },
+  {
+    "name": "calico-cni",
+    "description": "Calico Open Source CNI by Tigera — BGP-native Kubernetes networking with optional VXLAN overlay, iptables or eBPF datapath, and extended NetworkPolicy CRDs. TRIGGER: calico, tigera, calicoctl, felix, bird, BGP, wireguard-encryption, GlobalNetworkPolicy, NetworkSet, calicoctl-ipam, bgppeer, bgpconfig, IPPool, Tigera-operator, Installation-CR, WireGuardEncrypted, nodeEncryption, calico-node, calico-apiserver, calico-typha, ebpf-calico, nftables-calico. SKIP: Cilium-specific eBPF/Hubble (use cilium-cni); Flannel overlay (use flannel-cni); Weave mesh (use weave-cni)."
+  },
+  {
+    "name": "cfssl-tls",
+    "description": "Cloudflare cfssl variant of the tls topic hub. JSON-driven PKI toolkit for generating CAs, intermediate certs, and leaf certs with per-profile policies. NOT user-invocable; only inlines via the tls hub when cfssl signals fire (cwd contains cfssl.json, csr.json, or ca-config.json, or prompt mentions cfssl, cloudflare PKI, gencert, cert-bundle). For raw openssl ops see openssl-tls; for automated CA server see step-ca-tls."
+  },
+  {
+    "name": "chrome-devtools",
+    "description": "CDP-first Chrome automation via the local pure-CDP MCP server `chrome-devtools` (Python, ~/dev/chrome-devtools). Async event bus, structured output. Page lifecycle, a11y snapshot with clickable uids, click/fill, evaluate JS, screenshots, element inspection (HTML/CSS), device emulation (iPhone/Pixel presets), network capture with redirect hops + Set-Cookie, HttpOnly cookies, managed instances: visible default, headless opt-in, per-instance proxy, zombie recovery. TRIGGER chrome-devtools, CDP, devtools protocol, redirect chain, affiliate link, Set-Cookie, HttpOnly, localStorage, sessionStorage, device emulation, proxy, chrome instance, headless chrome. SKIP Playwright/Puppeteer test suites."
+  },
+  {
+    "name": "ci",
+    "description": "CI pipeline topic hub. Auto-routes to the right implementation variant based on environment signals (cwd files, prompt keywords). Variants today: gitlab-ci (.gitlab-ci.yml), github-actions-ci (.github/workflows/), jenkins-ci (Jenkinsfile), circleci (.circleci/config.yml). Hub stub never inlines variant content; matcher picks the variant whose paths or triggers score highest. TRIGGER CI, pipeline, workflow, runner, job, stage, artifact, badge, matrix build, cache key. SKIP individual build tool authoring (Makefile, CMakeLists — use build skill)."
+  },
+  {
+    "name": "cilium-cni",
+    "description": "Cilium CNI — eBPF-based Kubernetes networking, security, and observability. TRIGGER: cilium, ebpf-datapath, hubble, l7-policy, cilium-cli, CiliumNetworkPolicy, clustermesh, BGPControlPlane, kubeProxyReplacement, cilium-install, Netkit, gateway-api-cilium, cilium-service-mesh, sidecarless, hubble-relay, hubble-ui, cilium-node-config, cilium-operator, XDP, DSR, Maglev, BPF-lb, host-firewall, identity-based-policy, FQDN-policy. SKIP: Calico BGP-native underlay (use calico-cni); Flannel simple overlay (use flannel-cni); Weave mesh (use weave-cni); Istio/Linkerd sidecar mesh (separate)."
+  },
+  {
+    "name": "circleci",
+    "description": "CircleCI CI/CD variant of the ci topic hub. Targets .circleci/config.yml authoring — version 2.1, executors, jobs, commands, orbs, workflows, pipeline parameters, approval jobs, contexts. NOT user-invocable; inlines via the ci hub when CircleCI signals fire (cwd contains .circleci/config.yml; prompt mentions circleci, orbs, executor, or approval job). For GitLab CI see gitlab-ci. For cross-cutting CI concepts see the ci hub body."
+  },
+  {
+    "name": "cisco-bgp",
+    "description": "Cisco IOS / IOS-XE / IOS-XR BGP variant of the bgp topic hub. Targets IOS-style running-config edits delivered over serial console or SSH. NOT user-invocable; inlines via the bgp hub when Cisco signals fire (prompt mentions cisco, ios, ios-xe, ios-xr, serial console, COM port, UART, running-config, or session is opened to a Cisco device). For FRR daemon-based BGP see frr-bgp. For cross-cutting BGP path attributes and best-path selection see the bgp hub body."
+  },
+  {
+    "name": "cisco-evpn",
+    "description": "Cisco NX-OS / IOS-XE / IOS-XR EVPN variant of the evpn topic hub. Targets Nexus 9000 (NX-OS) VXLAN-EVPN leaf-spine fabrics. IOS-XE Catalyst 9000 and IOS-XR ASR/NCS lines use similar but distinct syntax. NOT user-invocable; only inlines via the evpn hub when Cisco signals fire (prompt mentions cisco, ios, ios-xe, ios-xr, nx-os, nexus, vxlan-evpn). For FRR daemon-based EVPN see frr-evpn. For OVN gateway EVPN see ovn-evpn."
+  },
+  {
+    "name": "cisco-ospf",
+    "description": "Cisco IOS / IOS-XE / IOS-XR OSPF variant of the ospf topic hub. Targets IOS-style running-config edits and IOS-XR commit-based two-stage syntax. NOT user-invocable; inlines via the ospf hub when Cisco signals fire (prompt mentions cisco, ios, ios-xe, ios-xr). For FRR daemon-based OSPF see frr-ospf. For JunOS see juniper-ospf. For cross-cutting OSPF area types and LSA taxonomy see the ospf hub body."
+  },
+  {
+    "name": "cni-plugin",
+    "description": "CNI (Container Network Interface) topic hub for Kubernetes pod networking. Routes to the right implementation variant based on environment signals. TRIGGER: cni, container-network-interface, kubernetes-networking, pod-cidr, networkpolicy, calico, cilium, flannel, weave, vxlan-overlay, bgp-overlay, ebpf, hubble, tigera, felix, calicoctl, cilium-cli, kube-flannel, weave-net, fastdp, IPAM, pod-to-pod, overlay, underlay, BGP-speaker, bird, wireguard-encryption, GlobalNetworkPolicy, CiliumNetworkPolicy. SKIP: service mesh control plane (Istio/Linkerd/Envoy sidecar — separate concern); kernel-level netfilter deep dives without CNI context (use linux skill)."
+  },
+  {
+    "name": "codesign-mac",
+    "description": "macOS code signing and notarization variant of the mac-ops topic hub. NOT user-invocable; inlines via mac-ops when signing signals fire (prompt mentions codesign, notarize, notarytool, gatekeeper, spctl, developer-id, xcrun-stapler, entitlements). Covers Developer ID signing, runtime hardening, entitlements, notarization via notarytool, stapling, and Gatekeeper verification. SKIP Apple Store signing (uses Xcode distribution certificates, not Developer ID); ad-hoc signing for local use → use codesign -s - directly."
+  },
+  {
+    "name": "container",
+    "description": "Container runtime topic hub. Auto-routes to the right implementation variant based on environment signals (cwd files, prompt keywords). Variants: docker-container (Docker daemon/Compose/Buildx), podman-container (rootless/Quadlet/systemd), containerd-container (ctr/nerdctl/shim), crictl-container (CRI tooling, kubelet debugging). Hub stub never inlines variant content; matcher picks the variant whose paths or triggers score highest. TRIGGER container, image, OCI, container-runtime, pod, image-pull, image-tag, dockerfile. SKIP virt/VMs (libvirt, qemu) → virtualization-stack; Kubernetes orchestration → k8s skill."
+  },
+  {
+    "name": "containerd-container",
+    "description": "containerd low-level runtime variant of the container topic hub. Covers ctr CLI, nerdctl (Docker-compat UX), /etc/containerd/config.toml plugin config, snapshotter config, runtime v2 shim, CRI plugin for Kubernetes integration. NOT user-invocable; inlines via the container hub when containerd signals fire (cwd contains config.toml; prompt mentions containerd, ctr, nerdctl, shim). For Docker daemon see docker-container. For CRI debug tooling see crictl-container."
+  },
+  {
+    "name": "coredns-dns",
+    "description": "CoreDNS variant of the dns topic hub. Plugin-chain DNS server written in Go; primary DNS for Kubernetes clusters (kube-dns replacement). Targets Corefile configuration. NOT user-invocable; inlines via the dns hub when CoreDNS signals fire (cwd contains Corefile; prompt mentions coredns, kubernetes, corefile). For BIND 9 authoritative server see bind9-dns; for lightweight resolver see dnsmasq-dns; for DNSSEC-validating recursive see unbound-dns."
+  },
+  {
+    "name": "corosync-pacemaker-ha",
+    "description": "Corosync + Pacemaker full-cluster HA variant of the vrrp-ha topic hub. NOT user-invocable; inlines via the vrrp-ha hub when cluster-manager signals fire (cwd contains corosync.conf or /etc/pacemaker/**, or prompt mentions corosync, pacemaker, pcs, crm, fence, stonith, totem, quorum, constraint). For lightweight single-VIP VRRP see keepalived-ha."
+  },
+  {
+    "name": "cpp",
+    "description": "Modern C++23/26-preview (ISO/IEC 14882:2024; C++26 preview gcc 15+/clang 20+) playbook — RAII, smart pointers, concepts, ranges, coroutines, std::expected/span/format. TRIGGER `.cpp`/`.hpp`/`.cc`/`.h`, `CMakeLists.txt`, \"modern C++\", CMake/clang-tidy/clang-format/sanitizers config, STL vs Boost vs Abseil choice, C++ audit. SKIP pure C, embedded with constraints (use cpp-pro embedded subset). Heavy → cpp-pro agent. Default C++23."
+  },
+  {
+    "name": "crictl-container",
+    "description": "CRI tooling variant of the container topic hub. Covers crictl pods/ps/logs/exec, /etc/crictl.yaml runtime-endpoint config, debugging kubelet-to-runtime interactions on a Kubernetes node, and when to use crictl vs nerdctl. NOT user-invocable; inlines via the container hub when CRI signals fire (cwd contains crictl.yaml; prompt mentions crictl, cri, kubelet, kubernetes-runtime). For containerd ctr/nerdctl see containerd-container. For Docker engine see docker-container."
+  },
+  {
+    "name": "csharp",
+    "description": "C# 12/13/14 + .NET 10 LTS / 11 STS preview playbook. TRIGGER `.cs`, `.csproj`, `.sln`, \"idiomatic C#\", dotnet/Roslyn analyzers/StyleCop/EditorConfig config, ASP.NET Core/Blazor/minimal API choice, .NET audit. SKIP legacy .NET Framework 4.x (dotnet-framework-48-expert agent). Heavy refactor → csharp-developer. Cross-platform → dotnet-core-expert."
+  },
+  {
+    "name": "dart",
+    "description": "Dart 3.11+/Flutter 3.41+ playbook. Sound null safety mandatory, records, patterns, sealed classes, class modifiers (final/base/interface/mixin class/sealed), extension types (3.3+). Impeller (iOS default, Android API 29+ Vulkan). Tooling: fvm/mise, pub, `dart format`, `dart analyze`+`very_good_analysis`, `flutter test`/`dart test`, mocktail/mockito+codegen, lcov, lefthook. State: Riverpod 3.x or Bloc 9.x. Strict-casts/strict-inference/strict-raw-types. TRIGGER `.dart`/`pubspec.yaml`; \"is this idiomatic Dart\"; pub/dart analyze/Flutter/Riverpod/Bloc; Flutter UI; Dart audit. SKIP non-Dart (Kotlin/Swift native), pure JS web (use typescript), backend Java (use java)."
+  },
+  {
+    "name": "datadog-metrics",
+    "description": "Datadog SaaS observability variant of the metrics topic hub. NOT user-invocable; inlines via the metrics hub when Datadog signals fire. Covers dd-agent config, DogStatsD wire protocol, Datadog query language, Monitors/SLOs, APM auto-instrumentation, and cost levers. SKIP self-hosted Prometheus (prometheus-metrics), VictoriaMetrics (victoriametrics-metrics), InfluxDB (influxdb-metrics)."
+  },
+  {
+    "name": "db-cli",
+    "description": "Database CLI topic hub. Auto-routes to the right client variant based on environment signals (cwd files, prompt keywords). Variants: psql-db (PostgreSQL), mysql-db (MySQL/MariaDB), sqlite-db (SQLite embedded), redis-db (Redis in-memory). Hub stub never inlines a variant body; the matcher picks the variant whose paths or triggers score highest. TRIGGER database CLI, psql, mysql, sqlite3, redis-cli, mongosh, query, schema, dump, restore, connection-string, REPL, interactive shell. SKIP ORM/query-builder concerns (Sequelize, SQLAlchemy, Diesel), schema migration framework specifics (Flyway, Alembic) — this hub covers the interactive CLI only."
+  },
+  {
+    "name": "defaults-mac",
+    "description": "macOS defaults CLI (CFPreferences/NSUserDefaults) variant of the mac-ops topic hub. NOT user-invocable; inlines via mac-ops when preferences signals fire (prompt mentions defaults, plist, defaults-write, defaults-read, NSUserDefaults, CFPreferences). Covers reading/writing preference domains, type flags, immediate-effect restart, global domain, and sandbox-app preferences. SKIP general plist manipulation (use plutil directly); launchd plists → launchctl-mac."
+  },
+  {
+    "name": "dns",
+    "description": "DNS configuration topic hub. Auto-routes to the right implementation variant based on environment signals (cwd files, prompt keywords). Variants today, bind9-dns (ISC BIND 9 authoritative/recursive), coredns-dns (CoreDNS plugin chain, Kubernetes), dnsmasq-dns (lightweight resolver + DHCP), unbound-dns (validating recursive resolver). Hub stub never inlines variant content; matcher picks highest-scoring variant per current context. TRIGGER dns, resolver, zone, nameserver, NXDOMAIN, SOA, DNSKEY, A, AAAA, CNAME, MX, TXT, NS, PTR. SKIP non-DNS networking protocols (DHCP standalone, BGP, HTTP)."
+  },
+  {
+    "name": "dnsmasq-dns",
+    "description": "dnsmasq variant of the dns topic hub. Lightweight DNS forwarder + DHCP server; common on embedded Linux, home routers, and dev environments. Targets /etc/dnsmasq.conf and /etc/dnsmasq.d/. NOT user-invocable; inlines via the dns hub when dnsmasq signals fire (cwd contains dnsmasq.conf; prompt mentions dnsmasq, dhcp-host, address=/). For ISC BIND 9 see bind9-dns; for Kubernetes DNS see coredns-dns; for DNSSEC-validating recursive see unbound-dns."
+  },
+  {
+    "name": "docker-container",
+    "description": "Docker daemon variant of the container topic hub. Classic dockerd engine — docker run, docker compose, Buildx multi-platform builds, Docker Desktop macOS quirks. NOT user-invocable; inlines via the container hub when Docker signals fire (cwd contains Dockerfile or docker-compose.yml; prompt mentions docker, dockerd, compose, buildx). For rootless daemonless engine see podman-container. For low-level runtime see containerd-container. For CRI tooling see crictl-container."
+  },
+  {
+    "name": "elasticsearch-logging",
+    "description": "Elastic Stack (ELK) log ingestion and search — full-text inverted-index, arbitrary field queries. TRIGGER: elasticsearch, kibana, logstash, beats, filebeat, metricbeat, elastic-agent, ILM, index-lifecycle, KQL, lucene-query, ELK, elastic-stack, rollover, hot-warm-cold, elasticsearch-yml, ingest-pipeline, shard, replica. SKIP: label-indexed cheaper log store (use loki-logging); OpenSearch fork (use opensearch-logging); AWS managed OpenSearch (use opensearch-logging)."
+  },
+  {
+    "name": "envoy-lb",
+    "description": "Envoy Proxy load-balancer variant of the loadbalancer topic hub. Covers Envoy static and xDS dynamic config (LDS/RDS/CDS/EDS/SDS), HTTP/2 + gRPC, circuit breakers, outlier detection, and admin API. Used as edge proxy, sidecar (Istio, Consul Connect, AWS App Mesh). NOT user-invocable; inlines via the loadbalancer hub when Envoy signals fire (envoy.yaml/yml, keywords xds/cluster/listener_filter/@envoy)."
+  },
+  {
+    "name": "evpn",
+    "description": "EVPN topic hub (RFC 7432 + RFC 8365). TRIGGER: evpn, mp-bgp, vxlan, vni, rd, rt, type-2, type-3, type-5, mac-vrf, ip-vrf, asymmetric-irb, symmetric-irb, multihoming, ethernet-segment, esi, mac-mobility, arp-suppression, bum-traffic, ingress-replication, underlay. Routes to the right variant by environment signals (cwd files + prompt keywords). SKIP plain L2 bridging with no BGP control-plane (use linux skill); plain L3 BGP without EVPN AFI (use bgp hub)."
+  },
+  {
+    "name": "ffmpeg",
+    "description": "ffmpeg 8.1.x (Hoare) media transformation. TRIGGER convert/transcode/re-encode/remux/cut/slice/trim/concat, edit title/language/disposition/chapter metadata, burn/extract subs, downscale, HDR-tonemap, encode HEVC/H.264/AV1/ProRes/VP9, VideoToolbox/Metal/libplacebo accel, iOS/macOS-compatible output (-tag:v hvc1), MP4 +faststart, libass burn-in, libfdk_aac/libopus, two-pass, VMAF, demuxer/filter concat, segment, attachments, mkv->mp4 remux, ffmpeg-full Homebrew. Files: .mkv .mp4 .mov .webm .avi .ts .m4a .flac .opus .wav .h264 .hevc .ass .srt. SKIP read-only inspect (use ffprobe)."
+  },
+  {
+    "name": "ffprobe",
+    "description": "ffprobe 8.1.x (FFmpeg Hoare) read-only media inspection. TRIGGER queries on codec/bitrate/resolution/fps/duration, list audio/sub/attachment tracks, show streams/chapters/format/disposition/metadata, detect HDR (bt2020/smpte2084/arib-std-b67) / Hi10P (10le pix_fmt, High10/Main10), keyframes, frame count, packet/frame inspection, BPS/NUMBER_OF_FRAMES tags, compare files. Output -of json/compact/flat/csv. Files: .mkv .mp4 .mov .webm .avi .flv .ts .m4a .flac .opus .wav. SKIP encode/transcode/edit (use ffmpeg)."
+  },
+  {
+    "name": "firewall",
+    "description": "Host firewall / packet-filter topic hub. Auto-routes to variant per environment signals (cwd files, prompt keywords). Variants nftables-fw (modern Linux, table inet, families ip/ip6/inet/arp/bridge/netdev) and iptables-fw (legacy Linux netfilter, chains INPUT/FORWARD/OUTPUT, iptables-save). Hub stub; matcher picks highest-scoring variant per context. TRIGGER firewall, packet-filter, drop, accept, masquerade, NAT, rule, chain, ruleset, conntrack, nftables, iptables. SKIP pure BPF/XDP, application-layer WAFs (modsecurity), libvirt firewall XML (use virtualization-stack)."
+  },
+  {
+    "name": "flannel-cni",
+    "description": "Flannel CNI — simple VXLAN/host-gw overlay for Kubernetes pod networking. TRIGGER: flannel, flannel-vxlan, flannel-host-gw, k3s-cni, kube-flannel, flanneld, kube-flannel-cfg, flannel-backend, flannel-subnet, vxlan-backend, host-gw-backend, udp-backend, flannel-subnet-mgr. SKIP: NetworkPolicy enforcement (Flannel has none — pair with calico-cni policy-only or kube-router); Calico BGP underlay (use calico-cni); Cilium eBPF (use cilium-cni); Weave mesh (use weave-cni)."
+  },
+  {
+    "name": "forge",
+    "description": "Remote git forge topic hub — GitHub, GitLab, Bitbucket. Auto-routes to the right platform variant based on cwd files and prompt keywords. TRIGGER pull request, merge request, MR, PR, issue, gist, release, fork, clone, push, repo, repository, code review, label, milestone, project, github, gitlab, bitbucket, gh, glab, bb. SKIP local git ops (use git CLI directly); CI/CD pipeline authoring (use ci hub)."
+  },
+  {
+    "name": "frr-bgp",
+    "description": "FRR (FreeRangeRouting) BGP variant of the bgp topic hub. Linux daemon stack — bgpd, zebra, vtysh CLI. Targets /etc/frr/frr.conf + /etc/frr/daemons configuration on systemd-managed hosts. NOT user-invocable; only inlines via the bgp hub when FRR signals fire (cwd contains frr.conf or daemons; prompt mentions frr, quagga, vtysh, zebra). For cross-cutting BGP path attributes and best-path selection see the bgp hub body. For non-FRR BGP on Cisco see cisco-bgp."
+  },
+  {
+    "name": "frr-evpn",
+    "description": "FRR (FreeRangeRouting) EVPN variant of the evpn topic hub. Linux daemon stack — bgpd advertises l2vpn evpn AFI; zebra programs kernel VXLAN/bridge dataplane via netlink. Targets /etc/frr/frr.conf with router bgp + l2vpn evpn address-family + advertise-all-vni. NOT user-invocable; only inlines via the evpn hub when FRR signals fire (cwd contains frr.conf or daemons; prompt mentions frr, vtysh, zebra, advertise-all-vni). For Cisco NX-OS EVPN see cisco-evpn. For OVN-controlled EVPN gateway see ovn-evpn."
+  },
+  {
+    "name": "frr-ospf",
+    "description": "FRR ospfd OSPF variant of the ospf topic hub. Targets Linux FRR daemon config under /etc/frr/. NOT user-invocable; inlines via the ospf hub when FRR signals fire (prompt mentions frr, ospfd, vtysh, zebra, or cwd contains /etc/frr/ files or daemons file). For Cisco IOS-style OSPF see cisco-ospf. For JunOS see juniper-ospf. For cross-cutting OSPF area types and LSA taxonomy see the ospf hub body."
+  },
+  {
+    "name": "gh-forge",
+    "description": "GitHub CLI gh — PR/issue/release/Actions workflow ops. Variant of the forge topic hub. NOT user-invocable; inlines via the forge hub when GitHub signals fire (cwd contains .github/**; prompt mentions github, gh, github.com, pull-request). SKIP local git ops (git CLI); GitLab/Bitbucket (see glab-forge/bb-forge); CI pipeline authoring (.github/workflows/*.yml, use ci/github-actions-ci)."
+  },
+  {
+    "name": "github-actions-ci",
+    "description": "GitHub Actions CI/CD variant of the ci topic hub. Targets .github/workflows/*.yml pipeline authoring — on: triggers, jobs, steps, strategy.matrix, reusable workflows, composite actions, GITHUB_TOKEN permissions. NOT user-invocable; inlines via the ci hub when GitHub Actions signals fire (cwd contains .github/workflows/; prompt mentions github-actions, uses:, runs-on:, or actions-runner). For GitLab CI pipelines see gitlab-ci. For cross-cutting CI concepts see the ci hub body."
+  },
+  {
+    "name": "gitlab-ci",
+    "description": "GitLab CI/CD variant of the ci topic hub. Targets .gitlab-ci.yml pipeline authoring — stages, jobs, rules, include, extends, parallel matrix, cache, artifacts. NOT user-invocable; inlines via the ci hub when GitLab signals fire (cwd contains .gitlab-ci.yml; prompt mentions gitlab-ci, gitlab-runner, rules, include, or extends). For GitHub Actions pipelines see github-actions-ci. For cross-cutting CI concepts see the ci hub body."
+  },
+  {
+    "name": "glab",
+    "description": "GitLab CLI glab v1.89+ ops — MR/issue/pipeline/release/variable/token/schedule/api/repo. TRIGGER on glab CLI use, MR create/merge/approve/rebase/checkout/note, issue CRUD, pipeline run/status/trace/retry/cancel/lint, releases, CI variables (masked/protected/scoped), project access tokens, schedules, GraphQL/REST via glab api, stacked diffs, group ops, GITLAB_HOST detection from git remote, %2F path encoding, curl fallback for POST with JSON arrays (scopes/tags/nested), CI Docker SSH→HTTPS+token swap, parsing ~/.config/glab-cli/config.yml. SKIP for non-GitLab work, github/gh CLI, generic git plumbing."
+  },
+  {
+    "name": "glab-forge",
+    "description": "GitLab CLI glab — MR/issue/release/pipeline workflow ops. Variant of the forge topic hub. NOT user-invocable; inlines via the forge hub when GitLab signals fire (cwd contains .gitlab/**; prompt mentions gitlab, glab, gitlab.com, merge-request). SKIP local git ops; GitHub/Bitbucket (see gh-forge/bb-forge); CI pipeline YAML authoring and glab API quirks (see existing glab skill)."
+  },
+  {
+    "name": "glfm",
+    "description": "GFM/GLFM/Mermaid syntax reference. CommonMark + GFM extensions (tables, task lists, strikethrough, autolinks) + GLFM (alerts, cross-refs, description lists, math, footnotes, front matter, diff, include) + Mermaid embeds (graph/sequence/state/ER/gantt/class/pie/gitGraph). TRIGGER `.md`/`.mdx` authoring on GitHub/GitLab, README/RFC/MR templates, table alignment, embedded diagrams, cross-project refs."
+  },
+  {
+    "name": "golang",
+    "description": "Go 1.25+/1.26 playbook. Modules, gofumpt+goimports, golangci-lint (errcheck/gosimple/govet/staticcheck/unused/revive/gocritic/bodyclose/contextcheck/errorlint/wrapcheck/prealloc/unparam/wastedassign/nilerr), table-driven tests, `-race`, generics (sparingly), `for range` over int (1.22+), slices/maps stdlib, `errors.Is`/`As`/`%w`, `context.Context` first param, `log/slog` (1.21+), `min`/`max`/`clear`. Concurrency: errgroup/WaitGroup/Once/Pool/`chan struct{}`/select+ctx.Done()/atomic. mockery, lefthook. TRIGGER `.go`/`go.mod`; \"is this idiomatic Go\"; configure golangci-lint/staticcheck/gofumpt; goroutine concurrency design; Go audit. SKIP non-Go."
+  },
+  {
+    "name": "grep-search",
+    "description": "grep / egrep / fgrep POSIX baseline search — GNU grep vs BSD grep (macOS) portability, recursive search, extended regex, literal matching. TRIGGER on: grep, egrep, fgrep, GNU-grep, BSD-grep, ggrep, grep -r, grep -E, grep -P, grep -F, grep --include, shell scripts requiring POSIX portability, Docker minimal images, busybox. SKIP: faster alternatives for large codebases (use ripgrep-search); in-place replacement (use sd-search); Silver Searcher-specific features (use ag-search)."
+  },
+  {
+    "name": "hammer",
+    "description": "Operational reference for the Foreman/Katello `hammer` CLI in baremetal-v2. `~/bin/hammer` is a LOCAL rbenv wrapper (Ruby 3.4.5, gems pinned to Foreman 3.19 + Katello 4.21) at console.foreman.craton.app — NOT kubectl-exec (khammer retired). Covers command structure, output formats (csv/yaml/json/table), scoped-search `--search`, config/auth, org/location scoping, defaults/shell, host/proxy/subnet/role/content recipes, idempotent seeds, and the full plugin set (REX + puppet now installed — no API fallback). STANDING RULE: manage Foreman EXCLUSIVELY via hammer — never REST API curl or kubectl exec. TRIGGER hammer, foreman, katello. SKIP non-Foreman CLIs and CloudStack compute."
+  },
+  {
+    "name": "haproxy-lb",
+    "description": "HAProxy load-balancer variant of the loadbalancer topic hub. Provides HAProxy 3.x config patterns for L4 (mode tcp) and L7 (mode http), TLS termination, stick-tables, active health checks, hot reload, and runtime stats via Unix socket. NOT user-invocable; inlines via the loadbalancer hub when HAProxy signals fire (haproxy.cfg, /etc/haproxy/, keywords frontend/backend/stick-table/@haproxy)."
+  },
+  {
+    "name": "hashi-vault",
+    "description": "HashiCorp Vault secrets management server variant of the secrets-vault hub. NOT user-invocable; inlines via secrets-vault hub when Vault signals fire (prompt mentions vault-cli, vault-server, vault-unseal, approle, kv-v2, vault-policy, or cwd contains vault.hcl / policies/*.hcl). Covers init, unseal, auth methods, secrets engines, CLI ops, policy HCL, lease renewal, audit logging, and HA with Raft/Consul. SKIP non-Vault secret stores."
+  },
+  {
+    "name": "helm-k8s",
+    "description": "Helm 3 — chart-based Kubernetes package manager. TRIGGER: helm, chart, helm-install, helm-upgrade, values-yaml, helmchart, Chart.yaml, subcharts, OCI registry push, helm-repo, bitnami, helm-template, helm-rollback, helm-history. SKIP: raw kubectl apply (kubectl-k8s); overlay patching (kustomize-k8s); KRM functions (kpt-k8s); container builds (container hub). NOT user-invocable — inlines via the k8s-cli hub."
+  },
+  {
+    "name": "iac",
+    "description": "Infrastructure-as-Code topic hub. Auto-routes to the right tool variant (Terraform, OpenTofu, Pulumi) based on cwd files and prompt signals. Covers declarative model, state file concept, plan-apply-destroy lifecycle, provider/resource abstraction, drift detection, and state locking. TRIGGER infrastructure-as-code, iac, plan, apply, tfstate, drift, provider, module, resource block, state lock, destroy, workspace. SKIP ad-hoc shell automation (use shell/linux skill), Kubernetes manifests (use k8s skill), configuration management (use ansible skill)."
+  },
+  {
+    "name": "image-build",
+    "description": "Container image build topic hub. Auto-routes to the right implementation variant based on environment signals (cwd files, prompt keywords). Variants: buildx-image (Docker Buildx/BuildKit), buildah-image (daemonless OCI, Podman/OpenShift), kaniko-image (Kubernetes pod builds), ko-image (Go-only, no Dockerfile). Hub stub never inlines variant content; matcher picks the variant whose paths or triggers score highest. TRIGGER container image build, dockerfile build, oci image, multi-stage, buildkit, buildx, buildah, kaniko, ko, multi-arch, image push, registry. SKIP container runtime ops (use container hub); k8s manifest ops (use k8s-cli hub)."
+  },
+  {
+    "name": "influxdb-metrics",
+    "description": "InfluxDB + Telegraf variant of the metrics topic hub. NOT user-invocable; inlines via the metrics hub when InfluxDB/Telegraf signals fire. Covers InfluxDB v2 org/bucket data model, Flux functional queries, InfluxQL legacy, Telegraf push-based collection, TSM/Parquet storage engines. SKIP Prometheus pull-model (prometheus-metrics), VictoriaMetrics (victoriametrics-metrics), Datadog (datadog-metrics)."
+  },
+  {
+    "name": "iptables-fw",
+    "description": "iptables variant of the firewall topic hub. Legacy Linux netfilter CLI — discrete chains per family (iptables, ip6tables, arptables, ebtables), pre-dating nftables. On modern distros iptables-nft is the default backend (iptables CLI translated to nftables ruleset). NOT user-invocable; only inlines via the firewall hub when iptables signals fire (cwd contains rules file under /etc/iptables, *.rules; prompt mentions iptables, ip6tables, iptables-save, iptables-restore). For modern nftables CLI/syntax see nftables-fw. For libvirt firewall XML see virtualization-stack."
+  },
+  {
+    "name": "ipvs-lb",
+    "description": "IPVS (IP Virtual Server) kernel-space L4 load-balancer variant of the loadbalancer topic hub. Covers ipvsadm CLI, forwarding modes (DR, NAT, TUN), scheduling algorithms, keepalived virtual_server HA integration, and container-host line-rate LB. NOT user-invocable; inlines via the loadbalancer hub when IPVS signals fire (/etc/ipvsadm.rules, keywords ipvsadm/lvs/lvs-dr/lvs-nat/lvs-tun/@ipvs)."
+  },
+  {
+    "name": "jaeger-tracing",
+    "description": "Jaeger distributed tracing variant of the tracing topic hub. NOT user-invocable; inlines via the tracing hub when Jaeger signals fire (prompt mentions jaeger, jaeger-agent, jaeger-collector, jaeger-query, jaeger-v2). For OpenTelemetry Collector pipeline config see otel-tracing. For Grafana Tempo backend see tempo-tracing. For Zipkin B3 propagation see zipkin-tracing."
+  },
+  {
+    "name": "java",
+    "description": "Java playbook. JDK 21/25 LTS, records, sealed, pattern matching, virtual threads, FFM/jextract, AOT/Leyden, GraalVM, CRaC, Netty 4.2 io_uring, Maven 3.9 / Gradle 9 KTS, Checkstyle, SpotBugs, ErrorProne, PMD, Spotless, JUnit5, AssertJ, Mockito, Testcontainers, PIT, JaCoCo, JMH, Spring Boot 4, Quarkus, Vert.x 5, Helidon Nima, Spring AI. TRIGGER .java pom.xml build.gradle build.gradle.kts; \"is this idiomatic Java\"; configure Maven/Gradle/Checkstyle/SpotBugs/PMD/ErrorProne; framework choice; audit Java codebase. SKIP Kotlin (use kotlin), Scala, Android."
+  },
+  {
+    "name": "javascript",
+    "description": "Modern JavaScript ES2024+ playbook (Node 24 Active LTS / 26 Current → LTS Oct 2026). TRIGGER `.js`/`.mjs`/`.cjs`, `package.json` without `tsconfig.json`, \"modern JS\", pnpm/biome/eslint/vitest config, async/promise design, JS audit. SKIP TypeScript projects (typescript). Heavy refactor → javascript-pro. Always pnpm (never npm/yarn). pnpm dlx not npx. Prefer TS for new code; this skill covers JS-only (legacy, plugin authors, no-TS environments)."
+  },
+  {
+    "name": "jenkins-ci",
+    "description": "Jenkins CI variant of the ci topic hub. Targets Jenkinsfile authoring — Declarative and Scripted pipeline syntax, agent directives, parallel stages, shared libraries, Blue Ocean UI, JNLP agent connection. NOT user-invocable; inlines via the ci hub when Jenkins signals fire (cwd contains Jenkinsfile; prompt mentions jenkins, groovy, pipeline-stage, jnlp, or Blue Ocean). For GitLab CI see gitlab-ci. For cross-cutting CI concepts see the ci hub body."
+  },
+  {
+    "name": "juniper-ospf",
+    "description": "Juniper JunOS OSPF variant of the ospf topic hub. Targets commit-based JunOS set-style config on MX, SRX, and QFX platforms. NOT user-invocable; inlines via the ospf hub when Juniper signals fire (prompt mentions juniper, junos, mx, srx, qfx). For FRR daemon-based OSPF see frr-ospf. For Cisco IOS-style OSPF see cisco-ospf. For cross-cutting OSPF area types and LSA taxonomy see the ospf hub body."
+  },
+  {
+    "name": "k8s-cli",
+    "description": "Kubernetes-level CLI topic hub. TRIGGER: kubernetes, k8s, kubectl, helm, chart, manifest, deployment, statefulset, daemonset, service, ingress, namespace, kubeconfig, kustomize, kpt, kubeadm, apply, rollout, overlay, Kptfile, helmchart, values.yaml. SKIP: container runtime ops (docker, podman, containerd, crictl) — use the container hub; CRI-level debugging (crictl) — use container hub. Routes to kubectl-k8s, helm-k8s, kustomize-k8s, or kpt-k8s variant based on cwd files and prompt signals."
+  },
+  {
+    "name": "kaniko-image",
+    "description": "kaniko variant of the image-build topic hub. Targets kaniko (GoogleContainerTools, community-maintained after Jun 2025 archive) for building OCI images inside Kubernetes pods without a Docker daemon or privileged container. TRIGGER kaniko, gcr-kaniko, kubernetes-build, rootless-kaniko, kaniko-executor, --cache-repo, gs:// context, s3:// context, git:// context. SKIP Docker-daemon builds (use buildx-image); daemonless local builds (use buildah-image); Go-only builds (use ko-image); runtime ops (use container hub)."
+  },
+  {
+    "name": "keepalived-ha",
+    "description": "keepalived VRRPv3 + IPVS load-balancer variant of the vrrp-ha topic hub. NOT user-invocable; inlines via the vrrp-ha hub when keepalived signals fire (cwd contains keepalived.conf or /etc/keepalived/**, or prompt mentions vrrp_instance, track_script, virtual_ipaddress, lvs, ipvs, real_server). For full-cluster resource management see corosync-pacemaker-ha."
+  },
+  {
+    "name": "ko-image",
+    "description": "ko variant of the image-build topic hub. Targets ko (ko-build/ko, formerly google/ko) — purpose-built Go container image builder; no Dockerfile needed; compiles Go binary locally and layers it onto a distroless base. TRIGGER ko, ko-build, ko-publish, go-container, KO_DOCKER_REPO, ko apply, .ko.yaml, distroless, ko resolve. SKIP non-Go images (use buildx-image or buildah-image); Kubernetes pod builds (use kaniko-image); runtime ops (use container hub)."
+  },
+  {
+    "name": "kotlin",
+    "description": "Kotlin playbook. Idioms (val/data/sealed/null safety/scope fns/extensions), Gradle KTS, ktlint+Spotless or ktfmt, detekt, Kotest/JUnit5+MockK, Kover, coroutines+Flow (`runTest`, structured concurrency, dispatchers), Channels rare, KMP/Compose Multiplatform, Ktor/Spring Boot/http4k server. TRIGGER `.kt`/`.kts`; \"is this idiomatic Kotlin\"; configure Gradle KTS/ktlint/detekt; coroutines/Flow design; Android/KMP/server-side Kotlin; Kotlin audit. SKIP pure Java (use java)."
+  },
+  {
+    "name": "kpt-k8s",
+    "description": "kpt — Git-native Kubernetes package orchestration via KRM (Kubernetes Resource Model). TRIGGER: kpt, Kptfile, kptfile, fn-render, krm-functions, kpt-live-apply, Config Sync, Nephio, package-orchestrator, kpt-pkg-get, kpt-fn-render, inventory tracking. SKIP: Helm chart lifecycle (helm-k8s); overlay patches (kustomize-k8s); plain kubectl (kubectl-k8s); container runtime (container hub). NOT user-invocable — inlines via the k8s-cli hub."
+  },
+  {
+    "name": "kube-vip-ha",
+    "description": "kube-vip Kubernetes-native VIP variant of the vrrp-ha topic hub. NOT user-invocable; inlines via the vrrp-ha hub when Kubernetes VIP signals fire (cwd contains kube-vip.yaml or kube-vip-*.yaml, or prompt mentions kube-vip, control-plane-vip, service-lb, loadbalancer-class, kubeadm HA bootstrap). Alternative to MetalLB for service-type LoadBalancer. For non-k8s VRRP see keepalived-ha or corosync-pacemaker-ha."
+  },
+  {
+    "name": "kubectl-k8s",
+    "description": "kubectl — official Kubernetes CLI. TRIGGER: kubectl, kubeconfig, kubectl-apply, kubectl-get, context switching, krew plugin, rollout, port-forward, exec, debug node, server-side apply, jsonpath output, custom-columns. SKIP: Helm chart management (helm-k8s); overlay-based customization (kustomize-k8s); package orchestration (kpt-k8s); container runtime ops (container hub). NOT user-invocable — inlines via the k8s-cli hub."
+  },
+  {
+    "name": "kubeseal-local",
+    "description": "Seal Kubernetes Secrets OFFLINE with pre-fetched per-context public certs in ~/.kubeseal/{context}.pem — no cluster round-trip, no in-cluster fetch-cert, immune to wrong-current-context mistakes. Covers the seal.sh wrapper (auto cert resolution by kube context), the kubeseal --cert offline command, scope modes, the refresh.sh cert regenerator, and the com.farchanjo.kubeseal-refresh launchd agent. TRIGGER on: kubeseal, sealing a Secret, sealed-secret, offline seal, picking the right context/cluster cert. SKIP in-cluster --fetch-cert sealing (this skill replaces that slow path); for Sealed Secrets concepts, scope theory, or controller install use the secrets-vault hub."
+  },
+  {
+    "name": "kustomize-k8s",
+    "description": "kustomize — overlay-based Kubernetes manifest customization, native in kubectl. TRIGGER: kustomize, kustomization, overlay, patch-strategic-merge, kustomization.yaml, commonLabels, namePrefix, nameSuffix, configMapGenerator, secretGenerator, images-override, helmCharts inflator. SKIP: Helm chart lifecycle (helm-k8s); KRM function pipelines (kpt-k8s); raw kubectl (kubectl-k8s). NOT user-invocable — inlines via the k8s-cli hub."
+  },
+  {
+    "name": "launchctl-mac",
+    "description": "macOS launchd service manager variant of the mac-ops topic hub. NOT user-invocable; inlines via mac-ops when launchd signals fire (prompt mentions launchd, launchctl, launch-agent, launch-daemon, watchpaths, calendarinterval, or plist files under Library/LaunchAgents or Library/LaunchDaemons). Covers plist authoring, load/unload, modern bootstrap/bootout syntax, and trigger key reference. SKIP brew services (managed launchd wrappers) → brew-mac; preferences plists → defaults-mac."
+  },
+  {
+    "name": "linux",
+    "description": "Linux sysadmin/ops playbook — distro-agnostic ref for systemd-based hosts (RHEL, Debian, Arch, openSUSE). TRIGGER systemd unit composition, journalctl forensics, networkd/NM/netplan, sysctl/proc tuning, package mgmt (apt/dnf/pacman/zypper), cron vs systemd-timers, troubleshooting (OOM, disk-full, perm denied, DNS fail, boot-fail, no-route), security baselines (capabilities, SELinux, AppArmor, auditctl, setpriv, namespaces, seccomp). SKIP virt → virtualization-stack; remote transport → ssh; IaC → ansible; eBPF/ftrace deep-dives out of scope. Keyword-callable via Skill(skill=\"linux\") or /linux. Not auto-primed by cwd."
+  },
+  {
+    "name": "loadbalancer",
+    "description": "Load-balancer topic hub. TRIGGER: load-balancer, lb, reverse-proxy, upstream, backend, frontend, virtual-server, sticky-session, health-check, round-robin, least-conn, weighted, sni, tls-termination, l4, l7, haproxy, nginx, traefik, envoy, ipvs. Routes to the correct implementation variant (haproxy-lb, nginx-lb, traefik-lb, envoy-lb, ipvs-lb) based on cwd files and prompt keywords. SKIP: CDN edge (Cloudflare, Akamai); DNS-based load balancing (use dns hub)."
+  },
+  {
+    "name": "logging",
+    "description": "Log aggregation, shipping, and indexing reference hub. TRIGGER: logs, log-aggregation, log-shipping, loki, logql, elasticsearch, opensearch, kibana, splunk, spl, fluentbit, fluentd, vector, journald, syslog, log-indexing, json-log, structured-log, log pipeline, log ingestion, log retention, log storage. Routes to variant skill by stack (loki-logging, elasticsearch-logging, opensearch-logging, splunk-logging). SKIP: metrics collection (use metrics hub); distributed tracing (use tracing hub); pure APM."
+  },
+  {
+    "name": "loki-logging",
+    "description": "Grafana Loki log aggregation — label-indexed (NOT full-text inverted index), cheaper than Elastic. TRIGGER: loki, logql, promtail, grafana-loki, label-cardinality, loki-config, tsdb-shipper, boltdb-shipper, loki compactor, structured metadata, loki retention, loki single-binary, loki scalable-mode, loki ruler, recording rules. SKIP: full-text search workloads needing arbitrary field indexing (use elasticsearch-logging or opensearch-logging); metrics-only (use Prometheus)."
+  },
+  {
+    "name": "mac-ops",
+    "description": "macOS platform operations topic hub. TRIGGER on macOS, darwin, brew, homebrew, defaults, launchd, launchctl, plist, codesign, notarize, gatekeeper, xattr, quarantine, system-preferences, sip, system-integrity-protection. Routes to variant skills for Homebrew package management (brew-mac), NSUserDefaults/CFPreferences CLI (defaults-mac), launchd service management (launchctl-mac), and code signing + notarization (codesign-mac). SKIP non-Apple-platform ops: Linux package management → linux skill; Windows service management → windows-infra-admin agent."
+  },
+  {
+    "name": "metrics",
+    "description": "Metrics and observability topic hub. Routes to the right TSDB/agent implementation variant based on cwd files and prompt keywords. TRIGGER metrics, observability, timeseries, tsdb, prometheus, promql, exporter, scrape-config, alertmanager, grafana, victoriametrics, vmselect, influxdb, flux, telegraf, datadog, statsd, dogstatsd. SKIP logs aggregation (use logging hub), distributed tracing (use tracing hub)."
+  },
+  {
+    "name": "minicom-serial",
+    "description": "minicom ncurses serial terminal emulator variant of the serial-console topic hub. NOT user-invocable; inlines via the serial-console hub when minicom signals fire (cwd contains .minirc.*; prompt mentions minicom, minicom-setup, .minirc). Covers interactive setup wizard, named profiles, file transfer (zmodem/ymodem/xmodem/kermit), scrollback buffer, macros. For minimalist no-ncurses see picocom-serial. For multi-window session survival see screen-serial. For modern profile-based CLI see tio-serial."
+  },
+  {
+    "name": "mkcert-tls",
+    "description": "mkcert developer-local CA variant of the tls topic hub. Zero-config locally-trusted certificates for development environments — browser-trusted without manual cert import per site. NOT user-invocable; only inlines via the tls hub when mkcert signals fire (prompt mentions mkcert, local-ca, localhost cert, dev-cert, or CAROOT). NEVER use mkcert-issued certs in production. For production PKI see openssl-tls, step-ca-tls, or cfssl-tls."
+  },
+  {
+    "name": "mkvextract",
+    "description": "mkvextract pull tracks/tags/chapters/attachments/cuesheet/timestamps/cues from mkv. Source read-only. Modes — tracks (0-indexed), attachments (1-indexed), chapters, tags, cuesheet, timestamps_v2, cues. TRIGGER dump subs, extract audio/video, pull embedded fonts/cover, save chapters.xml, save tags.xml, dump CUE, per-frame timestamps, round-trip mkv. Use `mkvmerge -i` first to list IDs. Output `-` = stdout. Files: .mkv .mka .mks. SKIP transcode (ffmpeg), in-place edit (mkvpropedit)."
+  },
+  {
+    "name": "mkvinfo",
+    "description": "mkvinfo EBML/Matroska inspection (read-only). TRIGGER inspect mkv internals, dump EBML tree, list TrackUID/SegmentUID/EditionUID/ChapterUID, segment info, cues/seek heads, validate matroska structure (--check-mode), inspect CodecPrivate/Cluster timestamps/SimpleBlock, get track ID for mkvmerge/mkvextract, check HDR color flags (Color transfer 16=PQ, 18=HLG, 1=BT.709), inspect attachments, verify after mkvpropedit. Files: .mkv .mka .mks. SKIP general probing (use ffprobe), non-mkv, modifications (use mkvpropedit/mkvmerge/mkvextract)."
+  },
+  {
+    "name": "mkvmerge",
+    "description": "mkvmerge mux/remux/split/append mkv (lossless, no re-encode). Always produces NEW file. TRIGGER combine streams into mkv, remux, split (duration/parts/chapters), append (`+`), drop tracks (-a/-d/-s/-A/-D/-S/-T/-M), set per-track --language/--language-ietf/--track-name/--default-track-flag/--forced-display-flag/--original-flag/--commentary-flag during mux, import chapters.xml/tags.xml, add/strip attachments, reorder via --track-order, build mkv from raw streams. Use `mkvmerge -i` / `-J` to list IDs (0-indexed). SKIP in-place patches (mkvpropedit), re-encode (ffmpeg), inspection (mkvinfo)."
+  },
+  {
+    "name": "mkvpropedit",
+    "description": "mkvpropedit in-place mkv header patching (no remux/re-encode, sub-second on multi-GB). TRIGGER set/fix container title, set track language/language-ietf/name, change flag-default/flag-forced/flag-original/flag-commentary/flag-hearing-impaired/flag-visual-impaired/flag-enabled, write/replace/strip global tags from XML (multi-language TITLE via TagLanguage, TargetTypeValue 30/50/60/70), replace per-track tags by UID, swap chapters from XML, add/replace/update/delete attachments (cover, fonts). Selectors `--edit info|track:vN|aN|sN|N|=UID|@NUMBER|attachment:@N|=UID|NAME`. Always copy-then-edit-then-swap (`cp -c` APFS clone). SKIP full remux (mkvmerge), re-encode (ffmpeg), inspection (mkvinfo)."
+  },
+  {
+    "name": "ml-engineer",
+    "description": "Production ML lifecycle playbook — pipeline dev, training, validation, deployment, monitoring, retraining. Traditional ML + DL, prod-grade. TRIGGER on build/train/deploy/monitor model, feature pipeline, MLflow/Kubeflow/Ray/Optuna/DVC/BentoML/Seldon/KServe/Triton/TorchServe, serving mode (REST/gRPC/batch/stream/edge/serverless), A/B test, drift detection (PSI/KL/Wasserstein), automated retraining, inference latency, rollout (blue-green/canary/shadow), prod ML troubleshooting, online/offline feature parity, model registry, model card. SKIP pure EDA/notebook R&D (use data-scientist), LLM/GenAI/RAG (use ai-engineer or llm-architect), pure ML infra (use mlops-engineer), non-ML backend APIs."
+  },
+  {
+    "name": "monoio",
+    "description": "monoio — ByteDance thread-per-core async Rust runtime on io_uring (Linux primary, epoll/legacy fallback). Background companion to rust skill (NOT user-invocable). TRIGGER"
+  },
+  {
+    "name": "mysql-db",
+    "description": "MySQL / MariaDB CLI variant of the db-cli topic hub. Covers mysql interactive client, mysqldump for backups, mysqlsh (MySQL Shell) for modern scripting, engine differences (InnoDB/MyISAM/Aria), and my.cnf configuration. NOT user-invocable; inlines via db-cli hub when MySQL signals fire (cwd contains .my.cnf, my.cnf, or *.sql; prompt mentions mysql, mariadb, mysqldump, mysqlsh). For PostgreSQL see psql-db. For embedded zero-config DB see sqlite-db."
+  },
+  {
+    "name": "naming",
+    "description": "Brand/product/company naming specialist. Generates and evaluates names across three pillars — linguistics (morphology, blends, neologisms, phonosemantics), strategy (positioning, archetype, target fit), and legal/digital viability (trademark anteriority, domain, social handle, SEO). Runs a full intake → generate → filter → validate → shortlist pipeline and returns a categorized shortlist with rationale, not a raw list. Use for naming a brand, product, app, company, feature, domain, or rebrand; for evaluating/scoring an existing name; or for cross-language safety checks."
+  },
+  {
+    "name": "native-tools",
+    "description": "Native tool preference for file operations. Toggle via `/native-tools on|off` or bare `/native-tools`. When ON, prefer Read/Edit/Write over Bash shell equivalents (`cat`, `sed -i`, `echo > FILE`, heredoc redirect) every turn. Bash itself is NEVER blocked — process, env, network, git, build, system-state, pipes, conditionals, and follow-stream ops stay free. TRIGGER when user asks to enable/disable native tool preference or `/native-tools`. SKIP non-file-operation tasks; preference-only, not a guard."
+  },
+  {
+    "name": "nftables-fw",
+    "description": "nftables variant of the firewall topic hub. Modern Linux packet filter (kernel ≥3.13) replacing iptables — unified ruleset across families ip, ip6, inet, arp, bridge, netdev. NOT user-invocable; only inlines via the firewall hub when nftables signals fire (cwd contains nftables.conf, *.nft, or /etc/nftables.d; prompt mentions nft, nftables, table inet, verdict, jump, accept, drop in nftables context). For legacy iptables CLI/chains see iptables-fw. For libvirt firewall XML see virtualization-stack."
+  },
+  {
+    "name": "nginx-lb",
+    "description": "NGINX load-balancer variant of the loadbalancer topic hub. Covers NGINX OSS upstream blocks, passive health checks, keepalive pooling, SSL termination, proxy headers, and graceful reload. NOT user-invocable; inlines via the loadbalancer hub when NGINX signals fire (nginx.conf, /etc/nginx/, keywords upstream/proxy_pass/@nginx). Active health checks and cookie-based sticky sessions require NGINX Plus."
+  },
+  {
+    "name": "opensearch-logging",
+    "description": "OpenSearch log analytics — Apache 2.0 fork of Elasticsearch 7.10, vendor-neutral (Linux Foundation / OSSF governance since 2024). TRIGGER: opensearch, opensearch-dashboards, AOS, amazon-opensearch, opensearch-cluster, PPL, piped-processing-language, opensearch-yml, data-prepper, opensearch-security, anomaly-detection, opensearch-alerting. SKIP: Elastic License 2.0 / commercial Elastic (use elasticsearch-logging); label-indexed cheaper logs (use loki-logging)."
+  },
+  {
+    "name": "openssl-tls",
+    "description": "OpenSSL CLI variant of the tls topic hub. Raw openssl commands for key generation, CSR creation, self-signed certs, chain inspection, PKCS#12 export, and TLS debugging. NOT user-invocable; only inlines via the tls hub when OpenSSL signals fire (cwd contains .pem/.crt/.csr/.key files or prompt mentions openssl, req, genpkey, x509, verify, pkcs12, s_client). For automated CA issuance see step-ca-tls or cfssl-tls."
+  },
+  {
+    "name": "opentofu-iac",
+    "description": "OpenTofu IaC variant of the iac topic hub. NOT user-invocable; inlines via the iac hub when OpenTofu signals fire. MPL-2.0 fork of pre-BSL Terraform, maintained by the Linux Foundation. Drop-in `tofu` CLI. Covers native encrypted state (1.7+), migration from Terraform, lock file rename, provider ecosystem compatibility. TRIGGER opentofu, tofu, linux-foundation, .opentofu.lock.hcl, *.tofu. SKIP Terraform BSL builds (see terraform-iac)."
+  },
+  {
+    "name": "openvpn-vpn",
+    "description": "OpenVPN 2.6+ variant of the vpn hub. TLS-over-UDP/TCP tunnel with mature PKI support and broad client compatibility. TRIGGER: openvpn, tls-crypt, tls-auth, tls-crypt-v2, data-ciphers, tap, tun, ovpn, easy-rsa, redirect-gateway, push route, verify-client-cert, auth SHA512. SKIP: WireGuard (wireguard-vpn); strongSwan IPsec (strongswan-vpn); Tailscale/Nebula SaaS overlay planes that abstract away the VPN config surface."
+  },
+  {
+    "name": "ospf",
+    "description": "OSPF configuration topic hub. Auto-routes to the right implementation variant based on environment signals (cwd files, prompt keywords). Variants today, frr-ospf (Linux FRR daemon), cisco-ospf (Cisco IOS/IOS-XE/IOS-XR), juniper-ospf (JunOS). Hub stub never inlines variant content; the matcher picks the variant whose paths or triggers score highest against current context. TRIGGER ospf, ospfv2, ospfv3, lsa, dr, bdr, area, abr, asbr, stub-area, nssa, lsdb, neighbor-state, full, exstart, exchange. SKIP non-OSPF IGPs (IS-IS see isis hub, EIGRP, RIP)."
+  },
+  {
+    "name": "otel-tracing",
+    "description": "OpenTelemetry Collector pipeline variant of the tracing topic hub. NOT user-invocable; inlines via the tracing hub when OTel signals fire (prompt mentions otel, opentelemetry, otelcol, otel-collector, otlp). Covers receivers/processors/exporters config, tail sampling, batch processor, distributions (otelcol vs otelcol-contrib), and SDK instrumentation for traces, metrics, logs. SKIP Jaeger-specific storage → jaeger-tracing; Tempo backend → tempo-tracing."
+  },
+  {
+    "name": "ovn-evpn",
+    "description": "OVN (Open Virtual Network) EVPN variant of the evpn topic hub. Covers OVN-Interconnect for DC-to-DC stretch and native EVPN gateway chassis for OVN-managed VXLAN overlays. Targets ovn-northd + ovn-controller deployments configured via ovn-nbctl. NOT user-invocable; only inlines via the evpn hub when OVN signals fire (prompt mentions ovn, ovn-northd, ovn-controller, ovn-nbctl, ovn-sbctl, ovn-ic, interconnect). For FRR daemon-based EVPN see frr-evpn. For Cisco NX-OS EVPN see cisco-evpn."
+  },
+  {
+    "name": "php",
+    "description": "Modern PHP 8.3/8.4/8.5 playbook (typed properties, enums, readonly, first-class callable, attributes, property hooks, asymmetric visibility, pipe operator, lazy objects). TRIGGER `.php`, `composer.json`, \"idiomatic PHP\", Composer/PHPStan/Psalm/PHP-CS-Fixer/Pest/PHPUnit config, Laravel vs Symfony choice, PHP audit. SKIP legacy PHP <7.4. Heavy refactor → php-pro. Laravel → laravel-specialist."
+  },
+  {
+    "name": "picocom-serial",
+    "description": "picocom minimalist serial terminal emulator variant of the serial-console topic hub. NOT user-invocable; inlines via the serial-console hub when picocom signals fire (cwd contains .picocomrc; prompt mentions picocom, pc-q, exit-picocom). Covers baud/frame/flow flags, keybindings, log session, lrzsz file transfer, auto-reconnect. For ncurses TUI with built-in zmodem see minicom-serial. For multi-window session survival see screen-serial. For modern profile-based CLI see tio-serial."
+  },
+  {
+    "name": "podman-container",
+    "description": "Podman daemonless rootless variant of the container topic hub. Rootless engine — no dockerd, no root, pods are first-class. Covers Quadlet systemd units (.container/.pod files), podman generate systemd, netavark/aardvark-dns networking, buildah. NOT user-invocable; inlines via the container hub when Podman signals fire (cwd contains containers.conf, storage.conf, *.container, *.pod; prompt mentions podman, rootless, quadlet, buildah). For Docker daemon see docker-container. For low-level runtime see containerd-container."
+  },
+  {
+    "name": "prometheus-metrics",
+    "description": "Prometheus TSDB variant of the metrics topic hub. NOT user-invocable; inlines via the metrics hub when Prometheus signals fire. Covers pull-based scraping, prometheus.yml config, native histograms (Prom 3.x default), OTLP ingestion, PromQL, Alertmanager routing tree, remote-write 2.0 to Thanos/Cortex/Mimir/VictoriaMetrics. SKIP VictoriaMetrics (victoriametrics-metrics), InfluxDB/Telegraf (influxdb-metrics), Datadog (datadog-metrics)."
+  },
+  {
+    "name": "psql-db",
+    "description": "PostgreSQL psql CLI variant of the db-cli topic hub. Covers interactive psql meta-commands, client-side import/export via \\copy, pg_dump/pg_restore, role and privilege model, and server config via postgresql.conf + pg_hba.conf. NOT user-invocable; inlines via db-cli hub when PostgreSQL signals fire (cwd contains .psqlrc, *.psql, *.pgsql, postgresql.conf, or pg_hba.conf; prompt mentions psql, postgres, pg_dump, pg_restore). For MySQL/MariaDB see mysql-db. For SQLite see sqlite-db."
+  },
+  {
+    "name": "pulumi-iac",
+    "description": "Pulumi IaC variant of the iac topic hub. NOT user-invocable; inlines via the iac hub when Pulumi signals fire. Covers programming-language IaC in TypeScript/Python/Go/.NET, stack vs project distinction, Pulumi Cloud and self-managed state backends (S3, Azure Blob, file), language-host gRPC model, and component resources. TRIGGER pulumi, stack, pulumi-state, Pulumi.yaml, pulumi up, pulumi preview. SKIP Terraform/OpenTofu (see terraform-iac / opentofu-iac), Kubernetes operator pattern (use k8s skill)."
+  },
+  {
+    "name": "python",
+    "description": "Python 3.11/3.13/3.14 playbook. TRIGGER `.py`, `pyproject.toml`, `requirements.txt`, `setup.py`, \"Pythonic\", uv/poetry/pip/ruff/mypy/pyright/pytest/hypothesis configs, FastAPI vs Django vs Flask choice, Python audit. SKIP data-science notebooks (data-scientist), ML lifecycle (ml-engineer). Heavy refactor → python-pro agent. Django → django-developer."
+  },
+  {
+    "name": "redis-db",
+    "description": "Redis in-memory key-value store CLI variant of the db-cli topic hub. Covers redis-cli interactive use, INFO, MONITOR, SCAN cursor iteration, data types (string, list, hash, set, sorted set, stream, bitmap, hyperloglog, geospatial), TTL semantics, persistence modes (RDB snapshots vs AOF), and ACLs from Redis 6+. NOT user-invocable; inlines via db-cli hub when Redis signals fire (cwd contains redis.conf or *.rdb; prompt mentions redis, redis-cli, ACL, lua-script). For relational CLI see psql-db or mysql-db."
+  },
+  {
+    "name": "rfc",
+    "description": "Resolve and summarize protocol specs (IETF RFC, W3C, IEEE, OASIS, OpenID Foundation, OpenConfig). TRIGGER on numeric (`8446`), IEEE pattern (`802.11`, `802.3`), or protocol name (`TLS 1.3`, `HTTP/3`, `gRPC`, `BGP`, `EVPN`, `VXLAN`, `SRv6`, `NETCONF`, `YANG`, `OAuth 2.1`, `JWT`, `OIDC`, `WebSocket`); imports like `net/http`/`javax.net.ssl`/`smtplib`; protocol comments/configs (`protocol: grpc`, `scheme: wss`); router/switch configs (BGP/OSPF/ISIS/EVPN/MPLS/SR); auth flows (PKCE, DPoP, mTLS, introspection); NETCONF/RESTCONF/gNMI/YANG. SKIP plain URL refs, std-lib calls without protocol concern. Outputs Protocol/Source/Spec/Status/Published + summary + key sections + related specs + URLs."
+  },
+  {
+    "name": "ripgrep-search",
+    "description": "ripgrep (rg) fast recursive file search — Rust-based, auto-respects .gitignore/.rgignore, PCRE2 via -P. TRIGGER on: ripgrep, rg, .rgignore, rg-config, RIPGREP_CONFIG_PATH, fast grep, rg flags, rg --type, rg --json, rg --hidden, rg --multiline. SKIP: in-place replacement (use sd-search); Silver Searcher-specific flags (use ag-search); POSIX portability requirements (use grep-search)."
+  },
+  {
+    "name": "ruby",
+    "description": "Ruby 4.0+ playbook (RBS/Sorbet, pattern matching, ractors, fiber scheduler, Data.define). TRIGGER `.rb`, `Gemfile`, `*.gemspec`, \"idiomatic Ruby\", Bundler/RuboCop/Standard/RSpec config, Rails vs Sinatra/Hanami choice, Ruby audit. Heavy Rails → rails-expert. Default Ruby 4.0+. SKIP Crystal/JRuby/MRuby derivatives, non-Ruby DSLs."
+  },
+  {
+    "name": "rust",
+    "description": "Rust 2024 edition / 1.95+ playbook. Edition 2024, resolver 3, MSRV 1.85, AFIT/RPITIT, async closures, let_chains, if-let guards, cfg_select!, precise capturing, unsafe attrs, tokio/embassy/smol, cancellation safety. Strict 3-layer lint baseline (Clippy forbid + deny + rustc), `#[expect]` over `#[allow]`, `clippy.toml` thresholds, CI gate. Tooling: cargo/rustfmt/clippy/nextest/insta/proptest/cargo-fuzz/bacon/criterion/divan/llvm-cov/cargo-shear/cargo-deny/cargo-audit/cargo-vet/cargo-semver-checks/cargo-hack/miri/loom/kani/cargo-expand/typos/mold. TRIGGER `.rs`/`Cargo.toml`, \"is this idiomatic\", `clippy.toml`/`[lints.*]`, lint/CI gate, async runtime, edition migrate, audit. SKIP non-Rust."
+  },
+  {
+    "name": "rust-tokio",
+    "description": "Cross-platform Tokio runtime + async ecosystem playbook (Linux epoll, FreeBSD/macOS/iOS kqueue, Windows IOCP via wepoll). TRIGGER tokio runtime flavors (multi_thread/current_thread/LocalSet/JoinSet/spawn_blocking), cancellation safety, sync primitives (Mutex/RwLock/Notify/Semaphore/oneshot/mpsc/broadcast/watch/CancellationToken), futures::Stream/StreamExt, AFIT vs async-trait, ecosystem (hyper, tower, axum, reqwest, sqlx, tonic, tracing, opentelemetry, tokio-console, tokio-metrics), graceful shutdown, mock-time testing. SKIP Linux-only io_uring specifics → rust-tokio-uring; non-async Rust → rust; host-level Linux ops → linux. Auto-loads with rust via Cargo.toml/*.rs."
+  },
+  {
+    "name": "rust-tokio-uring",
+    "description": "Rust async I/O — Tokio + io_uring on Linux ≥5.1 (5.15+ LTS, 6.1+ for DEFER_TASKRUN). TRIGGER tokio runtime (multi-thread/current-thread/LocalSet/JoinSet/spawn_blocking/select!/cancellation safety), io_uring SQ+CQ rings (SQE/CQE, SQPOLL, IOPOLL, registered buffers/files, multishot accept/recv/poll), Rust crates (tokio-uring, glommio, monoio, compio, io-uring), thread-per-core vs work-stealing, BufResult buffer ownership, kernel.io_uring_disabled sysctl, seccomp gating. SKIP non-async Rust → rust; non-Linux io_uring → tokio epoll/IOCP. Auto-loads with rust via Cargo.toml/*.rs."
+  },
+  {
+    "name": "screen-serial",
+    "description": "GNU screen as serial terminal emulator variant of the serial-console topic hub. NOT user-invocable; inlines via the serial-console hub when screen signals fire (cwd contains screenrc; prompt mentions screen, screen-tty, screen-detach). Covers serial attach, detach/reattach, session management, built-in logging, screenrc config. For minimalist no-ncurses see picocom-serial. For ncurses with zmodem see minicom-serial. For modern auto-reconnect CLI see tio-serial."
+  },
+  {
+    "name": "sd-search",
+    "description": "sd — Rust-based find-and-replace CLI, intuitive sed alternative. TRIGGER on: sd, find-and-replace, sed replacement, in-place replace, sd preview, sd capture groups, sed alternative, sed -i, bulk replace across files, regex replace in files. SKIP: read-only search without replacement (use ripgrep-search or grep-search); complex sed address ranges, append/insert/delete-line operations (sd lacks these — use sed directly); stream processing pipelines (use sed/awk)."
+  },
+  {
+    "name": "sealed-secrets",
+    "description": "Bitnami Sealed Secrets Kubernetes-native asymmetric encryption variant of the secrets-vault hub. NOT user-invocable; inlines via secrets-vault hub when Sealed Secrets signals fire (prompt mentions sealed-secrets, kubeseal, bitnami-sealed-secrets, or cwd contains sealed-secret.yaml / sealedsecret-*.yaml). Covers controller + kubeseal CLI flow, SealedSecret resource, scope modes, key rotation, backup, and comparison with SOPS for cluster-bound secrets. SKIP non-Kubernetes secret stores."
+  },
+  {
+    "name": "secrets-vault",
+    "description": "Secrets management topic hub — routes to the right implementation variant based on cwd files and prompt keywords. TRIGGER on: secret, secrets, vault, kv-store, secret-store, encryption-at-rest, dynamic-secret, lease, rotation, audit-log, kms, age, sops, sealed-secret, external-secrets, aws-secretsmanager, parameter-store. SKIP cert PKI ops (use tls hub); SSH key management (use ssh skill)."
+  },
+  {
+    "name": "serial-console",
+    "description": "Direct host-side serial terminal emulator hub — picocom, minicom, GNU screen, tio. TRIGGER serial, console, uart, tty, com-port, baud-rate, /dev/ttyUSB, /dev/ttyS, cisco-serial, router-console, switch-console, ftdi, cp210x, ch340, picocom, minicom, screen, tio. Matches cwd files (.picocomrc, .minirc.*, screenrc, tioconfig). SKIP scripted/programmatic serial via ssh-mcp (use ssh skill serial_open/serial_write instead); native language serial libraries (pyserial, tokio-serial). Auto-routes to the right terminal emulator variant; hub body covers cross-cutting UART signal model and USB-serial chipsets."
+  },
+  {
+    "name": "sevenz-archive",
+    "description": "7-Zip and p7zip operations — create, extract, list, test, and encrypt archives in 7z, zip, tar, gzip, xz, and other formats using LZMA2 compression. Covers solid archives, encrypted headers, multithreading, hash checksums, and cross-platform encrypted archives where ZIP encryption is too weak. TRIGGER: 7z, 7zip, p7zip, 7za, .7z, -mhe=on, LZMA2, solid archive, encrypted archive, cross-platform encryption. SKIP: tar without 7z involvement (use tar-archive); zstd standalone (use zstd-archive); info-zip zip/unzip only (use zip-archive)."
+  },
+  {
+    "name": "skill-schema",
+    "description": "Authoring contract for ~/.grok/skills/*/SKILL.md frontmatter. Required fields (name, description, peers, agents), optional fields (when_to_use, paths, triggers, variants, user-invocable, disable-model-invocation, allowed-tools), char budgets (description ≤700 preferred / ≤1024 hard; +when_to_use ≤1536), hub/variant rules (ADR-0001), skill visibility, and the lint-skills contract (manual run — no hook is wired). TRIGGER authoring or editing any SKILL.md, skillOverrides changes, lint-skills failures. SKIP skill body content guidelines — this covers schema/frontmatter and lint wiring only."
+  },
+  {
+    "name": "sops-secrets",
+    "description": "Mozilla SOPS file-based encryption variant of the secrets-vault hub. NOT user-invocable; inlines via secrets-vault hub when SOPS signals fire (prompt mentions sops, mozilla-sops, age, sops-encrypt, creation_rules, or cwd contains .sops.yaml / secrets.enc.yaml / secrets.enc.json). Covers backends (AWS KMS, GCP KMS, Azure Key Vault, age, PGP, Vault transit), .sops.yaml creation_rules, encrypt/decrypt/edit/rotate CLI, and GitOps integration with Flux/ArgoCD. SKIP non-SOPS secret stores."
+  },
+  {
+    "name": "speckit",
+    "description": "speckit — closed binary ~/bin/speckit for Spec-Driven Development (binary-only; ~/dev/speckit only when developing it). Loop: brief→status→next→phase (constitution/specify/clarify/plan/tasks/analyze/implement); validate green before commit; guard exit 4. Project ask/search over committed doc/arch (evidence-only). Personal/external knowledge: library validate/add/ask/search/update (machine-local library.db, never touches repo). Semantic tier-1 + opt-in deep. Authority: ~/bin/speckit CMD --help | manual --topic. TRIGGER speckit, SDD, doc/arch, guard, validate, verify, search, ask, library, work-id, semantic. SKIP GitHub spec-kit."
+  },
+  {
+    "name": "splunk-logging",
+    "description": "Splunk Enterprise and Splunk Cloud log search, indexing, and forwarding. TRIGGER: splunk, spl, spl2, universal-forwarder, UF, heavy-forwarder, HF, splunk-cloud, splunk-enterprise, indexes-conf, inputs-conf, props-conf, transforms-conf, saved-search, data-model, splunk-indexer, splunk-search-head, deployment-server, license-master, splunk-alert, lookup-table. SKIP: open-source log stores (use elasticsearch-logging or opensearch-logging); label-indexed logs (use loki-logging)."
+  },
+  {
+    "name": "spring",
+    "description": "Spring Framework topic hub. Auto-routes to the right variant by cwd signals and prompt keywords. TRIGGER spring, springframework, bean, autowired, @configuration, @component, @service, application-context, jakarta-ee, spring-boot, starter, jpa, @entity, @repository, security, @enablewebsecurity, cloud, webflux, @restcontroller. SKIP non-Spring JVM frameworks (Quarkus, Micronaut, Helidon)."
+  },
+  {
+    "name": "spring-boot",
+    "description": "Spring Boot 4 variant of the spring topic hub. NOT user-invocable; inlines via spring hub when Boot signals fire. TRIGGER springbootapplication, starter, actuator, auto-configuration, spring.factories, boot-starter, application.yml, embedded Tomcat/Netty, GraalVM native, virtual threads, api versioning, jspecify. SKIP non-Boot Spring apps, Quarkus, Micronaut."
+  },
+  {
+    "name": "spring-cloud",
+    "description": "Spring Cloud 2024/2025 variant of the spring topic hub. NOT user-invocable; inlines via spring hub when cloud/microservice signals fire. TRIGGER spring-cloud-config, Eureka, Consul, @EnableEurekaClient, @FeignClient, Resilience4j, @CircuitBreaker, Spring Cloud Gateway, @EnableConfigServer, distributed tracing, Micrometer, OpenTelemetry, bootstrap.yml. SKIP non-Spring microservice frameworks."
+  },
+  {
+    "name": "spring-data-jpa",
+    "description": "Spring Data JPA / Hibernate ORM variant of the spring topic hub. NOT user-invocable; inlines via spring hub when JPA signals fire. TRIGGER @Entity, @Repository, JpaRepository, CrudRepository, @Query, @OneToMany, @ManyToOne, @ManyToMany, Hibernate, @Embeddable, @Transactional, CriteriaBuilder, QueryDSL, EntityGraph, @DataJpaTest, Flyway, Liquibase. SKIP JDBC-only or R2DBC reactive — see spring-webflux variant."
+  },
+  {
+    "name": "spring-framework",
+    "description": "Spring Framework 7 (core IoC/DI/AOP) variant of the spring topic hub. NOT user-invocable; inlines via spring hub when core-framework signals fire. TRIGGER applicationContext.xml, @Configuration, @Bean, @ComponentScan, BeanPostProcessor, FactoryBean, AOP, @Aspect, @Around, SpEL, ApplicationEventPublisher, JSpecify, Virtual Threads. SKIP Boot auto-configuration — see spring-boot variant."
+  },
+  {
+    "name": "spring-security",
+    "description": "Spring Security 6.4+ variant of the spring topic hub. NOT user-invocable; inlines via spring hub when security signals fire. TRIGGER SecurityFilterChain, @EnableWebSecurity, AuthenticationManager, OAuth2, JWT, JwtDecoder, CSRF, CORS, @PreAuthorize, @Secured, UserDetailsService, PasswordEncoder, BCryptPasswordEncoder, oauth2Login, oauth2ResourceServer. SKIP non-Spring auth frameworks."
+  },
+  {
+    "name": "spring-webflux",
+    "description": "Spring WebFlux (Project Reactor) variant of the spring topic hub. NOT user-invocable; inlines via spring hub when reactive signals fire. TRIGGER Mono, Flux, reactive, Publisher, Subscriber, WebClient, RouterFunction, HandlerFunction, R2DBC, Netty, Schedulers, WebFilter, WebTestClient, @RestController reactive return types. SKIP blocking JDBC — incompatible with reactive stack."
+  },
+  {
+    "name": "sqlite-db",
+    "description": "SQLite embedded zero-config database variant of the db-cli topic hub. Covers the sqlite3 REPL, dot-commands (.tables/.schema/.dump/.read), journal modes (WAL, DELETE, MEMORY), PRAGMA configuration, VACUUM, and foreign-key enforcement. NOT user-invocable; inlines via db-cli hub when SQLite signals fire (cwd contains *.db, *.sqlite, *.sqlite3; prompt mentions sqlite, sqlite3, .dump, WAL). Common embedded contexts: Chrome user data, iOS/Android app storage, dev/test databases. For server databases see psql-db or mysql-db."
+  },
+  {
+    "name": "ssh",
+    "description": "ssh-mcp v7.0 SSH MCP server — 39 tools across session/exec/shell/transfer/rsync/forward/serial/subscription. 7 push-stream schemes: shell:// command:// transfer:// rsync:// session:// forward:// serial://. TRIGGER remote shell/exec, SFTP, rsync sync (>5 files/dir mirror), TCP port-forward, UART/TTY/COM serial, async cmds. Hard rules: NEVER ssh_run for repeat hosts (use ssh_connect reuse=auto + ssh_exec); NEVER chain ssh_upload >5 files (use ssh_rsync); NEVER hot-poll (subscribe via sub_open/sub_close); always pair sub_open with sub_close. Auth chain: key_path → password → SSH_AUTH_SOCK. 46-code error taxonomy. SKIP local-only fs ops (use Bash), git-over-ssh."
+  },
+  {
+    "name": "step-ca-tls",
+    "description": "smallstep step-ca variant of the tls topic hub. Automated private CA server with ACME, JWK, OIDC, and X5C provisioners; certificate lifecycle management via step CLI. NOT user-invocable; only inlines via the tls hub when step-ca signals fire (cwd contains ca.json or step-ca.json, or prompt mentions step, step-ca, smallstep, provisioner, ACME). For raw openssl operations see openssl-tls."
+  },
+  {
+    "name": "strongswan-vpn",
+    "description": "strongSwan IPsec/IKEv2 variant of the vpn hub. Full-featured kernel IPsec with IKEv2 daemon (charon). TRIGGER: strongswan, ipsec, swanctl, charon, ike, esp, ikev2, site-to-site ipsec, roadwarrior ipsec, ipsec.conf, ipsec.secrets, swanctl.conf. SKIP: WireGuard (wireguard-vpn); OpenVPN TLS tunnels (openvpn-vpn); application-layer TLS without kernel XFRM involvement."
+  },
+  {
+    "name": "subagent-autonomy",
+    "description": "Contract for subagent self-sufficiency in Grok Build. Subagents do NOT inherit the parent's skill catalog — prompt- and trigger-only skills never auto-prime inside a spawn. A subagent is autonomous when its dispatch brief carries everything it needs: inline the required skill-body excerpts (with absolute skill paths), the task slice, upstream context, and the output schema. Use to author dispatch briefs, audit missing-context regressions, and inline skill content into agent bodies. TRIGGER authoring/editing agent files; preparing subagent dispatches; debugging subagent missing-context."
+  },
+  {
+    "name": "swift",
+    "description": "Swift 6.2+/6.3 playbook. Strict concurrency (Sendable, actors, `@MainActor`, `@globalActor`), async/await, `AsyncSequence`, structured `Task`/`TaskGroup`, typed throws, macros (`@freestanding`/`@attached`), result builders, existential `any`, opaque `some`, `@Observable` (iOS 17+), `Observations` (iOS 26+), Embedded Swift, Wasm. SwiftPM, swift-format/SwiftFormat/SwiftLint (force_unwrapping, implicitly_unwrapped_optional, missing_docs, unused_import), XCTest/Swift Testing (`@Test`), Vapor 4+/Hummingbird. TRIGGER `.swift`/`Package.swift`; \"is this idiomatic Swift\"; SwiftPM/SwiftLint/SwiftFormat/XCTest; actor concurrency; SwiftUI/Vapor; Swift audit. SKIP Objective-C."
+  },
+  {
+    "name": "tar-archive",
+    "description": "GNU tar and bsdtar (libarchive) operations — create, extract, list, and update tarballs with gzip, bzip2, xz, and zstd backends. Covers GNU tar (Linux default) vs bsdtar (macOS/BSD, libarchive backend), deterministic reproducible builds, macOS resource-fork suppression, and streaming pipes. TRIGGER: tar, tarball, bsdtar, gnu-tar, .tar.gz, .tgz, .tar.bz2, .tar.xz, .tar.zst, COPYFILE_DISABLE, --no-mac-metadata. SKIP: standalone zstd without tar (use zstd-archive); zip/7z formats (use zip-archive or sevenz-archive)."
+  },
+  {
+    "name": "tempo-tracing",
+    "description": "Grafana Tempo distributed tracing backend variant of the tracing topic hub. NOT user-invocable; inlines via the tracing hub when Tempo signals fire (prompt mentions tempo, grafana-tempo, trace-bytes, metrics-generator, TraceQL). Cost-optimized object-storage backend; no attribute indexing. For OTel Collector pipeline config see otel-tracing. For Jaeger query UI see jaeger-tracing. For Zipkin B3 propagation see zipkin-tracing."
+  },
+  {
+    "name": "terraform-iac",
+    "description": "Terraform 1.x IaC variant of the iac topic hub. NOT user-invocable; inlines via the iac hub when Terraform signals fire. Covers HCL resource/variable/ output/module/locals syntax, backend types, workspaces, provider lock file, state operations, and post-1.6 BSL license note. TRIGGER terraform, tf, hashicorp, terraform-cloud, .terraform.lock.hcl, tfvars, tfstate. SKIP OpenTofu (see opentofu-iac), Pulumi (see pulumi-iac), Ansible."
+  },
+  {
+    "name": "text-search",
+    "description": "Text search and find-and-replace hub. TRIGGER on: text search, regex search, file search, ripgrep, rg, ag, silver searcher, grep, egrep, fgrep, sd, find and replace, code search, pattern search in files, recursive search, .rgignore, .agignore. Routes to the right tool: ripgrep-search (rg — fast Rust, PCRE2), ag-search (Silver Searcher — pre-installed, .agignore), grep-search (POSIX baseline, GNU vs BSD), sd-search (in-place replace, sed alternative). SKIP: IDE-level search (Ctrl+Shift+F in VS Code/IntelliJ); AST-based code search (use comby for structural search/replace); database full-text search (FTS)."
+  },
+  {
+    "name": "tio-serial",
+    "description": "tio modern serial terminal emulator variant of the serial-console topic hub. NOT user-invocable; inlines via the serial-console hub when tio signals fire (cwd contains tioconfig or .config/tio/config; prompt mentions tio, tio-list-devices, tio-config). Covers CLI flags, profile config, device discovery, XMODEM transfer, auto-reconnect. For minimalist picocom see picocom-serial. For ncurses with zmodem see minicom-serial. For GNU screen detach/reattach see screen-serial."
+  },
+  {
+    "name": "tls",
+    "description": "TLS/PKI configuration topic hub. Auto-routes to the right implementation variant based on environment signals (cwd files, prompt keywords). Variants today — openssl-tls (raw CLI), step-ca-tls (smallstep CA server), cfssl-tls (Cloudflare cfssl), mkcert-tls (developer-local). Hub stub never inlines a variant body; the matcher picks the variant whose paths or triggers score highest against current context. TRIGGER tls, certificate, cert, csr, pem, mtls, PKIX, x509, ACME, CA, SAN, pkcs12, chain, intermediate. SKIP non-cert crypto (SSH keys, GPG, symmetric ciphers unrelated to PKI)."
+  },
+  {
+    "name": "tracing",
+    "description": "Distributed tracing topic hub. Routes to the right backend variant based on cwd signals and prompt keywords. TRIGGER distributed-tracing, trace, span, traceid, spanid, otel, opentelemetry, jaeger, tempo, zipkin, w3c-traceparent, tracecontext, baggage, otlp, sampler, instrumentation. SKIP application-performance-monitoring pure metrics (use metrics hub); structured logs without correlation (use logging hub)."
+  },
+  {
+    "name": "traefik-lb",
+    "description": "Traefik load-balancer variant of the loadbalancer topic hub. Covers Traefik v3 dynamic LB with auto-discovery (Docker, Kubernetes, Consul), ACME Let's Encrypt TLS, IngressRoute CRD, middleware chains, and HTTP/3 support. NOT user-invocable; inlines via the loadbalancer hub when Traefik signals fire (traefik.yml/yaml/toml, keywords ingressroute/@traefik). SKIP static single-host nginx/HAProxy configs — those are nginx-lb and haproxy-lb."
+  },
+  {
+    "name": "typescript",
+    "description": "TypeScript 6.0+/7.0-dev playbook with strict tsconfig. TRIGGER `.ts`/`.tsx`, `tsconfig.json`, `package.json`+tsconfig, \"idiomatic TS\", pnpm/tsconfig/biome/eslint/vitest config, Next.js/Remix/vanilla choice, TS audit. SKIP plain JS no types (javascript), pure UI design (frontend-design). Heavy refactor → typescript-pro. React → react-specialist. Vue → vue-expert. Next.js → nextjs-developer. Always pnpm v10.33+/v11 (never npm/yarn). pnpm dlx not npx."
+  },
+  {
+    "name": "ucarp-ha",
+    "description": "ucarp userspace VRRP/CARP variant of the vrrp-ha topic hub. NOT user-invocable; inlines via the vrrp-ha hub when ucarp or CARP signals fire (prompt mentions ucarp, carp, userspace-vrrp). Lightweight pre-keepalived alternative; still used in OpenBSD-derived stacks and minimal Linux deployments where daemon complexity of keepalived is undesirable. For feature-rich VRRP + IPVS see keepalived-ha."
+  },
+  {
+    "name": "unbound-dns",
+    "description": "Unbound variant of the dns topic hub. Validating, recursive, caching DNS resolver by NLnet Labs. Security-focused: DNSSEC validation by default, QNAME minimisation (RFC 7816), aggressive NSEC. Targets /etc/unbound/unbound.conf. NOT user-invocable; inlines via the dns hub when Unbound signals fire (cwd contains unbound.conf; prompt mentions unbound, validating, DNSSEC). For BIND 9 authoritative see bind9-dns; for Kubernetes DNS see coredns-dns; for lightweight resolver see dnsmasq-dns."
+  },
+  {
+    "name": "victoriametrics-metrics",
+    "description": "VictoriaMetrics TSDB variant of the metrics topic hub. NOT user-invocable; inlines via the metrics hub when VictoriaMetrics signals fire. Covers single-node and cluster modes (vmselect/vminsert/vmstorage), vmagent scraper, vmalert rule engine, MetricsQL superset of PromQL. SKIP pure Prometheus (prometheus-metrics), InfluxDB/Telegraf (influxdb-metrics), Datadog (datadog-metrics)."
+  },
+  {
+    "name": "virtualization-stack",
+    "description": "Linux virt+SDN reference — libvirt/QEMU/KVM, OVS+OpenFlow+OVS-DOCA+DOCA SDK, mlx5 (switchdev, SR-IOV, SubFunctions, TC flower, BlueField), MLNX_OFED/DOCA-OFED, OVN, FRR (BGP/OSPF/EVPN/SRv6), keepalived/VRRP/IPVS, nftables, containerd, Ceph, CloudStack, kernel (vfio/mdev, vhost, virtio, eBPF/XDP). TRIGGER virsh, libvirt XML, hostdev, vDPA, virtualport, OVS, OpenFlow, OVN, DOCA, mlx5, ConnectX, BlueField, DPU, switchdev, SR-IOV, representor, TC flower, hw-offload, FRR, EVPN, VXLAN, SRv6, keepalived, VRRP, IPVS, nftables, conntrack, containerd, CRI, Ceph, RBD, CephFS, cephadm, CloudStack, libvirt-java, virtio, vhost, vfio-pci, DPDK, rte_flow. SKIP non-virt/SDN/storage/routing/DPU."
+  },
+  {
+    "name": "vpn",
+    "description": "VPN configuration hub — WireGuard, strongSwan IPsec, OpenVPN. TRIGGER: vpn, wireguard, wg, wg-quick, strongswan, ipsec, openvpn, tunnel, peer, psk, allowed-ips, gateway, site-to-site, roadwarrior, swanctl, ike, esp, tls-crypt, tun, tap, pre-shared-key. SKIP: TLS application-layer VPNs not managing kernel tunnels (Tailscale uses WireGuard underneath — covered implicitly); SSH port-forwarding (use ssh skill); general TLS PKI without VPN context."
+  },
+  {
+    "name": "vrrp-ha",
+    "description": "VRRP / HA topic hub — routes to the right implementation variant based on cwd files and prompt keywords. TRIGGER vrrp, high-availability, failover, virtual-ip, vip, master-backup, priority, advertisement, preempt, gratuitous-arp, keepalived, corosync, pacemaker, kube-vip, ucarp, carp. SKIP single-node process-supervisor HA (no IP failover involved); cluster orchestration without IP failover (use k8s skill); VXLAN/EVPN tunnel HA (use virtualization-stack)."
+  },
+  {
+    "name": "weave-cni",
+    "description": "Weave Net CNI — VXLAN/FastDP mesh overlay for Kubernetes, EOL since Weaveworks shutdown (June 2024); community fork at rajch/weave continues maintenance. TRIGGER: weave, weave-net, fastdp, weaveworks, weave-daemonset, WEAVE_PASSWORD, weave-npc, weave-mesh, weave-plugin, weave-kube, fastdp-kernel, sleeve-mode. SKIP: active new deployments (prefer calico-cni or cilium-cni); Calico BGP underlay (use calico-cni); Cilium eBPF (use cilium-cni); Flannel simple overlay (use flannel-cni). STATUS: EOL — this skill exists for maintenance of existing Weave clusters only."
+  },
+  {
+    "name": "wireguard-vpn",
+    "description": "WireGuard VPN variant of the vpn hub. Modern, minimal kernel-space VPN using Noise protocol handshake. TRIGGER: wireguard, wg, wg-quick, AllowedIPs, Endpoint, PreSharedKey, ListenPort, wg genkey, wg show, wg0.conf. SKIP: IKEv2/IPsec (strongswan-vpn), OpenVPN TLS tunnels (openvpn-vpn), Tailscale control-plane specifics (WireGuard data-plane still applies)."
+  },
+  {
+    "name": "workflow-authoring",
+    "description": "Authoring rules for Workflow-tool scripts. Skill/agent propagation contract: workflow spawns carry NO task prompt and nothing auto-primes, so prompt-/trigger-only skills (ssh, arithma, linux, rfc, keyword-callable) never prime inside a spawn — inline skill-body excerpts into each spawn brief. Self-enforced checks (verify pre-launch): avoid the literal call-site token in prose briefs, domain-keyword smell wants an activation marker inlined. TRIGGER authoring or debugging Workflow scripts, ultracode runs."
+  },
+  {
+    "name": "zip-archive",
+    "description": "Info-ZIP zip and unzip operations — create, extract, list, update, and repair ZIP archives cross-platform. Covers compression levels, UTF-8 filenames, interactive and non-interactive password handling, macOS __MACOSX folder cleanup, and Java/Android-compatible ZIP structure. TRIGGER: zip, unzip, pkzip, info-zip, .zip, __MACOSX, ZipCrypto, -O UTF-8, bsdunzip, zipinfo. SKIP: 7-Zip encrypted archives (use sevenz-archive); tar-only workflows (use tar-archive); zstd standalone (use zstd-archive)."
+  },
+  {
+    "name": "zipkin-tracing",
+    "description": "Zipkin distributed tracing variant of the tracing topic hub. NOT user-invocable; inlines via the tracing hub when Zipkin or B3 propagation signals fire (prompt mentions zipkin, b3-propagation, twitter-zipkin). Original distributed-tracing tool (Twitter, 2012); single binary; B3 header propagation format. For modern stacks prefer otel-tracing + jaeger-tracing or tempo-tracing. SKIP OpenTelemetry W3C-traceparent-only stacks (use otel-tracing)."
+  },
+  {
+    "name": "zstd-archive",
+    "description": "Facebook Zstandard (zstd) compression — standalone file compression, tar integration, dict training, multithreaded streaming, and seekable format. Best speed-vs-ratio tradeoff for CI pipelines, kernel images, and real-time data; 3-5x faster decompress than gzip at comparable ratios. TRIGGER: zstd, zstandard, tar-zstd, .zst, --ultra --long, -T0, dict train, zstd -c pipe, seekable zstd, zstd CI pipeline. SKIP: 7z LZMA2 (use sevenz-archive); tar with gzip/bzip2/xz only (use tar-archive); ZIP (use zip-archive)."
+  }
+]

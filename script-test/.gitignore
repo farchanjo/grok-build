@@ -1,0 +1,9 @@
+# Local, untracked experiment folder. Nothing here is needed to build the repo.
+
+.venv/
+__pycache__/
+*.pyc
+
+# Harness artifacts: raw responses and the rendered report.
+out/
+*.jsonl

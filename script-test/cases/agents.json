@@ -1,0 +1,438 @@
+[
+  {
+    "name": "accessibility-tester",
+    "description": "Expert accessibility tester specializing in WCAG compliance, inclusive design, and universal access. Masters screen reader compatibility, keyboard navigation, and assistive technology integration with focus on creating barrier-free digital experiences."
+  },
+  {
+    "name": "ai-engineer",
+    "description": "Expert AI engineer specializing in AI system design, model implementation, and production deployment. Masters multiple AI frameworks and tools with focus on building scalable, efficient, and ethical AI solutions from research to production."
+  },
+  {
+    "name": "angular-architect",
+    "description": "Expert Angular architect mastering Angular 21 with enterprise patterns (stable Signals, zoneless change detection, @if/@for/@switch, incremental hydration). Specializes in RxJS, NgRx state management, micro-frontend architecture, and performance optimization with focus on building scalable enterprise applications."
+  },
+  {
+    "name": "api-designer",
+    "description": "API architecture expert designing scalable, developer-friendly interfaces. Creates REST and GraphQL APIs with comprehensive documentation, focusing on consistency, performance, and developer experience."
+  },
+  {
+    "name": "arch-advisor",
+    "description": "Architecture coach agent. Wraps the arch-advisor skill — Hexagonal (Ports & Adapters) + DDD + GoF, vocabulary recap, project rules (Structurizr, MADR 4.0, DBML, OpenAPI). Use for architecture audits across files, ADR drafting, contract/boundary review."
+  },
+  {
+    "name": "architect-reviewer",
+    "description": "Expert architecture reviewer specializing in system design validation, architectural patterns, and technical decision assessment. Masters scalability analysis, technology stack evaluation, and evolutionary architecture with focus on maintainability and long-term viability."
+  },
+  {
+    "name": "azure-infra-engineer",
+    "description": "Azure cloud infrastructure expert specializing in network design, identity integration, PowerShell automation with Az modules, and infrastructure-as-code patterns using Bicep."
+  },
+  {
+    "name": "backend-developer",
+    "description": "Senior backend engineer specializing in scalable API development and microservices architecture. Builds robust server-side solutions with focus on performance, security, and maintainability."
+  },
+  {
+    "name": "build-engineer",
+    "description": "Expert build engineer specializing in build system optimization, compilation strategies, and developer productivity. Masters modern build tools, caching mechanisms, and creating fast, reliable build pipelines that scale with team growth."
+  },
+  {
+    "name": "chaos-engineer",
+    "description": "Expert chaos engineer specializing in controlled failure injection, resilience testing, and building antifragile systems. Masters chaos experiments, game day planning, and continuous resilience improvement with focus on learning from failure."
+  },
+  {
+    "name": "cli-developer",
+    "description": "Expert CLI developer specializing in command-line interface design, developer tools, and terminal applications. Masters user experience, cross-platform compatibility, and building efficient CLI tools that developers love to use."
+  },
+  {
+    "name": "cloud-architect",
+    "description": "Expert cloud architect specializing in multi-cloud strategies, scalable architectures, and cost-effective solutions. Masters AWS, Azure, and GCP with focus on security, performance, and compliance while designing resilient cloud-native systems."
+  },
+  {
+    "name": "cloudstack-dev",
+    "description": "Apache CloudStack source-code development specialist (4.23-SNAPSHOT, Java 17+/Maven 3.9, Spring Framework — NOT Boot). Covers module navigation, code conventions, Maven build profiles, schema upgrades, Vue 3 UI, Marvin Python tests. TRIGGER cloudstack source, BaseCmd, GenericDaoBase."
+  },
+  {
+    "name": "code-reviewer",
+    "description": "Expert code reviewer specializing in code quality, security vulnerabilities, and best practices across multiple languages. Masters static analysis, design patterns, and performance optimization with focus on maintainability and technical debt reduction."
+  },
+  {
+    "name": "compliance-auditor",
+    "description": "Expert compliance auditor specializing in regulatory frameworks, data privacy laws, and security standards. Masters GDPR, HIPAA, PCI DSS, SOC 2, and ISO certifications with focus on automated compliance validation and continuous monitoring."
+  },
+  {
+    "name": "context-manager",
+    "description": "Expert context manager specializing in information storage, retrieval, and synchronization across multi-agent systems. Masters state management, version control, and data lifecycle with focus on ensuring consistency, accessibility, and performance at scale."
+  },
+  {
+    "name": "cpp-pro",
+    "description": "Expert C++ developer specializing in modern C++20/23 (and emerging C++26), systems programming, and high-performance computing. Masters template metaprogramming, zero-overhead abstractions, and low-level optimization with emphasis on safety and efficiency."
+  },
+  {
+    "name": "csharp-developer",
+    "description": "Expert C# developer specializing in modern .NET development, ASP.NET Core, and cloud-native applications. Masters C# 14 features (extension members, field-backed properties, file-based apps), Blazor, .NET Aspire, and cross-platform development with emphasis on performance and clean architecture."
+  },
+  {
+    "name": "data-analyst",
+    "description": "Expert data analyst specializing in business intelligence, data visualization, and statistical analysis. Masters SQL, Python, and BI tools to transform raw data into actionable insights with focus on stakeholder communication and business impact."
+  },
+  {
+    "name": "data-engineer",
+    "description": "Expert data engineer specializing in building scalable data pipelines, ETL/ELT processes, and data infrastructure. Masters big data technologies and cloud platforms with focus on reliable, efficient, and cost-optimized data platforms."
+  },
+  {
+    "name": "data-scientist",
+    "description": "Expert data scientist specializing in statistical analysis, machine learning, and business insights. Masters exploratory data analysis, predictive modeling, and data storytelling with focus on delivering actionable insights that drive business value."
+  },
+  {
+    "name": "database-administrator",
+    "description": "Expert database administrator specializing in high-availability systems, performance optimization, and disaster recovery. Masters PostgreSQL, MySQL, MongoDB, and Redis with focus on reliability, scalability, and operational excellence."
+  },
+  {
+    "name": "database-optimizer",
+    "description": "Expert database optimizer specializing in query optimization, performance tuning, and scalability across multiple database systems. Masters execution plan analysis, index strategies, and system-level optimizations with focus on achieving peak database performance."
+  },
+  {
+    "name": "debugger",
+    "description": "Expert debugger specializing in complex issue diagnosis, root cause analysis, and systematic problem-solving. Masters debugging tools, techniques, and methodologies across multiple languages and environments with focus on efficient issue resolution."
+  },
+  {
+    "name": "dependency-manager",
+    "description": "Expert dependency manager specializing in package management, security auditing, and version conflict resolution across multiple ecosystems. Masters dependency optimization, supply chain security, and automated updates with focus on maintaining stable, secure, and efficient dependency trees."
+  },
+  {
+    "name": "deployment-engineer",
+    "description": "Expert deployment engineer specializing in CI/CD pipelines, release automation, and deployment strategies. Masters blue-green, canary, and rolling deployments with focus on zero-downtime releases and rapid rollback capabilities."
+  },
+  {
+    "name": "devops-engineer",
+    "description": "Expert DevOps engineer bridging development and operations with comprehensive automation, monitoring, and infrastructure management. Masters CI/CD, containerization, and cloud platforms with focus on culture, collaboration, and continuous improvement."
+  },
+  {
+    "name": "django-developer",
+    "description": "Expert Django developer mastering Django 5.2 LTS / 6.0 with modern Python practices. Specializes in scalable web applications, REST API development, async views, and enterprise patterns with focus on rapid development and security best practices."
+  },
+  {
+    "name": "documentation-engineer",
+    "description": "Expert documentation engineer specializing in technical documentation systems, API documentation, and developer-friendly content. Masters documentation-as-code, automated generation, and creating maintainable documentation that developers actually use."
+  },
+  {
+    "name": "dotnet-core-expert",
+    "description": "Expert .NET Core specialist mastering .NET 10 with modern C# features. Specializes in cross-platform development, minimal APIs, cloud-native applications, and microservices with focus on building high-performance, scalable solutions."
+  },
+  {
+    "name": "dotnet-framework-48-expert",
+    "description": "Expert .NET Framework 4.8 specialist mastering legacy enterprise applications. Specializes in Windows-based development, Web Forms, WCF services, and Windows services with focus on maintaining and modernizing existing enterprise solutions."
+  },
+  {
+    "name": "dx-optimizer",
+    "description": "Expert developer experience optimizer specializing in build performance, tooling efficiency, and workflow automation. Masters development environment optimization with focus on reducing friction, accelerating feedback loops, and maximizing developer productivity and satisfaction."
+  },
+  {
+    "name": "electron-pro",
+    "description": "Desktop application specialist building secure cross-platform solutions. Develops Electron apps with native OS integration, focusing on security, performance, and seamless user experience. Default to **Electron 42** (Chromium 148, Node 24); track the latest-3-majors support window (41 / 42 / 43)."
+  },
+  {
+    "name": "error-detective",
+    "description": "Expert error detective specializing in complex error pattern analysis, correlation, and root cause discovery. Masters distributed system debugging, error tracking, and anomaly detection with focus on finding hidden connections and preventing error cascades."
+  },
+  {
+    "name": "ffmpeg",
+    "description": "Media transcoding/remuxing/editing using ffmpeg. Wraps the ffmpeg skill. Use when caller wants the skill executed in an isolated subagent context (heavy/parallel/multi-file work) instead of inline in the main context."
+  },
+  {
+    "name": "ffprobe",
+    "description": "Media inspection (codecs, streams, metadata) using ffprobe. Wraps the ffprobe skill. Use when caller wants the skill executed in an isolated subagent context (heavy/parallel/multi-file work) instead of inline in the main context."
+  },
+  {
+    "name": "flutter-expert",
+    "description": "Expert Flutter specialist mastering Flutter 3.41+ with modern architecture patterns. Specializes in cross-platform development, custom animations, native integrations, and performance optimization with focus on creating beautiful, native-performance applications."
+  },
+  {
+    "name": "frontend-developer",
+    "description": "Expert UI engineer focused on crafting robust, scalable frontend solutions. Builds high-quality React components prioritizing maintainability, user experience, and web standards compliance."
+  },
+  {
+    "name": "fullstack-developer",
+    "description": "End-to-end feature owner with expertise across the entire stack. Delivers complete solutions from database to UI with focus on seamless integration and optimal user experience."
+  },
+  {
+    "name": "git-workflow-manager",
+    "description": "Expert Git workflow manager specializing in branching strategies, automation, and team collaboration. Masters Git workflows, merge conflict resolution, and repository management with focus on enabling efficient, clear, and scalable version control practices."
+  },
+  {
+    "name": "glab",
+    "description": "GitLab CLI operations (MRs, pipelines, releases, vars). Wraps the glab skill. Use when caller wants the skill executed in an isolated subagent context (heavy/parallel/multi-file work) instead of inline in the main context."
+  },
+  {
+    "name": "glfm",
+    "description": "GFM/GLFM/Mermaid markdown reference. Wraps the glfm skill. Use when caller wants the skill executed in an isolated subagent context (heavy/parallel/multi-file work) instead of inline in the main context."
+  },
+  {
+    "name": "golang-pro",
+    "description": "Expert Go developer specializing in high-performance systems, concurrent programming, and cloud-native microservices. Masters idiomatic Go patterns with emphasis on simplicity, efficiency, and reliability."
+  },
+  {
+    "name": "graphql-architect",
+    "description": "GraphQL schema architect designing efficient, scalable API graphs. Masters federation, subscriptions, and query optimization while ensuring type safety and developer experience."
+  },
+  {
+    "name": "incident-responder",
+    "description": "Expert incident responder specializing in security and operational incident management. Masters evidence collection, forensic analysis, and coordinated response with focus on minimizing impact and preventing future incidents."
+  },
+  {
+    "name": "it-ops-orchestrator",
+    "description": "IT operations meta-orchestrator specializing in routing tasks across PowerShell, .NET, infrastructure, Azure, and M365 subagents. Prefers PowerShell-based automation as the default implementation language."
+  },
+  {
+    "name": "java-architect",
+    "description": "Senior Java architect specializing in enterprise-grade applications, Spring ecosystem, and cloud-native development. Masters modern Java features, reactive programming, and microservices patterns with focus on scalability and maintainability."
+  },
+  {
+    "name": "javascript-pro",
+    "description": "Expert JavaScript developer specializing in modern ES2024+ features, asynchronous programming, and full-stack development. Masters both browser APIs and Node.js 22/24 LTS ecosystem with emphasis on performance and clean code patterns."
+  },
+  {
+    "name": "knowledge-synthesizer",
+    "description": "Expert knowledge synthesizer specializing in extracting insights from multi-agent interactions, identifying patterns, and building collective intelligence. Masters cross-agent learning, best practice extraction, and continuous system improvement through knowledge management."
+  },
+  {
+    "name": "kotlin-specialist",
+    "description": "Expert Kotlin developer specializing in coroutines, multiplatform development, and Android applications. Masters functional programming patterns, DSL design, and modern Kotlin features with emphasis on conciseness and safety."
+  },
+  {
+    "name": "kubernetes-specialist",
+    "description": "Expert Kubernetes specialist mastering container orchestration, cluster management, and cloud-native architectures. Specializes in production-grade deployments, security hardening, and performance optimization with focus on scalability and reliability."
+  },
+  {
+    "name": "laravel-specialist",
+    "description": "Expert Laravel specialist mastering Laravel 12 / 13 with modern PHP practices (no LTS branding — 18mo bugfix + 2y security per major). Specializes in elegant syntax, Eloquent ORM, queue systems, and enterprise features with focus on building scalable web applications and APIs."
+  },
+  {
+    "name": "legacy-modernizer",
+    "description": "Expert legacy system modernizer specializing in incremental migration strategies and risk-free modernization. Masters refactoring patterns, technology updates, and business continuity with focus on transforming legacy systems into modern, maintainable architectures without disrupting operations."
+  },
+  {
+    "name": "llm-architect",
+    "description": "Expert LLM architect specializing in large language model architecture, deployment, and optimization. Masters LLM system design, fine-tuning strategies, and production serving with focus on building scalable, efficient, and safe LLM applications."
+  },
+  {
+    "name": "mcp-developer",
+    "description": "Expert MCP developer specializing in Model Context Protocol server and client development. Masters protocol specification, SDK implementation, and building production-ready integrations between AI systems and external tools/data sources."
+  },
+  {
+    "name": "microservices-architect",
+    "description": "Distributed systems architect designing scalable microservice ecosystems. Masters service boundaries, communication patterns, and operational excellence in cloud-native environments."
+  },
+  {
+    "name": "mkvextract",
+    "description": "Extract tracks/tags/chapters/attachments from mkv. Wraps the mkvextract skill. Use when caller wants the skill executed in an isolated subagent context (heavy/parallel/multi-file work) instead of inline in the main context."
+  },
+  {
+    "name": "mkvinfo",
+    "description": "Inspect EBML/Matroska structure. Wraps the mkvinfo skill. Use when caller wants the skill executed in an isolated subagent context (heavy/parallel/multi-file work) instead of inline in the main context."
+  },
+  {
+    "name": "mkvmerge",
+    "description": "Mux/remux/split/append mkv files. Wraps the mkvmerge skill. Use when caller wants the skill executed in an isolated subagent context (heavy/parallel/multi-file work) instead of inline in the main context."
+  },
+  {
+    "name": "mkvpropedit",
+    "description": "Patch mkv headers in place. Wraps the mkvpropedit skill. Use when caller wants the skill executed in an isolated subagent context (heavy/parallel/multi-file work) instead of inline in the main context."
+  },
+  {
+    "name": "ml-engineer",
+    "description": "Expert ML engineer specializing in machine learning model lifecycle, production deployment, and ML system optimization. Masters both traditional ML and deep learning with focus on building scalable, reliable ML systems from training to serving."
+  },
+  {
+    "name": "mlops-engineer",
+    "description": "Expert MLOps engineer specializing in ML infrastructure, platform engineering, and operational excellence for machine learning systems. Masters CI/CD for ML, model versioning, and scalable ML platforms with focus on reliability and automation."
+  },
+  {
+    "name": "mobile-developer",
+    "description": "Cross-platform mobile specialist building performant native experiences. Creates optimized mobile applications with React Native and Flutter, focusing on platform-specific excellence and battery efficiency."
+  },
+  {
+    "name": "multi-agent-coordinator",
+    "description": "Expert multi-agent coordinator specializing in complex workflow orchestration, inter-agent communication, and distributed system coordination. Masters parallel execution, dependency management, and fault tolerance with focus on achieving seamless collaboration at scale."
+  },
+  {
+    "name": "network-engineer",
+    "description": "Expert network engineer specializing in cloud and hybrid network architectures, security, and performance optimization. Masters network design, troubleshooting, and automation with focus on reliability, scalability, and zero-trust principles."
+  },
+  {
+    "name": "nextjs-developer",
+    "description": "Expert Next.js developer mastering Next.js 16.2+ with App Router, stable Turbopack (dev+prod default), React Compiler integration, and full-stack features. Specializes in server components, server actions, performance optimization, and production deployment with focus on building fast, SEO-friendly applications."
+  },
+  {
+    "name": "nlp-engineer",
+    "description": "Expert NLP engineer specializing in natural language processing, understanding, and generation. Masters transformer models, text processing pipelines, and production NLP systems with focus on multilingual support and real-time performance."
+  },
+  {
+    "name": "performance-engineer",
+    "description": "Expert performance engineer specializing in system optimization, bottleneck identification, and scalability engineering. Masters performance testing, profiling, and tuning across applications, databases, and infrastructure with focus on achieving optimal response times and resource efficiency."
+  },
+  {
+    "name": "performance-monitor",
+    "description": "Expert performance monitor specializing in system-wide metrics collection, analysis, and optimization. Masters real-time monitoring, anomaly detection, and performance insights across distributed agent systems with focus on observability and continuous improvement."
+  },
+  {
+    "name": "php-pro",
+    "description": "Expert PHP developer specializing in modern PHP 8.4+ (8.5 latest) with strong typing, async programming, and enterprise frameworks. Masters Laravel, Symfony, and modern PHP patterns with emphasis on performance and clean architecture."
+  },
+  {
+    "name": "platform-engineer",
+    "description": "Expert platform engineer specializing in internal developer platforms, self-service infrastructure, and developer experience. Masters platform APIs, GitOps workflows, and golden path templates with focus on empowering developers and accelerating delivery."
+  },
+  {
+    "name": "postgres-pro",
+    "description": "Expert PostgreSQL specialist mastering database administration, performance optimization, and high availability. Deep expertise in PostgreSQL internals, advanced features, and enterprise deployment with focus on reliability and peak performance."
+  },
+  {
+    "name": "powershell-51-expert",
+    "description": "Senior Windows PowerShell 5.1 automation expert specializing in legacy .NET Framework, RSAT modules, and enterprise IT operations across AD, DNS, DHCP, GPO, and Windows servers."
+  },
+  {
+    "name": "powershell-7-expert",
+    "description": "Cross-platform PowerShell 7.6 LTS (.NET 10) expert specializing in modern .NET, cloud automation, CI/CD tooling, Azure integration, and high-performance scripting across Windows, Linux, and macOS environments."
+  },
+  {
+    "name": "powershell-module-architect",
+    "description": "PowerShell architecture expert specializing in module design, function structure, reusable libraries, profile optimization, and cross-version compatibility across PowerShell 5.1 and PowerShell 7+."
+  },
+  {
+    "name": "powershell-ui-architect",
+    "description": "PowerShell UI architect specializing in desktop and terminal interfaces using WinForms, WPF, TUIs, and Metro-style frameworks like MahApps.Metro and Elysium. Focuses on building maintainable, testable, and user-friendly frontends on top of PowerShell and .NET automation."
+  },
+  {
+    "name": "prompt-engineer",
+    "description": "Expert prompt engineer specializing in designing, optimizing, and managing prompts for large language models. Masters prompt architecture, evaluation frameworks, and production prompt systems with focus on reliability, efficiency, and measurable outcomes."
+  },
+  {
+    "name": "python-pro",
+    "description": "Expert Python developer specializing in modern Python 3.13+ development (3.14 latest) with deep expertise in type safety, async programming, data science, and web frameworks. Masters Pythonic patterns while ensuring production-ready code quality."
+  },
+  {
+    "name": "qa-expert",
+    "description": "Expert QA engineer specializing in comprehensive quality assurance, test strategy, and quality metrics. Masters manual and automated testing, test planning, and quality processes with focus on delivering high-quality software through systematic testing."
+  },
+  {
+    "name": "rails-expert",
+    "description": "Expert Rails specialist mastering Rails 8.1 with modern conventions. Specializes in convention over configuration, Hotwire/Turbo, Action Cable, and rapid application development with focus on building elegant, maintainable web applications."
+  },
+  {
+    "name": "react-specialist",
+    "description": "Expert React specialist mastering React 19.2+ with modern patterns and ecosystem (React Compiler, Server Components, Actions). Specializes in performance optimization, advanced hooks, server components, and production-ready architectures with focus on creating scalable, maintainable applications."
+  },
+  {
+    "name": "refactoring-specialist",
+    "description": "Expert refactoring specialist mastering safe code transformation techniques and design pattern application. Specializes in improving code structure, reducing complexity, and enhancing maintainability while preserving behavior with focus on systematic, test-driven refactoring."
+  },
+  {
+    "name": "rfc",
+    "description": "Fetch and summarize RFCs / protocol specs (IETF/W3C/IEEE). Wraps the rfc skill. Use when caller wants the skill executed in an isolated subagent context (heavy/parallel/multi-file work) instead of inline in the main context."
+  },
+  {
+    "name": "rust-engineer",
+    "description": "Senior Rust engineer for systems programming, memory safety, and zero-cost abstractions. Targets Rust 2024 edition (1.85+) on a Rust 1.98 toolchain (current stable 1.98.1, Sep 2026) — masters AFIT/RPITIT, async closures, precise capturing, core::range migration for Rust 2027 edition prep, and performance optimization for mission-critical applications."
+  },
+  {
+    "name": "spring-boot-engineer",
+    "description": "Expert Spring Boot engineer mastering Spring Boot 4+ (Spring Framework 7, Jakarta EE 11, JSpecify) with cloud-native patterns. Specializes in microservices, reactive programming, Spring Cloud integration, and enterprise solutions with focus on building scalable, production-ready applications."
+  },
+  {
+    "name": "sql-pro",
+    "description": "Expert SQL developer specializing in complex query optimization, database design, and performance tuning across PostgreSQL, MySQL, SQL Server, and Oracle. Masters advanced SQL features, indexing strategies, and data warehousing patterns."
+  },
+  {
+    "name": "sre-engineer",
+    "description": "Expert Site Reliability Engineer balancing feature velocity with system stability through SLOs, automation, and operational excellence. Masters reliability engineering, chaos testing, and toil reduction with focus on building resilient, self-healing systems."
+  },
+  {
+    "name": "swift-expert",
+    "description": "Expert Swift developer specializing in Swift 6.3+ with strict concurrency, SwiftUI, and protocol-oriented programming. Masters Apple platforms development, server-side Swift, and modern concurrency with emphasis on safety and expressiveness."
+  },
+  {
+    "name": "terraform-engineer",
+    "description": "Expert Terraform / OpenTofu engineer specializing in infrastructure as code, multi-cloud provisioning, and modular architecture. Masters Terraform 1.14.x and OpenTofu 1.11.x best practices, state management, and enterprise patterns with focus on reusability, security, and automation."
+  },
+  {
+    "name": "test-automator",
+    "description": "Expert test automation engineer specializing in building robust test frameworks, CI/CD integration, and comprehensive test coverage. Masters multiple automation tools and frameworks with focus on maintainable, scalable, and efficient automated testing solutions."
+  },
+  {
+    "name": "tooling-engineer",
+    "description": "Expert tooling engineer specializing in developer tool creation, CLI development, and productivity enhancement. Masters tool architecture, plugin systems, and user experience design with focus on building efficient, extensible tools that significantly improve developer workflows."
+  },
+  {
+    "name": "typescript-pro",
+    "description": "Expert TypeScript developer specializing in advanced type system usage, full-stack development, and build optimization. Masters type-safe patterns for both frontend and backend with emphasis on developer experience and runtime safety."
+  },
+  {
+    "name": "ui-designer",
+    "description": "Expert visual designer specializing in creating intuitive, beautiful, and accessible user interfaces. Masters design systems, interaction patterns, and visual hierarchy to craft exceptional user experiences that balance aesthetics with functionality."
+  },
+  {
+    "name": "virt-bgp",
+    "description": "BGP protocol specialist covering semantics, EVPN route types, RPKI/BGPsec, Flowspec, MP-BGP AFI/SAFI, L3VPN VPNv4/v6, route reflection, communities, and decision-process edge cases. Backed by 42 cached RFC files. TRIGGER BGP-4, EVPN, RPKI, Flowspec, VPNv4."
+  },
+  {
+    "name": "virt-ceph",
+    "description": "Ceph storage specialist covering RADOS, OSD/Mon/MDS/RGW, CRUSH map, PG autoscaler, RBD images (snapshot/clone/mirror), CephFS, cephadm orchestration, BlueStore, libvirt RBD pool, and cephx auth. TRIGGER ceph, RADOS, librbd, cephadm, CRUSH."
+  },
+  {
+    "name": "virt-cloudstack",
+    "description": "Apache CloudStack operational specialist covering management server, KVM agent (LibvirtComputingResource, OvsVifDriver), virtual router, system VMs, network plugins (OVS/OVN/NSX-T), storage backends (NFS/Ceph RBD), and CloudStack API. TRIGGER CloudStack, agent.log, deployVirtualMachine."
+  },
+  {
+    "name": "virt-containerd",
+    "description": "containerd specialist covering runtime v2 shim model, snapshotters (overlayfs/btrfs/devmapper), CRI, NRI, content store, image registries, sandbox API, KVM-based runtimes (Kata/Firecracker/gVisor), and CNI integration. TRIGGER containerd, snapshotter, runtime v2 shim, Kata."
+  },
+  {
+    "name": "virt-frr",
+    "description": "FRR (FRRouting) daemon specialist covering bgpd, ospfd, isisd, ldpd, pimd, vrrpd, bfdd, vtysh CLI, ZAPI, zebra dataplane backends (netlink/FPM), YANG/RESTCONF northbound, route-map, prefix-list, and per-VRF config. TRIGGER FRR, bgpd, vtysh, ZAPI, frr.conf."
+  },
+  {
+    "name": "virt-integration",
+    "description": "Cross-layer architecture specialist for the open-source virt + SDN stack. Designs topologies spanning libvirt, OVS, mlx5, OVN, FRR, keepalived, Ceph, containerd, CloudStack. TRIGGER design, topology, packet-path, BGP-EVPN underlay, OVN-K8s, MTU planning."
+  },
+  {
+    "name": "virt-keepalived-nft",
+    "description": "keepalived (VRRP/IPVS) + nftables specialist covering VRRPv2/v3, sync groups, healthcheckers, IPVS/LVS (NAT/DR/TUN), notify scripts; nftables families, hooks, chains, sets/maps (vmap), libvirt firewall integration. TRIGGER keepalived, vrrp_instance, nftables, ipvsadm."
+  },
+  {
+    "name": "virt-libvirt",
+    "description": "libvirt + QEMU/KVM specialist covering domain XML, virsh CLI, VM lifecycle, snapshots, live migration, hot-plug, storage pools, and NIC attach modes (bridge, OVS virtualport, SR-IOV hostdev, vDPA, macvtap). TRIGGER virsh, libvirt, domain XML, qemu, vfio-pci."
+  },
+  {
+    "name": "virt-mlx5",
+    "description": "NVIDIA mlx5 driver + ConnectX/BlueField + OFED specialist covering devlink, eswitch/switchdev, SR-IOV, SubFunctions, representors, TC flower offload, MLNX_OFED/DOCA-OFED install, and RDMA/RoCE stack. TRIGGER mlx5_core, switchdev, SR-IOV, BlueField, MLNX_OFED."
+  },
+  {
+    "name": "virt-ovn",
+    "description": "OVN specialist covering NB/SB OVSDB schemas, ovn-northd, ovn-controller, logical switches/routers, ACLs, load balancers, NAT, gateway routers, OVN-IC, OVN-Kubernetes, Neutron ML2 plugin, and hardware offload. TRIGGER ovn-nbctl, ovn-sbctl, ovn-trace, OVN-K8s."
+  },
+  {
+    "name": "virt-ovs-doca",
+    "description": "OVS + OVS-DOCA + DOCA SDK specialist covering kernel/DPDK/DOCA datapaths, OpenFlow 1.0/1.3/1.5, conntrack, VXLAN/GENEVE tunnels, TC flower/rte_flow hw-offload, DOCA Flow API, and DOCA SDK libraries. TRIGGER ovs-vsctl, ovs-ofctl, hw-offload, doca_flow."
+  },
+  {
+    "name": "virt-troubleshoot",
+    "description": "Cross-layer diagnostics specialist for the open-source virt + SDN stack (libvirt, OVS, mlx5, OVN, FRR, keepalived, nftables, Ceph, containerd, CloudStack). TRIGGER debug, diagnose, trace, root-cause, packet drops, BGP not establishing, OVN flows missing."
+  },
+  {
+    "name": "virtualization-stack",
+    "description": "Linux virtualization + SDN stack orchestrator (libvirt/QEMU/OVS/OVN/DOCA/FRR/Ceph). Wraps the virtualization-stack skill for isolated subagent context and acts as HANDOFF orchestrator for the 12 virt-* specialist subagents."
+  },
+  {
+    "name": "vue-expert",
+    "description": "Expert Vue specialist mastering Vue 3.5 (stable) with Composition API and ecosystem; tracking Vue 3.6 Vapor Mode (beta, opt-in). Specializes in reactivity system, performance optimization, Nuxt 3 development, and enterprise patterns with focus on building elegant, reactive applications."
+  },
+  {
+    "name": "websocket-engineer",
+    "description": "Real-time communication specialist implementing scalable WebSocket architectures. Masters bidirectional protocols, event-driven systems, and low-latency messaging for interactive applications."
+  },
+  {
+    "name": "windows-infra-admin",
+    "description": "Windows infrastructure expert specializing in Active Directory, DNS, DHCP, GPO, server administration, and enterprise automation via PowerShell."
+  }
+]
