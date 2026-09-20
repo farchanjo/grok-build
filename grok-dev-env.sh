@@ -117,9 +117,10 @@ export GROK_DISABLE_AUTOUPDATER=1
 # helper build starts the daemon with room. The cache is also capped well below
 # the 500G default: it is shared, and an unbounded one fills the disk.
 ulimit -n 65536 2>/dev/null || true
-# Override, not default: the ambient profile sets 500G, and an unbounded shared
-# cache filling the disk is the failure mode this guards against.
-export SCCACHE_CACHE_SIZE=50G
+# Override, not default: the ambient profile sets 500G. The cap is deliberately
+# small (5G) — this workspace's full build exceeds it, so the cache thrashes
+# rather than grows, and the disk stays predictable.
+export SCCACHE_CACHE_SIZE=5G
 
 # Agent discovery otherwise also scans the legacy literal ~/.grok whenever
 # GROK_HOME points elsewhere, which would pull the real user agent tree into
