@@ -25,15 +25,17 @@ fn remote_none_preserves_built_in_defaults() {
     assert_eq!(
         policy.todo_gate,
         TodoGateConfig {
-            enabled: false,
+            // Shipped default: the gate is on unless remote or CLI says off.
+            enabled: true,
             max_fires_per_prompt: DEFAULT_TODO_GATE_MAX_FIRES,
+            ..TodoGateConfig::default()
         },
     );
     assert!(policy.enabled);
     assert!(policy.todo_nudge.enabled);
 }
 #[test]
-fn remote_disable_matches_default_path() {
+fn remote_disable_overrides_the_shipped_default() {
     let remote = remote_with_todo_gate(Some(false), None);
     let policy = resolve_reminder_policy(Some(&remote), false);
     assert_eq!(
@@ -41,6 +43,7 @@ fn remote_disable_matches_default_path() {
         TodoGateConfig {
             enabled: false,
             max_fires_per_prompt: DEFAULT_TODO_GATE_MAX_FIRES,
+            ..TodoGateConfig::default()
         },
     );
 }
@@ -53,18 +56,21 @@ fn remote_enable_true_overrides_default() {
         TodoGateConfig {
             enabled: true,
             max_fires_per_prompt: DEFAULT_TODO_GATE_MAX_FIRES,
+            ..TodoGateConfig::default()
         },
     );
 }
 #[test]
-fn remote_cap_override_applies_without_enabling_gate() {
+fn remote_cap_override_applies_without_touching_enablement() {
     let remote = remote_with_todo_gate(None, Some(5));
     let policy = resolve_reminder_policy(Some(&remote), false);
     assert_eq!(
         policy.todo_gate,
         TodoGateConfig {
-            enabled: false,
+            // No `enabled` on the remote payload ⇒ shipped default stands.
+            enabled: true,
             max_fires_per_prompt: 5,
+            ..TodoGateConfig::default()
         },
     );
 }
@@ -78,21 +84,49 @@ fn cli_todo_gate_overrides_remote_enable_false() {
             enabled: true,
             // Cap stays whatever remote said; CLI only flips `enabled`.
             max_fires_per_prompt: 7,
+            ..TodoGateConfig::default()
         },
     );
 }
+#[test]
+fn remote_item_cap_and_pick_override_apply() {
+    let remote = RemoteSettings {
+        todo_gate_max_items_named: Some(5),
+        todo_gate_pick_with_decision: Some(false),
+        ..RemoteSettings::default()
+    };
+    let policy = resolve_reminder_policy(Some(&remote), false);
+    assert_eq!(policy.todo_gate.max_items_named, 5);
+    assert!(!policy.todo_gate.pick_with_decision);
+    // A zero cap is floored to 1 so the reminder always names something.
+    let zero = RemoteSettings {
+        todo_gate_max_items_named: Some(0),
+        ..RemoteSettings::default()
+    };
+    assert_eq!(
+        resolve_reminder_policy(Some(&zero), false)
+            .todo_gate
+            .max_items_named,
+        1
+    );
+}
+
 #[test]
 fn remote_settings_deserializes_without_todo_gate_fields() {
     let legacy_json = "{}";
     let settings: RemoteSettings = serde_json::from_str(legacy_json).unwrap();
     assert_eq!(settings.todo_gate_enabled, None);
     assert_eq!(settings.todo_gate_max_fires_per_prompt, None);
+    assert_eq!(settings.todo_gate_max_items_named, None);
+    assert_eq!(settings.todo_gate_pick_with_decision, None);
     let policy = resolve_reminder_policy(Some(&settings), false);
     assert_eq!(
         policy.todo_gate,
         TodoGateConfig {
-            enabled: false,
+            // Nothing in the payload ⇒ the shipped default stands.
+            enabled: true,
             max_fires_per_prompt: DEFAULT_TODO_GATE_MAX_FIRES,
+            ..TodoGateConfig::default()
         },
     );
 }
@@ -405,4 +439,39 @@ async fn rollover_reminder_fires_when_fallback_stamps_a_date_free_template() {
             );
         })
         .await;
+}
+
+/// The pick's instruction is the measured pair verbatim
+/// (`script-test/sim_todo_gate.py`: one choice picks the actionable item
+/// 15/18 = 83% against 11/18 = 61% for insertion order). A reworded question is
+/// an unmeasured one, so the two sentences are pinned here.
+#[test]
+fn todo_gate_pick_question_is_the_measured_one() {
+    let pending = [
+        "add the writer",
+        "wire the route",
+        "add the auth check",
+        "ship it",
+    ];
+    let (state, questions) = super::reminders::todo_gate_pick_request(&pending);
+    let instruction = questions["next"]["instructions"]
+        .as_str()
+        .expect("instructions is a string");
+    assert!(
+        instruction.starts_with(
+            "The agent ended its turn with pending todos and no backing task. Which single \
+             pending item should it advance next?"
+        ),
+        "measured lead sentence changed: {instruction}"
+    );
+    assert!(
+        instruction.contains(
+            "Pick the item the agent can start right now with the tools it has. If an earlier \
+             item is blocked, a later one is the answer."
+        ),
+        "measured criteria sentence changed: {instruction}"
+    );
+    assert_eq!(state["outstanding_todos"].as_array().unwrap().len(), 4);
+    assert_eq!(questions["next"]["criteria"]["item_1"], "add the writer");
+    assert_eq!(questions["next"]["criteria"]["item_4"], "ship it");
 }

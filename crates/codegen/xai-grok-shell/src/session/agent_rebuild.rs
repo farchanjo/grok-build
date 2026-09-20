@@ -547,28 +547,25 @@ mod tests {
                     .expect("test rebuild spec should be uniquely owned")
                     .subagents_enabled = true;
                 let models_manager = spec.models_manager.clone();
-                models_manager
-                    .insert_test_entry("zeta-public", model_entry("internal-zeta"));
-                models_manager
-                    .insert_test_entry("alpha-public", model_entry("internal-alpha"));
+                models_manager.insert_test_entry("zeta-public", model_entry("internal-zeta"));
+                models_manager.insert_test_entry("alpha-public", model_entry("internal-alpha"));
                 let mut hidden = model_entry("internal-hidden");
                 hidden.info.hidden = true;
                 models_manager.insert_test_entry("private-hidden-model", hidden);
                 let mut unselectable = model_entry("internal-unselectable");
                 unselectable.info.user_selectable = false;
-                models_manager
-                    .insert_test_entry("private-unselectable-model", unselectable);
+                models_manager.insert_test_entry("private-unselectable-model", unselectable);
                 let first = spec
                     .build_agent(AgentDefinition::default_grok_build())
                     .await
                     .expect("first agent build should succeed");
                 let first_description = task_description(&first);
+                // The description no longer dumps the slug list: full catalogs
+                // bloat it, so it now points the model at `search_models` and
+                // leaves slug freshness to the validator asserted below.
                 assert!(
-                    first_description.contains(
-                        "If the user explicitly asks for the model of a subagent/task, you may ONLY use model slugs from this list:\n\
-                         - alpha-public\n\
-                         - zeta-public"
-                    )
+                    first_description
+                        .contains("Call `search_models` with their product name or version")
                 );
                 assert!(!first_description.contains("private-hidden-model"));
                 assert!(!first_description.contains("private-unselectable-model"));
@@ -581,22 +578,22 @@ mod tests {
                     .expect("Task model validator should be registered");
                 assert!(validator.error_for("alpha-public").is_none());
                 assert!(validator.error_for("private-hidden-model").is_some());
-                models_manager
-                    .insert_test_entry("beta-public", model_entry("internal-beta"));
+                models_manager.insert_test_entry("beta-public", model_entry("internal-beta"));
                 assert!(validator.error_for("beta-public").is_none());
                 let rebuilt = spec
                     .build_agent(AgentDefinition::default_grok_build())
                     .await
                     .expect("rebuilt agent should succeed");
                 let rebuilt_description = task_description(&rebuilt);
+                // Same guidance after the rebuild; the fresh `beta-public` key
+                // is carried by the validator, not by the description text.
                 assert!(
-                    rebuilt_description.contains(
-                        "If the user explicitly asks for the model of a subagent/task, you may ONLY use model slugs from this list:\n\
-                         - alpha-public\n\
-                         - beta-public\n\
-                         - zeta-public"
-                    )
+                    rebuilt_description
+                        .contains("Call `search_models` with their product name or version")
                 );
+                // The description is rendered, so the `${{ params.task.model }}`
+                // template token is already substituted at this point.
+                assert!(rebuilt_description.contains("to inherit the parent model"));
             })
             .await;
     }

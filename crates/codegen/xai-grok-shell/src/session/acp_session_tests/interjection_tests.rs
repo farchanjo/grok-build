@@ -14,6 +14,18 @@ async fn drain_interjections_pushes_synthetic_user_message_after_tool_result() {
             let (actor, _gateway_rx) = build_actor().await;
 
             const TOOL_RESULT_CONTENT: &str = "file contents: fn main() {}";
+            // A bare tool result is an orphan: the integrity repair that runs
+            // when the interjection is injected strips results whose call id no
+            // assistant message declares. Seed the declaring message first.
+            actor.chat_state_handle.push_assistant_response(
+                ConversationItem::assistant_tool_calls(vec![
+                    xai_grok_inference_types::conversation::ToolCall {
+                        id: std::sync::Arc::from("call-1"),
+                        name: "run_terminal_command".into(),
+                        arguments: std::sync::Arc::from(r#"{ "command": "echo hi" }"#),
+                    },
+                ]),
+            );
             actor
                 .chat_state_handle
                 .push_tool_result(ConversationItem::tool_result("call-1", TOOL_RESULT_CONTENT));
@@ -81,6 +93,18 @@ async fn drain_multiple_interjections_pushes_one_user_message_each_in_order() {
             let (actor, _gateway_rx) = build_actor().await;
 
             const TOOL_RESULT_CONTENT: &str = "tool output";
+            // A bare tool result is an orphan: the integrity repair that runs
+            // when the interjection is injected strips results whose call id no
+            // assistant message declares. Seed the declaring message first.
+            actor.chat_state_handle.push_assistant_response(
+                ConversationItem::assistant_tool_calls(vec![
+                    xai_grok_inference_types::conversation::ToolCall {
+                        id: std::sync::Arc::from("call-1"),
+                        name: "run_terminal_command".into(),
+                        arguments: std::sync::Arc::from(r#"{ "command": "echo hi" }"#),
+                    },
+                ]),
+            );
             actor
                 .chat_state_handle
                 .push_tool_result(ConversationItem::tool_result("call-1", TOOL_RESULT_CONTENT));

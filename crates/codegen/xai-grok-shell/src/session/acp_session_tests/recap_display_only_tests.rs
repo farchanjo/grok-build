@@ -661,9 +661,25 @@ async fn recap_request_rides_parent_prompt_cache() {
                 .get_inference_settings()
                 .await
                 .unwrap();
+            let active = actor.models_manager.current_model_id().0.to_string();
             cfg.base_url = server.url();
             cfg.api_backend = xai_grok_inference_types::ApiBackend::Responses;
+            // `x-grok-conv-id` is a first-party header, and the identity is
+            // derived from the *model's* URL while the mock is loopback. Pin the
+            // settings' model to the id whose catalog entry below declares an
+            // xAI host — the request still reaches the mock through base_url.
+            cfg.model = active.clone();
             actor.chat_state_handle.update_inference_settings(cfg);
+            let mut entry = crate::agent::config::ModelEntry {
+                info: crate::agent::config::ModelInfo::fallback(&active),
+                model_provider: None,
+                api_key: Some("test-key".to_owned()),
+                env_key: None,
+                auth_provider: None,
+                api_base_url: None,
+            };
+            entry.info.base_url = "https://api.x.ai/v1".to_owned();
+            actor.models_manager.insert_test_entry(active, entry);
 
             actor.chat_state_handle.replace_conversation(vec![
                 ConversationItem::system("you are a coding agent"),
@@ -751,9 +767,25 @@ async fn recap_request_sends_hosted_tools_under_backend_search() {
                 .get_inference_settings()
                 .await
                 .unwrap();
+            let active = actor.models_manager.current_model_id().0.to_string();
             cfg.base_url = server.url();
             cfg.api_backend = xai_grok_inference_types::ApiBackend::Responses;
+            // `x-grok-conv-id` is a first-party header, and the identity is
+            // derived from the *model's* URL while the mock is loopback. Pin the
+            // settings' model to the id whose catalog entry below declares an
+            // xAI host — the request still reaches the mock through base_url.
+            cfg.model = active.clone();
             actor.chat_state_handle.update_inference_settings(cfg);
+            let mut entry = crate::agent::config::ModelEntry {
+                info: crate::agent::config::ModelInfo::fallback(&active),
+                model_provider: None,
+                api_key: Some("test-key".to_owned()),
+                env_key: None,
+                auth_provider: None,
+                api_base_url: None,
+            };
+            entry.info.base_url = "https://api.x.ai/v1".to_owned();
+            actor.models_manager.insert_test_entry(active, entry);
 
             actor.chat_state_handle.replace_conversation(vec![
                 ConversationItem::system("you are a coding agent"),
@@ -842,9 +874,25 @@ async fn recap_hosted_tools_reflect_the_active_per_turn_override() {
             let server = MockInferenceServer::start().await.unwrap();
             server.set_response("recap summary");
             let mut cfg = actor.chat_state_handle.get_inference_settings().await.unwrap();
+            let active = actor.models_manager.current_model_id().0.to_string();
             cfg.base_url = server.url();
             cfg.api_backend = xai_grok_inference_types::ApiBackend::Responses;
+            // `x-grok-conv-id` is a first-party header, and the identity is
+            // derived from the *model's* URL while the mock is loopback. Pin the
+            // settings' model to the id whose catalog entry below declares an
+            // xAI host — the request still reaches the mock through base_url.
+            cfg.model = active.clone();
             actor.chat_state_handle.update_inference_settings(cfg);
+            let mut entry = crate::agent::config::ModelEntry {
+                info: crate::agent::config::ModelInfo::fallback(&active),
+                model_provider: None,
+                api_key: Some("test-key".to_owned()),
+                env_key: None,
+                auth_provider: None,
+                api_base_url: None,
+            };
+            entry.info.base_url = "https://api.x.ai/v1".to_owned();
+            actor.models_manager.insert_test_entry(active, entry);
 
             actor.chat_state_handle.replace_conversation(vec![
                 ConversationItem::system("you are a coding agent"),

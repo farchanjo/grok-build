@@ -22,7 +22,7 @@ fn todo_gate_fires_when_pending_remains() {
         backing_task_count: 0,
     };
     assert!(matches!(
-        evaluate_todo_gate(&input),
+        evaluate_todo_gate(&input, None, 3),
         TodoGateDecision::Nudge { .. }
     ));
 }
@@ -37,7 +37,7 @@ fn todo_gate_passes_when_in_progress_count_le_backing_count() {
         backing_task_count: 1,
     };
     assert!(matches!(
-        evaluate_todo_gate(&input),
+        evaluate_todo_gate(&input, None, 3),
         TodoGateDecision::Continue
     ));
 }
@@ -52,7 +52,7 @@ fn todo_gate_fires_when_in_progress_exceeds_backing_count() {
         in_progress_backed: vec!["pr-1:ci-green"],
         backing_task_count: 1,
     };
-    let decision = evaluate_todo_gate(&input);
+    let decision = evaluate_todo_gate(&input, None, 3);
     let TodoGateDecision::Nudge { reminder, reason } = decision else {
         panic!("expected Nudge when in_progress exceeds backing count");
     };
@@ -69,7 +69,7 @@ fn todo_gate_fires_when_in_progress_exceeds_backing_count() {
 
 #[test]
 fn todo_gate_reminder_renders_plan_tool_name() {
-    let raw = build_todo_gate_reminder(&["fix-round-1"], &[]);
+    let raw = build_todo_gate_reminder(&["fix-round-1"], &[], None, 3);
     let renderer = TemplateRenderer::new(
         HashMap::from([(ToolKind::Plan, "todo_write".to_string())]),
         HashMap::new(),
@@ -95,7 +95,7 @@ fn todo_gate_reminder_renders_plan_tool_name() {
 // nudge's signature phrase must not leak in).
 #[test]
 fn todo_gate_has_its_own_vocabulary() {
-    let gate = build_todo_gate_reminder(&["only-pending"], &[]);
+    let gate = build_todo_gate_reminder(&["only-pending"], &[], None, 3);
     // Gate's signature phrase — distinguishes it from the periodic
     // TodoNudge ("hasn't been used recently") in dashboards and
     // model-side debugging.
@@ -166,7 +166,7 @@ fn todo_gate_empty_state_no_compaction_passes() {
         backing_task_count: 0,
     };
     assert!(matches!(
-        evaluate_todo_gate(&input),
+        evaluate_todo_gate(&input, None, 3),
         TodoGateDecision::Continue
     ));
 }
@@ -176,10 +176,43 @@ fn todo_gate_reminder_omits_empty_sections() {
     // Only the populated sections render; empty buckets are dropped.
     // The backed-in-progress bucket is never listed (deliberately
     // removed — the gate already decided not to nudge on those).
-    let r = build_todo_gate_reminder(&["only-pending"], &[]);
+    let r = build_todo_gate_reminder(&["only-pending"], &[], None, 3);
     assert!(r.contains("Pending:"));
     assert!(!r.contains("In-progress (no backing"));
     assert!(!r.contains("backed by a live background task"));
+}
+
+// ── Item cap and pick ────────────────────────────────────────────
+
+#[test]
+fn reminder_caps_the_item_dump_and_counts_the_rest() {
+    let pending: Vec<&str> = (0..20)
+        .map(|i| ["a", "b", "c", "d", "e", "f", "g", "h", "i", "j"][i % 10])
+        .collect();
+    let reminder = build_todo_gate_reminder(&pending, &[], None, 3);
+    assert_eq!(reminder.matches("\n- ").count(), 3, "{reminder}");
+    assert!(reminder.contains("… and 17 more pending"), "{reminder}");
+    // Under the cap there is no "more" line.
+    let short = build_todo_gate_reminder(&["only"], &[], None, 3);
+    assert!(!short.contains("more pending"), "{short}");
+}
+
+#[test]
+fn picked_item_leads_the_pending_list() {
+    let pending = ["first", "second", "third", "fourth"];
+    let reminder = build_todo_gate_reminder(&pending, &[], Some("third"), 3);
+    let listed: Vec<&str> = reminder
+        .lines()
+        .filter_map(|line| line.strip_prefix("- "))
+        .collect();
+    assert_eq!(listed, vec!["third", "first", "second"]);
+    // An unknown pick (or none) keeps insertion order.
+    let fallback = build_todo_gate_reminder(&pending, &[], Some("ghost"), 3);
+    let listed: Vec<&str> = fallback
+        .lines()
+        .filter_map(|line| line.strip_prefix("- "))
+        .collect();
+    assert_eq!(listed, vec!["first", "second", "third"]);
 }
 
 // ── `CollectedTodoGateInput::as_input` partition heuristic ───────

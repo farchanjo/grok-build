@@ -1262,6 +1262,16 @@ impl RetrievalSettingsState {
                     ..
                 } = &mut self.edit
                 {
+                    // The protocol is a three-value enum: cycle it rather
+                    // than opening free-form entry, so a typo cannot fall back
+                    // to `openai_compatible` silently.
+                    if let Some(f) = fields.get_mut(*field_idx)
+                        && field_name(&f.0) == "protocol"
+                    {
+                        cycle_protocol(f);
+                        self.dirty = true;
+                        return None;
+                    }
                     // Fixed enum rows are display-only — never free-form edit.
                     if let Some(f) = fields.get(*field_idx)
                         && !is_fixed_field_label(&f.0)
@@ -1299,7 +1309,7 @@ impl RetrievalSettingsState {
         let get = |name: &str| {
             fields
                 .iter()
-                .find(|(k, _)| k == name)
+                .find(|(k, _)| field_name(k) == name)
                 .map(|(_, v)| v.clone())
                 .unwrap_or_default()
         };
@@ -1347,6 +1357,7 @@ impl RetrievalSettingsState {
                     model: get("model").trim().to_owned(),
                     protocol: match get("protocol").as_str() {
                         "cohere_compatible" => RerankerProtocol::CohereCompatible,
+                        "jev" => RerankerProtocol::Jev,
                         _ => RerankerProtocol::OpenaiCompatible,
                     },
                     endpoint: if ep.trim().is_empty() {
@@ -2142,6 +2153,33 @@ fn is_fixed_field_label(label: &str) -> bool {
     label.contains("(fixed)")
 }
 
+/// Reranker protocols, in cycle order. Mirrors `RerankerProtocol`; the field
+/// used to be free-form, where a typo silently fell back to
+/// `openai_compatible` because the parse has a catch-all arm.
+const RERANKER_PROTOCOLS: [&str; 3] = ["openai_compatible", "cohere_compatible", "jev"];
+
+/// Field label carrying the cycle hint. `field_name` strips it back.
+const PROTOCOL_FIELD: &str = "protocol (enter to cycle)";
+
+/// Bare field name for a label that may carry the cycle hint.
+fn field_name(label: &str) -> &str {
+    label.split(" (").next().unwrap_or(label)
+}
+
+/// Advance one protocol field to the next catalog entry, wrapping.
+fn cycle_protocol(field: &mut (String, String)) {
+    // An unknown hand-edited value restarts at the first entry rather than
+    // advancing from it, so the field never lands on a value the parse drops.
+    let next = match RERANKER_PROTOCOLS
+        .iter()
+        .position(|protocol| *protocol == field.1.as_str())
+    {
+        Some(current) => (current + 1) % RERANKER_PROTOCOLS.len(),
+        None => 0,
+    };
+    field.1 = RERANKER_PROTOCOLS[next].to_owned();
+}
+
 fn next_editable_field_idx(fields: &[(String, String)], from: usize) -> usize {
     let mut i = from.saturating_add(1);
     while i < fields.len() {
@@ -2215,7 +2253,7 @@ fn default_reranker_fields(existing: Option<&RerankerModelDto>) -> Vec<(String, 
             ("id".into(), String::new()),
             ("provider".into(), String::new()),
             ("model".into(), String::new()),
-            ("protocol".into(), "openai_compatible".into()),
+            (PROTOCOL_FIELD.into(), "openai_compatible".into()),
             ("endpoint".into(), String::new()),
             ("batch_size".into(), "32".into()),
             ("max_input_tokens".into(), "8192".into()),
@@ -2224,7 +2262,7 @@ fn default_reranker_fields(existing: Option<&RerankerModelDto>) -> Vec<(String, 
             ("id".into(), e.id.clone()),
             ("provider".into(), e.config.provider.clone()),
             ("model".into(), e.config.model.clone()),
-            ("protocol".into(), e.config.protocol.as_str().into()),
+            (PROTOCOL_FIELD.into(), e.config.protocol.as_str().into()),
             (
                 "endpoint".into(),
                 e.config.endpoint.clone().unwrap_or_default(),
@@ -3325,6 +3363,36 @@ mod tests {
                 .any(|l| *l == "v Validate" || *l == "s Validate"),
             "duplicate Validate labels removed: {labels:?}"
         );
+    }
+
+    /// Enter on the protocol field cycles the three protocols instead of
+    /// opening free-form entry, and wraps.
+    #[test]
+    fn protocol_field_cycles_through_the_catalog() {
+        let mut field = (PROTOCOL_FIELD.to_owned(), "openai_compatible".to_owned());
+        cycle_protocol(&mut field);
+        assert_eq!(field.1, "cohere_compatible");
+        cycle_protocol(&mut field);
+        assert_eq!(field.1, "jev");
+        cycle_protocol(&mut field);
+        assert_eq!(field.1, "openai_compatible", "cycle wraps");
+    }
+
+    /// A hand-edited value outside the catalog restarts the cycle rather than
+    /// landing on a value the parse would silently drop.
+    #[test]
+    fn protocol_field_recovers_from_an_unknown_value() {
+        let mut field = (PROTOCOL_FIELD.to_owned(), "bogus".to_owned());
+        cycle_protocol(&mut field);
+        assert_eq!(field.1, "openai_compatible");
+    }
+
+    /// The cycle hint must not hide the field from the commit path.
+    #[test]
+    fn protocol_label_still_resolves_to_its_field() {
+        assert_eq!(field_name(PROTOCOL_FIELD), "protocol");
+        assert_eq!(field_name("protocol"), "protocol");
+        assert_eq!(field_name("id"), "id");
     }
 
     #[test]

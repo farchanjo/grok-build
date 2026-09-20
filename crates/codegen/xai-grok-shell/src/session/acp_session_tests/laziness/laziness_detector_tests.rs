@@ -231,8 +231,10 @@ fn evaluate_laziness_disabled_returns_feature_disabled() {
 #[test]
 fn evaluate_laziness_low_confidence_returns_low_confidence() {
     let cfg = cfg_enabled(3);
+    // 0.45 sits below the 0.5 harness default; the per-model override test
+    // below covers the other side of the gate.
     let decision = evaluate_laziness(
-        &output(LazinessCategory::StalledNarration, 0.5),
+        &output(LazinessCategory::StalledNarration, 0.45),
         &cfg,
         0,
         LAZINESS_DEFAULT_MIN_CONFIDENCE,
@@ -490,4 +492,76 @@ fn build_laziness_nudge_returns_empty_for_not_stalled() {
             "{variant:?} must produce no nudge text"
         );
     }
+}
+
+#[test]
+fn laziness_default_gate_is_the_measured_operating_point() {
+    // 2.15: at the old 0.70 default the detector fired on 3 of 16 stalls.
+    // 0.50 is where this classifier's score distribution was measured.
+    assert_eq!(LAZINESS_DEFAULT_MIN_CONFIDENCE, 0.5);
+}
+
+#[test]
+fn classifier_prompt_attaches_a_definition_to_every_category() {
+    // 2.14: bare option labels scored 0/16 on stalled categories; with the
+    // definitions attached it went to 10/16. An option label is not a
+    // definition, so every category must carry one.
+    for (category, definition) in [
+        (
+            "stalled_narration",
+            "the prose claims an action but there is no matching tool call",
+        ),
+        (
+            "stalled_permission_asking",
+            "it asks the user permission to do the obvious next step of an in-flight task",
+        ),
+        (
+            "stalled_no_todos_but_task_in_flight",
+            "it stopped while the task plainly still has work left",
+        ),
+        (
+            "stalled_false_completion",
+            "it claims completion or success while substantive claims lack tool_call evidence",
+        ),
+        (
+            "not_stalled_complete",
+            "every major claim is backed by a tool call and its result",
+        ),
+        (
+            "not_stalled_waiting_on_background",
+            "a background task or subagent is live and it cannot drive it forward",
+        ),
+        (
+            "not_stalled_waiting_on_user",
+            "it asked a genuine question that needs the user before work can continue",
+        ),
+    ] {
+        let needle = format!("\"{category}\" — {definition}");
+        assert!(
+            super::LAZINESS_CLASSIFIER_PROMPT.contains(&needle),
+            "category {category} must carry its definition"
+        );
+    }
+}
+
+#[test]
+fn build_laziness_nudge_drops_the_evidence_clause_when_the_classifier_has_none() {
+    // 2.16b: a scored decision returns no text. Dropping the clause beats a
+    // dangling "flagged this session:"; the rule text must survive intact.
+    for blank in ["", "   ", "\n"] {
+        let n = build_laziness_nudge(LazinessCategory::StalledNarration, blank, None);
+        assert!(
+            !n.contains("flagged this session"),
+            "blank evidence must drop the clause: {n:?}"
+        );
+        assert!(
+            n.starts_with("Per <task_completion_discipline> Rule 1"),
+            "rule text must survive: {n:?}"
+        );
+    }
+    let n = build_laziness_nudge(LazinessCategory::StalledNarration, "  ev  ", None);
+    assert!(
+        n.starts_with("Idle-stall detector flagged this session: ev\n\n"),
+        "evidence is trimmed and kept when present: {n:?}"
+    );
 }

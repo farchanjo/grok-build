@@ -26,6 +26,7 @@ pub use async_openai::types::responses as rs;
 // `xai_grok_inference::*`. The shell-side `sampling::client::Config`
 // composite was removed when its only remaining role -- session-snapshot
 // state for `MvpAgent` -- was migrated to `RefCell<InferenceConfig>` directly.
+pub use xai_grok_inference::config::ProviderIdentity;
 pub use xai_grok_inference::{
     InferenceActor, InferenceChannel, InferenceClient, InferenceConfig, InferenceErrorInfo,
     InferenceErrorKind, InferenceEvent, InferenceHandle, InferenceLatencyStats, OriginClientInfo,

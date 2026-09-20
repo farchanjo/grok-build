@@ -668,6 +668,9 @@ pub struct PagerLocalSnapshot {
     pub compaction_in_progress: bool,
     /// `[compaction.jev].enabled`: Jev-guided pruning of the summarizer view.
     pub compaction_jev_enabled: bool,
+    /// `[compaction.jev].transport`: `native` | `openrouter`. Defaults to
+    /// `openrouter`, which is today's behaviour.
+    pub compaction_jev_transport: String,
     /// Media routing mode (`auto` | `tools_only` | `off`).
     pub media_routing: String,
     /// Stable image understanding model ID. `@session` reuses the active model.
@@ -728,6 +731,9 @@ impl Default for PagerLocalSnapshot {
             // Jev pruning ships OFF: the pruning path stays byte-identical to
             // today's summarizer input until the user opts in.
             compaction_jev_enabled: false,
+            // The transport default is the endpoint every existing
+            // `[compaction.jev]` user already has.
+            compaction_jev_transport: "openrouter".to_string(),
             media_routing: "auto".to_string(),
             tool_catalog: Vec::new(),
             pinned_tools: Vec::new(),
@@ -1223,6 +1229,15 @@ pub fn current_value_for(
         )),
         // Jev pruning is a plain bool; absent `[compaction.jev]` means off.
         "compaction_jev_enabled" => Some(SettingValue::Bool(pager.compaction_jev_enabled)),
+        "compaction_jev_transport" => Some(SettingValue::Enum(
+            // The snapshot carries an owned string, the enum a `&'static str`;
+            // both spellings are canonical, so leak-free interning is exact.
+            canonical_transport(&pager.compaction_jev_transport),
+        )),
+        // Phase-4 control rows read the shell store, not the snapshot: it is
+        // the same value the consumer acts on, so the row cannot disagree with
+        // behaviour.
+        key if xai_grok_shell::session::control::is_control(key) => control_value_for(key),
         "compaction_status" => Some(SettingValue::String(if pager.compaction_in_progress {
             "Compacting".to_string()
         } else {
@@ -1258,6 +1273,55 @@ pub fn current_value_for(
 
         _ => None,
     }
+}
+
+/// Current value of one Phase-4 control row, typed for the modal.
+///
+/// Always `Some` for a registered row: the row's declared default is the
+/// fallback, so a row never renders blank.
+pub fn control_value_for(key: &str) -> Option<SettingValue> {
+    let spec = xai_grok_shell::session::control::spec_for(key)?;
+    Some(match spec.kind {
+        xai_grok_shell::session::control::ControlKind::Bool => SettingValue::Bool(
+            xai_grok_shell::session::control::bool_at(key, spec.default_bool),
+        ),
+        xai_grok_shell::session::control::ControlKind::Int { .. }
+        | xai_grok_shell::session::control::ControlKind::Percent { .. } => SettingValue::Int(
+            xai_grok_shell::session::control::int_at(key, spec.default_int),
+        ),
+        xai_grok_shell::session::control::ControlKind::Choice(choices) => SettingValue::Enum(
+            canonical_control_choice(key, choices.first().copied().unwrap_or("")),
+        ),
+    })
+}
+
+/// Intern a control row's current choice to a `&'static str` from its catalog.
+fn canonical_control_choice(key: &str, fallback: &'static str) -> &'static str {
+    let current = xai_grok_shell::session::control::str_at(key, fallback);
+    match xai_grok_shell::session::control::spec_for(key).map(|spec| spec.kind) {
+        Some(xai_grok_shell::session::control::ControlKind::Choice(choices)) => choices
+            .iter()
+            .find(|choice| **choice == current)
+            .copied()
+            .unwrap_or(fallback),
+        _ => fallback,
+    }
+}
+
+/// Rendered value of one control row, for the toast.
+pub fn render_control(key: &str) -> String {
+    xai_grok_shell::session::control::render(key)
+}
+
+/// Intern a transport spelling to its `&'static str` canonical.
+///
+/// [`JevTransport::parse`] is total over both canonical spellings, so an
+/// unrecognised snapshot value falls back to the default rather than rendering
+/// an empty chooser selection.
+fn canonical_transport(value: &str) -> &'static str {
+    xai_grok_shell::session::helpers::jev_prune::JevTransport::parse(value)
+        .unwrap_or_default()
+        .as_str()
 }
 
 /// Default value for `key`, derived from the registry metadata.
@@ -1323,6 +1387,7 @@ mod tests {
     fn defaults_match_ui_config_default() {
         let reg = SettingsRegistry::defaults();
         let ui = UiConfig::default();
+        let pager = PagerLocalSnapshot::default();
         for meta in reg.all() {
             if meta.owner == SettingOwner::Pager {
                 continue;
@@ -1779,6 +1844,17 @@ mod tests {
                         "compaction_jev_enabled registry default must be false"
                     );
                 }
+                // Jev transport: SHELL-owned enum, no UiConfig mirror. The
+                // registered default is the canonical spelling of the
+                // PagerLocalSnapshot default, so a reset lands back on
+                // OpenRouter rather than on an arbitrary member.
+                ("compaction_jev_transport", SettingKind::Enum { default, .. }) => {
+                    assert_eq!(
+                        *default,
+                        canonical_transport(&pager.compaction_jev_transport),
+                        "compaction_jev_transport default drifts from PagerLocalSnapshot::default()"
+                    );
+                }
                 ("compaction_status", SettingKind::Status) => {}
                 // Media settings: SHELL-owned, no UiConfig mirror.
                 ("media_routing", SettingKind::Enum { default, .. }) => {
@@ -1827,11 +1903,46 @@ mod tests {
                     );
                 }
 
-                _ => panic!(
-                    "settings::defs::default_settings() contains entry `{}` with no \
-                     matching arm in defaults_match_ui_config_default. Add an arm.",
-                    meta.key
-                ),
+                // Control rows come from the shell's `CONTROLS` table, so
+                // their defaults live in the spec: mirror-check the mapping
+                // instead of duplicating one arm per path.
+                _ => {
+                    use xai_grok_shell::session::control::{ControlKind, spec_for};
+                    let Some(spec) = spec_for(meta.key) else {
+                        panic!(
+                            "settings::defs::default_settings() contains entry `{}` with no \
+                             matching arm in defaults_match_ui_config_default. Add an arm.",
+                            meta.key
+                        );
+                    };
+                    match (&spec.kind, &meta.kind) {
+                        (ControlKind::Bool, SettingKind::Bool { default }) => assert_eq!(
+                            *default, spec.default_bool,
+                            "control `{}` bool default drifts from its spec",
+                            spec.path
+                        ),
+                        (
+                            ControlKind::Int { .. } | ControlKind::Percent { .. },
+                            SettingKind::Int { default, .. },
+                        ) => assert_eq!(
+                            *default, spec.default_int,
+                            "control `{}` int default drifts from its spec",
+                            spec.path
+                        ),
+                        (ControlKind::Choice(choices), SettingKind::Enum { default, .. }) => {
+                            assert_eq!(
+                                *default,
+                                choices.first().copied().unwrap_or(""),
+                                "control `{}` choice default drifts from its spec",
+                                spec.path
+                            );
+                        }
+                        (control_kind, meta_kind) => panic!(
+                            "control `{}` maps {:?} onto the wrong SettingKind {:?}",
+                            spec.path, control_kind, meta_kind
+                        ),
+                    }
+                }
             }
         }
     }

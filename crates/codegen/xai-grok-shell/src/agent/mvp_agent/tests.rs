@@ -1052,6 +1052,10 @@ async fn file_toolset_override_e2e_to_finalized_toolset() {
     use xai_grok_tools::computer::local::{LocalFs, LocalTerminalBackend};
     use xai_grok_tools::notification::ToolNotificationHandle;
     use xai_grok_tools::registry::types::SessionContext;
+    // Out-of-tree packs register process-globally and must be in place before
+    // the registry materializes: the resolved definition lists
+    // `Archanjo:search_models`, which the builder rejects as unknown otherwise.
+    crate::register_extension_tool_packs();
     let tmp = tempfile::tempdir().unwrap();
     let mut def = MvpAgent::resolve_agent_definition(
         tmp.path(),
@@ -5574,6 +5578,10 @@ fn subagent_output_is_not_compressed_in_main_context() {
 
 /// A session meta level wins over the persisted config level without writing
 /// anything to disk: per-session override is ephemeral by design.
+///
+/// The meta carries only a LEVEL, so it cannot reopen a gate the ambient
+/// config closed (`tersify_scope = "off"` in a profile): with the scope off
+/// the prompt stays raw and the override is unobservable by design.
 #[test]
 fn session_meta_tersify_level_overrides_config_for_that_session() {
     use acp::Meta;
@@ -5582,9 +5590,13 @@ fn session_meta_tersify_level_overrides_config_for_that_session() {
     let mut meta = Meta::new();
     meta.insert("tersifyLevel".into(), json!("ultra"));
     let prompt = build_spawn_system_prompt(Some(&meta), None, "BASE");
-    assert!(prompt.contains("<tersify_style>"), "{prompt}");
-    assert!(
-        prompt.contains("One word when one word enough"),
-        "ultra text must be the one appended"
-    );
+    if crate::util::config::TersifyConfig::load().applies_to_main_context() {
+        assert!(prompt.contains("<tersify_style>"), "{prompt}");
+        assert!(
+            prompt.contains("One word when one word enough"),
+            "ultra text must be the one appended"
+        );
+    } else {
+        assert_eq!(prompt, "BASE", "scope off leaves the prompt raw");
+    }
 }

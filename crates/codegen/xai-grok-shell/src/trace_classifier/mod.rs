@@ -500,7 +500,13 @@ fn run_todo_gate(state: &TodoState, gate_backing_task_count: usize) -> TodoGateO
         backing_task_count: gate_backing_task_count,
     };
     let input = collected.as_input();
-    match evaluate_todo_gate(&input) {
+    // The replay mirrors the pure gate; the pick is a live decision call, so
+    // the offline replay renders insertion order with the shipped item cap.
+    match evaluate_todo_gate(
+        &input,
+        None,
+        xai_grok_agent::system_reminder::TodoGateConfig::default().max_items_named,
+    ) {
         TodoGateDecision::Continue => TodoGateOwned {
             decision: GateDecisionKind::Continue,
             reason: None,
@@ -1998,8 +2004,12 @@ mod tests {
     #[tokio::test]
     async fn min_confidence_override_is_threaded_through() {
         let trace = parse_synthetic();
+        // The default moved 0.7 -> 0.5 (measured sweep in
+        // `laziness_classifier.rs`), so the fixture sits just below it and the
+        // override just below the fixture: the assert is about the override
+        // threading through, not about the value of the default.
         let stub = StubClient(
-            r#"{"category":"stalled_narration","confidence":0.65,"evidence":"e"}"#.to_owned(),
+            r#"{"category":"stalled_narration","confidence":0.45,"evidence":"e"}"#.to_owned(),
         );
         let data_default = process_turn(
             &trace[0],
@@ -2014,8 +2024,15 @@ mod tests {
             data_default.laziness.decision,
             LazinessDecisionKind::NoNudgeLowConfidence,
         );
-        let data_low =
-            process_turn(&trace[0], "m", 0.5, LAZINESS_INCLUDE_REASONING, None, &stub).await;
+        let data_low = process_turn(
+            &trace[0],
+            "m",
+            0.40,
+            LAZINESS_INCLUDE_REASONING,
+            None,
+            &stub,
+        )
+        .await;
         assert_eq!(data_low.laziness.decision, LazinessDecisionKind::WouldNudge);
     }
 

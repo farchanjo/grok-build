@@ -243,7 +243,12 @@ pub fn ensure_pending(
         .meta_get(schema::META_VECTOR_REBUILD_PENDING)
         .unwrap_or_default();
     let fresh = match PendingRebuild::parse(&existing) {
-        Some(p) if p.intended.is_empty() || p.intended == intended_fp => p,
+        // Reuse only for the same target. Staging is keyed by chunk id and
+        // content hash but NOT by source, so a target-less marker (dimension
+        // mismatch, adopt) would otherwise hand this attempt vectors that were
+        // embedded by another model — and they would be installed under the new
+        // fingerprint, silently mixing embedding spaces.
+        Some(p) if p.intended == intended_fp => p,
         _ => PendingRebuild {
             id: new_attempt_id(),
             intended: intended_fp.to_owned(),

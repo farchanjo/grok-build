@@ -769,7 +769,11 @@ mod tests {
             let mut idx =
                 MemoryIndex::open_or_create(&db_path, storage.clone(), Default::default(), dims)
                     .unwrap();
-            idx.reindex_file(&file_path, "session").unwrap();
+            let result = idx.reindex_file(&file_path, "session").unwrap();
+            assert!(
+                result.added > 0,
+                "the fixture file must produce chunks, got {result:?}"
+            );
         }
 
         // Install the fingerprint and backfill the existing chunk.
@@ -812,7 +816,11 @@ mod tests {
             let mut idx =
                 MemoryIndex::open_or_create(&db_path, storage.clone(), Default::default(), dims)
                     .unwrap();
-            idx.reindex_file(&file_path, "session").unwrap();
+            let result = idx.reindex_file(&file_path, "session").unwrap();
+            assert!(
+                result.added > 0,
+                "the fixture file must produce chunks, got {result:?}"
+            );
         }
 
         // Install the fingerprint and backfill the existing chunk.
@@ -852,6 +860,20 @@ mod tests {
         let db_path = tmp.path().join("test.sqlite");
         let storage =
             MemoryStorage::with_paths(tmp.path().join("global"), tmp.path().join("workspace"));
+        // A source change only needs reconciling while the index holds vectors:
+        // with no chunk the rebuild completes instantly and reads as Ready.
+        let file_path = tmp.path().join("existing.md");
+        std::fs::write(
+            &file_path,
+            "## Decisions\n\nWe chose Rust for memory safety.",
+        )
+        .unwrap();
+        {
+            let mut idx =
+                MemoryIndex::open_or_create(&db_path, storage.clone(), Default::default(), 4)
+                    .unwrap();
+            assert!(idx.reindex_file(&file_path, "session").unwrap().added > 0);
+        }
         let (old_embedder, _) = install_compatible_fingerprint(&db_path, storage.clone(), 4).await;
         let old_index =
             MemoryIndex::open_or_create(&db_path, storage.clone(), Default::default(), 4).unwrap();
@@ -860,6 +882,32 @@ mod tests {
 
         let new_fake = std::sync::Arc::new(FakeMemoryRetrieval::new(4, "new-model"));
         let new_provider = RetrievalEmbeddingProvider::new(new_fake.clone());
+        // Probe: a source change is only detectable while the old fingerprint is
+        // on record, which is what the helper's name promises.
+        let probe = xai_grok_memory::index::MemoryIndex::open_or_create(
+            &db_path,
+            storage.clone(),
+            Default::default(),
+            4,
+        )
+        .expect("open index for the fingerprint probe");
+        assert!(
+            probe.installed_vector_fingerprint_hash().is_some(),
+            "helper left no fingerprint on record"
+        );
+        // A source change is only observable while the index holds vectors: the
+        // seeded chunk above is what the rebuild has to reconcile.
+        assert_ne!(
+            probe.installed_vector_fingerprint_hash().as_deref(),
+            Some(
+                xai_grok_memory::MemoryRetrieval::source_spec(&*new_fake)
+                    .fingerprint(&Default::default())
+                    .unwrap()
+                    .hash
+                    .as_str()
+            ),
+            "the source change must change the fingerprint"
+        );
         let readiness = xai_grok_memory::rebuild::ensure_vectors_ready(
             &db_path,
             storage.clone(),
@@ -874,10 +922,13 @@ mod tests {
             tokio_util::sync::CancellationToken::new(),
         )
         .await;
-        assert!(matches!(
-            readiness,
-            xai_grok_memory::rebuild::VectorReadiness::Pending { .. }
-        ));
+        assert!(
+            matches!(
+                readiness,
+                xai_grok_memory::rebuild::VectorReadiness::Pending { .. }
+            ),
+            "a same-dimension source change must reconcile, got {readiness:?}"
+        );
 
         let index = MemoryIndex::open_or_create(&db_path, storage, Default::default(), 4).unwrap();
         assert!(!index.vectors_safe_to_backfill());
@@ -915,7 +966,11 @@ mod tests {
             let mut idx =
                 MemoryIndex::open_or_create(&db_path, storage.clone(), Default::default(), 4)
                     .unwrap();
-            idx.reindex_file(&file_path, "session").unwrap();
+            let result = idx.reindex_file(&file_path, "session").unwrap();
+            assert!(
+                result.added > 0,
+                "the fixture file must produce chunks, got {result:?}"
+            );
         }
 
         // A different dimension count marks the rebuild as pending.

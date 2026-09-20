@@ -685,6 +685,7 @@ async fn first_turn_memory_injection_disabled_does_not_persist_to_chat_history()
                 search_source: "tool",
                 embedding_credentials: crate::session::memory::EndpointScopedCredentials::none(),
                 retrieval: None,
+                gate: None,
                 index_config: crate::config::MemoryIndexConfig::default(),
                 rebuild_backoff_secs: 0,
                 vector_mirror: None,

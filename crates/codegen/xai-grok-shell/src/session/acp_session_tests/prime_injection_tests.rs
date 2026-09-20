@@ -276,6 +276,9 @@ async fn drive_prompt(
     (prompt_task, conv)
 }
 
+/// The injected hidden reminder is tagged `SkillPrime` by its constructor
+/// (`ConversationItem::skill_prime_reminder`), not `SystemReminder`: match the
+/// tag the producer actually writes.
 fn reminder_items<'a>(
     conv: &'a [xai_grok_inference_types::ConversationItem],
 ) -> Vec<&'a xai_grok_inference_types::ConversationItem> {
@@ -285,7 +288,7 @@ fn reminder_items<'a>(
                 item,
                 xai_grok_inference_types::ConversationItem::User(u)
                     if u.synthetic_reason
-                        == Some(xai_grok_inference_types::SyntheticReason::SystemReminder)
+                        == Some(xai_grok_inference_types::SyntheticReason::SkillPrime)
             )
         })
         .collect()

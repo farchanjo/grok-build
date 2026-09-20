@@ -1522,7 +1522,10 @@ mod tests {
     #[tokio::test]
     async fn build_skill_information_for_refs_loads_and_wraps() {
         let dir = tempfile::tempdir().unwrap();
-        let skill_dir = dir.path().join("commit");
+        // The strict no-follow walk derives its trusted root from the `skills`
+        // path component; without one the fixture counts as "unofficial" and
+        // the body never loads (see unofficial_skill_md_cannot_be_loaded_for_slash).
+        let skill_dir = dir.path().join("skills/commit");
         std::fs::create_dir_all(&skill_dir).unwrap();
         let path = skill_dir.join("SKILL.md");
         std::fs::write(

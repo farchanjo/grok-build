@@ -162,9 +162,16 @@ fn trusted_local_refresh_surfaces_new_agent_via_discovery() {
         Some(plugin_registry.as_ref()),
     );
     let names: Vec<&str> = agents.iter().map(|a| a.name.as_str()).collect();
+    // The callable name is the FILE STEM, not the frontmatter `name`: spawn
+    // lookup resolves `plugin:agent` to `{agent}.md`, so discovery has to
+    // agree with it (`discovery.rs` states the same contract).
     assert!(
-        names.contains(&"demo-plugin:new-agent"),
+        names.contains(&"demo-plugin:new"),
         "new agent must surface in /agents after session-start refresh; got {names:?}"
+    );
+    assert!(
+        !names.contains(&"demo-plugin:new-agent"),
+        "frontmatter name must not become the callable name; got {names:?}"
     );
 
     // Session `_meta.pluginDirs` load. Lives in the same test because
@@ -291,7 +298,7 @@ async fn headless_session_refreshes_trusted_local_plugin_and_writes_session_json
         Some(plugin_registry.as_ref()),
     );
     assert!(
-        agents.iter().any(|a| a.name == "demo-plugin:new-agent"),
+        agents.iter().any(|a| a.name == "demo-plugin:new"),
         "new agent must surface in /agents after the binary's session-start refresh"
     );
 
