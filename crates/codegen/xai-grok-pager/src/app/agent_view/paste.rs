@@ -445,6 +445,7 @@ pub(super) mod paste_key_tests {
     use crate::scrollback::state::ScrollbackState;
     use crate::views::prompt_widget::KIND_PASTE;
     fn make_agent() -> AgentView {
+        clear_ssh_markers();
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         AgentView::new(
             AgentSession {
@@ -1052,6 +1053,20 @@ pub(super) mod paste_key_tests {
             toast_msg.contains("Image limit reached"),
             "expected cap toast to be the last toast shown; got {toast_msg:?}"
         );
+    }
+    /// The drop classifier stands down over SSH (`try_handle_dropped_paths_paste`
+    /// returns early) while the terminal context is a process-global read from
+    /// the real environment. Every agent built by `make_agent` therefore starts
+    /// in the local world, so the paste tests assert behaviour instead of
+    /// inheriting the runner's shell.
+    fn clear_ssh_markers() {
+        // SAFETY: the context is read lazily, before any other thread in the
+        // test process touches the environment.
+        unsafe {
+            for var in ["SSH_CONNECTION", "SSH_TTY", "SSH_CLIENT"] {
+                std::env::remove_var(var);
+            }
+        }
     }
     /// Drive `agent` through the canonical drop-classifier assertions
     /// for one `Event::Paste` arm. The `setup` closure puts the agent
@@ -2553,17 +2568,6 @@ pub(super) mod paste_key_tests {
     }
     #[test]
     fn agent_completion_inserts_unreadable_file_url_as_path_text() {
-        // The drop classifier stands down over SSH (`try_handle_dropped_paths_paste`
-        // returns early) and the terminal context is a process-global read from
-        // the real environment: clear the SSH markers so the test states which
-        // world it asserts instead of inheriting the runner's.
-        // SAFETY: the context is read lazily and this runs before any other
-        // thread in the test process touches the environment.
-        unsafe {
-            for var in ["SSH_CONNECTION", "SSH_TTY", "SSH_CLIENT"] {
-                std::env::remove_var(var);
-            }
-        }
         let mut agent = make_agent();
         agent.set_active_pane(ActivePane::Prompt, true);
         let ctx = agent_completion_ctx(&agent, None);
