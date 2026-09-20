@@ -565,9 +565,9 @@ pub struct RemoteSettings {
     #[serde(default, deserialize_with = "deserialize_tolerant_worktree_auto_gc")]
     pub worktree_auto_gc: Option<WorktreeAutoGcSettings>,
     /// Enable/disable the runtime turn-end TodoGate remotely.
-    /// Precedence: CLI `--todo-gate` > this field > built-in default (`false`).
-    /// The gate ships disabled; set this to `Some(true)` (via the
-    /// `grok_build_settings` remote settings key) to enable it. See
+    /// Precedence: CLI `--todo-gate` > this field > built-in default (`true`).
+    /// The gate ships enabled; set this to `Some(false)` (via the
+    /// `grok_build_settings` remote settings key) to disable it. See
     /// `session::acp_session::resolve_reminder_policy`.
     #[serde(default)]
     pub todo_gate_enabled: Option<bool>,
@@ -576,6 +576,19 @@ pub struct RemoteSettings {
     /// No CLI override. See `session::acp_session::resolve_reminder_policy`.
     #[serde(default)]
     pub todo_gate_max_fires_per_prompt: Option<u32>,
+    /// Most todo items the TodoGate reminder names before collapsing the rest
+    /// into a `… and N more` line.
+    /// Precedence: this field > built-in default
+    /// (`DEFAULT_TODO_GATE_MAX_ITEMS_NAMED`). See
+    /// `session::acp_session::resolve_reminder_policy`.
+    #[serde(default)]
+    pub todo_gate_max_items_named: Option<u32>,
+    /// Let one decision call pick which pending item the TodoGate names next,
+    /// when the pending list is longer than `TodoGateConfig::PICK_THRESHOLD`.
+    /// Precedence: this field > built-in default (`true`). See
+    /// `session::acp_session::resolve_reminder_policy`.
+    #[serde(default)]
+    pub todo_gate_pick_with_decision: Option<bool>,
     #[serde(default)]
     pub auto_wake_enabled: Option<bool>,
     #[serde(default)]

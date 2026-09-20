@@ -819,7 +819,10 @@ pub struct AgentDefinition {
     /// Tool denylist. `Agent(type)` entries strip spawn permissions.
     #[serde(default, deserialize_with = "deserialize_string_or_vec")]
     pub disallowed_tools: Vec<String>,
-    #[serde(default)]
+    /// Reasoning effort this agent runs at, when the model supports one.
+    /// `reasoning_effort` is accepted as an alias so the frontmatter key
+    /// matches the `task` tool's parameter name.
+    #[serde(default, alias = "reasoning_effort")]
     pub effort: Option<Effort>,
     #[serde(default, deserialize_with = "deserialize_nonzero_u32")]
     pub max_turns: Option<u32>,
@@ -1062,6 +1065,16 @@ pub enum Effort {
 }
 impl Effort {
     pub const VALID_VALUES: &[&str] = &["low", "medium", "high", "xhigh", "max"];
+
+    /// Effort a spawned subagent runs at when neither the `task` call nor the
+    /// agent's own `reasoning_effort`/`effort` frontmatter declares one.
+    ///
+    /// Asking the parent to pick measured *worse* than a constant: an effort
+    /// rubric answered 14/25 (56%) where a flat `high` scored 16/25 (64%), and
+    /// 16 of the 25 golds were `high`. `medium` is the ladder's own default and
+    /// leaves the child's loop room to escalate; an agent that wants more says
+    /// so in its own frontmatter.
+    pub const DEFAULT_SUBAGENT: &str = "medium";
 }
 const _: () = assert!(Effort::VALID_VALUES.len() == <Effort as strum::EnumCount>::COUNT);
 #[derive(
@@ -2100,6 +2113,21 @@ Agent body.
         assert_eq!(def.color, Some(AgentColor::Blue));
         assert_eq!(def.initial_prompt.as_deref(), Some("hello world"));
         assert_eq!(def.model, ModelOverride::Override("grok-3".to_string()));
+    }
+
+    #[test]
+    fn reasoning_effort_is_accepted_as_a_frontmatter_alias() {
+        let alias = "---\nname: t\ndescription: t\nreasoning_effort: high\n---\n";
+        assert_eq!(
+            AgentDefinition::parse(alias).unwrap().effort,
+            Some(Effort::High)
+        );
+        // The canonical key keeps working.
+        let canonical = "---\nname: t\ndescription: t\neffort: low\n---\n";
+        assert_eq!(
+            AgentDefinition::parse(canonical).unwrap().effort,
+            Some(Effort::Low)
+        );
     }
     #[test]
     fn test_parse_minimal_definition() {
