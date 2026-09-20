@@ -413,7 +413,7 @@ mod tests {
         cfg.max_request_tokens = 200_000;
         cfg.preserve_recent_messages = 1;
         unsafe { std::env::set_var("GROK_JEV_APPLY_TEST_KEY", "test-key") };
-        let client = JevClient::new(&cfg, dir.path()).unwrap();
+        let client = JevClient::new(&cfg, dir.path(), None).unwrap();
         (client, shutdown_tx)
     }
 

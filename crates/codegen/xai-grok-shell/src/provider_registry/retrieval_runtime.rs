@@ -19,9 +19,9 @@ use xai_grok_config_types::{
 };
 use xai_grok_inference::{
     DEFAULT_EMBEDDINGS_PATH, DEFAULT_RERANK_PATH, EmbeddingEncodingFormat, EmbeddingRequest,
-    OpenRouterRerankAdapter, OpenaiCompatibleEmbeddings, RerankRequest, RetrievalAuthScheme,
-    RetrievalCredential, RetrievalError, RetrievalPurpose, RetrievalResult, RetrievalRouteContext,
-    VllmRerankAdapter, normalize_endpoint_path,
+    JevRerankAdapter, OpenRouterRerankAdapter, OpenaiCompatibleEmbeddings, RerankRequest,
+    RetrievalAuthScheme, RetrievalCredential, RetrievalError, RetrievalPurpose, RetrievalResult,
+    RetrievalRouteContext, VllmRerankAdapter, normalize_endpoint_path,
 };
 
 use super::id::{BuiltInProviderId, ProviderId};
@@ -615,6 +615,27 @@ fn validate_rerank_surface(
                 })
             }
         }
+        RerankerProtocol::Jev => {
+            // Jev is a decisions endpoint, not a rerank endpoint: it is reached
+            // over the same compatible/retrieval-only surfaces as the other
+            // handwritten adapters (native TypeSafe or OpenRouter alpha).
+            if matches!(
+                surface,
+                ApiSurface::OpenAiCompatibleSubset
+                    | ApiSurface::RetrievalOnly
+                    | ApiSurface::OpenRouterNative
+                    | ApiSurface::OpenAiPlatform
+            ) || kind.is_openai_compatible_family()
+                || kind == ProviderKind::OpenRouter
+            {
+                Ok(())
+            } else {
+                Err(RetrievalRuntimeError::SurfaceMismatch {
+                    id: provider_id.to_owned(),
+                    detail: format!("surface {} cannot host jev rerank", surface.as_str()),
+                })
+            }
+        }
     }
 }
 
@@ -905,6 +926,12 @@ pub async fn rerank_with_runtime(
         return_documents: false,
     };
 
+    // An explicit Jev protocol wins over the OpenRouter surface heuristic:
+    // the route shape is what the config declares, not what the host is.
+    if runtime.reranker_protocol == Some(RerankerProtocol::Jev) {
+        let client = JevRerankAdapter::new(runtime.route.clone())?;
+        return client.rerank(request, &runtime.credential, cancel).await;
+    }
     let use_openrouter = runtime.route.api_surface == "openrouter_native"
         || runtime.route.provider_kind == "openrouter";
     if use_openrouter {

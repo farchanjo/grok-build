@@ -19,16 +19,21 @@
 mod apply;
 mod client;
 mod state;
+mod transport;
 mod types;
 
 pub use apply::{PruneFailure, apply_decisions, decide};
 pub use client::{JEV_API_KEY_ENV, JevClient};
 pub use state::collect_candidates;
+pub use transport::{
+    CredentialSource, DEFAULT_KEY_FILE, JEV_KEY_FILE_ENV, JevTransport, NATIVE_KEY_NAMES,
+    OPENROUTER_KEY_NAMES, ResolvedCredential, key_file_path, resolve_credential,
+};
 pub use types::{
     DEFAULT_ENDPOINT, DEFAULT_KEEP_THRESHOLD, DEFAULT_MAX_REQUEST_TOKENS, DEFAULT_MAX_STATE_TOKENS,
     DEFAULT_MODEL, DEFAULT_PRESERVE_RECENT_MESSAGES, DEFAULT_TIMEOUT_MS,
     DEFAULT_TRUNCATE_HEAD_CHARS, KeepDecision, PruneDecisions, PruneError, PruneOutcome,
-    PruneStats, ResolvedJevPrune, ToolPair,
+    PruneStats, ResolvedJevPrune, SESSION_KEY_SUFFIX, ToolPair, derived_session_key,
 };
 
 #[cfg(test)]

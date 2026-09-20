@@ -99,6 +99,10 @@ pub enum RerankerProtocol {
     OpenaiCompatible,
     /// Cohere-compatible rerank shape.
     CohereCompatible,
+    /// Jev (TypeSafe decisions) shape: posts `{model, state, questions}` and
+    /// answers `{answers: {<index>: {noul}}}` — one `noul` question per
+    /// candidate, keyed by document index.
+    Jev,
 }
 
 impl RerankerProtocol {
@@ -106,6 +110,7 @@ impl RerankerProtocol {
         match self {
             Self::OpenaiCompatible => "openai_compatible",
             Self::CohereCompatible => "cohere_compatible",
+            Self::Jev => "jev",
         }
     }
 }
@@ -485,6 +490,22 @@ mod tests {
         assert_eq!(v["protocol"], "cohere_compatible");
         let back: RerankerModelConfig = serde_json::from_value(v).unwrap();
         assert_eq!(back.protocol, RerankerProtocol::CohereCompatible);
+    }
+
+    #[test]
+    fn jev_reranker_protocol_roundtrip() {
+        let r = RerankerModelConfig {
+            provider: "jev".into(),
+            model: "jev-latest".into(),
+            protocol: RerankerProtocol::Jev,
+            endpoint: Some("alpha/decisions".into()),
+            ..Default::default()
+        };
+        let v = serde_json::to_value(&r).unwrap();
+        assert_eq!(v["protocol"], "jev");
+        let back: RerankerModelConfig = serde_json::from_value(v).unwrap();
+        assert_eq!(back.protocol, RerankerProtocol::Jev);
+        assert_eq!(RerankerProtocol::Jev.as_str(), "jev");
     }
 
     #[test]

@@ -6,6 +6,7 @@
 
 pub mod base64_f32;
 pub mod embeddings;
+pub mod jev_rerank;
 pub mod openrouter_rerank;
 pub mod transport;
 pub mod types;
@@ -16,6 +17,7 @@ mod http_tests;
 
 pub use base64_f32::decode_base64_f32;
 pub use embeddings::{OpenaiCompatibleEmbeddings, parse_embedding_response_for_test};
+pub use jev_rerank::{JevRerankAdapter, parse_jev_rerank_response};
 pub use openrouter_rerank::{OpenRouterRerankAdapter, map_openrouter_result};
 pub use transport::{RetrievalCredential, RetrievalTransport, RetrievalTransportPolicy};
 pub use types::{

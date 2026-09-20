@@ -7,12 +7,23 @@
 
 use std::collections::BTreeMap;
 
+use super::transport::JevTransport;
 use crate::agent::config::JevPruneConfig;
 
 /// Default decisions endpoint (OpenRouter alpha surface).
+///
+/// Kept as a standalone constant for callers that never name a transport; the
+/// authoritative pair lives on [`JevTransport`].
 pub const DEFAULT_ENDPOINT: &str = "https://openrouter.ai/api/alpha/decisions";
 /// Default model reference. A plain string: the Jev model is not a catalog entry.
 pub const DEFAULT_MODEL: &str = "~typesafe/jev-latest";
+/// Suffix of the derived session key (`{session_info.id}:jev`).
+///
+/// The Jev payload shape differs from a chat turn's, so reusing the session's
+/// own key would make `bootstrap_room` — an `fnv1a_32` of the key — claim a
+/// prefix family Jev does not belong to. The derived key leaves the chat path
+/// untouched and still gives affinity within Jev's own traffic.
+pub const SESSION_KEY_SUFFIX: &str = "jev";
 /// Default keep probability; `keep_result >= threshold` keeps the result verbatim.
 pub const DEFAULT_KEEP_THRESHOLD: f64 = 0.5;
 /// Newest items never pruned, plus the very first item.
@@ -34,6 +45,9 @@ pub const DEFAULT_TIMEOUT_MS: u64 = 8_000;
 pub struct ResolvedJevPrune {
     /// Master switch. `false` short-circuits before any candidate work.
     pub enabled: bool,
+    /// Which wire the decisions call rides. Defaults to `openrouter`, which is
+    /// today's behaviour.
+    pub transport: JevTransport,
     /// Decisions endpoint. Defaults to [`DEFAULT_ENDPOINT`].
     pub endpoint: String,
     /// Model reference sent in the request body. Defaults to [`DEFAULT_MODEL`].
@@ -84,10 +98,12 @@ impl ResolvedJevPrune {
                 .filter(|v| !v.is_empty())
                 .map(str::to_owned)
         };
+        let transport = cfg.transport.unwrap_or_default();
         Self {
             enabled: cfg.enabled,
-            endpoint: blank(&cfg.endpoint).unwrap_or_else(|| DEFAULT_ENDPOINT.to_owned()),
-            model: blank(&cfg.model).unwrap_or_else(|| DEFAULT_MODEL.to_owned()),
+            transport,
+            endpoint: blank(&cfg.endpoint).unwrap_or_else(|| transport.endpoint().to_owned()),
+            model: blank(&cfg.model).unwrap_or_else(|| transport.model().to_owned()),
             api_key_env: blank(&cfg.api_key_env),
             zdr: cfg.zdr,
             data_collection: blank(&cfg.data_collection),
@@ -121,6 +137,7 @@ impl ResolvedJevPrune {
     pub fn disabled() -> Self {
         Self {
             enabled: false,
+            transport: JevTransport::default(),
             endpoint: DEFAULT_ENDPOINT.to_owned(),
             model: DEFAULT_MODEL.to_owned(),
             api_key_env: None,
@@ -141,8 +158,15 @@ impl ResolvedJevPrune {
         self.enabled
     }
 
-    /// OpenRouter `provider` block, or `None` when no routing knob is set.
+    /// OpenRouter `provider` block, or `None` when the transport does not take
+    /// one or no routing knob is set.
+    ///
+    /// The block is OpenRouter-only: the native endpoint rejects unknown
+    /// top-level fields.
     pub fn provider_block(&self) -> Option<serde_json::Value> {
+        if !self.transport.sends_provider_block() {
+            return None;
+        }
         let mut block = serde_json::Map::new();
         if let Some(zdr) = self.zdr {
             block.insert("zdr".to_owned(), serde_json::Value::Bool(zdr));
@@ -163,13 +187,45 @@ impl ResolvedJevPrune {
     }
 }
 
+/// Derived session key for the Jev lane: `{session_id}:jev`.
+///
+/// Never the session's own key — see [`SESSION_KEY_SUFFIX`].
+///
+/// # The six session-id carriers, audited before adding a seventh
+///
+/// Every one of these is derived from `session_info.id` on the chat path, each
+/// gated differently, and none of them changed when the Jev lane was added:
+///
+/// | carrier | where | gate |
+/// | --- | --- | --- |
+/// | `x-grok-session-id` | `client.rs` `GrokRequestHeaders::apply` | `first_party` only |
+/// | `X-Session-ID` | `client.rs` self-hosted family | self-hosted base URLs only |
+/// | body `session_id` + `bootstrap_room` | `apply_session_affinity` | suppressed for OpenAI and Anthropic |
+/// | OpenRouter native `session_id` | same body field | never suppressed (OpenRouter reads it) |
+/// | Anthropic `metadata.user_id` | Messages conversion | Anthropic only |
+/// | OpenAI `prompt_cache_key` | `finalize_request` | OpenAI and Codex only |
+///
+/// Two consequences decide the Jev design. First, `x-grok-*` headers never
+/// reach a third-party transport at all: `GrokRequestHeaders::apply` returns
+/// early when `!first_party`, so a Jev call on OpenRouter could not carry them
+/// even if it wanted to. Second, `bootstrap_room` is `fnv1a_32(key)` and is a
+/// *routing* key, not decoration: two streams that share it are assumed to
+/// share prefixes, which a `{state, questions}` payload does not.
+///
+/// So Jev sends `session_id` only, on its own derived key, and leaves
+/// `bootstrap_room` to the transports that define it.
+pub fn derived_session_key(session_id: &str) -> String {
+    format!("{session_id}:{SESSION_KEY_SUFFIX}")
+}
+
 /// Every failure mode is surfaced as a [`PruneError`]; the caller decides
 /// whether to fall back to the unpruned view. The pruner never aborts a
 /// compaction on its own.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PruneError {
-    /// No credential resolved from `api_key_env`, `GROK_JEV_API_KEY` or `auth.json`.
-    MissingCredential,
+    /// No credential resolved. `chain` is the ordered list of links tried, so
+    /// a two-transport setup stays debuggable.
+    MissingCredential { chain: String },
     /// Non-2xx response. `body` is a short snippet for the log line.
     Http { status: u16, body: String },
     /// Transport failure (DNS, connect, timeout, body read).
@@ -189,10 +245,9 @@ pub enum PruneError {
 impl std::fmt::Display for PruneError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::MissingCredential => write!(
-                f,
-                "no Jev credential: set api_key_env, GROK_JEV_API_KEY, or store the OpenRouter key"
-            ),
+            Self::MissingCredential { chain } => {
+                write!(f, "no Jev credential; tried {chain}")
+            }
             Self::Http { status, body } => write!(f, "jev request failed ({status}): {body}"),
             Self::Request(message) => write!(f, "jev request error: {message}"),
             Self::Malformed(message) => write!(f, "jev returned a malformed response: {message}"),
@@ -406,6 +461,67 @@ mod tests {
     }
 
     #[test]
+    fn transport_moves_endpoint_model_and_provider_together() {
+        let native = ResolvedJevPrune::from_config(Some(&JevPruneConfig {
+            enabled: true,
+            transport: Some(JevTransport::Native),
+            ..Default::default()
+        }));
+        assert_eq!(native.transport, JevTransport::Native);
+        assert_eq!(native.endpoint, JevTransport::Native.endpoint());
+        assert_eq!(native.model, "jev-latest");
+        assert!(!native.model.starts_with("~typesafe/"));
+
+        let openrouter = ResolvedJevPrune::from_config(Some(&JevPruneConfig {
+            enabled: true,
+            ..Default::default()
+        }));
+        assert_eq!(openrouter.transport, JevTransport::Openrouter);
+        assert_eq!(openrouter.endpoint, DEFAULT_ENDPOINT);
+        assert_eq!(openrouter.model, DEFAULT_MODEL);
+    }
+
+    #[test]
+    fn explicit_endpoint_and_model_still_win_over_the_transport() {
+        let cfg = JevPruneConfig {
+            enabled: true,
+            transport: Some(JevTransport::Native),
+            endpoint: Some("http://127.0.0.1:9/decisions".to_owned()),
+            model: Some("custom-model".to_owned()),
+            ..Default::default()
+        };
+        let resolved = ResolvedJevPrune::from_config(Some(&cfg));
+        assert_eq!(resolved.endpoint, "http://127.0.0.1:9/decisions");
+        assert_eq!(resolved.model, "custom-model");
+    }
+
+    #[test]
+    fn native_never_sends_the_provider_block() {
+        let cfg = JevPruneConfig {
+            enabled: true,
+            transport: Some(JevTransport::Native),
+            zdr: Some(true),
+            require_parameters: Some(true),
+            ..Default::default()
+        };
+        assert!(
+            ResolvedJevPrune::from_config(Some(&cfg))
+                .provider_block()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn derived_session_key_is_namespaced_and_stable() {
+        assert_eq!(derived_session_key("01a0b71b"), "01a0b71b:jev");
+        assert_eq!(
+            derived_session_key("01a0b71b"),
+            derived_session_key("01a0b71b")
+        );
+        assert_ne!(derived_session_key("01a0b71b"), "01a0b71b");
+    }
+
+    #[test]
     fn blank_strings_fall_back_to_defaults() {
         let cfg = JevPruneConfig {
             enabled: true,
@@ -424,6 +540,7 @@ mod tests {
     #[test]
     fn provider_block_omits_absent_knobs() {
         let cfg = JevPruneConfig {
+            transport: Some(JevTransport::Openrouter),
             zdr: Some(true),
             require_parameters: Some(true),
             ..Default::default()

@@ -398,7 +398,7 @@ fn parse_reranker_entry(
                     Some("protocol"),
                     ConfigWarningKind::InvalidValue,
                     "unrecognized reranker protocol; only registered typed protocols are \
-                     accepted (openai_compatible, cohere_compatible); field ignored"
+                     accepted (openai_compatible, cohere_compatible, jev); field ignored"
                         .into(),
                 )),
             },
@@ -1083,6 +1083,7 @@ fn parse_reranker_protocol(s: &str) -> Option<RerankerProtocol> {
     match s.trim().to_ascii_lowercase().as_str() {
         "openai_compatible" | "openai-compatible" => Some(RerankerProtocol::OpenaiCompatible),
         "cohere_compatible" | "cohere-compatible" => Some(RerankerProtocol::CohereCompatible),
+        "jev" | "jev_native" | "jev-native" => Some(RerankerProtocol::Jev),
         _ => None,
     }
 }

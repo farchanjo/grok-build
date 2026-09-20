@@ -131,7 +131,14 @@ service error text.
 - **Typed rerank protocols** are distinct from nonstandard/custom rerank
   protocols. An arbitrary OpenAI-compatible endpoint is **not** assumed to be
   a typed reranker; an endpoint only participates as a reranker when it
-  actually implements the typed rerank protocol.
+  actually implements the typed rerank protocol. Three protocols are
+  registered: `openai_compatible` (`{model, query, documents, top_n}` →
+  `{results: [{index, relevance_score}]}`), `cohere_compatible`, and `jev`
+  (`{model, state, questions}` → `{answers: {<index>: {noul}}}` — one `noul`
+  question per candidate, keyed by document index so two candidates with the
+  same name cannot collide). A `jev` entry sets its own relative `endpoint`
+  (`alpha/decisions` on an OpenRouter base URL, `systemone` on the native
+  TypeSafe one); the `openai_compatible` default is `/rerank`.
 
 ### Solaris no-auth configuration evidence
 

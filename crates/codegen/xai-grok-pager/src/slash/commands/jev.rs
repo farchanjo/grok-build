@@ -3,18 +3,23 @@
 //! `on` / `off` dispatch the same typed action as the settings row, so the
 //! value persists to `[compaction.jev].enabled` and the running session picks
 //! it up through the existing `[compaction]` reload fan-out (no restart).
-//! Bare `/jev` and `/jev status` report the effective state.
+//! `transport` does the same for `[compaction.jev].transport`. Bare `/jev` and
+//! `/jev status` report the effective state, including which credential chain
+//! link produced the key — never the key itself.
 
 use crate::app::actions::Action;
 use crate::slash::command::{CommandExecCtx, CommandResult, SlashCommand};
+use xai_grok_shell::session::helpers::jev_prune::{
+    JevTransport, ResolvedJevPrune, resolve_credential,
+};
 
-/// Jev model used when `[compaction.jev].model` is unset. Mirrors the shell
-/// client default; the decisions endpoint is not a chat surface, so this is a
-/// plain string rather than a catalog entry.
-const DEFAULT_MODEL: &str = "~typesafe/jev-latest";
-
-/// Decisions endpoint used when `[compaction.jev].endpoint` is unset.
+/// Decisions endpoint used when `[compaction.jev].endpoint` is unset. Mirrors
+/// the shell client default; the decisions endpoint is not a chat surface, so
+/// this is a plain string rather than a catalog entry.
 const DEFAULT_ENDPOINT: &str = "https://openrouter.ai/api/alpha/decisions";
+
+/// Decisions model used when `[compaction.jev].model` is unset.
+const DEFAULT_MODEL: &str = "~typesafe/jev-latest";
 
 /// Control Jev-guided compaction pruning.
 pub struct JevCommand;
@@ -25,25 +30,31 @@ impl SlashCommand for JevCommand {
     }
 
     fn description(&self) -> &str {
-        "Toggle Jev-guided compaction pruning"
+        "Toggle Jev-guided compaction pruning and pick its transport"
     }
 
     fn usage(&self) -> &str {
-        "/jev [on|off|status]"
+        "/jev [on|off|status|transport native|openrouter]"
     }
 
     fn arg_placeholder(&self) -> Option<&str> {
-        Some("on/off")
+        Some("on/off/transport")
     }
 
     fn run(&self, ctx: &mut CommandExecCtx, args: &str) -> CommandResult {
-        match args.trim().to_ascii_lowercase().as_str() {
+        let args = args.trim();
+        let (verb, rest) = match args.split_once(char::is_whitespace) {
+            Some((verb, rest)) => (verb.to_ascii_lowercase(), rest.trim()),
+            None => (args.to_ascii_lowercase(), ""),
+        };
+        match verb.as_str() {
             "on" | "enable" | "enabled" => {
                 CommandResult::Action(Action::SetCompactionJevEnabled(true))
             }
             "off" | "disable" | "disabled" => {
                 CommandResult::Action(Action::SetCompactionJevEnabled(false))
             }
+            "transport" | "wire" => jev_transport(rest),
             "" | "status" => CommandResult::Message(jev_status(ctx)),
             other => CommandResult::Error(format!(
                 "unknown argument `{other}`; usage: {}",
@@ -53,9 +64,36 @@ impl SlashCommand for JevCommand {
     }
 }
 
-/// Effective model and endpoint, from `[compaction.jev]` when set.
-fn jev_model_and_endpoint() -> (String, String) {
-    let jev = xai_grok_shell::config::load_effective_config()
+/// `transport <name>`; a bare `transport` reports the two spellings.
+fn jev_transport(rest: &str) -> CommandResult {
+    if rest.is_empty() {
+        return CommandResult::Message(format!(
+            "usage: /jev transport <{}>",
+            JevTransport::ALL
+                .iter()
+                .map(|t| t.as_str())
+                .collect::<Vec<_>>()
+                .join("|")
+        ));
+    }
+    match JevTransport::parse(rest) {
+        Some(transport) => {
+            CommandResult::Action(Action::SetJevTransport(transport.as_str().to_owned()))
+        }
+        None => CommandResult::Error(format!(
+            "unknown transport `{rest}`; expected {}",
+            JevTransport::ALL
+                .iter()
+                .map(|t| t.as_str())
+                .collect::<Vec<_>>()
+                .join(" or ")
+        )),
+    }
+}
+
+/// Effective `[compaction.jev]` policy, from config when set.
+fn jev_config() -> Option<xai_grok_shell::agent::config::JevPruneConfig> {
+    xai_grok_shell::config::load_effective_config()
         .ok()
         .and_then(|root| root.get("compaction").cloned())
         .and_then(|value| {
@@ -63,20 +101,34 @@ fn jev_model_and_endpoint() -> (String, String) {
                 .try_into::<xai_grok_shell::agent::config::CompactionConfig>()
                 .ok()
         })
-        .and_then(|config| config.jev);
-    match jev {
-        Some(jev) => (
-            jev.model.unwrap_or_else(|| DEFAULT_MODEL.to_owned()),
-            jev.endpoint.unwrap_or_else(|| DEFAULT_ENDPOINT.to_owned()),
-        ),
-        None => (DEFAULT_MODEL.to_owned(), DEFAULT_ENDPOINT.to_owned()),
-    }
+        .and_then(|config| config.jev)
 }
 
 fn jev_status(ctx: &CommandExecCtx) -> String {
-    let (model, endpoint) = jev_model_and_endpoint();
+    let cfg = jev_config();
+    let resolved = ResolvedJevPrune::from_config(cfg.as_ref());
+    let (model, endpoint) = (
+        cfg.as_ref()
+            .and_then(|c| c.model.clone())
+            .unwrap_or_else(|| resolved.model.clone()),
+        cfg.as_ref()
+            .and_then(|c| c.endpoint.clone())
+            .unwrap_or_else(|| resolved.endpoint.clone()),
+    );
+    let _ = (DEFAULT_MODEL, DEFAULT_ENDPOINT);
+    // The credential source is what makes a two-transport setup debuggable: a
+    // 401 with no chain named is a dead end. Only the label is printed.
+    let credential = match resolve_credential(
+        resolved.transport,
+        cfg.as_ref().and_then(|c| c.api_key_env.as_deref()),
+        &xai_grok_config::grok_home(),
+    ) {
+        Ok(resolved) => resolved.source.label(),
+        Err(error) => format!("unavailable ({error})"),
+    };
     format!(
-        "Jev-guided pruning: {}\nmodel: {model}\nendpoint: {endpoint}\n\
+        "Jev-guided pruning: {}\ntransport: {}\nmodel: {model}\nendpoint: {endpoint}\n\
+         credential: {credential}\n\
          Prunes stale tool calls and tool results from the summarizer view only; \
          user and assistant text is untouched.",
         if ctx.pager_state.compaction_jev_enabled {
@@ -84,6 +136,7 @@ fn jev_status(ctx: &CommandExecCtx) -> String {
         } else {
             "off"
         },
+        resolved.transport.as_str(),
     )
 }
 
@@ -137,6 +190,51 @@ mod tests {
     }
 
     #[test]
+    fn transport_dispatches_the_same_typed_action_as_the_settings_row() {
+        let cmd = JevCommand;
+        let models = ModelState::default();
+        let bundle = BundleState::default();
+        for (arg, expected) in [("native", "native"), ("openrouter", "openrouter")] {
+            let mut ctx = make_ctx(&models, &bundle, false);
+            match cmd.run(&mut ctx, &format!("transport {arg}")) {
+                CommandResult::Action(Action::SetJevTransport(value)) => {
+                    assert_eq!(value, expected)
+                }
+                other => panic!("expected Action::SetJevTransport({expected}), got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn bare_transport_lists_the_spellings() {
+        let cmd = JevCommand;
+        let models = ModelState::default();
+        let bundle = BundleState::default();
+        let mut ctx = make_ctx(&models, &bundle, false);
+        match cmd.run(&mut ctx, "transport") {
+            CommandResult::Message(msg) => {
+                assert!(
+                    msg.contains("native") && msg.contains("openrouter"),
+                    "{msg}"
+                )
+            }
+            other => panic!("expected a usage message, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn unknown_transport_is_an_error() {
+        let cmd = JevCommand;
+        let models = ModelState::default();
+        let bundle = BundleState::default();
+        let mut ctx = make_ctx(&models, &bundle, false);
+        assert!(matches!(
+            cmd.run(&mut ctx, "transport carrier-pigeon"),
+            CommandResult::Error(_)
+        ));
+    }
+
+    #[test]
     fn bare_and_status_report_effective_state() {
         let cmd = JevCommand;
         let models = ModelState::default();
@@ -150,6 +248,31 @@ mod tests {
                 other => panic!("expected status message for `{args}`, got {other:?}"),
             }
         }
+    }
+
+    /// `status` names the credential chain link and never the key.
+    #[test]
+    fn status_prints_a_credential_source_label() {
+        let cmd = JevCommand;
+        let models = ModelState::default();
+        let bundle = BundleState::default();
+        let mut ctx = make_ctx(&models, &bundle, false);
+        let CommandResult::Message(msg) = cmd.run(&mut ctx, "status") else {
+            panic!("expected a status message");
+        };
+        let line = msg
+            .lines()
+            .find(|line| line.starts_with("credential: "))
+            .expect("status carries a credential line");
+        let source = line.trim_start_matches("credential: ");
+        assert!(
+            source.starts_with("env:")
+                || source.starts_with("file:")
+                || source.starts_with("auth.json:")
+                || source.starts_with("unavailable"),
+            "unexpected source label: {source}"
+        );
+        assert!(msg.contains("transport: "), "{msg}");
     }
 
     #[test]

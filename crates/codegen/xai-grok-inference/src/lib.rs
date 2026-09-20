@@ -96,13 +96,13 @@ pub use openrouter_baseline::{
 };
 pub use retrieval::{
     DEFAULT_EMBEDDINGS_PATH, DEFAULT_RERANK_PATH, EmbeddingAdapter, EmbeddingEncodingFormat,
-    EmbeddingRequest, EmbeddingResult, EmbeddingVector, OpenRouterRerankAdapter,
+    EmbeddingRequest, EmbeddingResult, EmbeddingVector, JevRerankAdapter, OpenRouterRerankAdapter,
     OpenaiCompatibleEmbeddings, RerankAdapter, RerankHit, RerankRequest, RerankResult,
     RetrievalAuthScheme, RetrievalCredential, RetrievalError, RetrievalErrorCategory,
     RetrievalPurpose, RetrievalResult, RetrievalRouteContext, RetrievalTransport,
     RetrievalTransportPolicy, VllmRerankAdapter, decode_base64_f32, normalize_endpoint_path,
-    parse_embedding_response_for_test, parse_vllm_rerank_response, validate_embedding_request,
-    validate_relative_endpoint_path, validate_rerank_request,
+    parse_embedding_response_for_test, parse_jev_rerank_response, parse_vllm_rerank_response,
+    validate_embedding_request, validate_relative_endpoint_path, validate_rerank_request,
 };
 // Prefer `xai_grok_inference::retrieval::...` for retrieval-only constants that
 // would collide with sampler retry exports (e.g. DEFAULT_MAX_RETRIES).

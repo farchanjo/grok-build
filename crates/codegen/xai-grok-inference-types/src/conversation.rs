@@ -125,6 +125,12 @@ pub enum SyntheticReason {
     /// Working-directory switch context appended after a session relocation.
     /// Carries a generation marker so recovery can detect an existing append.
     WorkingDirectorySwitch,
+    /// Native skill prime reminder, prepended to the turn it belongs to.
+    /// Distinct from [`Self::SystemReminder`] (shared with ten other origins) so
+    /// the request builders can drop the **stale** copies: prime re-runs from
+    /// the current prompt every turn, and ten primed turns used to accumulate
+    /// ~60 KB of re-sent bodies. The transcript keeps them; the request does not.
+    SkillPrime,
     /// Catch-all for unknown/future variants.  Preserves forward compatibility
     /// so older clients can deserialize sessions written by newer versions.
     #[serde(other)]
@@ -162,6 +168,7 @@ impl SyntheticReason {
             | Self::GoalSummary
             | Self::StopHookFeedback
             | Self::WorkingDirectorySwitch
+            | Self::SkillPrime
             | Self::Unknown => false,
         }
     }
@@ -1125,6 +1132,23 @@ impl ConversationItem {
                 text: Arc::<str>::from(content.into()),
             }],
             synthetic_reason: Some(SyntheticReason::SystemReminder),
+            cwd_generation: None,
+            prior_turn_interrupt: None,
+            prompt_index: None,
+        })
+    }
+
+    /// Create a synthetic user message carrying a native skill prime reminder.
+    ///
+    /// Same `<system-reminder>` framing as [`Self::system_reminder`], tagged
+    /// with [`SyntheticReason::SkillPrime`] so it can be told apart at request
+    /// build.
+    pub fn skill_prime_reminder(content: impl Into<String>) -> Self {
+        Self::User(UserItem {
+            content: vec![ContentPart::Text {
+                text: Arc::<str>::from(content.into()),
+            }],
+            synthetic_reason: Some(SyntheticReason::SkillPrime),
             cwd_generation: None,
             prior_turn_interrupt: None,
             prompt_index: None,
@@ -2193,8 +2217,14 @@ pub fn conversation_item_to_chat_message(item: ConversationItem) -> ChatRequestM
 pub fn conversation_to_chat_messages(items: Vec<ConversationItem>) -> Vec<ChatRequestMessage> {
     let mut out: Vec<ChatRequestMessage> = Vec::with_capacity(items.len());
     let mut pending_reasoning: Vec<String> = Vec::new();
+    let stale = stale_prime_reminders(&items);
 
-    for item in items {
+    for (index, item) in items.into_iter().enumerate() {
+        // Every prime reminder but the newest is a stale copy derived from an
+        // older prompt. The transcript keeps them; the request does not.
+        if stale[index] {
+            continue;
+        }
         match item {
             ConversationItem::Reasoning(r) => {
                 let text = reasoning_item_text(&r);
@@ -2550,10 +2580,13 @@ impl From<&ConversationRequest> for rs::CreateResponse {
 /// so they appear inline in the same order the model originally emitted —
 /// which is what lets the server-side prefix KV-cache hit on repeat turns.
 fn build_responses_input(req: &ConversationRequest) -> rs::InputParam {
+    let stale = stale_prime_reminders(&req.items);
     let items: Vec<rs::InputItem> = req
         .items
         .iter()
-        .flat_map(conversation_item_to_input_items)
+        .enumerate()
+        .filter(|(index, _)| !stale[*index])
+        .flat_map(|(_, item)| conversation_item_to_input_items(item))
         .collect();
     rs::InputParam::Items(items)
 }
@@ -2590,6 +2623,29 @@ pub fn patch_reasoning_text_types(body: &mut serde_json::Value) {
             }
         }
     }
+}
+
+/// Whether `item` is a native skill prime reminder.
+pub fn is_skill_prime_reminder(item: &ConversationItem) -> bool {
+    matches!(
+        item,
+        ConversationItem::User(user)
+            if user.synthetic_reason == Some(SyntheticReason::SkillPrime)
+    )
+}
+
+/// Per-item flag: true for every prime reminder except the newest one.
+///
+/// Prime runs from the current prompt on every turn, so only the newest
+/// reminder matches the request being built; older ones are stale copies that
+/// would otherwise be re-sent until compaction drops them.
+fn stale_prime_reminders(items: &[ConversationItem]) -> Vec<bool> {
+    let newest = items.iter().rposition(is_skill_prime_reminder);
+    items
+        .iter()
+        .enumerate()
+        .map(|(index, item)| is_skill_prime_reminder(item) && Some(index) != newest)
+        .collect()
 }
 
 /// Convert a ConversationItem to Responses API InputItem(s)
@@ -9423,6 +9479,49 @@ mod tests {
     }
 
     // ── SyntheticReason tests ─────────────────────────────────────────────────
+
+    #[test]
+    fn skill_prime_reminder_is_tagged_and_does_not_start_a_turn() {
+        let item = ConversationItem::skill_prime_reminder("<skill_prime>x</skill_prime>");
+        assert!(is_skill_prime_reminder(&item));
+        let ConversationItem::User(user) = &item else {
+            panic!("prime reminder is a user item");
+        };
+        assert_eq!(user.synthetic_reason, Some(SyntheticReason::SkillPrime));
+        assert!(!SyntheticReason::SkillPrime.starts_prompt_turn());
+        assert_eq!(
+            serde_json::to_value(SyntheticReason::SkillPrime).unwrap(),
+            serde_json::json!("skill_prime")
+        );
+    }
+
+    #[test]
+    fn only_the_newest_prime_reminder_survives_the_request_build() {
+        let items = vec![
+            ConversationItem::skill_prime_reminder("old"),
+            ConversationItem::user("first"),
+            ConversationItem::skill_prime_reminder("new"),
+            ConversationItem::user("second"),
+        ];
+        let msgs = conversation_to_chat_messages(items.clone());
+        assert_eq!(msgs.len(), 3, "only the newest prime reminder is sent");
+        let texts: Vec<String> = msgs
+            .iter()
+            .filter_map(|m| match &m.content {
+                MessageContent::Text(text) => Some(text.clone()),
+                _ => None,
+            })
+            .collect();
+        assert!(texts.iter().any(|t| t.contains("new")));
+        assert!(!texts.iter().any(|t| t.contains("old")));
+
+        // Both builders agree, and a single reminder is never stripped.
+        let stale = stale_prime_reminders(&items);
+        assert_eq!(stale, vec![true, false, false, false]);
+        let single = vec![ConversationItem::skill_prime_reminder("only")];
+        assert_eq!(stale_prime_reminders(&single), vec![false]);
+        assert_eq!(conversation_to_chat_messages(single).len(), 1);
+    }
 
     /// Real user messages must have `synthetic_reason = None`.
     #[test]
