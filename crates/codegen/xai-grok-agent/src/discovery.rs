@@ -199,6 +199,14 @@ fn merge_subagents(
 /// compat agents, then bundled. `.grok` dirs resolve from `grok_home`
 /// (GROK_HOME-aware) plus the legacy literal `~/.grok` when GROK_HOME points
 /// elsewhere; `.claude` resolves from `home`.
+/// Whether the legacy literal `~/.grok` tree participates in discovery.
+/// `GROK_LEGACY_HOME_ENABLED=0` drops it, which is how an isolated development
+/// profile (`GROK_HOME=~/.grokdev`) keeps a run from also seeing the user's
+/// real agent tree.
+fn legacy_grok_home_enabled() -> bool {
+    std::env::var("GROK_LEGACY_HOME_ENABLED").map_or(true, |value| value != "0")
+}
+
 pub(crate) fn user_agent_dirs(
     home: Option<&Path>,
     grok_home: Option<&Path>,
@@ -208,7 +216,8 @@ pub(crate) fn user_agent_dirs(
     // still discovered and stay consistent with scope_from_path classification.
     let legacy_grok = home
         .map(|h| h.join(".grok"))
-        .filter(|legacy| grok_home != Some(legacy.as_path()));
+        .filter(|legacy| grok_home != Some(legacy.as_path()))
+        .filter(|_| legacy_grok_home_enabled());
 
     let mut dirs = Vec::new();
     if let Some(g) = grok_home {
@@ -798,10 +807,18 @@ mod tests {
             .map(|(p, _)| p)
             .collect();
         assert!(paths.contains(&grok.join("agents")));
-        assert!(paths.contains(&home.join(".grok").join("agents")));
+        // The legacy tree is opt-out; the isolated development profile sets
+        // GROK_LEGACY_HOME_ENABLED=0, so assert against the active policy.
+        assert_eq!(
+            paths.contains(&home.join(".grok").join("agents")),
+            legacy_grok_home_enabled()
+        );
         assert!(paths.contains(&home.join(".claude").join("agents")));
         assert!(paths.contains(&grok.join("bundled").join("agents")));
-        assert!(paths.contains(&home.join(".grok").join("bundled").join("agents")));
+        assert_eq!(
+            paths.contains(&home.join(".grok").join("bundled").join("agents")),
+            legacy_grok_home_enabled()
+        );
     }
 
     #[test]
