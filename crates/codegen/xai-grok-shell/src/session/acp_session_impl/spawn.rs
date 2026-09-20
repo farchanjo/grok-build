@@ -1096,6 +1096,13 @@ pub(crate) async fn spawn_session_actor(
             search_source: "tool",
             embedding_credentials: embed_credentials,
             retrieval: memory_retrieval_facade,
+            // Built here so `[memory.gate] rerank = true` has a route from the
+            // search path; the append seam builds its own client per call.
+            gate: memory_config
+                .as_ref()
+                .map(|mc| crate::session::memory::gate::resolve_config(&mc.gate))
+                .and_then(crate::session::memory::gate::build_gate)
+                .map(std::sync::Arc::new),
             // The actual `[memory.index]` config every chunk writer uses drives
             // both fingerprint doc-prep identity and chunking.
             index_config: memory_config
@@ -1634,8 +1641,15 @@ pub(crate) async fn spawn_session_actor(
             }),
             cmd_tx.clone(),
             std::collections::HashMap::new(),
+            Some(compaction_jev.clone()),
         ),
     ));
+    // Agent types the `validate_only` smoke check resolves `agent_type`
+    // literals against. Filled right after the session exists (the authority
+    // lane needs it); `None` means "skip the check".
+    let workflow_agent_types: std::sync::Arc<parking_lot::Mutex<Option<Vec<String>>>> =
+        std::sync::Arc::new(parking_lot::Mutex::new(None));
+    let workflow_agent_types_for_launch = workflow_agent_types.clone();
     let (workflow_launch_tx, mut workflow_launch_rx) = tokio::sync::mpsc::unbounded_channel::<
         xai_grok_tools::implementations::grok_build::workflow::WorkflowLaunchEnvelope,
     >();
@@ -1727,12 +1741,14 @@ pub(crate) async fn spawn_session_actor(
                     let agent_budget = input
                         .agent_budget
                         .unwrap_or(xai_workflow::DEFAULT_AGENT_BUDGET);
+                    let known_agent_types = workflow_agent_types_for_launch.lock().clone();
                     tokio::spawn(async move {
                         let verdict = tokio::task::spawn_blocking(move || {
-                            xai_workflow::validate_script_with_agent_budget(
+                            xai_workflow::validate_script_with_known_agents(
                                 &script,
                                 probe_args,
                                 agent_budget,
+                                known_agent_types.as_deref(),
                             )
                         })
                         .await;
@@ -2139,6 +2155,9 @@ pub(crate) async fn spawn_session_actor(
         workspace_ops: workspace_ops.clone(),
         trace_config_template: std::cell::RefCell::new(None),
     });
+    // The workflow smoke check resolves `agent_type` literals against the
+    // same callable roster every other spawn lane uses.
+    *workflow_agent_types.lock() = Some(session.callable_agent_type_names());
     // Publish this session as a delivery target so owner-stamped pushes
     // created on a *shared* transport (a subagent's stream on the parent's
     // MCP client, a reparented task, a scheduled fire) reach the owning
@@ -2146,7 +2165,7 @@ pub(crate) async fn spawn_session_actor(
     crate::session::delivery::register(crate::session::delivery::SessionDeliveryTarget {
         session_id: session.session_info.id.0.to_string(),
         cmd_tx: session.session_cmd_tx.clone(),
-        persistence_tx: session.notifications.persistence_tx.clone(),
+        persistence: persistence.clone(),
         mcp_state: std::sync::Arc::downgrade(&session.mcp_state),
         push_stats: std::sync::Arc::clone(&session.mcp_push_stats),
         subscription_registry: std::sync::Arc::clone(&session.mcp_subscription_registry),
@@ -2198,7 +2217,8 @@ pub(crate) async fn spawn_session_actor(
     }
     {
         let snapshot = session.tool_metadata_snapshot.clone();
-        let tool_index = crate::session::tool_index::Bm25ToolSearchIndex::new(snapshot);
+        let tool_index =
+            crate::session::tool_index::Bm25ToolSearchIndex::with_service_dense(snapshot);
         session
             .agent
             .borrow()
@@ -2208,6 +2228,9 @@ pub(crate) async fn spawn_session_actor(
             ))
             .await;
     }
+    // The workflow tool description carries the live catalog (see
+    // `refresh_workflow_tool_catalog`).
+    session.refresh_workflow_tool_catalog();
     if let Some(client) = managed_gateway_tool_client.clone() {
         session
             .agent

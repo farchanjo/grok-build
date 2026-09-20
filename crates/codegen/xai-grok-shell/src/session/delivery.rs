@@ -44,9 +44,9 @@ use xai_grok_tools::reminders::task_completion::TaskCompletionReservations;
 pub(crate) struct SessionDeliveryTarget {
     pub(crate) session_id: String,
     pub(crate) cmd_tx: UnboundedSender<SessionCommand>,
-    /// The owner's persistence channel: a routed frame is written to the
-    /// owner's transcript, not to the transport holder's.
-    pub(crate) persistence_tx: UnboundedSender<PersistenceMsg>,
+    /// The owner's persistence handle: a routed frame is written to the
+    /// owner's transcript — live *and* durable — not to the transport holder's.
+    pub(crate) persistence: crate::session::persistence::PersistenceHandle,
     /// The owner's MCP state, so a shared transport that reconnects under the
     /// holder can be re-pointed here instead of leaving this session on the
     /// dead client. `Weak`: a target never keeps a session alive.
@@ -221,7 +221,9 @@ mod tests {
         let target = SessionDeliveryTarget {
             session_id: id.to_string(),
             cmd_tx: tx,
-            persistence_tx,
+            persistence: crate::session::persistence::PersistenceHandle::from_sender_for_test(
+                persistence_tx,
+            ),
             mcp_state: Weak::new(),
             push_stats: Arc::new(Mutex::new(HashMap::new())),
             subscription_registry: Arc::new(Mutex::new(HashMap::new())),

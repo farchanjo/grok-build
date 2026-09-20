@@ -147,7 +147,9 @@ fn register_child(id: &str) -> (ChildQueue, crate::session::delivery::SessionDel
     crate::session::delivery::register(crate::session::delivery::SessionDeliveryTarget {
         session_id: id.to_string(),
         cmd_tx: tx,
-        persistence_tx,
+        persistence: crate::session::persistence::PersistenceHandle::from_sender_for_test(
+            persistence_tx,
+        ),
         mcp_state: std::sync::Weak::new(),
         push_stats: Arc::new(parking_lot::Mutex::new(Default::default())),
         subscription_registry: Arc::new(parking_lot::Mutex::new(Default::default())),

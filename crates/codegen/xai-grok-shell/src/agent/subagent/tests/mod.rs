@@ -35,7 +35,7 @@ fn spawn_parent_is_rehomed_when_the_named_parent_is_gone() {
     crate::session::delivery::register(crate::session::delivery::SessionDeliveryTarget {
         session_id: "live-parent".to_string(),
         cmd_tx: tx,
-        persistence_tx,
+        persistence: crate::session::persistence::PersistenceHandle::from_sender_for_test(persistence_tx),
         mcp_state: std::sync::Weak::new(),
         push_stats: std::sync::Arc::new(parking_lot::Mutex::new(Default::default())),
         subscription_registry: std::sync::Arc::new(parking_lot::Mutex::new(Default::default())),

@@ -301,10 +301,10 @@ fn route_frame(
 fn frame_persistence<'a>(
     routed: &'a Option<crate::session::delivery::SessionDeliveryTarget>,
     config: &'a NotificationBridgeConfig,
-) -> &'a tokio::sync::mpsc::UnboundedSender<PersistenceMsg> {
+) -> &'a crate::session::persistence::PersistenceHandle {
     routed
         .as_ref()
-        .map_or(&config.persistence.tx, |target| &target.persistence_tx)
+        .map_or(&config.persistence, |target| &target.persistence)
 }
 
 fn stamp_scheduler_meta(
@@ -418,11 +418,16 @@ async fn handle_scheduled_task_removed(
             .map_err(|error| format!("failed to serialize scheduled task deletion: {error}"))?;
         let update = crate::session::storage::SessionUpdate::Xai(Box::new(notification));
         if acknowledgement.is_some() {
-            // The durable append targets this bridge's session file, which owns
-            // the scheduler state; the live write goes to the frame's owner.
-            durable_append_landed(config.persistence.append_update_durably(update).await)?;
+            // Durable too: the removal must survive a reload in the owner's
+            // transcript, not only in this bridge's file.
+            durable_append_landed(
+                frame_persistence(&routed, config)
+                    .append_update_durably(update)
+                    .await,
+            )?;
         } else {
             frame_persistence(&routed, config)
+                .tx
                 .send(PersistenceMsg::Update(update))
                 .map_err(|_| "session persistence stopped".to_owned())?;
         }
@@ -876,12 +881,11 @@ async fn handle_notification(
             }
             // A routed frame belongs to the owner's transcript and the owner's
             // hook registry, not to the bridge's session.
-            let frame_persistence = routed
-                .as_ref()
-                .map_or(&config.persistence.tx, |target| &target.persistence_tx);
-            let _ = frame_persistence.send(PersistenceMsg::Update(
-                crate::session::storage::SessionUpdate::Xai(Box::new(notification.clone())),
-            ));
+            let _ = frame_persistence(&routed, config)
+                .tx
+                .send(PersistenceMsg::Update(
+                    crate::session::storage::SessionUpdate::Xai(Box::new(notification.clone())),
+                ));
             let params = serde_json::to_value(&notification)
                 .and_then(|v| serde_json::value::to_raw_value(&v))
                 .ok();
@@ -1199,9 +1203,11 @@ async fn handle_notification(
                 },
                 meta: meta.map(serde_json::Value::Object),
             };
-            let _ = frame_persistence(&routed, config).send(PersistenceMsg::Update(
-                crate::session::storage::SessionUpdate::Xai(Box::new(notification.clone())),
-            ));
+            let _ = frame_persistence(&routed, config)
+                .tx
+                .send(PersistenceMsg::Update(
+                    crate::session::storage::SessionUpdate::Xai(Box::new(notification.clone())),
+                ));
             if let Ok(params) = serde_json::to_value(&notification)
                 .and_then(|v| serde_json::value::to_raw_value(&v))
             {
@@ -1343,7 +1349,9 @@ mod tests {
         crate::session::delivery::register(crate::session::delivery::SessionDeliveryTarget {
             session_id: "child-session".to_string(),
             cmd_tx: owner_tx,
-            persistence_tx: owner_persistence_tx,
+            persistence: crate::session::persistence::PersistenceHandle::from_sender_for_test(
+                owner_persistence_tx,
+            ),
             mcp_state: std::sync::Weak::new(),
             push_stats: Arc::new(parking_lot::Mutex::new(Default::default())),
             subscription_registry: Arc::new(parking_lot::Mutex::new(Default::default())),
@@ -1404,7 +1412,9 @@ mod tests {
         crate::session::delivery::register(crate::session::delivery::SessionDeliveryTarget {
             session_id: "child-session".to_string(),
             cmd_tx: owner_tx,
-            persistence_tx: owner_persistence_tx,
+            persistence: crate::session::persistence::PersistenceHandle::from_sender_for_test(
+                owner_persistence_tx,
+            ),
             mcp_state: std::sync::Weak::new(),
             push_stats: Arc::new(parking_lot::Mutex::new(Default::default())),
             subscription_registry: Arc::new(parking_lot::Mutex::new(Default::default())),
@@ -1467,7 +1477,9 @@ mod tests {
         crate::session::delivery::register(crate::session::delivery::SessionDeliveryTarget {
             session_id: "child-session".to_string(),
             cmd_tx: owner_tx,
-            persistence_tx: owner_persistence_tx,
+            persistence: crate::session::persistence::PersistenceHandle::from_sender_for_test(
+                owner_persistence_tx,
+            ),
             mcp_state: std::sync::Weak::new(),
             push_stats: Arc::new(parking_lot::Mutex::new(Default::default())),
             subscription_registry: Arc::new(parking_lot::Mutex::new(Default::default())),
@@ -1574,7 +1586,9 @@ mod tests {
         crate::session::delivery::register(crate::session::delivery::SessionDeliveryTarget {
             session_id: "child-session".to_string(),
             cmd_tx: owner_tx,
-            persistence_tx: owner_persistence_tx,
+            persistence: crate::session::persistence::PersistenceHandle::from_sender_for_test(
+                owner_persistence_tx,
+            ),
             mcp_state: std::sync::Weak::new(),
             push_stats: Arc::new(parking_lot::Mutex::new(Default::default())),
             subscription_registry: Arc::new(parking_lot::Mutex::new(Default::default())),
@@ -1636,7 +1650,9 @@ mod tests {
         crate::session::delivery::register(crate::session::delivery::SessionDeliveryTarget {
             session_id: "child-session".to_string(),
             cmd_tx: owner_tx,
-            persistence_tx: owner_persistence_tx,
+            persistence: crate::session::persistence::PersistenceHandle::from_sender_for_test(
+                owner_persistence_tx,
+            ),
             mcp_state: std::sync::Weak::new(),
             push_stats: Arc::new(parking_lot::Mutex::new(Default::default())),
             subscription_registry: Arc::new(parking_lot::Mutex::new(Default::default())),
@@ -2608,7 +2624,9 @@ mod tests {
         crate::session::delivery::register(crate::session::delivery::SessionDeliveryTarget {
             session_id: "other-session".to_string(),
             cmd_tx: owner_tx,
-            persistence_tx: owner_persistence_tx,
+            persistence: crate::session::persistence::PersistenceHandle::from_sender_for_test(
+                owner_persistence_tx,
+            ),
             mcp_state: std::sync::Weak::new(),
             push_stats: Arc::new(parking_lot::Mutex::new(HashMap::new())),
             subscription_registry: Arc::new(parking_lot::Mutex::new(HashMap::new())),
