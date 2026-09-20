@@ -2553,6 +2553,17 @@ pub(super) mod paste_key_tests {
     }
     #[test]
     fn agent_completion_inserts_unreadable_file_url_as_path_text() {
+        // The drop classifier stands down over SSH (`try_handle_dropped_paths_paste`
+        // returns early) and the terminal context is a process-global read from
+        // the real environment: clear the SSH markers so the test states which
+        // world it asserts instead of inheriting the runner's.
+        // SAFETY: the context is read lazily and this runs before any other
+        // thread in the test process touches the environment.
+        unsafe {
+            for var in ["SSH_CONNECTION", "SSH_TTY", "SSH_CLIENT"] {
+                std::env::remove_var(var);
+            }
+        }
         let mut agent = make_agent();
         agent.set_active_pane(ActivePane::Prompt, true);
         let ctx = agent_completion_ctx(&agent, None);
