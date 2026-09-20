@@ -110,6 +110,22 @@ fi
 
 export GROK_DISABLE_AUTOUPDATER=1
 
+# Build hygiene. The sccache daemon inherits the file-descriptor limit of
+# whoever started it; at the macOS default (256) it dies mid-build with
+# "Too many open files", leaving zero-length .rmeta files behind that surface
+# much later as "memory map must have a nonzero length". Raise it here so every
+# helper build starts the daemon with room. The cache is also capped well below
+# the 500G default: it is shared, and an unbounded one fills the disk.
+ulimit -n 65536 2>/dev/null || true
+# Override, not default: the ambient profile sets 500G, and an unbounded shared
+# cache filling the disk is the failure mode this guards against.
+export SCCACHE_CACHE_SIZE=50G
+
+# Agent discovery otherwise also scans the legacy literal ~/.grok whenever
+# GROK_HOME points elsewhere, which would pull the real user agent tree into
+# every development and test run. Isolation wins here.
+export GROK_LEGACY_HOME_ENABLED=0
+
 # Prevent the development console from discovering state owned by Cursor, Claude,
 # and Codex. Compatibility-specific tests can re-enable only the surfaces they
 # explicitly exercise, and must still use controlled fixtures or ~/.grokdev.

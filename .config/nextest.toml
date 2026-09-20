@@ -37,6 +37,27 @@ status-level = "skip"
 # Only summarize failures; keep successful output from flooding the terminal.
 final-status-level = "fail"
 
+# These tests build a TLS client against the platform trust store. Run with the
+# full parallelism, 13 of them panic in the rustls provider
+# ("TrustStore configured to enable native roots but no valid root certificates
+# parsed!") at about 15s; run one at a time they all pass, so the trigger is
+# concurrency and not code. The group serializes only this family — everything
+# else keeps the machine's parallelism.
+[test-groups.platform-trust]
+max-threads = 1
+
+[[profile.default.overrides]]
+filter = 'test(laziness_integration_tests)'
+test-group = 'platform-trust'
+
+# Three end-to-end tests spawn a real process and complete a turn: about 80s
+# each on an idle machine, so the default 300s cap is crossed once the whole
+# suite runs them alongside 7600 other tests. They pass in isolation; widen the
+# cap for this family instead of leaving the outcome to scheduling luck.
+[[profile.default.overrides]]
+filter = 'test(agent_headless_completes_a_turn_without_a_grok_session) | test(session_still_relays_when_the_switch_is_on) | test(xai_switch_keeps_the_relay_off_with_a_session_present)'
+slow-timeout = { period = "120s", terminate-after = 5 }
+
 [profile.default.junit]
 # Path is interpreted relative to ${store.dir}/${profile}. With the store above,
 # reports are written to target-dev/nextest/default/nextest-results.xml.

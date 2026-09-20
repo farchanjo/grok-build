@@ -87,6 +87,33 @@ rustflags = ["-C", "force-unwind-tables=yes", "-C", "target-feature=+crt-static"
 # env vars below for those platforms.
 # See: https://github.com/tikv/jemallocator/issues/122
 [env]
+# The ambient shell of a grok-agent session exports these, and the shell reads
+# them through `env_string`/`env_bool`, where blank means unset. Left alone, an
+# interactive dev shell makes hundreds of env-sensitive shell tests fail (OTLP
+# header parsing, endpoint precedence, catalog shape). `force` is required
+# because cargo leaves an already-set variable alone.
+GROK_EXTERNAL_OTEL = { value = "", force = true }
+OTEL_EXPORTER_OTLP_ENDPOINT = { value = "", force = true }
+OTEL_EXPORTER_OTLP_TRACES_ENDPOINT = { value = "", force = true }
+OTEL_EXPORTER_OTLP_HEADERS = { value = "", force = true }
+OTEL_LOGS_EXPORTER = { value = "", force = true }
+OTEL_METRICS_EXPORTER = { value = "", force = true }
+OTEL_TRACES_EXPORTER = { value = "", force = true }
+# Same story for provider keys: tests that remove a stored key still see the
+# provider as configured when the ambient shell exports these, so they assert
+# `NotConfigured` and get `Configured`. A test that needs a key sets its own.
+ANTHROPIC_API_KEY = { value = "", force = true }
+OPENAI_API_KEY = { value = "", force = true }
+OPENROUTER_API_KEY = { value = "", force = true }
+XAI_API_KEY = { value = "", force = true }
+# Under nextest's parallelism, hundreds of tests that build an S3 client panic
+# in aws-smithy's rustls provider: "TrustStore configured to enable native roots
+# but no valid root certificates parsed!" — the native-roots loader comes back
+# empty when many processes load it at once. `rustls-native-certs` honours
+# SSL_CERT_FILE, and pointing it at the system bundle makes the same 50-test
+# module go from ~47 failures to 1. macOS path; a Linux host would use
+# /etc/ssl/certs/ca-certificates.crt.
+SSL_CERT_FILE = { value = "/etc/ssl/cert.pem", force = true }
 SYSTEM_DEPS_DAV1D_BUILD_INTERNAL = "auto"
 AARCH64_APPLE_DARWIN_JEMALLOC_SYS_WITH_LG_PAGE = "14"
 AARCH64_UNKNOWN_LINUX_GNU_JEMALLOC_SYS_WITH_LG_PAGE = "16"

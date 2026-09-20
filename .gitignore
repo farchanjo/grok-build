@@ -7,5 +7,12 @@
 **/*.rs.bk
 .DS_Store
 
-# Local Grok workspace data (skills/personas) — intentionally untracked
-.grok/
+# Local Grok workspace data (skills/personas) — untracked, except the artifacts
+# that are repo content: a `.grok/*` pattern (not `.grok/`) is required for the
+# negations to work, because a parent directory exclusion cannot be re-included.
+.grok/*
+!.grok/skills/
+!.grok/workflows/
+
+# detent MCP runtime: per-service state and probe logs, rewritten constantly
+.detent/
