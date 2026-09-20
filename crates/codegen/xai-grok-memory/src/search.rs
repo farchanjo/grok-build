@@ -773,19 +773,20 @@ const REMOTE_RERANK_PREFIX_CAP: usize = 64;
 /// untouched in its exact local order, then MMR/truncation continue. On any
 /// failure — reranker unavailable, cancelled, malformed, stale, or invalid
 /// indices — the **complete exact local pre-rerank order** is kept. No partial
-/// reorder/loss ever occurs.
+/// reorder/loss ever occurs. `workspace_path` rides along in the rerank state.
 pub async fn remote_rerank(
     results: &mut Vec<SearchResult>,
     relevance: &mut Vec<f64>,
     retrieval: Option<&dyn super::retrieval::MemoryRetrieval>,
     query: &str,
+    workspace_path: &str,
     max_body_chars: usize,
 ) {
     let Some(r) = retrieval else { return };
     let Some((k, docs)) = rerank_prefix(results, max_body_chars) else {
         return;
     };
-    let perm = match r.rerank(query, &docs).await {
+    let perm = match r.rerank(query, workspace_path, &docs).await {
         Ok(Some(p)) => super::retrieval::validate_rerank_permutation(Some(&p), k),
         _ => None,
     };
@@ -1868,8 +1869,10 @@ mod tests {
 
         // Remote rerank reverses to [a, b].
         let fake = crate::retrieval::FakeMemoryRetrieval::new(4, "rerank-m");
-        let fake = fake.with_rerank(|_q, docs| {
+        let fake = fake.with_rerank(|_q, workspace, docs| {
             assert_eq!(docs.len(), 2);
+            // The folder rides along into the rerank call.
+            assert_eq!(workspace, "/w");
             Ok(Some(vec![1, 0]))
         });
         super::remote_rerank(
@@ -1877,6 +1880,7 @@ mod tests {
             &mut relevance,
             Some(&fake),
             "rust ownership",
+            "/w",
             4000,
         )
         .await;
@@ -2005,10 +2009,10 @@ mod tests {
             vec![1, 1],    // duplicate + missing
         ] {
             let fake = crate::retrieval::FakeMemoryRetrieval::new(4, "rerank-m");
-            let fake = fake.with_rerank(move |_q, _d| Ok(Some(bad_perm.clone())));
+            let fake = fake.with_rerank(move |_q, _ws, _d| Ok(Some(bad_perm.clone())));
             let mut r = results.clone();
             let mut rel = relevance.clone();
-            super::remote_rerank(&mut r, &mut rel, Some(&fake), "q", 4000).await;
+            super::remote_rerank(&mut r, &mut rel, Some(&fake), "q", "/w", 4000).await;
             let ids: Vec<String> = r.iter().map(|x| x.chunk_id.clone()).collect();
             assert_eq!(
                 ids, local_ids,
@@ -2028,7 +2032,7 @@ mod tests {
             let fake = crate::retrieval::FakeMemoryRetrieval::new(4, "rerank-m");
             let mut r = results.clone();
             let mut rel = relevance.clone();
-            super::remote_rerank(&mut r, &mut rel, Some(&fake), "q", 4000).await;
+            super::remote_rerank(&mut r, &mut rel, Some(&fake), "q", "/w", 4000).await;
             let ids: Vec<String> = r.iter().map(|x| x.chunk_id.clone()).collect();
             assert_eq!(ids, local_ids, "reranker unavailable must keep local order");
         }
@@ -2036,11 +2040,11 @@ mod tests {
         {
             use crate::retrieval::{RetrievalError, RetrievalErrorKind};
             let fake = crate::retrieval::FakeMemoryRetrieval::new(4, "rerank-m");
-            let fake =
-                fake.with_rerank(|_q, _d| Err(RetrievalError::new(RetrievalErrorKind::Transient)));
+            let fake = fake
+                .with_rerank(|_q, _ws, _d| Err(RetrievalError::new(RetrievalErrorKind::Transient)));
             let mut r = results.clone();
             let mut rel = relevance.clone();
-            super::remote_rerank(&mut r, &mut rel, Some(&fake), "q", 4000).await;
+            super::remote_rerank(&mut r, &mut rel, Some(&fake), "q", "/w", 4000).await;
             let ids: Vec<String> = r.iter().map(|x| x.chunk_id.clone()).collect();
             assert_eq!(ids, local_ids, "reranker error must keep local order");
         }
@@ -2099,12 +2103,12 @@ mod tests {
 
         // Rerank returns a valid permutation of the 64-prefix only.
         let fake = crate::retrieval::FakeMemoryRetrieval::new(4, "rr");
-        let fake = fake.with_rerank(move |_q, docs| {
+        let fake = fake.with_rerank(move |_q, _ws, docs| {
             assert_eq!(docs.len(), 64, "only the bounded prefix is sent");
             // Reverse the 64 prefix.
             Ok(Some((0..64).rev().collect()))
         });
-        super::remote_rerank(&mut results, &mut relevance, Some(&fake), "q", 4000).await;
+        super::remote_rerank(&mut results, &mut relevance, Some(&fake), "q", "/w", 4000).await;
 
         assert_eq!(results.len(), n, "no candidate loss");
         // The suffix (positions 64..) must remain in exact local order.
@@ -2139,10 +2143,10 @@ mod tests {
             vec![63usize, 0, 1],         // wrong length + out of range
         ] {
             let fake = crate::retrieval::FakeMemoryRetrieval::new(4, "rr");
-            let fake = fake.with_rerank(move |_q, _d| Ok(Some(bad.clone())));
+            let fake = fake.with_rerank(move |_q, _ws, _d| Ok(Some(bad.clone())));
             let mut r = results.clone();
             let mut rel = relevance.clone();
-            super::remote_rerank(&mut r, &mut rel, Some(&fake), "q", 4000).await;
+            super::remote_rerank(&mut r, &mut rel, Some(&fake), "q", "/w", 4000).await;
             let ids: Vec<String> = r.iter().map(|x| x.chunk_id.clone()).collect();
             assert_eq!(
                 ids, local_ids,

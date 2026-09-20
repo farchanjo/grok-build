@@ -863,6 +863,7 @@ pub fn rerank_request_from_config(
     query: String,
     documents: Vec<String>,
     top_n: Option<u32>,
+    workspace_path: Option<&str>,
 ) -> RerankRequest {
     let endpoint = config
         .endpoint
@@ -876,6 +877,7 @@ pub fn rerank_request_from_config(
         top_n,
         endpoint,
         return_documents: false,
+        workspace_path: workspace_path.map(str::to_owned),
     }
 }
 
@@ -910,6 +912,7 @@ pub async fn rerank_with_runtime(
     query: String,
     documents: Vec<String>,
     top_n: Option<u32>,
+    workspace_path: Option<&str>,
     cancel: tokio_util::sync::CancellationToken,
 ) -> RetrievalResult<xai_grok_inference::RerankResult> {
     let endpoint = runtime
@@ -924,6 +927,7 @@ pub async fn rerank_with_runtime(
         top_n,
         endpoint,
         return_documents: false,
+        workspace_path: workspace_path.map(str::to_owned),
     };
 
     // An explicit Jev protocol wins over the OpenRouter surface heuristic:

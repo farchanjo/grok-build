@@ -794,6 +794,7 @@ impl PrimeIndexHandle {
             pin_snapshot_generation: Some(pin.space().snapshot_generation),
             embed_route_pin: Some(pin.space().route_id.clone()),
             hard_error_on_limit_exceeded: false,
+            workspace_path: None,
         };
         let stage = service
             .embed(profile_id, texts.clone(), options, cancel)

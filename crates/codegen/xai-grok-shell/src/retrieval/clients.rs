@@ -51,6 +51,7 @@ pub trait RetrievalExecutor: Send + Sync + 'static {
         query: String,
         documents: Vec<String>,
         top_n: Option<u32>,
+        workspace_path: Option<&str>,
         cancel: CancellationToken,
     ) -> RetrievalResult<RerankResult>;
 }
@@ -90,6 +91,7 @@ impl RetrievalExecutor for Pr16RetrievalExecutor {
         query: String,
         documents: Vec<String>,
         top_n: Option<u32>,
+        workspace_path: Option<&str>,
         cancel: CancellationToken,
     ) -> RetrievalResult<RerankResult> {
         let opts = RetrievalResolveOptions {
@@ -100,7 +102,7 @@ impl RetrievalExecutor for Pr16RetrievalExecutor {
         };
         let runtime =
             resolve_reranker_runtime(home, config, &opts, None).map_err(RetrievalError::from)?;
-        rerank_with_runtime(&runtime, query, documents, top_n, cancel).await
+        rerank_with_runtime(&runtime, query, documents, top_n, workspace_path, cancel).await
     }
 }
 
@@ -141,6 +143,8 @@ struct FakeState {
     rerank_calls: Vec<String>,
     embed_pins: Vec<RouteCallPins>,
     rerank_pins: Vec<RouteCallPins>,
+    /// Workspace path offered on each rerank call (None = caller unknown).
+    rerank_workspaces: Vec<Option<String>>,
     /// model_id → remaining fail-then-ok counters
     fail_then_ok_left: HashMapLike,
 }
@@ -207,6 +211,11 @@ impl FakeRetrievalExecutor {
 
     pub fn rerank_pins_seen(&self) -> Vec<RouteCallPins> {
         self.state.lock().rerank_pins.clone()
+    }
+
+    /// Workspace path per rerank call, in call order.
+    pub fn rerank_workspaces_seen(&self) -> Vec<Option<String>> {
+        self.state.lock().rerank_workspaces.clone()
     }
 }
 
@@ -313,6 +322,7 @@ impl RetrievalExecutor for FakeRetrievalExecutor {
         _query: String,
         documents: Vec<String>,
         top_n: Option<u32>,
+        workspace_path: Option<&str>,
         cancel: CancellationToken,
     ) -> RetrievalResult<RerankResult> {
         self.resolve_provider_ids
@@ -322,6 +332,7 @@ impl RetrievalExecutor for FakeRetrievalExecutor {
             let mut st = self.state.lock();
             st.rerank_calls.push(model_id.to_owned());
             st.rerank_pins.push(pins.clone());
+            st.rerank_workspaces.push(workspace_path.map(str::to_owned));
         }
         enforce_pins(pins, &cancel)?;
 
@@ -446,12 +457,21 @@ impl RetrievalExecutor for CountingExecutor {
         query: String,
         documents: Vec<String>,
         top_n: Option<u32>,
+        workspace_path: Option<&str>,
         cancel: CancellationToken,
     ) -> RetrievalResult<RerankResult> {
         self.counters.reranks.fetch_add(1, Ordering::SeqCst);
         self.inner
             .rerank(
-                home, model_id, config, pins, query, documents, top_n, cancel,
+                home,
+                model_id,
+                config,
+                pins,
+                query,
+                documents,
+                top_n,
+                workspace_path,
+                cancel,
             )
             .await
     }

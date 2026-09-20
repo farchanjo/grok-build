@@ -757,6 +757,8 @@ async fn fill_from_index(
             pin_snapshot_generation: Some(frozen.space().snapshot_generation),
             embed_route_pin: None,
             hard_error_on_limit_exceeded: false,
+            // The measured Jev rerank question reads the folder from the state.
+            workspace_path: Some(workspace_root.to_string_lossy().into_owned()),
         };
         match service
             .rerank(
@@ -1794,6 +1796,7 @@ mod tests {
             _query: String,
             documents: Vec<String>,
             top_n: Option<u32>,
+            _workspace_path: Option<&str>,
             cancel: CancellationToken,
         ) -> RetrievalResult<RerankResult> {
             self.rerank_docs.lock().unwrap().push(documents.clone());

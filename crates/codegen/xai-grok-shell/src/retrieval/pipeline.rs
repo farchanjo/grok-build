@@ -56,6 +56,10 @@ pub struct PipelineOptions {
     /// off. Semantic deadline/attempt/input failures still follow the semantic
     /// hard/soft flag only.
     pub hard_error_on_limit_exceeded: bool,
+    /// Folder the caller is working in, when known. Carried into the rerank
+    /// request state for adapters whose question wording reads the folder
+    /// (Jev); `None` keeps the state to the query alone.
+    pub workspace_path: Option<String>,
 }
 
 /// Successful embedding stage outcome (one embedding space).
@@ -581,6 +585,7 @@ pub async fn rerank_with_profile(
             query.clone(),
             documents.clone(),
             top_n,
+            options.workspace_path.as_deref(),
             cancel.child_token(),
         );
         let outcome = tokio::select! {

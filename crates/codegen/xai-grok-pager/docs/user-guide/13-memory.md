@@ -431,7 +431,7 @@ written exactly as it was before the gate existed.
 | Key | Default | Description |
 |-----|---------|-------------|
 | `enabled` | `false` | Run the gate before an append. `false` makes zero Jev requests. |
-| `rerank` | `false` | Order memory-search results through the gate's decisions client instead of the retrieval rerank slot. Works with `enabled = false`; both routes ask the same questions, so this picks the owner of the call |
+| `rerank` | `false` | Order memory-search results through the gate's decisions client instead of the retrieval rerank slot. Works with `enabled = false`; both routes ask the same questions and carry the folder in the state, so this picks the owner of the call |
 | `model` | `~typesafe/jev-latest` | Jev model reference (the decisions endpoint is not a chat surface) |
 | `endpoint` | OpenRouter decisions | Decisions endpoint override |
 | `api_key_env` | unset | Environment variable holding the credential; falls back to `GROK_JEV_API_KEY`, then the OpenRouter key in `auth.json` |

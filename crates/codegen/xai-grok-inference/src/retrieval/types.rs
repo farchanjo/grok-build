@@ -253,6 +253,10 @@ pub struct RerankRequest {
     /// When true, request optional returned document text (never trusted as
     /// authoritative for identity; original documents/index mapping wins).
     pub return_documents: bool,
+    /// Folder the caller is working in, when known. Adapters whose question
+    /// wording refers to the caller's folder (Jev) carry it in the request
+    /// state; the compatible protocols ignore it.
+    pub workspace_path: Option<String>,
 }
 
 impl fmt::Debug for RerankRequest {
@@ -264,6 +268,7 @@ impl fmt::Debug for RerankRequest {
             .field("top_n", &self.top_n)
             .field("endpoint", &self.endpoint)
             .field("return_documents", &self.return_documents)
+            .field("has_workspace_path", &self.workspace_path.is_some())
             .finish()
     }
 }
@@ -277,6 +282,7 @@ impl Default for RerankRequest {
             top_n: None,
             endpoint: DEFAULT_RERANK_PATH.to_owned(),
             return_documents: false,
+            workspace_path: None,
         }
     }
 }

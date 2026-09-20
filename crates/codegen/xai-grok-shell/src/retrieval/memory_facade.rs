@@ -133,10 +133,11 @@ impl RetrievalServiceMemoryFacade {
             // primary route can never serve vectors from a different space.
             embed_route_pin: Some(self.primary_embedding_route.clone()),
             hard_error_on_limit_exceeded: false,
+            workspace_path: None,
         }
     }
 
-    fn rerank_options(&self) -> PipelineOptions {
+    fn rerank_options(&self, workspace_path: &str) -> PipelineOptions {
         PipelineOptions {
             hard_error_on_semantic_failure: false,
             bypass_semantic: false,
@@ -145,6 +146,8 @@ impl RetrievalServiceMemoryFacade {
             pin_snapshot_generation: Some(self.snapshot_generation),
             embed_route_pin: None,
             hard_error_on_limit_exceeded: false,
+            // The measured Jev rerank question reads the folder from the state.
+            workspace_path: Some(workspace_path.to_owned()),
         }
     }
 }
@@ -216,13 +219,14 @@ impl xai_grok_memory::MemoryRetrieval for RetrievalServiceMemoryFacade {
     async fn rerank(
         &self,
         query: &str,
+        workspace_path: &str,
         documents: &[String],
     ) -> Result<Option<Vec<usize>>, RetrievalError> {
         if !self.has_rerank_routes || documents.is_empty() {
             return Ok(None);
         }
         let docs: Vec<String> = documents.iter().take(RERANK_DOC_CAP).cloned().collect();
-        let options = self.rerank_options();
+        let options = self.rerank_options(workspace_path);
         match self
             .service
             .rerank(
@@ -381,18 +385,28 @@ mod tests {
     }
 
     /// Rerank via the profile returns hit indices; outages degrade to None
-    /// (the memory caller then keeps its exact local pre-rerank order).
+    /// (the memory caller then keeps its exact local pre-rerank order). The
+    /// caller's folder must reach the executor — the Jev question reads it
+    /// from the request state.
     #[tokio::test]
     async fn facade_rerank_returns_indices_or_none() {
         let (service, executor) = service_with_graph();
         let facade = RetrievalServiceMemoryFacade::new(&service, "default").unwrap();
         let perm = facade
-            .rerank("q", &["d0".to_owned(), "d1".to_owned(), "d2".to_owned()])
+            .rerank(
+                "q",
+                "/w/project",
+                &["d0".to_owned(), "d1".to_owned(), "d2".to_owned()],
+            )
             .await
             .unwrap();
         // Default FakeRerankScript::Ok returns hits in document order.
         assert_eq!(perm, Some(vec![0usize, 1, 2]));
         assert_eq!(executor.rerank_calls().len(), 1);
+        assert_eq!(
+            executor.rerank_workspaces_seen(),
+            vec![Some("/w/project".to_owned())]
+        );
     }
 
     /// Debug output of the facade never includes credentials/vectors/text.
@@ -473,7 +487,7 @@ mod tests {
         // N-02: rerank is generation-pinned too — a stale facade fails closed
         // to the exact local pre-rerank order (Ok(None) ⇒ keep local order).
         let rr = facade
-            .rerank("q", &["d0".to_owned()])
+            .rerank("q", "/w", &["d0".to_owned()])
             .await
             .unwrap_or_else(|_| panic!("rerank must degrade, not error"));
         assert!(

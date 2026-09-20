@@ -669,11 +669,20 @@ async fn hard_retrieve_preserves_typed_deadline_error() {
             query: String,
             documents: Vec<String>,
             top_n: Option<u32>,
+            workspace_path: Option<&str>,
             cancel: CancellationToken,
         ) -> xai_grok_inference::RetrievalResult<xai_grok_inference::RerankResult> {
             self.inner
                 .rerank(
-                    home, model_id, config, pins, query, documents, top_n, cancel,
+                    home,
+                    model_id,
+                    config,
+                    pins,
+                    query,
+                    documents,
+                    top_n,
+                    workspace_path,
+                    cancel,
                 )
                 .await
         }
@@ -1007,6 +1016,51 @@ async fn malformed_rerank_falls_back_to_pre_order() {
     assert!(out.result.is_none());
 }
 
+/// The caller's folder must reach the executor: the Jev rerank question reads
+/// it from the request state, so a drop anywhere on the way silently degrades
+/// the wording.
+#[tokio::test]
+async fn rerank_options_carry_the_workspace_path_to_the_executor() {
+    let clock = Arc::new(MockClock::new());
+    let (reg, fake) = build_reg(clock);
+    fake.set_embed("emb-a", FakeEmbedScript::Ok { dims: 4, fill: 0.0 });
+    let (svc, _) = service(reg, fake.clone());
+    let out = svc
+        .rerank(
+            "default",
+            "q".into(),
+            vec!["d1".into(), "d2".into()],
+            PipelineOptions {
+                workspace_path: Some("/w/project".into()),
+                ..Default::default()
+            },
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    assert!(out.result.is_some());
+    assert_eq!(
+        fake.rerank_workspaces_seen(),
+        vec![Some("/w/project".to_owned())]
+    );
+
+    // Default options keep the state minimal.
+    let (reg, fake) = build_reg(Arc::new(MockClock::new()));
+    fake.set_embed("emb-a", FakeEmbedScript::Ok { dims: 4, fill: 0.0 });
+    let (svc, _) = service(reg, fake.clone());
+    let _ = svc
+        .rerank(
+            "default",
+            "q".into(),
+            vec!["d1".into()],
+            PipelineOptions::default(),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(fake.rerank_workspaces_seen(), vec![None]);
+}
+
 #[tokio::test]
 async fn input_budget_enforced() {
     let clock = Arc::new(MockClock::new());
@@ -1211,11 +1265,20 @@ impl super::clients::RetrievalExecutor for DeadlineAdvancingExecutor {
         query: String,
         documents: Vec<String>,
         top_n: Option<u32>,
+        workspace_path: Option<&str>,
         cancel: CancellationToken,
     ) -> xai_grok_inference::RetrievalResult<xai_grok_inference::RerankResult> {
         self.inner
             .rerank(
-                home, model_id, config, pins, query, documents, top_n, cancel,
+                home,
+                model_id,
+                config,
+                pins,
+                query,
+                documents,
+                top_n,
+                workspace_path,
+                cancel,
             )
             .await
     }

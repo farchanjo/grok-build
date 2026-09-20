@@ -17,6 +17,7 @@ use tokio_util::sync::CancellationToken;
 
 use super::base64_f32::encode_standard_base64;
 use super::embeddings::OpenaiCompatibleEmbeddings;
+use super::jev_rerank::JevRerankAdapter;
 use super::transport::{RetrievalCredential, RetrievalTransport};
 use super::types::{
     EmbeddingEncodingFormat, EmbeddingRequest, RerankRequest, RetrievalAuthScheme, RetrievalError,
@@ -469,6 +470,7 @@ async fn vllm_rerank_happy() {
                 top_n: Some(2),
                 endpoint: "/rerank".into(),
                 return_documents: false,
+                workspace_path: None,
             },
             &RetrievalCredential::new(Some("k".into())),
             CancellationToken::new(),
@@ -477,6 +479,75 @@ async fn vllm_rerank_happy() {
         .unwrap();
     assert_eq!(res.hits.len(), 2);
     assert_eq!(res.hits[0].index, 2);
+}
+
+/// The Jev adapter posts `{model, state, questions}` over HTTP and parses the
+/// answers back. The caller's folder must ride in the state: the measured
+/// question wording reads it from there.
+#[tokio::test]
+async fn jev_rerank_posts_the_workspace_in_the_state_and_parses_answers() {
+    let spy = Spy::default();
+    let spy2 = spy.clone();
+    let app = Router::new()
+        .route(
+            "/v1/alpha/decisions",
+            post(move |State(s): State<Spy>, req: Request<Body>| {
+                let s = s.clone();
+                async move {
+                    let headers = req.headers().clone();
+                    let bytes = axum::body::to_bytes(req.into_body(), 1024 * 1024)
+                        .await
+                        .unwrap();
+                    s.requests.lock().await.push(Captured {
+                        authorization: headers
+                            .get("authorization")
+                            .and_then(|v| v.to_str().ok())
+                            .map(str::to_owned),
+                        custom_auth: None,
+                        body: String::from_utf8_lossy(&bytes).into_owned(),
+                    });
+                    axum::Json(json!({
+                        "answers": {
+                            "1": {"type": "noul", "noul": 0.9},
+                            "0": {"type": "noul", "noul": 0.1}
+                        }
+                    }))
+                }
+            }),
+        )
+        .with_state(spy2);
+    let (addr, _h) = spawn_router(app).await;
+    let base = format!("http://{addr}/v1");
+    let mut route = route_for(&base, RetrievalAuthScheme::Bearer);
+    route.purpose = RetrievalPurpose::Rerank;
+    let client = JevRerankAdapter::new(route).unwrap();
+    let res = client
+        .rerank(
+            RerankRequest {
+                model: "~typesafe/jev-latest".into(),
+                query: "find the issue about login".into(),
+                documents: vec!["list issues".into(), "search issues".into()],
+                top_n: None,
+                endpoint: "alpha/decisions".into(),
+                return_documents: false,
+                workspace_path: Some("/w/project".into()),
+            },
+            &RetrievalCredential::new(Some("k".into())),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.hits.len(), 2);
+    assert_eq!(res.hits[0].index, 1);
+
+    let caps = spy.requests.lock().await;
+    assert_eq!(caps.len(), 1);
+    assert_eq!(caps[0].authorization.as_deref(), Some("Bearer k"));
+    let body: serde_json::Value = serde_json::from_str(&caps[0].body).unwrap();
+    assert_eq!(body["state"]["query"], json!("find the issue about login"));
+    assert_eq!(body["state"]["workspace_path"], json!("/w/project"));
+    assert_eq!(body["questions"]["0"]["type"], json!("noul"));
+    assert_eq!(body["questions"]["1"]["type"], json!("noul"));
 }
 
 #[tokio::test]
@@ -868,6 +939,7 @@ async fn openrouter_rerank_429_then_success() {
                 top_n: Some(1),
                 endpoint: "/rerank".into(),
                 return_documents: false,
+                workspace_path: None,
             },
             &RetrievalCredential::new(Some("or-key".into())),
             CancellationToken::new(),
@@ -922,6 +994,7 @@ async fn openrouter_rerank_503_then_success() {
                 top_n: None,
                 endpoint: "/rerank".into(),
                 return_documents: false,
+                workspace_path: None,
             },
             &RetrievalCredential::new(Some("or-key".into())),
             CancellationToken::new(),
@@ -964,6 +1037,7 @@ async fn openrouter_rerank_max_retries_zero_one_hit() {
                 top_n: None,
                 endpoint: "/rerank".into(),
                 return_documents: false,
+                workspace_path: None,
             },
             &RetrievalCredential::new(Some("or-key".into())),
             CancellationToken::new(),
@@ -1003,6 +1077,7 @@ async fn openrouter_rerank_oversized_response() {
                 top_n: None,
                 endpoint: "/rerank".into(),
                 return_documents: false,
+                workspace_path: None,
             },
             &RetrievalCredential::new(Some("or-key".into())),
             CancellationToken::new(),
@@ -1048,6 +1123,7 @@ async fn openrouter_rerank_401_no_retry() {
                 top_n: None,
                 endpoint: "/rerank".into(),
                 return_documents: false,
+                workspace_path: None,
             },
             &RetrievalCredential::new(Some("or-key".into())),
             CancellationToken::new(),

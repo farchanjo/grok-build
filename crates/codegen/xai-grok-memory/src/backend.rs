@@ -1046,9 +1046,10 @@ impl MemoryBackend for MemoryBackendImpl {
         // (no &index borrow). Feed bounded text only. On any failure the
         // complete exact local pre-rerank order is restored and MMR/
         // truncation continue. `[memory.gate] rerank = true` sends the same
-        // call through the gate's decisions client instead. ──
+        // call through the gate's decisions client instead. Both routes carry
+        // the workspace path in the rerank state. ──
+        let workspace_path = self.storage.workspace_dir().to_string_lossy().into_owned();
         if self.gate.as_ref().is_some_and(|gate| gate.config().rerank) {
-            let workspace_path = self.storage.workspace_dir().to_string_lossy().into_owned();
             super::search::gate_rerank(
                 &mut candidates,
                 &mut relevance,
@@ -1064,6 +1065,7 @@ impl MemoryBackend for MemoryBackendImpl {
                 &mut relevance,
                 self.retrieval.as_deref(),
                 query,
+                &workspace_path,
                 RERANK_BODY_CHAR_BOUND,
             )
             .await;

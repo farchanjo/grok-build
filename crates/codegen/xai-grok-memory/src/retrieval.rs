@@ -115,6 +115,10 @@ pub trait MemoryRetrieval: Send + Sync {
     /// Optionally rerank `documents` against `query`, returning a permutation
     /// of valid indices into `documents` (length equals `documents.len()`).
     ///
+    /// `workspace_path` is the folder the caller is working in; it travels in
+    /// the rerank state because the measured question wording reads the folder
+    /// from there.
+    ///
     /// Return `Ok(None)` when no reranker is configured or when the reranker
     /// is unavailable/cancelled/malformed/stale — the caller then keeps its
     /// complete exact local pre-rerank order. Invalid/duplicate/missing
@@ -123,6 +127,7 @@ pub trait MemoryRetrieval: Send + Sync {
     async fn rerank(
         &self,
         query: &str,
+        workspace_path: &str,
         documents: &[String],
     ) -> Result<Option<Vec<usize>>, RetrievalError>;
 }
@@ -199,7 +204,11 @@ pub struct FakeMemoryRetrieval {
     pub embed_override:
         Option<Arc<dyn Fn(&[String]) -> Result<Vec<Vec<f32>>, RetrievalError> + Send + Sync>>,
     pub rerank_override: Option<
-        Arc<dyn Fn(&str, &[String]) -> Result<Option<Vec<usize>>, RetrievalError> + Send + Sync>,
+        Arc<
+            dyn Fn(&str, &str, &[String]) -> Result<Option<Vec<usize>>, RetrievalError>
+                + Send
+                + Sync,
+        >,
     >,
     embed_calls: Arc<AtomicU64>,
     rerank_calls: Arc<AtomicU64>,
@@ -227,7 +236,7 @@ impl FakeMemoryRetrieval {
 
     pub fn with_rerank(
         mut self,
-        f: impl Fn(&str, &[String]) -> Result<Option<Vec<usize>>, RetrievalError>
+        f: impl Fn(&str, &str, &[String]) -> Result<Option<Vec<usize>>, RetrievalError>
         + Send
         + Sync
         + 'static,
@@ -275,11 +284,12 @@ impl MemoryRetrieval for FakeMemoryRetrieval {
     async fn rerank(
         &self,
         query: &str,
+        workspace_path: &str,
         documents: &[String],
     ) -> Result<Option<Vec<usize>>, RetrievalError> {
         self.rerank_calls.fetch_add(1, Ordering::Relaxed);
         if let Some(f) = &self.rerank_override {
-            return f(query, documents);
+            return f(query, workspace_path, documents);
         }
         Ok(None)
     }

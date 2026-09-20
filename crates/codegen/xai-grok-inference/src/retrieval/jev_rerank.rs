@@ -28,8 +28,9 @@ use super::types::{
 /// Verbatim from the rerank measurement (`script-test/sim_memory_rerank.py`:
 /// top-1 7/10 → 9/10, gold in top-3 10/10). The harness labelled each candidate
 /// `Chunk (scope: …):`; this writes `Candidate:` — the one deviation, because the
-/// same adapter also reranks skills and tools. The gate route's state carries
-/// `workspace_path`; the remote route carries only `query`.
+/// same adapter also reranks skills and tools. The state carries
+/// `workspace_path` whenever the caller knows the folder — the gate route
+/// always does; the retrieval route only when it supplies one.
 pub const JEV_RERANK_QUESTION: &str = "The user is working in the folder given in the state. Is this memory chunk one they would want surfaced for the query below?";
 /// Candidate label appended after [`JEV_RERANK_QUESTION`].
 pub const JEV_CANDIDATE_PREFIX: &str = "Candidate: ";
@@ -110,9 +111,25 @@ pub fn build_jev_rerank_body(request: &RerankRequest) -> Value {
         .collect();
     json!({
         "model": request.model,
-        "state": { "query": request.query },
+        "state": state_with_query_and_workspace(request),
         "questions": questions,
     })
+}
+
+/// Request state. `query` always travels; `workspace_path` travels when the
+/// caller knows the folder (blank counts as unknown), because
+/// [`JEV_RERANK_QUESTION`] reads the folder from the state.
+fn state_with_query_and_workspace(request: &RerankRequest) -> Value {
+    let mut state = serde_json::Map::new();
+    state.insert("query".to_owned(), json!(request.query));
+    if let Some(workspace_path) = request
+        .workspace_path
+        .as_deref()
+        .filter(|path| !path.trim().is_empty())
+    {
+        state.insert("workspace_path".to_owned(), json!(workspace_path));
+    }
+    Value::Object(state)
 }
 
 #[derive(Debug, Deserialize)]
@@ -199,6 +216,7 @@ mod tests {
             top_n: None,
             endpoint: "alpha/decisions".into(),
             return_documents: false,
+            workspace_path: None,
         }
     }
 
@@ -207,6 +225,8 @@ mod tests {
         let body = build_jev_rerank_body(&request());
         assert_eq!(body["model"], json!("~typesafe/jev-latest"));
         assert_eq!(body["state"]["query"], json!("find the issue about login"));
+        // Unknown folder: the key stays out rather than sending an empty one.
+        assert!(body["state"].get("workspace_path").is_none());
         assert_eq!(body["questions"]["0"]["type"], json!("noul"));
         let instruction = body["questions"]["0"]["instructions"].as_str().unwrap();
         // The measured question leads; the candidate text follows the label.
@@ -223,6 +243,20 @@ mod tests {
             body["questions"]["1"]["criteria"]["false"],
             JEV_FALSE_CRITERION
         );
+    }
+
+    #[test]
+    fn body_carries_the_workspace_path_in_the_state_when_known() {
+        let mut req = request();
+        req.workspace_path = Some("/w/project".into());
+        let body = build_jev_rerank_body(&req);
+        assert_eq!(body["state"]["workspace_path"], json!("/w/project"));
+        assert_eq!(body["state"]["query"], json!("find the issue about login"));
+
+        // Blank counts as unknown, mirroring the credential handling.
+        req.workspace_path = Some("   ".into());
+        let body = build_jev_rerank_body(&req);
+        assert!(body["state"].get("workspace_path").is_none());
     }
 
     #[test]

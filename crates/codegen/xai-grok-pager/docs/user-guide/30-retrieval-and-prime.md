@@ -136,7 +136,9 @@ service error text.
   `{results: [{index, relevance_score}]}`), `cohere_compatible`, and `jev`
   (`{model, state, questions}` → `{answers: {<index>: {noul}}}` — one `noul`
   question per candidate, keyed by document index so two candidates with the
-  same name cannot collide). A `jev` entry sets its own relative `endpoint`
+  same name cannot collide; the state carries the caller's `workspace_path`
+  when known, because the measured question wording reads the folder from
+  there). A `jev` entry sets its own relative `endpoint`
   (`alpha/decisions` on an OpenRouter base URL, `systemone` on the native
   TypeSafe one); the `openai_compatible` default is `/rerank`.
 
