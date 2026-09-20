@@ -11,6 +11,7 @@ pub mod compact;
 pub mod compact_mode;
 pub mod config_agents;
 pub mod context;
+pub mod controls;
 pub mod copy;
 pub mod dashboard;
 pub mod debug;
@@ -78,7 +79,7 @@ use std::sync::Arc;
 /// This is the single source of truth for the builtin command set.
 /// The registry is constructed from this list.
 pub fn builtin_commands() -> Vec<Arc<dyn SlashCommand>> {
-    vec![
+    let mut commands: Vec<Arc<dyn SlashCommand>> = vec![
         Arc::new(exit::ExitCommand),
         Arc::new(help::HelpCommand),
         Arc::new(docs::DocsCommand),
@@ -157,7 +158,10 @@ pub fn builtin_commands() -> Vec<Arc<dyn SlashCommand>> {
         Arc::new(scroll_debug::ScrollDebugCommand),
         // Debug toggles: always registered, listed only on debug binaries.
         Arc::new(debug::DebugCommand),
-    ]
+    ];
+    // Phase-4 control rows: one `on|off|status` surface per target.
+    commands.extend(controls::control_commands());
+    commands
 }
 #[cfg(test)]
 mod tests {
@@ -252,6 +256,7 @@ mod tests {
         const SHELL_RESERVED: &[&str] = &[
             "agents",
             "agents-dashboard",
+            "agents-recommend",
             "always-approve",
             "announcements",
             "auto",
@@ -284,6 +289,7 @@ mod tests {
             "full",
             "fullscreen",
             "gboom",
+            "goal-verify",
             "guides",
             "help",
             "history",
@@ -295,23 +301,27 @@ mod tests {
             "import-claude",
             "jev",
             "jump",
+            "laziness",
             "log",
             "loop",
             "m",
             "marketplace",
             "max-tokens",
             "mcps",
+            "memory-gate",
             "minimal",
             "ml",
             "model",
             "multiline",
             "new",
+            "permission-classifier",
             "personas",
             "plan",
             "plan-view",
             "plugins",
             "preferences",
             "prefs",
+            "prime",
             "privacy",
             "provider",
             "providers",
@@ -345,7 +355,9 @@ mod tests {
             "timeline",
             "timestamps",
             "title",
+            "todo-gate",
             "toggle-mouse-reporting",
+            "tool-search",
             "top-p",
             "transcript",
             "t",

@@ -28,6 +28,24 @@ pub(crate) const MAX_THOUGHTS_WIDTH_MAX: i64 = 500;
 /// definition and the live-wrap-preview gate in the int stepper.
 pub(crate) const MAX_THOUGHTS_WIDTH_KEY: &str = "max_thoughts_width";
 
+/// Jev transports. Order matches `JevTransport::ALL`, default first.
+///
+/// A transport is not a free field: endpoint, model string, provider block and
+/// credential chain all move with it, which is why the row is an enum rather
+/// than three text fields.
+const JEV_TRANSPORT_CHOICES: &[EnumChoice] = &[
+    EnumChoice {
+        canonical: "openrouter",
+        display: "OpenRouter",
+        description: "OpenRouter alpha decisions proxy. Provider routing block and the OpenRouter credential chain.",
+    },
+    EnumChoice {
+        canonical: "native",
+        display: "Native (TypeSafe)",
+        description: "TypeSafe's documented evaluation endpoint. No provider block; TYPESAFE_API_KEY / TYPESAFE_AI_FABRICIO_KEY chain.",
+    },
+];
+
 // ---------------------------------------------------------------------------
 // Theme choice catalogs.
 //
@@ -765,7 +783,7 @@ pub fn default_settings() -> Vec<SettingMeta> {
     // Shell schema defaults, used as registry source of truth.
     let ui_default = UiConfig::default();
 
-    vec![
+    let mut rows = vec![
         SettingMeta {
             key: "compact_mode",
             category: SettingCategory::Appearance,
@@ -2236,6 +2254,32 @@ pub fn default_settings() -> Vec<SettingMeta> {
             restart_required: false,
             hidden_in_minimal: false,
         },
+        SettingMeta {
+            key: "compaction_jev_transport",
+            category: SettingCategory::Compaction,
+            owner: SettingOwner::Shell,
+            label: "Jev transport",
+            description: "Which wire the Jev decisions call rides. Each transport carries its own endpoint, model string, provider block and credential chain, because setting one without the others fails confusingly: the native endpoint with the `~typesafe/` model prefix 404s and the OpenRouter endpoint with a bare `jev-latest` fails model resolution. OpenRouter is today's behaviour.",
+            keywords: &[
+                "compaction",
+                "jev",
+                "transport",
+                "endpoint",
+                "native",
+                "typesafe",
+                "openrouter",
+                "credential",
+            ],
+            kind: SettingKind::Enum {
+                default: "openrouter",
+                choices: JEV_TRANSPORT_CHOICES,
+                // No preview action: the transport only changes what the next
+                // Jev call posts, so there is nothing to show live.
+                supports_preview: false,
+            },
+            restart_required: false,
+            hidden_in_minimal: false,
+        },
         // ── Runtime status row (non-editable) ─────────────────────────────
         //
         // This is a special status row that shows whether automatic
@@ -2252,5 +2296,113 @@ pub fn default_settings() -> Vec<SettingMeta> {
             restart_required: false,
             hidden_in_minimal: false,
         },
-    ]
+    ];
+    // Phase-4 control rows. The shell owns the table (path, type, default,
+    // label); this side only adds the category, so a new knob is one entry
+    // there and zero duplicated metadata here.
+    rows.extend(
+        xai_grok_shell::session::control::CONTROLS
+            .iter()
+            .map(control_setting_meta),
+    );
+    rows
+}
+
+/// Registry row for one Phase-4 control knob.
+///
+/// Every one ships at today's behaviour, so applying the whole table changes
+/// nothing until a row is flipped, and each is independently reversible.
+fn control_setting_meta(spec: &xai_grok_shell::session::control::ControlSpec) -> SettingMeta {
+    use xai_grok_shell::session::control::ControlKind;
+    let kind = match spec.kind {
+        ControlKind::Bool => SettingKind::Bool {
+            default: spec.default_bool,
+        },
+        ControlKind::Int { min, max } | ControlKind::Percent { min, max } => SettingKind::Int {
+            default: spec.default_int,
+            min,
+            max,
+        },
+        ControlKind::Choice(choices) => SettingKind::Enum {
+            default: choices.first().copied().unwrap_or(""),
+            choices: choice_catalog(choices),
+            supports_preview: false,
+        },
+    };
+    SettingMeta {
+        key: spec.path,
+        category: control_category(spec.path),
+        owner: SettingOwner::Shell,
+        label: spec.label,
+        description: spec.description,
+        keywords: spec.keywords,
+        kind,
+        restart_required: false,
+        hidden_in_minimal: false,
+    }
+}
+
+/// Section a control row renders under, keyed by its target.
+fn control_category(path: &str) -> SettingCategory {
+    match path.split('.').next().unwrap_or_default() {
+        "memory" | "workflows" => SettingCategory::Session,
+        "search" => SettingCategory::Models,
+        "todo_gate" => SettingCategory::Agent,
+        _ => SettingCategory::Agent,
+    }
+}
+
+/// Intern a choice catalog to the `&'static [EnumChoice]` the registry needs.
+///
+/// The table is fixed at compile time, so leaking one small boxed slice per
+/// distinct catalog is bounded and keeps `SettingKind::Enum` free of lifetimes.
+fn choice_catalog(choices: &'static [&'static str]) -> &'static [EnumChoice] {
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+    static CACHE: OnceLock<Mutex<HashMap<usize, &'static [EnumChoice]>>> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut cache = cache.lock().expect("choice catalog cache");
+    if let Some(hit) = cache.get(&(choices.as_ptr() as usize)) {
+        return hit;
+    }
+    let built: &'static [EnumChoice] = Box::leak(
+        choices
+            .iter()
+            .map(|choice| EnumChoice {
+                canonical: choice,
+                display: choice_display(choice),
+                description: choice_description(choice),
+            })
+            .collect::<Vec<_>>()
+            .into_boxed_slice(),
+    );
+    cache.insert(choices.as_ptr() as usize, built);
+    built
+}
+
+/// One-line meaning of a choice, shown in the picker sheet. Empty for the
+/// spellings that read as themselves.
+fn choice_description(canonical: &'static str) -> &'static str {
+    match canonical {
+        "bm25" => "Lexical only. Monolingual, but exact on names and cheap.",
+        "dense" => "Embedding only. Cross-lingual, but loses the exact-name short-circuit.",
+        "fused" => "BM25 plus dense, keeping the exact-name short-circuit. Today's behaviour.",
+        "low" => "Cheapest. For mechanical agents with a short task.",
+        "medium" => "The measured default: a constant high scored 64% against 56% for asking.",
+        "high" => "Most reasoning budget. Reserve it for agents that earn it.",
+        _ => "",
+    }
+}
+
+/// Title-case a canonical choice for the picker row.
+fn choice_display(canonical: &'static str) -> &'static str {
+    match canonical {
+        "bm25" => "BM25",
+        "dense" => "Dense",
+        "fused" => "Fused",
+        "low" => "Low",
+        "medium" => "Medium",
+        "high" => "High",
+        other => other,
+    }
 }

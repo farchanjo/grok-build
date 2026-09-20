@@ -31,5 +31,6 @@ pub use registry::{
     SettingKey, SettingKind, SettingMeta, SettingOwner, SettingValue, SettingsRegistry,
     StringValidator, canonical_artifact_language, canonical_conversation_language,
     canonical_hunk_tracker_mode, canonical_screen_mode, canonical_voice_capture_mode,
-    canonical_voice_stt_language, current_value_for, default_value_for, dynamic_enum_choices,
+    canonical_voice_stt_language, control_value_for, current_value_for, default_value_for,
+    dynamic_enum_choices, render_control,
 };

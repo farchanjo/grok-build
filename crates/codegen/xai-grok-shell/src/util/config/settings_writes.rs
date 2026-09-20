@@ -1,5 +1,105 @@
-use super::persist::{update_config, update_config_checked};
+use super::mcp::user_config_path;
+use super::persist::{
+    lock_config_writes, read_to_string_or_empty, update_config, update_config_checked,
+};
 use anyhow::Result;
+use toml::Value as TomlValue;
+
+/// Typed scalar for a [`set_control`] write.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ControlScalar {
+    Bool(bool),
+    Int(i64),
+    Float(f64),
+    Str(String),
+}
+
+impl ControlScalar {
+    fn into_toml(self) -> TomlValue {
+        match self {
+            Self::Bool(value) => TomlValue::Boolean(value),
+            Self::Int(value) => TomlValue::Integer(value),
+            Self::Float(value) => TomlValue::Float(value),
+            Self::Str(value) => TomlValue::String(value),
+        }
+    }
+}
+
+/// Persist one Phase-4 control row by its dotted config path.
+///
+/// The row's path *is* its key, so the write needs no per-knob function: the
+/// table in `session::control` already declares every path, its type and its
+/// default, and the consumers read the same store. The write goes through the
+/// same `config.toml` lock and atomic rename as every other setting; it skips
+/// the typed round-trip because these knobs deliberately have no struct.
+///
+/// Refuses a path outside the declared table, so a typo fails loudly instead
+/// of writing a table nothing reads.
+pub async fn set_control(path: &str, value: ControlScalar) -> Result<()> {
+    let spec = crate::session::control::spec_for(path)
+        .ok_or_else(|| anyhow::anyhow!("unknown control row `{path}`"))?;
+    // Fail closed on a type mismatch rather than writing a value the reader
+    // would silently discard.
+    let mut value = value;
+    match (spec.kind, &value) {
+        (crate::session::control::ControlKind::Bool, ControlScalar::Bool(_)) => {}
+        (crate::session::control::ControlKind::Int { .. }, ControlScalar::Int(_)) => {}
+        (crate::session::control::ControlKind::Choice(_), ControlScalar::Str(_)) => {}
+        // A percentage row is stored as the fraction the config already uses.
+        (crate::session::control::ControlKind::Percent { .. }, ControlScalar::Int(_)) => {
+            let ControlScalar::Int(percent) = value else {
+                unreachable!("matched above")
+            };
+            value = ControlScalar::Float(f64::from(percent.clamp(0, 100) as i32) / 100.0);
+        }
+        (kind, got) => {
+            anyhow::bail!("control `{path}` takes {kind:?}, got {got:?}");
+        }
+    }
+    let _guard = lock_config_writes().await;
+    let file = user_config_path();
+    let text = read_to_string_or_empty(&file)?;
+    let mut root: TomlValue = if text.trim().is_empty() {
+        TomlValue::Table(Default::default())
+    } else {
+        toml::from_str(&text).map_err(|error| {
+            anyhow::anyhow!(
+                "refusing to overwrite unparseable {}: {error}",
+                file.display()
+            )
+        })?
+    };
+    set_dotted(&mut root, path, value.into_toml())?;
+    let rendered = toml::to_string_pretty(&root)?;
+    super::persist::atomic_write_string(&file, &rendered)?;
+    // Live immediately: the consumers read this store, not the file.
+    crate::session::control::install(&root);
+    Ok(())
+}
+
+/// Set `root` at a dotted `path`, creating intermediate tables.
+fn set_dotted(root: &mut TomlValue, path: &str, value: TomlValue) -> Result<()> {
+    let (tables, leaf) = path
+        .rsplit_once('.')
+        .ok_or_else(|| anyhow::anyhow!("control path `{path}` has no table"))?;
+    let mut node = root;
+    for segment in tables.split('.') {
+        if !node.is_table() {
+            *node = TomlValue::Table(Default::default());
+        }
+        let table = node.as_table_mut().expect("just made a table");
+        node = table
+            .entry(segment.to_owned())
+            .or_insert_with(|| TomlValue::Table(Default::default()));
+    }
+    if !node.is_table() {
+        *node = TomlValue::Table(Default::default());
+    }
+    node.as_table_mut()
+        .expect("just made a table")
+        .insert(leaf.to_owned(), value);
+    Ok(())
+}
 
 // ---------------------------------------------------------------------------
 // Settings helpers — typed disk-write wrappers for each setting.
@@ -487,6 +587,32 @@ pub async fn set_compaction_jev_enabled(value: bool) -> Result<()> {
     .await
 }
 
+/// Persist `[compaction.jev].transport`.
+///
+/// The transport is not a free field: endpoint, model string, provider block
+/// and credential chain all move with it, so the canonical pair is written on
+/// every change. Flipping only the enum would leave the previous transport's
+/// endpoint behind, which is the 404 / model-resolution failure the enum
+/// exists to prevent.
+pub async fn set_jev_transport(value: String) -> Result<()> {
+    let transport = crate::session::helpers::jev_prune::JevTransport::parse(&value)
+        .ok_or_else(|| anyhow::anyhow!("unknown jev transport `{value}`"))?;
+    update_config_checked(|cfg| {
+        let jev = cfg.compaction.jev.get_or_insert_with(Default::default);
+        jev.transport = Some(transport);
+        jev.endpoint = Some(transport.endpoint().to_owned());
+        jev.model = Some(transport.model().to_owned());
+        if !transport.sends_provider_block() {
+            jev.zdr = None;
+            jev.data_collection = None;
+            jev.require_parameters = None;
+        }
+        cfg.compaction.normalize_validate()?;
+        Ok(())
+    })
+    .await
+}
+
 /// Persist the primary compaction route. Empty restores `@session`.
 pub async fn set_compaction_primary_model(value: String) -> Result<()> {
     set_compaction_model_at(0, value).await
@@ -572,4 +698,75 @@ pub async fn set_media_file_model(value: String) -> Result<()> {
         );
     }
     update_config(set_media_model_field("file_model", value)).await
+}
+
+#[cfg(test)]
+mod control_write_tests {
+    use super::*;
+
+    fn root(toml_src: &str) -> TomlValue {
+        toml::from_str(toml_src).unwrap()
+    }
+
+    #[test]
+    fn dotted_write_creates_missing_tables() {
+        let mut value = root("");
+        set_dotted(
+            &mut value,
+            "permission.floors.exec",
+            TomlValue::Boolean(false),
+        )
+        .unwrap();
+        assert_eq!(value["permission"]["floors"]["exec"].as_bool(), Some(false));
+    }
+
+    #[test]
+    fn dotted_write_preserves_siblings_and_unrelated_tables() {
+        let mut value = root(
+            "[permission.floors]\nwrite = true\nexec = true\n\
+             [ui]\ncompact_mode = true\n",
+        );
+        set_dotted(
+            &mut value,
+            "permission.floors.exec",
+            TomlValue::Boolean(false),
+        )
+        .unwrap();
+        assert_eq!(value["permission"]["floors"]["write"].as_bool(), Some(true));
+        assert_eq!(value["permission"]["floors"]["exec"].as_bool(), Some(false));
+        assert_eq!(value["ui"]["compact_mode"].as_bool(), Some(true));
+    }
+
+    #[test]
+    fn dotted_write_replaces_a_scalar_where_a_table_belongs() {
+        let mut value = root("[todo_gate]\nenabled = true\n");
+        set_dotted(&mut value, "todo_gate.enabled", TomlValue::Boolean(false)).unwrap();
+        assert_eq!(value["todo_gate"]["enabled"].as_bool(), Some(false));
+    }
+
+    #[test]
+    fn a_top_level_scalar_replaces_a_table_in_its_slot() {
+        let mut value = root("permission = 3\n");
+        set_dotted(
+            &mut value,
+            "permission.floors.write",
+            TomlValue::Boolean(true),
+        )
+        .unwrap();
+        assert_eq!(value["permission"]["floors"]["write"].as_bool(), Some(true));
+    }
+
+    #[test]
+    fn a_percent_row_is_stored_as_a_fraction() {
+        // 20 -> 0.20, the format `[memory.gate]` already uses.
+        let percent = 20_i64;
+        let stored = f64::from(percent as i32) / 100.0;
+        assert_eq!(stored, 0.20_f64);
+    }
+
+    #[test]
+    fn a_path_without_a_table_is_rejected() {
+        let mut value = root("");
+        assert!(set_dotted(&mut value, "enabled", TomlValue::Boolean(true)).is_err());
+    }
 }

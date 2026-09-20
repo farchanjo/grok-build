@@ -367,6 +367,8 @@ enabled = false                       # disable background workflows (or GROK_WO
 
 Project workflows are discovered from `<repo-root>/.grok/workflows/`; user workflows from `~/.grok/workflows/`. Discovery and invocation key off the script's `meta.name`, so keep each filename aligned with its `meta.name`. Built-ins win over project names, and project names win over user names, so keep names unique across scopes.
 
+The discovered catalog — each name with its `when_to_use` (or its description) — is appended to the `workflow` tool description for the session, so the model can choose a registered workflow without a separate listing. The catalog is rebuilt from disk per session and capped at 30 entries; see [Retrieval and Prime](30-retrieval-and-prime.md) for the retrieval path that will replace it.
+
 Each launch gets a session-unique display handle such as `deep-research-2`. That handle is what you see in the `/workflows` run dashboard and pass to `/workflow pause`, `resume`, or `stop` — the internal run IDs never surface in commands. A numbered handle isn't a reusable definition name, so the dashboard disables **save** until you pick a new unique `meta.name` and save the edited script yourself. See [Slash Commands](04-slash-commands.md) for examples.
 
 ### Skills

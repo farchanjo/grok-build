@@ -2371,6 +2371,115 @@ pub(in crate::app::dispatch) fn set_compaction_jev_enabled(
     }]
 }
 
+/// Write one Phase-4 control row.
+///
+/// The shell store is the single source of truth, so there is nothing to
+/// mirror here: [`set_control_inner`] writes it optimistically and the effect
+/// persists. The modal repaints from the store, which is why the value is
+/// visible before the disk write lands.
+pub(in crate::app::dispatch) fn set_control(
+    app: &mut AppView,
+    key: &'static str,
+    value: crate::settings::SettingValue,
+) -> Vec<Effect> {
+    let previous = crate::settings::control_value_for(key);
+    if previous.as_ref() == Some(&value) {
+        return vec![];
+    }
+    set_control_inner(app, key, value.clone());
+    refresh_open_settings_modals(app);
+    tracing::info!(target: "settings", key, ?value, "control changed");
+    let label = xai_grok_shell::session::control::spec_for(key)
+        .map(|spec| spec.label)
+        .unwrap_or(key);
+    app.show_toast(&format!(
+        "\u{2713} {label}: {}",
+        crate::settings::render_control(key)
+    ));
+    vec![Effect::PersistSetting {
+        key,
+        value,
+        // `control_value_for` is total for a registered row, so the fallback
+        // only covers a key that somehow lost its spec.
+        rollback_value: previous.unwrap_or(crate::settings::SettingValue::Bool(false)),
+    }]
+}
+
+/// Optimistic local write into the shell store, which is process-wide: this is
+/// what makes the row repaint before the disk write lands.
+pub(super) fn set_control_inner(
+    _app: &mut AppView,
+    key: &'static str,
+    value: crate::settings::SettingValue,
+) {
+    let rendered = match value {
+        crate::settings::SettingValue::Bool(v) => v.to_string(),
+        crate::settings::SettingValue::Int(v) => v.to_string(),
+        crate::settings::SettingValue::Enum(v) => v.to_owned(),
+        crate::settings::SettingValue::String(v) => v,
+    };
+    xai_grok_shell::session::control::set_local(key, rendered);
+}
+
+/// State-only mutation for `compaction_jev_transport`.
+///
+/// The transport owns endpoint, model, provider block and credential chain, so
+/// flipping it rewrites the two fields that would otherwise 404 or fail model
+/// resolution when they lag behind. An explicit per-field override in the
+/// user's `[compaction.jev]` is not distinguishable here, so the canonical pair
+/// is written on every change: that is what makes the switch safe to flip.
+pub(super) fn set_jev_transport_inner(app: &mut AppView, value: &str) {
+    let Some(transport) = xai_grok_shell::session::helpers::jev_prune::JevTransport::parse(value)
+    else {
+        return;
+    };
+    let jev = app
+        .compaction_config
+        .jev
+        .get_or_insert_with(Default::default);
+    jev.transport = Some(transport);
+    jev.endpoint = Some(transport.endpoint().to_owned());
+    jev.model = Some(transport.model().to_owned());
+    if !transport.sends_provider_block() {
+        jev.zdr = None;
+        jev.data_collection = None;
+        jev.require_parameters = None;
+    }
+}
+
+/// Outer dispatcher for `Action::SetJevTransport`.
+pub(in crate::app::dispatch) fn set_jev_transport(app: &mut AppView, value: String) -> Vec<Effect> {
+    let Some(transport) = xai_grok_shell::session::helpers::jev_prune::JevTransport::parse(&value)
+    else {
+        return vec![];
+    };
+    let canonical = transport.as_str();
+    let prev = app
+        .compaction_config
+        .jev
+        .as_ref()
+        .and_then(|jev| jev.transport)
+        .unwrap_or_default()
+        .as_str();
+    if prev == canonical {
+        return vec![];
+    }
+    set_jev_transport_inner(app, canonical);
+    refresh_open_settings_modals(app);
+    tracing::info!(
+        target: "settings",
+        key = "compaction_jev_transport",
+        value = canonical,
+        "setting changed",
+    );
+    app.show_toast(&format!("\u{2713} Jev transport: {canonical}"));
+    vec![Effect::PersistSetting {
+        key: "compaction_jev_transport",
+        value: crate::settings::SettingValue::Enum(canonical),
+        rollback_value: crate::settings::SettingValue::Enum(prev),
+    }]
+}
+
 /// State-only mutation for `compaction_primary_model`.
 pub(super) fn set_compaction_primary_model_inner(app: &mut AppView, value: String) {
     let mut models = current_compaction_models(app);

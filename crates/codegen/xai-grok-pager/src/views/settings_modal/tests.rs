@@ -803,8 +803,9 @@ fn rows_contain_categories_and_settings_through_pr_14() {
             &SettingCategory::Privacy,
             &SettingCategory::Models,
             &SettingCategory::Compaction,
-            // The Session category has no registered settings, so its
-            // header is not emitted.
+            // `[memory.gate]` rows are registered now, and `memory*` maps to
+            // the Session category, so its header is emitted.
+            &SettingCategory::Session,
             // Advanced category (first entries:
             // `show_tips`, `auto_update`).
             &SettingCategory::Advanced,
@@ -892,6 +893,31 @@ fn rows_contain_categories_and_settings_through_pr_14() {
             "repetition_guard",
             "tersify_scope",
             "tersify_level",
+            // Phase-4 control rows: permission floors + classifier, laziness,
+            // prime, agents.recommend, goal.verify and todo_gate all live in
+            // the shell store and render from one table.
+            "permission.floors.write",
+            "permission.floors.unsafe_env",
+            "permission.floors.opaque_shell",
+            "permission.floors.exec",
+            "permission.classifier.enabled",
+            "laziness.enabled",
+            "laziness.min_confidence",
+            "laziness.idle_threshold_ms",
+            "laziness.max_nudges_per_session",
+            "prime.enabled",
+            "prime.index_width",
+            "prime.strip_scaffolding",
+            "agents.recommend.enabled",
+            "agents.recommend.graph",
+            "agents.recommend.default_effort",
+            "goal.verify.enabled",
+            "goal.verifier_count",
+            "goal.verify.pre_filter",
+            "todo_gate.enabled",
+            "todo_gate.max_fires_per_prompt",
+            "todo_gate.max_items_named",
+            "todo_gate.pick_with_decision",
             // SHELL-owned coding_data_sharing (Privacy category).
             "coding_data_sharing",
             // SHELL-owned default_model (Models category).
@@ -913,6 +939,8 @@ fn rows_contain_categories_and_settings_through_pr_14() {
             "media_video_model",
             "media_file_model",
             "media_status",
+            // SHELL-owned tool-search backend selector.
+            "search.tool_backend",
             // Dedicated Compaction category.
             "compaction_strategy",
             "compaction_trigger_policy",
@@ -920,10 +948,19 @@ fn rows_contain_categories_and_settings_through_pr_14() {
             "compaction_primary_model",
             "compaction_fallback_model",
             "compaction_jev_enabled",
+            "compaction_jev_transport",
             "compaction_status",
             // `auto_compact_threshold_percent` (Session category) is
             // not exposed in the modal.
             // Advanced category.
+            // `[memory.gate]` and `[workflows]` rows land in the Session category.
+            "memory.enabled",
+            "memory.session.save_on_end",
+            "memory.gate.enabled",
+            "memory.gate.worth_threshold",
+            "memory.gate.covered_threshold",
+            "memory.gate.scope_routing",
+            "workflows.enabled",
             "show_tips",
             // Deep-link into the Tools sub-sheet (search + pin over the
             // built-in + MCP tool catalog).

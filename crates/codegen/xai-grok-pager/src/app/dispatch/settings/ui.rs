@@ -8,18 +8,19 @@ use super::setters::{
     set_compaction_band_count_inner, set_compaction_fallback_model_inner,
     set_compaction_jev_enabled_inner, set_compaction_primary_model_inner,
     set_compaction_strategy_inner, set_compaction_trigger_policy_inner, set_contextual_hint_inner,
-    set_conversation_language_inner, set_default_model_inner,
+    set_control_inner, set_conversation_language_inner, set_default_model_inner,
     set_default_selected_permission_inner, set_display_refresh_auto_cadence_inner,
     set_fork_secondary_model_inner, set_group_tool_verbs_inner, set_hunk_tracker_mode_inner,
-    set_invert_scroll_inner, set_keep_text_selection_inner, set_max_thoughts_width_inner,
-    set_media_audio_model_inner, set_media_file_model_inner, set_media_image_model_inner,
-    set_media_routing_inner, set_media_video_model_inner, set_multiline_mode,
-    set_page_flip_on_send_inner, set_prompt_suggestions_inner, set_remember_tool_approvals_inner,
-    set_render_mermaid_inner, set_repetition_guard_inner, set_respect_manual_folds_inner,
-    set_screen_mode_inner, set_scroll_lines_inner, set_scroll_mode_inner, set_scroll_speed_inner,
-    set_show_thinking_blocks_inner, set_show_tips_inner, set_simple_mode_inner, set_tersify_level,
-    set_tersify_scope, set_theme_inner, set_timeline_inner, set_timestamps, set_timestamps_inner,
-    set_vim_mode_inner, set_voice_capture_mode_inner, set_voice_stt_language_inner,
+    set_invert_scroll_inner, set_jev_transport_inner, set_keep_text_selection_inner,
+    set_max_thoughts_width_inner, set_media_audio_model_inner, set_media_file_model_inner,
+    set_media_image_model_inner, set_media_routing_inner, set_media_video_model_inner,
+    set_multiline_mode, set_page_flip_on_send_inner, set_prompt_suggestions_inner,
+    set_remember_tool_approvals_inner, set_render_mermaid_inner, set_repetition_guard_inner,
+    set_respect_manual_folds_inner, set_screen_mode_inner, set_scroll_lines_inner,
+    set_scroll_mode_inner, set_scroll_speed_inner, set_show_thinking_blocks_inner,
+    set_show_tips_inner, set_simple_mode_inner, set_tersify_level, set_tersify_scope,
+    set_theme_inner, set_timeline_inner, set_timestamps, set_timestamps_inner, set_vim_mode_inner,
+    set_voice_capture_mode_inner, set_voice_stt_language_inner,
 };
 use crate::app::actions::{Action, Effect};
 use crate::app::app_view::{ActiveView, AppView};
@@ -1676,6 +1677,11 @@ pub(in crate::app::dispatch) fn action_for_reset(
         ("compaction_jev_enabled", SettingValue::Bool(b)) => {
             Some(Action::SetCompactionJevEnabled(*b))
         }
+        // Jev transport: enum round-trip (registered default is the first
+        // canonical spelling, so a reset lands back on OpenRouter).
+        ("compaction_jev_transport", SettingValue::Enum(s)) => {
+            Some(Action::SetJevTransport((*s).to_owned()))
+        }
         // Primary model: blank or the explicit sentinel → active session route.
         ("compaction_primary_model", SettingValue::String(s)) => {
             if s.is_empty() || s == "@session" {
@@ -1725,6 +1731,11 @@ pub(in crate::app::dispatch) fn action_for_reset(
             } else {
                 Some(Action::SetMediaFileModel(acp::ModelId::new(s.clone())))
             }
+        }
+        // Phase-4 control rows live in the shell store and all share one typed
+        // action, so a single arm covers the whole family.
+        (key, value) if xai_grok_shell::session::control::is_control(key) => {
+            Some(Action::SetControl(key, value.clone()))
         }
 
         _ => None,
@@ -2027,6 +2038,14 @@ pub(in crate::app::dispatch) fn apply_setting_rollback(
         }
         ("compaction_jev_enabled", SettingValue::Bool(b)) => {
             set_compaction_jev_enabled_inner(app, *b);
+        }
+        ("compaction_jev_transport", SettingValue::Enum(s)) => {
+            set_jev_transport_inner(app, s);
+        }
+        // Phase-4 control rows have no local mirror: the shell store is the
+        // only copy, so a rollback is a plain re-write of the previous value.
+        (key, value) if xai_grok_shell::session::control::is_control(key) => {
+            set_control_inner(app, key, value.clone());
         }
         ("compaction_primary_model", SettingValue::String(s)) => {
             set_compaction_primary_model_inner(app, s.clone());

@@ -92,6 +92,7 @@ const ALL_SETTINGS_EXERCISED: &[&str] = &[
     "compaction_primary_model",
     "compaction_fallback_model",
     "compaction_jev_enabled",
+    "compaction_jev_transport",
     "compaction_status",
     // Model-language group + its two Enum children (exercised via the
     // group sub-sheet, which opens each child's enum picker).
@@ -118,9 +119,16 @@ const ALL_SETTINGS_EXERCISED: &[&str] = &[
 #[test]
 fn every_registered_setting_is_exercised() {
     let reg = SettingsRegistry::defaults();
+    // Phase-4 control rows are exercised generically (they all share one
+    // action, one persist arm and one default rule), so their keys are taken
+    // from the table rather than repeated here.
+    let control_keys: Vec<&str> = xai_grok_shell::session::control::CONTROLS
+        .iter()
+        .map(|spec| spec.path)
+        .collect();
     let mut missing: Vec<&str> = Vec::new();
     for meta in reg.all() {
-        if !ALL_SETTINGS_EXERCISED.contains(&meta.key) {
+        if !ALL_SETTINGS_EXERCISED.contains(&meta.key) && !control_keys.contains(&meta.key) {
             missing.push(meta.key);
         }
     }
@@ -2105,6 +2113,28 @@ fn registry_kind_membership_through_pr_14() {
             "contextual_hints.small_screen",
             "contextual_hints.word_select",
             "contextual_hints.ssh_wrap",
+            // Phase-4 control rows (SHELL-owned; every one ships at today's
+            // behaviour, so the two that ship OFF are named in
+            // `session::control::tests::every_row_defaults_to_todays_behaviour`).
+            "agents.recommend.enabled",
+            "agents.recommend.graph",
+            "goal.verify.enabled",
+            "goal.verify.pre_filter",
+            "laziness.enabled",
+            "memory.enabled",
+            "memory.gate.enabled",
+            "memory.gate.scope_routing",
+            "memory.session.save_on_end",
+            "permission.classifier.enabled",
+            "permission.floors.exec",
+            "permission.floors.opaque_shell",
+            "permission.floors.unsafe_env",
+            "permission.floors.write",
+            "prime.enabled",
+            "prime.strip_scaffolding",
+            "todo_gate.enabled",
+            "todo_gate.pick_with_decision",
+            "workflows.enabled",
         ]
         .into_iter()
         .collect::<std::collections::BTreeSet<_>>()
@@ -2117,9 +2147,11 @@ fn registry_kind_membership_through_pr_14() {
     assert_eq!(
         enum_keys,
         vec![
+            "agents.recommend.default_effort",
             "auto_dark_theme",
             "auto_light_theme",
             "coding_data_sharing",
+            "compaction_jev_transport",
             "compaction_strategy",
             "compaction_trigger_policy",
             "default_selected_permission",
@@ -2133,6 +2165,7 @@ fn registry_kind_membership_through_pr_14() {
             "render_mermaid",
             "screen_mode",
             "scroll_mode",
+            "search.tool_backend",
             "tersify_level",
             "tersify_scope",
             "theme",
@@ -2172,9 +2205,18 @@ fn registry_kind_membership_through_pr_14() {
         sorted_int,
         vec![
             "compaction_band_count",
+            "goal.verifier_count",
+            "laziness.idle_threshold_ms",
+            "laziness.max_nudges_per_session",
+            "laziness.min_confidence",
             "max_thoughts_width",
+            "memory.gate.covered_threshold",
+            "memory.gate.worth_threshold",
+            "prime.index_width",
             "scroll_lines",
             "scroll_speed",
+            "todo_gate.max_fires_per_prompt",
+            "todo_gate.max_items_named",
         ],
         "Int kind membership drift (PR 8)",
     );
@@ -2220,9 +2262,11 @@ fn enum_settings_membership_through_pr_14() {
     assert_eq!(
         enum_keys,
         vec![
+            "agents.recommend.default_effort",
             "auto_dark_theme",
             "auto_light_theme",
             "coding_data_sharing",
+            "compaction_jev_transport",
             "compaction_strategy",
             "compaction_trigger_policy",
             "default_selected_permission",
@@ -2236,6 +2280,7 @@ fn enum_settings_membership_through_pr_14() {
             "render_mermaid",
             "screen_mode",
             "scroll_mode",
+            "search.tool_backend",
             "tersify_level",
             "tersify_scope",
             "theme",
@@ -2317,6 +2362,7 @@ fn defaults_round_trip_through_registry() {
             "compaction_primary_model" => SettingValue::String("@session".to_string()),
             "compaction_fallback_model" => SettingValue::String(String::new()),
             "compaction_jev_enabled" => SettingValue::Bool(false),
+            "compaction_jev_transport" => SettingValue::Enum("openrouter"),
             "compaction_status" => SettingValue::String("Idle".to_string()),
             "media_routing" => SettingValue::Enum("auto"),
             "media_image_model" => SettingValue::String("@session".to_string()),
@@ -2354,6 +2400,19 @@ fn defaults_round_trip_through_registry() {
             "repetition_guard" => SettingValue::Bool(true),
             "tersify_scope" => SettingValue::Enum("main_only"),
             "tersify_level" => SettingValue::Enum("full"),
+            // Phase-4 control rows: the expected default is the declared one,
+            // so a row that drifts from its spec fails here.
+            other if xai_grok_shell::session::control::is_control(other) => {
+                use xai_grok_shell::session::control::ControlKind;
+                let spec = xai_grok_shell::session::control::spec_for(other).expect("spec");
+                match spec.kind {
+                    ControlKind::Bool => SettingValue::Bool(spec.default_bool),
+                    ControlKind::Int { .. } | ControlKind::Percent { .. } => {
+                        SettingValue::Int(spec.default_int)
+                    }
+                    ControlKind::Choice(choices) => SettingValue::Enum(choices[0]),
+                }
+            }
             other => panic!("test must list expected default for `{other}`"),
         }
     };
@@ -2380,6 +2439,77 @@ fn defaults_round_trip_through_registry() {
                 meta.key
             );
         }
+    }
+}
+
+/// Every Phase-4 control row is a real row: it renders, it dispatches the one
+/// generic action on Space/Enter, and it carries the spec's own label.
+#[test]
+fn every_control_row_dispatches_the_generic_action() {
+    use xai_grok_shell::session::control::{CONTROLS, ControlKind};
+    for spec in CONTROLS {
+        let mut state = make_state();
+        let reg = state.registry.clone();
+        let meta = reg.find(spec.path).expect("control row registered");
+        assert_eq!(meta.label, spec.label, "{} label drifted", spec.path);
+
+        navigate_to(&mut state, spec.path);
+        // Bool flips in place; an Int opens its stepper and an Enum its
+        // picker, so both need a second Enter to commit.
+        let outcome = match spec.kind {
+            ControlKind::Bool => handle_settings_key(&mut state, &press(KeyCode::Char(' '))),
+            ControlKind::Int { .. } | ControlKind::Percent { .. } => {
+                let opened = handle_settings_key(&mut state, &press(KeyCode::Enter));
+                assert!(
+                    matches!(opened, SettingsKeyOutcome::Changed),
+                    "{} must open its stepper, got {opened:?}",
+                    spec.path
+                );
+                handle_settings_key(&mut state, &press(KeyCode::Enter))
+            }
+            ControlKind::Choice(_) => {
+                let opened = handle_settings_key(&mut state, &press(KeyCode::Enter));
+                assert!(
+                    matches!(opened, SettingsKeyOutcome::Changed),
+                    "{} must open its picker, got {opened:?}",
+                    spec.path
+                );
+                handle_settings_key(&mut state, &press(KeyCode::Down));
+                handle_settings_key(&mut state, &press(KeyCode::Enter))
+            }
+        };
+        match outcome {
+            SettingsKeyOutcome::Action(Action::SetControl(key, _)) => {
+                assert_eq!(key, spec.path, "{} dispatched the wrong row", spec.path)
+            }
+            other => panic!("{} must dispatch SetControl, got {other:?}", spec.path),
+        }
+    }
+}
+
+/// The mouse path reaches the same action as the keyboard path for a control
+/// row, so a click cannot bypass the generic writer.
+#[test]
+fn control_row_mouse_click_dispatches_the_generic_action() {
+    let mut state = make_state();
+    synth_rects(&mut state);
+    let row_y = row_idx_for(&state, "todo_gate.enabled") as u16;
+    let _ = handle_settings_mouse(
+        &mut state,
+        MouseEventKind::Down(crossterm::event::MouseButton::Left),
+        10,
+        row_y,
+    );
+    match handle_settings_mouse(
+        &mut state,
+        MouseEventKind::Down(crossterm::event::MouseButton::Left),
+        10,
+        row_y,
+    ) {
+        SettingsKeyOutcome::Action(Action::SetControl(key, _)) => {
+            assert_eq!(key, "todo_gate.enabled")
+        }
+        other => panic!("expected SetControl from the click, got {other:?}"),
     }
 }
 
@@ -2435,6 +2565,7 @@ fn settings_value_payload_matches_kind() {
             | SettingsKeyOutcome::Action(Action::SetInvertScroll(_))
             | SettingsKeyOutcome::Action(Action::SetDisplayRefreshAutoCadence(_))
             | SettingsKeyOutcome::Action(Action::SetCompactionJevEnabled(_))
+            | SettingsKeyOutcome::Action(Action::SetControl(..))
             | SettingsKeyOutcome::Action(Action::SetRepetitionGuard(_)) => {}
             other => panic!(
                 "expected a typed bool setter for `{}`, got {:?}",
@@ -8496,6 +8627,71 @@ fn compaction_jev_enabled_mouse_click_two_stage_toggles() {
         row_y,
     );
     assert_set_bool_action(outcome, "compaction_jev_enabled", true);
+}
+
+/// Test that compaction_jev_transport is an Enum, Compaction-category,
+/// SHELL-owned, live (no restart) and openrouter by default.
+#[test]
+fn compaction_jev_transport_defaults_to_openrouter_shell_owned_enum() {
+    let reg = SettingsRegistry::defaults();
+    let meta = reg
+        .find("compaction_jev_transport")
+        .expect("compaction_jev_transport registered");
+
+    assert_eq!(meta.category, SettingCategory::Compaction);
+    assert_eq!(meta.owner, SettingOwner::Shell);
+    assert!(
+        !meta.restart_required,
+        "the transport is live-applied via the [compaction] reload fan-out"
+    );
+    match &meta.kind {
+        SettingKind::Enum {
+            default, choices, ..
+        } => {
+            assert_eq!(*default, "openrouter", "default must be today's behaviour");
+            let canonicals: Vec<&str> = choices.iter().map(|c| c.canonical).collect();
+            assert_eq!(canonicals, vec!["openrouter", "native"]);
+        }
+        other => panic!("compaction_jev_transport must be Enum, got {other:?}"),
+    }
+    assert!(
+        meta.description.contains("credential chain"),
+        "description must say the transport moves the credential chain too"
+    );
+}
+
+#[test]
+fn compaction_jev_transport_enter_dispatches_typed_setter() {
+    let mut s = make_state();
+    navigate_to(&mut s, "compaction_jev_transport");
+    // Enter opens the picker; Down previews the second choice; Enter commits.
+    let _ = handle_settings_key(&mut s, &press(KeyCode::Enter));
+    let _ = handle_settings_key(&mut s, &press(KeyCode::Down));
+    let outcome = handle_settings_key(&mut s, &press(KeyCode::Enter));
+    let action = match outcome {
+        SettingsKeyOutcome::Action(a) => a,
+        other => panic!("expected typed setter Action, got {other:?}"),
+    };
+    match action {
+        Action::SetJevTransport(value) => assert_eq!(value, "native"),
+        other => panic!("expected Action::SetJevTransport, got {other:?}"),
+    }
+}
+
+/// The row renders the live value, never the default, once the config says
+/// otherwise.
+#[test]
+fn compaction_jev_transport_renders_the_configured_value() {
+    let snapshot = PagerLocalSnapshot {
+        compaction_jev_transport: "native".to_string(),
+        ..PagerLocalSnapshot::default()
+    };
+    let value = xai_grok_pager::settings::current_value_for(
+        "compaction_jev_transport",
+        &UiConfig::default(),
+        &snapshot,
+    );
+    assert_eq!(value, Some(SettingValue::Enum("native")));
 }
 
 /// Test that compaction_status is read-only (Status kind).

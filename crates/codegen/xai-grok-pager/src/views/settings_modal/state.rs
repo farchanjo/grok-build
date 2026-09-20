@@ -1108,6 +1108,11 @@ pub(super) fn action_for_bool(key: SettingKey, new: bool) -> Option<Action> {
         "display_refresh_auto_cadence" => Some(Action::SetDisplayRefreshAutoCadence(new)),
         // Jev-guided compaction pruning: plain bool, no preview.
         "compaction_jev_enabled" => Some(Action::SetCompactionJevEnabled(new)),
+        // Phase-4 control rows: one generic action carries the path.
+        key if xai_grok_shell::session::control::is_control(key) => Some(Action::SetControl(
+            key,
+            crate::settings::SettingValue::Bool(new),
+        )),
         _ => None,
     }
 }
@@ -1205,6 +1210,14 @@ pub(super) fn action_for_enum_commit(key: SettingKey, choice: &'static str) -> O
         "compaction_trigger_policy" => Some(Action::SetCompactionTriggerPolicy(choice.to_string())),
         // --- Media settings ---
         "media_routing" => Some(Action::SetMediaRouting(choice.to_string())),
+        // Jev transport: same typed action the `/jev transport` command
+        // dispatches, so the two cannot drift.
+        "compaction_jev_transport" => Some(Action::SetJevTransport(choice.to_string())),
+        // Phase-4 control rows: one generic action carries the path.
+        key if xai_grok_shell::session::control::is_control(key) => Some(Action::SetControl(
+            key,
+            crate::settings::SettingValue::Enum(choice),
+        )),
         _ => None,
     }
 }
@@ -1299,6 +1312,11 @@ pub(super) fn action_for_int(key: SettingKey, value: i64) -> Option<Action> {
         "scroll_lines" => Some(Action::SetScrollLines(value)),
         // Compaction band count: int round-trip.
         "compaction_band_count" => Some(Action::SetCompactionBandCount(value)),
+        // Phase-4 control rows: one generic action carries the path.
+        key if xai_grok_shell::session::control::is_control(key) => Some(Action::SetControl(
+            key,
+            crate::settings::SettingValue::Int(value),
+        )),
         _ => None,
     }
 }

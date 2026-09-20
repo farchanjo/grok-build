@@ -1500,6 +1500,11 @@ fn move_setting_away_from_default(app: &mut AppView, key: crate::settings::Setti
         "compaction_jev_enabled" => {
             let _ = dispatch(Action::SetCompactionJevEnabled(true), app);
         }
+        "compaction_jev_transport" => {
+            // The registered default is the first canonical spelling, so the
+            // away-from-default direction is the other transport.
+            let _ = dispatch(Action::SetJevTransport("native".to_string()), app);
+        }
         "compaction_primary_model" => {
             use agent_client_protocol as acp;
             use std::sync::Arc;
@@ -1587,6 +1592,33 @@ fn move_setting_away_from_default(app: &mut AppView, key: crate::settings::Setti
         }
         "language.artifact" => {
             let _ = dispatch(Action::SetArtifactLanguage("ja-JP".to_string()), app);
+        }
+        key if xai_grok_shell::session::control::is_control(key) => {
+            // Control rows are shell-store entries with a declared kind: step
+            // each one away from its registered default along its own axis.
+            use xai_grok_shell::session::control::{ControlKind, spec_for};
+            let away =
+                match spec_for(key).map(|spec| (spec.kind, spec.default_int, spec.default_bool)) {
+                    Some((ControlKind::Bool, _, default)) => {
+                        crate::settings::SettingValue::Bool(!default)
+                    }
+                    Some((
+                        ControlKind::Int { max, .. } | ControlKind::Percent { max, .. },
+                        default,
+                        _,
+                    )) => crate::settings::SettingValue::Int(if default < max {
+                        default + 1
+                    } else {
+                        default - 1
+                    }),
+                    Some((ControlKind::Choice(choices), _, _)) => {
+                        crate::settings::SettingValue::String(
+                            choices.get(1).copied().unwrap_or_default().to_owned(),
+                        )
+                    }
+                    None => crate::settings::SettingValue::Bool(true),
+                };
+            let _ = dispatch(Action::SetControl(key, away), app);
         }
         other => {
             panic!(
@@ -3711,6 +3743,59 @@ fn set_compaction_jev_enabled_idempotent_when_unchanged() {
     let _ = dispatch(Action::SetCompactionJevEnabled(true), &mut app);
     let effects = dispatch(Action::SetCompactionJevEnabled(true), &mut app);
     assert!(effects.is_empty(), "second enable is a no-op");
+}
+
+/// Test that SetJevTransport emits PersistSetting and moves endpoint, model
+/// and provider block with the enum — the point of the transport being one
+/// knob rather than three fields.
+#[test]
+fn set_jev_transport_emits_persist_setting_and_moves_the_pair() {
+    use crate::settings::SettingValue;
+    let mut app = test_app_with_agent();
+    let effects = dispatch(Action::SetJevTransport("native".to_owned()), &mut app);
+    assert_eq!(effects.len(), 1);
+    match &effects[0] {
+        Effect::PersistSetting {
+            key,
+            value,
+            rollback_value,
+        } => {
+            assert_eq!(*key, "compaction_jev_transport");
+            assert_eq!(*value, SettingValue::Enum("native"));
+            assert_eq!(*rollback_value, SettingValue::Enum("openrouter"));
+        }
+        other => panic!("expected PersistSetting, got {other:?}"),
+    }
+    let jev = app
+        .compaction_config
+        .jev
+        .as_ref()
+        .expect("[compaction.jev] created by the write");
+    assert_eq!(jev.model.as_deref(), Some("jev-latest"));
+    assert_eq!(
+        jev.endpoint.as_deref(),
+        Some("https://api.typesafe.ai/v1/systemone")
+    );
+}
+
+/// The transport is idempotent and the unknown spelling is a no-op.
+#[test]
+fn set_jev_transport_is_idempotent_and_ignores_junk() {
+    let mut app = test_app_with_agent();
+    assert!(
+        dispatch(Action::SetJevTransport("openrouter".to_owned()), &mut app).is_empty(),
+        "openrouter is already the default"
+    );
+    assert!(
+        dispatch(
+            Action::SetJevTransport("carrier-pigeon".to_owned()),
+            &mut app
+        )
+        .is_empty(),
+        "an unknown spelling changes nothing"
+    );
+    let _ = dispatch(Action::SetJevTransport("native".to_owned()), &mut app);
+    assert!(dispatch(Action::SetJevTransport("native".to_owned()), &mut app).is_empty());
 }
 
 /// Test that SetMediaRouting emits PersistSetting with correct payload.

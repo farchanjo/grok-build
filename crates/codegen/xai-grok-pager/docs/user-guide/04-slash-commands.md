@@ -443,6 +443,68 @@ Toggle message timestamps on or off.
 
 ---
 
+## Control Commands
+
+Each of these follows the same shape — `on`, `off`, or `status` — and dispatches
+the **same typed action as its settings row**, so the command and the modal
+cannot drift. `status` is the cheap one: it prints the effective values and the
+live state the feature reads, without changing anything.
+
+**Every row behind them ships at today's behaviour**, so a fresh config is
+unaffected until a row is flipped, and each one is independently reversible.
+
+### `/jev [on|off|status|transport native|openrouter]`
+
+Control Jev-guided compaction pruning, and pick which wire the decisions call
+rides. `transport` moves the endpoint, the model string, the `provider` block
+and the credential chain **together**: the native endpoint with the
+`~typesafe/` model prefix 404s, and the OpenRouter endpoint with a bare
+`jev-latest` fails model resolution, so the three must not be set apart.
+`status` names the credential *source* (`env:`, `file:`, `auth.json:`) and never
+the key, so a 401 is diagnosable.
+
+### `/permission-classifier [on|off|status]`
+
+Toggle the auto-mode classifier and see the four bash confirmation floors
+(`write`, `unsafe_env`, `opaque_shell`, `exec`), all armed by default. A floor
+overrides a classifier allow, so a disarmed floor is the cheapest prompt to
+remove; the `exec` floor is the dominant term.
+
+### `/laziness [on|off|status]`
+
+Toggle the stall detector and report its confidence gate, idle window and nudge
+cap. The cap at `0` with the detector on is observation-only: the classifier
+fires and nothing is injected.
+
+### `/prime [on|off|status]`
+
+Toggle prime injection and report the index width and the scaffolding strip.
+
+### `/memory-gate [on|off|status]`
+
+Toggle the memory admission gate and report the master switch, the
+end-of-session save, both thresholds (as percentages) and scope routing.
+
+### `/agents-recommend [on|off|status]`
+
+Toggle agent recommendation and its delegates graph, and report the default
+agent effort.
+
+### `/goal-verify [on|off|status]`
+
+Toggle goal verification and report the skeptic panel size and the pre-filter.
+
+### `/todo-gate [on|off|status]`
+
+Toggle the turn-end todo gate and report its fire cap, item cap and picker.
+
+### `/tool-search [status|bm25|dense|fused]`
+
+Report and pick the tool search backend. `fused` keeps BM25 and the
+exact-name short-circuit and adds the dense index.
+
+---
+
 ## Skills as Slash Commands
 
 Any enabled skill with `user-invocable: true` in its SKILL.md frontmatter shows up as a slash command. (Turn a skill off via `/skills` and it stops being advertised.) So a skill at `~/.grok/skills/commit/SKILL.md` runs as:
