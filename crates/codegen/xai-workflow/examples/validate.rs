@@ -19,5 +19,9 @@ fn main() {
             println!("RUN FAIL: {e}");
             std::process::exit(2);
         }
+        Err(e @ xai_workflow::ValidationError::AgentType(_)) => {
+            println!("AGENT TYPE FAIL: {e}");
+            std::process::exit(3);
+        }
     }
 }

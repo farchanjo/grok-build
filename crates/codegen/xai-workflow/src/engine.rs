@@ -171,12 +171,10 @@ pub fn run_workflow(params: WorkflowRunParams) -> WorkflowOutcome {
     };
 
     let mut scope = rhai::Scope::new();
-    let args_dyn = match rhai::serde::to_dynamic(&args) {
-        Ok(d) => d,
-        Err(e) => {
-            return WorkflowOutcome::Failed {
-                error: format!("invalid workflow args: {e}"),
-            };
+    let args_dyn = match args_scope_value(&args) {
+        Ok(dynamic) => dynamic,
+        Err(error) => {
+            return WorkflowOutcome::Failed { error };
         }
     };
     scope.push_dynamic("args", args_dyn);
@@ -211,6 +209,23 @@ fn find_control_token(err: &EvalAltResult) -> Option<ControlToken> {
         EvalAltResult::ErrorInModule(_, inner, _) => find_control_token(inner),
         _ => None,
     }
+}
+
+/// Bind the script's `args` global.
+///
+/// A Rhai map answers `()` for a missing property, while unit raises
+/// "a getter is not registered". Scripts read optional args (`args.dry_run`)
+/// and a run is often launched without any, so an absent payload becomes an
+/// empty map: the read yields `()` instead of failing the whole run at the
+/// first property access.
+fn args_scope_value(args: &serde_json::Value) -> Result<Dynamic, String> {
+    let dynamic =
+        rhai::serde::to_dynamic(args).map_err(|error| format!("invalid workflow args: {error}"))?;
+    Ok(if dynamic.is_unit() {
+        Dynamic::from_map(rhai::Map::new())
+    } else {
+        dynamic
+    })
 }
 
 fn terminated(token: ControlToken) -> Box<EvalAltResult> {
@@ -768,6 +783,35 @@ fn register_host_fns(engine: &mut rhai::Engine, ctx: &Rc<RefCell<Ctx>>) {
         )?;
         value_to_dynamic(&value)
     });
+
+    // One decisions call: `decide(state, questions)` answers with the
+    // `answers` object, so a script can ask a judgement question for one
+    // call instead of spending a whole `agent()` spawn on it. The call is
+    // journaled like any other host call, so a resume replays it.
+    let c = ctx.clone();
+    engine.register_fn(
+        "decide",
+        move |state: Dynamic, questions: rhai::Map| -> ScriptResult<Dynamic> {
+            if questions.is_empty() {
+                return Err(runtime_error("decide() needs at least one question"));
+            }
+            let state = dynamic_to_value(state);
+            let questions = map_to_value(questions)?;
+            let payload = serde_json::json!({ "state": &state, "questions": &questions });
+            let value = host_call(
+                &c,
+                "decide",
+                payload,
+                |reply| WorkflowHostRequest::Decide {
+                    state,
+                    questions,
+                    reply,
+                },
+                |answers| answers,
+            )?;
+            value_to_dynamic(&value)
+        },
+    );
 
     let c = ctx.clone();
     engine.register_fn(
@@ -1734,6 +1778,59 @@ mod tests {
     }
 
     #[test]
+    fn decide_answers_are_journaled_and_replayed_without_a_second_call() {
+        let script = r#"
+            let meta = #{ name: "t", description: "d" };
+            let answers = decide(#{ streak: 2 }, #{ q1: #{ "type": "noul", "instructions": "advance?" } });
+            complete(#{ noul: answers.q1.noul });
+        "#;
+
+        let dir = tempfile::tempdir().unwrap();
+        let journal_path = dir.path().join("journal.jsonl");
+
+        let (tx, rx) = mpsc::unbounded_channel::<WorkflowHostMessage>();
+        let host = spawn_mock_host(rx, |req| {
+            if let WorkflowHostRequest::Decide { reply, .. } = req {
+                let _ = reply.send(Ok(serde_json::json!({ "q1": { "noul": 0.83 } })));
+            }
+        });
+        let first = run_workflow(params(script, Journal::new(Some(journal_path.clone())), tx));
+        drop(host);
+        let WorkflowOutcome::Completed { result: first } = first else {
+            panic!("first run should complete");
+        };
+        assert_eq!(first["noul"], serde_json::json!(0.83));
+
+        let (tx, rx) = mpsc::unbounded_channel::<WorkflowHostMessage>();
+        let host = spawn_mock_host(rx, |req| match req {
+            WorkflowHostRequest::Decide { .. } => panic!("replay must not call decide again"),
+            _ => {}
+        });
+        let second = run_workflow(params(script, Journal::load(journal_path).unwrap(), tx));
+        drop(host);
+        let WorkflowOutcome::Completed { result: second } = second else {
+            panic!("resumed run should complete");
+        };
+        assert_eq!(first, second);
+    }
+
+    #[test]
+    fn decide_needs_at_least_one_question() {
+        let script = r#"
+            let meta = #{ name: "t", description: "d" };
+            complete(decide(#{}, #{}));
+        "#;
+        let (tx, rx) = mpsc::unbounded_channel::<WorkflowHostMessage>();
+        let host = spawn_mock_host(rx, |_| {});
+        let outcome = run_workflow(params(script, Journal::new(None), tx));
+        drop(host);
+        let WorkflowOutcome::Failed { error } = outcome else {
+            panic!("expected a runtime failure, got {outcome:?}");
+        };
+        assert!(error.contains("at least one question"), "{error}");
+    }
+
+    #[test]
     fn journal_write_failure_is_fatal() {
         let dir = tempfile::tempdir().unwrap();
         let journal_path = dir.path().join("journal.jsonl");
@@ -1875,6 +1972,35 @@ mod tests {
                 assert_eq!(result, serde_json::json!("\"</tag>\\nquoted\""));
             }
             other => panic!("expected Completed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn reading_an_optional_arg_without_any_args_yields_unit_instead_of_failing() {
+        let (tx, rx) = mpsc::unbounded_channel();
+        let host = spawn_mock_host(rx, |_req| {});
+
+        let mut run_params = params(
+            r#"
+            let meta = #{ name: "t", description: "d" };
+            let dry_run = false;
+            if args.dry_run != () { dry_run = args.dry_run; }
+            complete(#{ dry_run: dry_run });
+            "#,
+            Journal::new(None),
+            tx,
+        );
+        // A run launched without args binds `args` as unit; a property read on
+        // unit used to raise "a getter is not registered" and kill the run.
+        run_params.args = serde_json::Value::Null;
+        let outcome = run_workflow(run_params);
+        drop(host);
+
+        match outcome {
+            WorkflowOutcome::Completed { result } => {
+                assert_eq!(result["dry_run"], serde_json::json!(false));
+            }
+            other => panic!("unexpected outcome: {other:?}"),
         }
     }
 }

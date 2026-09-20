@@ -64,7 +64,9 @@ pub fn extract_meta(script: &str) -> Result<WorkflowMeta, MetaError> {
         .map_err(|e| MetaError::Parse(crate::with_rhai_hint(e.to_string())))?;
 
     let mut scope = rhai::Scope::new();
-    scope.push_dynamic("args", rhai::Dynamic::UNIT);
+    // An empty map, not unit: a meta block that reads an optional arg
+    // (`args.dry_run`) gets `()` back instead of "a getter is not registered".
+    scope.push_dynamic("args", rhai::Dynamic::from_map(rhai::Map::new()));
 
     let _ = engine.eval_with_scope::<rhai::Dynamic>(&mut scope, script);
 

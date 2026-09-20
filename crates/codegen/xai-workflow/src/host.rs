@@ -13,6 +13,11 @@ pub struct AgentOpts {
     pub max_output_tokens: Option<u64>,
     #[serde(default)]
     pub agent_type: Option<String>,
+    /// Skill names to prioritize in the child's inherited skills list,
+    /// mirroring `spawn_subagent`'s `skills_hint` (existing skills first;
+    /// unknown names ignored; never prunes skills).
+    #[serde(default)]
+    pub skills_hint: Option<Vec<String>>,
     #[serde(default)]
     pub capability_mode: Option<String>,
     #[serde(default)]
@@ -122,6 +127,14 @@ pub enum WorkflowHostRequest {
         opts: AgentOpts,
         reply: oneshot::Sender<Result<AgentResult, HostError>>,
     },
+    /// One decisions call (`state` + `questions` in, the `answers` object
+    /// out). This is the only path to a model from inside a script that
+    /// costs a call instead of a whole subagent spawn.
+    Decide {
+        state: serde_json::Value,
+        questions: serde_json::Value,
+        reply: oneshot::Sender<Result<serde_json::Value, HostError>>,
+    },
     Phase {
         title: String,
         replayed: bool,
@@ -164,6 +177,7 @@ impl WorkflowHostRequest {
             Self::ReserveAgentCalls { .. } => "reserve_agent_calls",
             Self::ReleaseAgentCalls { .. } => "release_agent_calls",
             Self::SpawnAgent { .. } => "spawn_agent",
+            Self::Decide { .. } => "decide",
             Self::Phase { .. } => "phase",
             Self::Log { .. } => "log",
             Self::Telemetry { .. } => "telemetry",
