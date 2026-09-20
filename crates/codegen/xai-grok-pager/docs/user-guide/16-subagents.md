@@ -71,6 +71,18 @@ The `spawn_subagent` tool accepts a `subagent_type` parameter that selects the c
 | `plan`            | Planning agent. Explores the codebase and produces a structured implementation plan; does not edit files. |
 
 Project- or user-defined agents can add new types or shadow these built-ins by name.
+An agent definition is a Markdown file with YAML frontmatter in `.grok/agents/`
+or `~/.grok/agents/`; the body becomes the role prompt. Two frontmatter fields
+worth knowing when you author one:
+
+- `reasoning_effort` (alias `effort`) — the level this agent runs at, when the
+  model supports one. Declaring it removes the decision from the parent; a
+  spawned child otherwise defaults to `medium`. `low` / `medium` / `high` /
+  `xhigh` / `max` are accepted.
+- `disallowed_tools` — tool names to strip from the child's toolset. A reviewer
+  whose deliverable is a verdict, not an edit, can keep the shell (so `git diff`
+  and the test suite still work) while losing the edit tools:
+  `disallowed_tools: ["search_replace", "write"]`.
 
 ---
 
@@ -155,7 +167,7 @@ The main agent calls the `spawn_subagent` tool. Its parameters:
 | `description`     | A short label for the task (3-5 words).                          |
 | `subagent_type`   | The agent type to launch. Defaults to `general-purpose`.         |
 | `model`           | Optional model/provider catalog ID. Can target xAI, curated OpenAI, OpenRouter, or a configured Codex subscription agent. OpenAI entries prefixed with `openai:` are discovery-only and rejected for subagents because their tool support is unverified. |
-| `reasoning_effort` | Optional reasoning effort (`low`, `medium`, `high`, `max`, …) when the selected model supports it — including OpenAI ChatGPT OAuth and API-key models. Omit to inherit role/persona/parent defaults. Ignored when `resume_from` is set. |
+| `reasoning_effort` | Optional reasoning effort (`low`, `medium`, `high`, `max`, …) when the selected model supports it — including OpenAI ChatGPT OAuth and API-key models. Omit it unless this call needs something else: the child runs at its agent's declared `reasoning_effort` frontmatter, or `medium` when the agent declares none (and the model accepts it). Ignored when `resume_from` is set. |
 | `run_in_background` | Run the subagent in the background and return immediately with a subagent ID. Defaults to `true`. |
 | `capability_mode` | Restrict the subagent's tools: `read-only`, `read-write`, `execute`, or `all`. |
 | `isolation`       | `none` (shared workspace, the default) or `worktree` (isolated git worktree). |

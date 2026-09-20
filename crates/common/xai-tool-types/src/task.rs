@@ -107,13 +107,19 @@ pub struct TaskToolInput {
     /// `"high"`, `"max"`). Applied when the selected model supports reasoning
     /// effort. Works for Codex subscription models (`codex-subscription`,
     /// `codex:<model>`) and other providers that advertise effort options.
-    /// Omit to inherit role/persona/parent defaults. Do not pass if
-    /// `resume_from` is set (source effort is retained).
+    ///
+    /// Omit it unless this call needs something else: the child then runs at
+    /// its agent's declared `reasoning_effort` frontmatter, or `medium` when
+    /// the agent declares none. Asking was measured worse than a constant —
+    /// an effort rubric answered correctly 14/25 (56%) where a flat `high`
+    /// scored 16/25 (64%) — so the parent should not spend a decision on it.
+    /// Do not pass if `resume_from` is set (source effort is retained).
     #[schemars(
         description = "Optional reasoning effort for this agent (e.g. \"low\", \"medium\", \
             \"high\", \"max\"). Applied when the selected model supports reasoning effort, \
-            including Codex subscription models. If omitted, the subagent inherits role, \
-            persona, or parent defaults. Do not pass if resume_from is set."
+            including Codex subscription models. Defaults to the agent's declared \
+            `reasoning_effort`, else \"medium\"; pass it only to override that. \
+            Do not pass if resume_from is set."
     )]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning_effort: Option<String>,

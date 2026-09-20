@@ -6,6 +6,44 @@ use super::task::types::SubagentDepthCounter;
 
 pub use xai_grok_tools_api::slash_commands::WORKFLOW_TOOL_NAME;
 
+/// Cap on catalog entries appended to the tool description.
+///
+/// A listing is a per-turn cost. At five entries the listed arm scored 8/8
+/// where a blind arm scored 5/8 (`FINDINGS-WORKFLOW.md` §3); at thirty entries
+/// the listing costs 677 tokens/turn that retrieval does not (§4). The bound
+/// keeps the fallback honest until retrieval lands.
+pub const MAX_CATALOG_ENTRIES: usize = 30;
+/// Per-entry character cap for one catalog line.
+pub const MAX_CATALOG_LINE_CHARS: usize = 200;
+
+/// Append a `Registered workflows:` catalog to a tool description.
+///
+/// `entries` is `(name, when_to_use or description)`, sorted here so the
+/// catalog is stable across scans. An empty catalog leaves the base unchanged.
+pub fn with_workflow_catalog(base: &str, entries: &[(String, String)]) -> String {
+    if entries.is_empty() {
+        return base.to_owned();
+    }
+    let mut sorted: Vec<&(String, String)> = entries.iter().collect();
+    sorted.sort_by(|a, b| a.0.cmp(&b.0));
+    let mut out = String::from(base);
+    out.push_str("\n\nRegistered workflows:\n");
+    for (name, when_to_use) in sorted.iter().take(MAX_CATALOG_ENTRIES) {
+        out.push_str(&format!("- {name}: {}\n", collapse_line(when_to_use)));
+    }
+    out
+}
+
+/// Collapse whitespace and bound one catalog line to [`MAX_CATALOG_LINE_CHARS`].
+fn collapse_line(text: &str) -> String {
+    let collapsed = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if collapsed.chars().count() <= MAX_CATALOG_LINE_CHARS {
+        return collapsed;
+    }
+    let head: String = collapsed.chars().take(MAX_CATALOG_LINE_CHARS).collect();
+    format!("{head}\u{2026}")
+}
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
 pub struct WorkflowToolInput {
     #[serde(default)]
@@ -45,7 +83,7 @@ pub struct WorkflowToolInput {
 
     #[serde(default)]
     #[schemars(
-        description = "Run a path-specific smoke check without launching: validate metadata, compile the full script, and execute the single path selected by the supplied args and canned host results. It does not exercise every branch or prove live tools and agent outputs work."
+        description = "Run a path-specific smoke check without launching: validate metadata, compile the full script, resolve every `agent_type` literal against the callable roster, and execute the single path selected by the supplied args and canned host results. It does not exercise every branch or prove live tools and agent outputs work."
     )]
     pub validate_only: bool,
 }
@@ -172,7 +210,7 @@ impl crate::types::tool_metadata::ToolMetadata for WorkflowTool {
     fn description_template(&self) -> &str {
         r##"Launch a workflow: a Rhai script that orchestrates subagents as one background run. Provide exactly one source: `name` (a registered workflow — built-in, or from the project `.grok/workflows/` or user `~/.grok/workflows/`), an inline `script`, or a `script_path`. Optionally pass `args` (bound to the script's `args`) and `agent_budget`, an absolute cap on cumulative child-agent calls: every agent() and parallel() item consumes one slot (schema retries do not); default 128. The call returns immediately; progress appears in `/workflows` and completion is reported automatically — do not poll or sleep-wait.
 
-Prefer a registered workflow when one fits; author a script for bounded fan-out over a known work list, staged research and verification, or several independent perspectives, and confirm unusually large fan-out first. Before writing or editing a script, read the `create-workflow` skill's SKILL.md. `validate_only: true` runs a path-specific smoke check (metadata, compile, one canned-host path) — not proof that every branch or live tool works.
+Prefer a registered workflow when one fits; author a script for bounded fan-out over a known work list, staged research and verification, or several independent perspectives, and confirm unusually large fan-out first. Before writing or editing a script, read the `create-workflow` skill's SKILL.md. `validate_only: true` runs a path-specific smoke check (metadata, compile, every `agent_type` literal, one canned-host path) — not proof that every branch or live tool works.
 
 A started run gets a session-unique display name (e.g. `review-changes`, `review-changes-2`) — the handle to show the user and use with `/workflow pause|resume|stop <name>`; keep run IDs internal. Each launch persists an editable `script_path`; edit it and launch as a new run to iterate. Use `resume_from_run_id` only for a same-process paused run (process restarts are terminal); a budget-limited run resumes only with a higher `agent_budget`. Save reusable scripts to `.grok/workflows/<name>.rhai`."##
     }
@@ -323,6 +361,32 @@ impl xai_tool_runtime::Tool for WorkflowTool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn catalog_is_sorted_bounded_and_absent_when_empty() {
+        assert_eq!(with_workflow_catalog("base", &[]), "base");
+        let entries = vec![
+            ("zebra".to_owned(), "when z".to_owned()),
+            ("alpha".to_owned(), "when   a\nspread".to_owned()),
+        ];
+        let out = with_workflow_catalog("base", &entries);
+        assert!(out.starts_with("base\n\nRegistered workflows:\n"));
+        let alpha = out.find("- alpha: when a spread").expect("alpha line");
+        let zebra = out.find("- zebra: when z").expect("zebra line");
+        assert!(alpha < zebra, "catalog must be sorted: {out}");
+    }
+
+    #[test]
+    fn catalog_caps_entries_and_line_length() {
+        let long = "x".repeat(MAX_CATALOG_LINE_CHARS + 50);
+        let entries: Vec<(String, String)> = (0..MAX_CATALOG_ENTRIES + 5)
+            .map(|i| (format!("w{i:03}"), long.clone()))
+            .collect();
+        let out = with_workflow_catalog("base", &entries);
+        assert_eq!(out.matches("\n- ").count(), MAX_CATALOG_ENTRIES);
+        assert!(out.contains("\u{2026}"));
+        assert!(!out.contains(&long));
+    }
 
     #[test]
     fn validation_requires_exactly_one_source_and_bounded_positive_budget() {

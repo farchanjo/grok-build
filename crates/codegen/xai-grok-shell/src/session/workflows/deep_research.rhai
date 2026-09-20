@@ -54,6 +54,10 @@ try {
         plan_prompt,
         #{
             label: "research-planner",
+            // Roles are bound by name instead of only re-described in prose:
+            // the agent's own definition carries the persona and its default
+            // effort, and the prose below keeps the workflow-specific contract.
+            agent_type: "data-analyst",
             capability_mode: "read-only",
             output_schema: plan_schema,
         },
@@ -130,6 +134,7 @@ for q in questions {
     jobs.push(#{
         prompt: prompt,
         label: "researcher-" + i.to_string(),
+        agent_type: "data-scientist",
         capability_mode: "read-only",
         output_schema: research_schema,
         phase: "Research",
@@ -269,6 +274,7 @@ for shard_claims in verifier_claims {
     verify_jobs.push(#{
         prompt: prompt,
         label: "evidence-verifier-" + verifier_idx.to_string(),
+        agent_type: "architect-reviewer",
         capability_mode: "read-only",
         output_schema: verdict_schema,
         phase: "Verify",
@@ -448,6 +454,7 @@ try {
         synthesis_prompt,
         #{
             label: "report-synthesizer",
+            agent_type: "documentation-engineer",
             capability_mode: "read-only",
             phase: "Report",
         },

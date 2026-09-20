@@ -846,9 +846,12 @@ mod tests {
         std::fs::create_dir_all(&project).unwrap();
         symlink(&project, &linked).unwrap();
         let path = save_project_workflow(&linked, "safe", &script("safe")).unwrap();
+        // Compare canonically on both sides: on macOS `tempdir()` lives under
+        // `/var/folders`, itself a symlink to `/private/var`, so the raw
+        // expectation would differ from the canonicalized result.
         assert_eq!(
             dunce::canonicalize(path).unwrap(),
-            project.join(".grok/workflows/safe.rhai")
+            dunce::canonicalize(project.join(".grok/workflows/safe.rhai")).unwrap()
         );
     }
 

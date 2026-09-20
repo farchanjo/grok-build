@@ -14,6 +14,44 @@ impl SessionActor {
         )))
     }
 
+    /// Apply the live workflow catalog to the `workflow` tool description.
+    ///
+    /// The registry is scanned from disk per session, and the description is
+    /// the only place a workflow name reaches the model: a blind arm scored
+    /// 5/8 where a listed catalog scored 8/8 (`FINDINGS-WORKFLOW.md` §3).
+    /// Re-applied wherever the bridge is rewired, because a rebuilt toolset
+    /// starts from the bare description again.
+    pub(crate) fn refresh_workflow_tool_catalog(&self) {
+        let (_, listings) = self.named_workflow_snapshot();
+        let entries: Vec<(String, String)> = listings
+            .iter()
+            .map(|listing| {
+                (
+                    listing.name.clone(),
+                    listing
+                        .when_to_use
+                        .clone()
+                        .unwrap_or_else(|| listing.description.clone()),
+                )
+            })
+            .collect();
+        let base = xai_grok_tools::types::tool_metadata::ToolMetadata::description_template(
+            &xai_grok_tools::implementations::grok_build::WorkflowTool,
+        );
+        let description =
+            xai_grok_tools::implementations::grok_build::workflow::with_workflow_catalog(
+                base, &entries,
+            );
+        self.agent
+            .borrow()
+            .tool_bridge()
+            .toolset()
+            .set_tool_description(
+                xai_grok_tools::implementations::grok_build::WORKFLOW_TOOL_NAME,
+                &description,
+            );
+    }
+
     pub(crate) async fn launch_named_workflow(
         self: &Arc<Self>,
         registry: &crate::session::workflow::registry::WorkflowRegistry,
