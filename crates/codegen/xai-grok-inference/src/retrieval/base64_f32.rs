@@ -163,7 +163,7 @@ mod tests {
 
     #[test]
     fn roundtrip_f32() {
-        let floats = [1.0f32, -2.5, 0.0, 3.14159];
+        let floats = [1.0f32, -2.5, 0.0, std::f32::consts::PI];
         let mut bytes = Vec::new();
         for f in floats {
             bytes.extend_from_slice(&f.to_le_bytes());
