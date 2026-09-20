@@ -1296,6 +1296,16 @@ fn compaction_snapshot_fields(
         // Read from the raw config, not the resolved struct: `[compaction.jev]`
         // is optional and a missing table means OFF.
         compaction_jev_enabled: config.jev.as_ref().is_some_and(|jev| jev.enabled),
+        // Same source as the flag above, through the shell resolver. Without
+        // this the row keeps the local default and renders "OpenRouter" over a
+        // config that says `native` — the tersify rows were fixed the same way.
+        compaction_jev_transport:
+            xai_grok_shell::session::helpers::jev_prune::ResolvedJevPrune::from_config(
+                config.jev.as_ref(),
+            )
+            .transport
+            .as_str()
+            .to_owned(),
         ..Default::default()
     }
 }

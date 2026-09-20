@@ -13,14 +13,6 @@ use xai_grok_shell::session::helpers::jev_prune::{
     JevTransport, ResolvedJevPrune, resolve_credential,
 };
 
-/// Decisions endpoint used when `[compaction.jev].endpoint` is unset. Mirrors
-/// the shell client default; the decisions endpoint is not a chat surface, so
-/// this is a plain string rather than a catalog entry.
-const DEFAULT_ENDPOINT: &str = "https://openrouter.ai/api/alpha/decisions";
-
-/// Decisions model used when `[compaction.jev].model` is unset.
-const DEFAULT_MODEL: &str = "~typesafe/jev-latest";
-
 /// Control Jev-guided compaction pruning.
 pub struct JevCommand;
 
@@ -115,7 +107,6 @@ fn jev_status(ctx: &CommandExecCtx) -> String {
             .and_then(|c| c.endpoint.clone())
             .unwrap_or_else(|| resolved.endpoint.clone()),
     );
-    let _ = (DEFAULT_MODEL, DEFAULT_ENDPOINT);
     // The credential source is what makes a two-transport setup debuggable: a
     // 401 with no chain named is a dead end. Only the label is printed.
     let credential = match resolve_credential(
@@ -244,10 +235,25 @@ mod tests {
             match cmd.run(&mut ctx, args) {
                 CommandResult::Message(msg) => {
                     assert!(msg.contains("Jev-guided pruning: on"), "got {msg}");
+                    // Every effective field is spelled out; the values come
+                    // from the shell resolver, never from a local copy.
+                    for field in ["transport: ", "model: ", "endpoint: "] {
+                        assert!(msg.contains(field), "missing {field:?} in {msg}");
+                    }
                 }
                 other => panic!("expected status message for `{args}`, got {other:?}"),
             }
         }
+    }
+
+    /// The fallbacks the row prints are the shell client's own defaults, so a
+    /// bare config and the wire agree by construction.
+    #[test]
+    fn status_fallbacks_are_the_shell_defaults() {
+        use xai_grok_shell::session::helpers::jev_prune::{DEFAULT_ENDPOINT, DEFAULT_MODEL};
+        let resolved = ResolvedJevPrune::from_config(None);
+        assert_eq!(resolved.model, DEFAULT_MODEL);
+        assert_eq!(resolved.endpoint, DEFAULT_ENDPOINT);
     }
 
     /// `status` names the credential chain link and never the key.

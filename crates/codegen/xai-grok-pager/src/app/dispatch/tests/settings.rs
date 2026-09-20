@@ -3798,6 +3798,34 @@ fn set_jev_transport_is_idempotent_and_ignores_junk() {
     assert!(dispatch(Action::SetJevTransport("native".to_owned()), &mut app).is_empty());
 }
 
+/// The transport row must render what the config says. The snapshot is the
+/// only source for the row and for the picker's current index, so a missing
+/// hydration makes both claim "openrouter" over a config that says `native`.
+#[test]
+fn snapshot_hydrates_the_jev_transport_from_config() {
+    use xai_grok_shell::agent::config::{CompactionConfig, JevPruneConfig};
+    use xai_grok_shell::session::helpers::jev_prune::JevTransport;
+
+    let mut app = test_app_with_agent();
+    app.compaction_config = CompactionConfig {
+        jev: Some(JevPruneConfig {
+            enabled: true,
+            transport: Some(JevTransport::Native),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let snap = crate::app::dispatch::settings::ui::build_pager_snapshot(&app);
+    assert_eq!(snap.compaction_jev_transport, "native");
+    assert!(snap.compaction_jev_enabled);
+
+    // A silent table keeps the local default rather than inventing a value.
+    app.compaction_config.jev = None;
+    let snap = crate::app::dispatch::settings::ui::build_pager_snapshot(&app);
+    assert_eq!(snap.compaction_jev_transport, "openrouter");
+    assert!(!snap.compaction_jev_enabled);
+}
+
 /// Test that SetMediaRouting emits PersistSetting with correct payload.
 #[test]
 fn set_media_routing_emits_persist_setting() {
