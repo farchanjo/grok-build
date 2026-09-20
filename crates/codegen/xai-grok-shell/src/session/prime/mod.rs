@@ -28,6 +28,7 @@
 //! It never splices a conversation and performs no prompt injection (PR19).
 
 pub mod agents;
+pub mod decide;
 pub mod fusion;
 pub mod index;
 pub mod inventory;
@@ -55,6 +56,7 @@ use crate::retrieval::{DegradationKind, DegradationNotice, RetrievalService};
 use self::inventory::{InventoryLimits, WorkspaceInventory};
 use self::render::render_skills;
 
+pub use self::decide::{GATE_THRESHOLD, PrimeDecider, VARIANT_CONFIDENCE_FLOOR};
 pub use self::index::{
     FrozenEmbeddingPin, PrimeIndexError, PrimeIndexHandle, PrimeMirrorPair, agent_index_text,
     agent_rerank_document, agent_source_class, agent_to_metadata_item, agents_to_index_items,
@@ -80,6 +82,45 @@ pub use self::agents::{
     AgentRefresh, AgentRenderBudgets, CallableAgentAuthority, PrimeAgentSelection, RenderedAgents,
     SelectedAgent,
 };
+
+/// `_meta` key stamped on the prime marker chunk.
+///
+/// Mirrored by the pager as `user_message_chunk_meta::PRIME_MARKER`.
+pub const PRIME_MARKER_META: &str = "primeMarker";
+
+/// Names listed in the marker before it collapses into `+N`.
+const MAX_MARKER_NAMES: usize = 8;
+
+/// One-line marker announcing what prime injected into this turn.
+///
+/// Prime's reminder is invisible: it is a `<system-reminder>` item that the
+/// pager suppresses, and it is stripped from later requests. This line is the
+/// transcript's record of what was actually sent, and it must stay one line —
+/// a marker that inlines a body rebuilds the problem it solves.
+pub fn prime_marker_text(names: &[String], tokens: u64) -> String {
+    let mut listed = names
+        .iter()
+        .take(MAX_MARKER_NAMES)
+        .cloned()
+        .collect::<Vec<_>>()
+        .join(", ");
+    if names.len() > MAX_MARKER_NAMES {
+        listed.push_str(&format!(", +{}", names.len() - MAX_MARKER_NAMES));
+    }
+    match tokens {
+        0 => format!("◆ primed: {listed}"),
+        t if t >= 1_000 => format!("◆ primed: {listed} ({:.1}k tokens)", t as f64 / 1_000.0),
+        t => format!("◆ primed: {listed} ({t} tokens)"),
+    }
+}
+
+/// Chunk `_meta` for the marker: its own key plus an explicit
+/// `hideFromScrollback: false`, so no suppression path can swallow it.
+pub fn prime_marker_meta() -> Option<serde_json::Map<String, serde_json::Value>> {
+    serde_json::json!({ PRIME_MARKER_META: true, "hideFromScrollback": false })
+        .as_object()
+        .cloned()
+}
 
 /// Async supplier of the authoritative eligible native skill snapshot. PR19
 /// wires this to `ToolBridge::eligible_native_skills()`. The shell calls this
@@ -448,6 +489,9 @@ pub async fn run_prime_selection(
 
     // ── Optional semantic refinement ───────────────────────────────────────
     let mut order = ranked.clone();
+    // Set when the gate/choice decided the head: the injection is then the one
+    // chosen skill, not the configured cap.
+    let mut decided = false;
     if !input.prompt.trim().is_empty()
         && let Some(profile) = input.semantic_profile
         && let Some(service) = input.semantic_service
@@ -477,9 +521,17 @@ pub async fn run_prime_selection(
         }
         degradations.extend(outcome.degradations);
         order = outcome.order;
+        decided = outcome.decided;
     }
 
-    let target = input.config.max_results.max(1) as usize;
+    // A taken decision injects the chosen skill alone: measured one skill per
+    // turn at 86.5% precision against 21.7% for three, on a quarter of the
+    // context. Without a decision the configured cap stands unchanged.
+    let target = if decided {
+        1
+    } else {
+        input.config.max_results.max(1) as usize
+    };
 
     // ── Revalidate against a fresh snapshot + bounded body load (with
     //    backfill) ─────────────────────────────────────────────────────────
@@ -536,6 +588,28 @@ pub async fn run_prime_selection(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn prime_marker_stays_one_line_and_carries_the_cost() {
+        let names = vec!["dns".to_string(), "bind9-dns".to_string()];
+        assert_eq!(
+            prime_marker_text(&names, 1_234),
+            "◆ primed: dns, bind9-dns (1.2k tokens)"
+        );
+        assert_eq!(prime_marker_text(&names, 0), "◆ primed: dns, bind9-dns");
+        assert_eq!(
+            prime_marker_text(&names, 40),
+            "◆ primed: dns, bind9-dns (40 tokens)"
+        );
+        let many: Vec<String> = (0..11).map(|i| format!("s{i}")).collect();
+        let line = prime_marker_text(&many, 10);
+        assert!(line.contains("+3"), "overflow collapses: {line}");
+        assert!(!line.contains('\n'), "the marker must stay one line");
+
+        let meta = prime_marker_meta().expect("object");
+        assert_eq!(meta[PRIME_MARKER_META], serde_json::json!(true));
+        assert_eq!(meta["hideFromScrollback"], serde_json::json!(false));
+    }
 
     #[tokio::test]
     async fn pre_cancelled_token_returns_empty_without_err() {

@@ -21,7 +21,10 @@ use crate::types::compat::CompatConfig;
 use conditional::ConditionalSkills;
 use listing::{DEFAULT_SKILL_TOOL_NAME, SKILL_BUDGET_CONTEXT_PERCENT, format_announcement};
 
-pub use listing::{XmlRenderMode, format_announcement_xml, format_compaction_skill_listing};
+pub use listing::{
+    SKILL_INDEX_WIDTH_BYTES, XmlRenderMode, clean_skill_description, format_announcement_xml,
+    format_compaction_skill_listing,
+};
 
 /// Why a `SkillUpdateEffects` was produced.
 ///

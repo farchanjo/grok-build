@@ -3,6 +3,12 @@
 //! The runner never contacts a network, embedding, reranking, or model
 //! provider. Matching is local substring / path / pin evidence only. Results
 //! are keyed by case id and skill identity; fingerprints mark stale state.
+//!
+//! A **semantic arm** is available opt-in ([`EvalArm::Semantic`]): the same
+//! cases run against a caller-supplied similarity instead of the literal
+//! substring test, which is the only way a natural-language `should_trigger`
+//! case can pass. The scorer is injected (never resolved here), so the offline
+//! property holds by construction — the default arm calls nothing.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
@@ -24,6 +30,46 @@ pub const MAX_RESOURCE_CHARS: usize = 256;
 pub const MAX_PATH_PATTERN_CHARS: usize = 256;
 pub const MAX_PEERS: usize = 8;
 pub const MAX_RESULT_NOTES_CHARS: usize = 160;
+
+/// Matching arm for the runner.
+///
+/// The corpus's natural-language cases fail under [`EvalArm::Offline`] by
+/// construction (a Portuguese request is never a literal substring of an
+/// English description). The semantic arm is how they become passable without
+/// giving up the offline default.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EvalArm {
+    /// Literal substring / path / pin evidence. No network, no model.
+    #[default]
+    Offline,
+    /// Same cases, matched by an injected similarity scorer. Still
+    /// deterministic for a deterministic scorer.
+    Semantic,
+}
+
+impl EvalArm {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Offline => "offline",
+            Self::Semantic => "semantic",
+        }
+    }
+
+    /// True for the default arm, so pre-existing stored reports round-trip
+    /// without gaining a field.
+    fn is_offline(&self) -> bool {
+        matches!(self, Self::Offline)
+    }
+}
+
+/// Similarity at or above which the semantic arm treats a query as matching.
+/// Same shape as prime's own gate: a "does this fit" score sits at 0.2–0.4, so
+/// a 0.5 threshold would under-fire.
+pub const SEMANTIC_MATCH_THRESHOLD: f32 = 0.4;
+
+/// Caller-supplied similarity `(query, document text) -> 0..=1`.
+pub type SemanticScorer<'a> = &'a dyn Fn(&str, &str) -> f32;
 
 /// Case kinds the local runner can evaluate offline.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -411,6 +457,9 @@ pub struct EvalCaseResult {
 #[serde(rename_all = "camelCase")]
 pub struct EvalRunReport {
     pub schema_version: u32,
+    /// Matching arm that produced this report.
+    #[serde(default, skip_serializing_if = "EvalArm::is_offline")]
+    pub arm: EvalArm,
     pub generation: u64,
     pub inventory_fingerprint: String,
     pub cases_fingerprint: String,
@@ -483,6 +532,24 @@ impl LocalSkillEvidence {
         name.contains(&q) || desc.contains(&q) || when.contains(&q) || short.contains(&q)
     }
 
+    /// Semantic arm: best caller-supplied similarity over the same fields the
+    /// literal matcher scans, at [`SEMANTIC_MATCH_THRESHOLD`]. The scorer is
+    /// never called by the offline arm.
+    fn matches_query_semantically(&self, query: &str, scorer: SemanticScorer<'_>) -> bool {
+        if query.is_empty() {
+            return false;
+        }
+        [
+            Some(self.name.as_str()),
+            Some(self.description.as_str()),
+            self.when_to_use.as_deref(),
+            self.short_description.as_deref(),
+        ]
+        .into_iter()
+        .flatten()
+        .any(|field| scorer(query, field) >= SEMANTIC_MATCH_THRESHOLD)
+    }
+
     fn matches_path(&self, path: &str) -> bool {
         self.paths
             .iter()
@@ -503,6 +570,8 @@ impl LocalSkillEvidence {
 }
 
 /// Run the suite twice for stable ordering. Cancels cooperatively.
+///
+/// Offline arm: nothing outside this file is called.
 pub fn run_eval_suite(
     suite: &EvalSuite,
     subject: &LocalSkillEvidence,
@@ -512,11 +581,39 @@ pub fn run_eval_suite(
     inventory_fingerprint: &str,
     cancel: &AtomicBool,
 ) -> EvalRunReport {
-    let first = run_once(suite, subject, peers, cancel);
+    run_eval_suite_with_arm(
+        suite,
+        subject,
+        peers,
+        identity,
+        generation,
+        inventory_fingerprint,
+        EvalArm::Offline,
+        None,
+        cancel,
+    )
+}
+
+/// Run the suite under an explicit arm. A [`EvalArm::Semantic`] run without a
+/// scorer degrades to the offline matcher rather than failing.
+#[allow(clippy::too_many_arguments)]
+pub fn run_eval_suite_with_arm(
+    suite: &EvalSuite,
+    subject: &LocalSkillEvidence,
+    peers: &[LocalSkillEvidence],
+    identity: SkillIdentity,
+    generation: u64,
+    inventory_fingerprint: &str,
+    arm: EvalArm,
+    scorer: Option<SemanticScorer<'_>>,
+    cancel: &AtomicBool,
+) -> EvalRunReport {
+    let scorer = scorer.filter(|_| arm == EvalArm::Semantic);
+    let first = run_once(suite, subject, peers, arm, scorer, cancel);
     let second = if cancel.load(Ordering::Relaxed) {
         first.clone()
     } else {
-        run_once(suite, subject, peers, cancel)
+        run_once(suite, subject, peers, arm, scorer, cancel)
     };
     let stable = first == second;
     let cancelled = cancel.load(Ordering::Relaxed);
@@ -546,6 +643,7 @@ pub fn run_eval_suite(
     };
     EvalRunReport {
         schema_version: EVALS_SCHEMA_VERSION,
+        arm,
         generation,
         inventory_fingerprint: inventory_fingerprint.to_string(),
         cases_fingerprint: suite.fingerprint(),
@@ -561,6 +659,8 @@ fn run_once(
     suite: &EvalSuite,
     subject: &LocalSkillEvidence,
     peers: &[LocalSkillEvidence],
+    arm: EvalArm,
+    scorer: Option<SemanticScorer<'_>>,
     cancel: &AtomicBool,
 ) -> Vec<(String, bool)> {
     let mut out = Vec::with_capacity(suite.cases.len());
@@ -568,19 +668,34 @@ fn run_once(
         if cancel.load(Ordering::Relaxed) {
             break;
         }
-        out.push((case.id.clone(), eval_case(case, subject, peers)));
+        out.push((
+            case.id.clone(),
+            eval_case(case, subject, peers, arm, scorer),
+        ));
     }
     out.sort_by(|a, b| a.0.cmp(&b.0));
     out
 }
 
-fn eval_case(case: &EvalCase, subject: &LocalSkillEvidence, peers: &[LocalSkillEvidence]) -> bool {
+fn eval_case(
+    case: &EvalCase,
+    subject: &LocalSkillEvidence,
+    peers: &[LocalSkillEvidence],
+    arm: EvalArm,
+    scorer: Option<SemanticScorer<'_>>,
+) -> bool {
+    let matches = |evidence: &LocalSkillEvidence| match (arm, scorer) {
+        (EvalArm::Semantic, Some(scorer)) => {
+            evidence.matches_query_semantically(&case.query, scorer)
+        }
+        _ => evidence.matches_query(&case.query),
+    };
     match case.kind {
         EvalCaseKind::ShouldTrigger => {
-            skill_named(subject, case.skill.as_deref()) && subject.matches_query(&case.query)
+            skill_named(subject, case.skill.as_deref()) && matches(subject)
         }
         EvalCaseKind::ShouldNotTrigger => {
-            skill_named(subject, case.skill.as_deref()) && !subject.matches_query(&case.query)
+            skill_named(subject, case.skill.as_deref()) && !matches(subject)
         }
         EvalCaseKind::ExplicitPin => skill_named(subject, case.skill.as_deref()),
         EvalCaseKind::PathTrigger => {
@@ -605,7 +720,7 @@ fn eval_case(case: &EvalCase, subject: &LocalSkillEvidence, peers: &[LocalSkillE
                 } else {
                     peers.iter().find(|p| p.name == *peer_name)
                 };
-                if evidence.is_some_and(|e| e.matches_query(&case.query)) {
+                if evidence.is_some_and(&matches) {
                     hits += 1;
                 }
             }
@@ -854,6 +969,7 @@ fn bound_text(text: &str, max_chars: usize) -> String {
 mod tests {
     use super::*;
     use crate::implementations::skills::types::SkillScope;
+    use std::sync::atomic::AtomicUsize;
 
     fn suite(yaml: &str) -> EvalSuite {
         parse_eval_suite(yaml.as_bytes()).expect("suite")
@@ -987,6 +1103,108 @@ cases:
         assert_eq!(report.status, SkillHealthStatus::Failed);
         assert!(!report.results["should-not"].passed);
         assert!(!report.results["clash"].passed);
+    }
+
+    #[test]
+    fn semantic_arm_uses_the_injected_scorer_and_offline_does_not() {
+        // A natural-language request never contains the English description
+        // literally: offline fails by construction, the semantic arm passes.
+        let yaml = r#"
+version: 1
+cases:
+  - id: nl-trigger
+    kind: should_trigger
+    query: "subiu a latencia do cluster"
+    skill: metrics
+  - id: nl-silence
+    kind: should_not_trigger
+    query: "subiu a latencia do cluster"
+    skill: commit
+"#;
+        let suite = suite(yaml);
+        let metrics = subject("metrics", "Cluster latency and saturation dashboards");
+        let commit = subject("commit", "Create well-formatted git commits");
+        let peers = [commit.clone()];
+        let calls = AtomicUsize::new(0);
+        let scorer = |query: &str, field: &str| {
+            calls.fetch_add(1, Ordering::Relaxed);
+            if query.contains("latencia") && field.contains("latency") {
+                0.9
+            } else {
+                0.1
+            }
+        };
+
+        let offline = run_eval_suite(
+            &suite,
+            &metrics,
+            &peers,
+            SkillIdentity::new("metrics", None),
+            1,
+            "fp",
+            &AtomicBool::new(false),
+        );
+        assert_eq!(offline.arm, EvalArm::Offline);
+        assert!(!offline.results["nl-trigger"].passed);
+        assert!(offline.results["nl-silence"].passed);
+        assert_eq!(calls.load(Ordering::Relaxed), 0, "offline calls nothing");
+
+        let semantic = run_eval_suite_with_arm(
+            &suite,
+            &metrics,
+            &peers,
+            SkillIdentity::new("metrics", None),
+            1,
+            "fp",
+            EvalArm::Semantic,
+            Some(&scorer),
+            &AtomicBool::new(false),
+        );
+        assert_eq!(semantic.arm, EvalArm::Semantic);
+        assert!(semantic.results["nl-trigger"].passed);
+        assert!(semantic.results["nl-silence"].passed);
+        assert_eq!(semantic.status, SkillHealthStatus::ValidPass);
+        assert!(calls.load(Ordering::Relaxed) > 0, "scorer was consulted");
+
+        // A semantic arm without a scorer degrades to the offline matcher.
+        let bare = run_eval_suite_with_arm(
+            &suite,
+            &metrics,
+            &peers,
+            SkillIdentity::new("metrics", None),
+            1,
+            "fp",
+            EvalArm::Semantic,
+            None,
+            &AtomicBool::new(false),
+        );
+        assert!(!bare.results["nl-trigger"].passed);
+    }
+
+    #[test]
+    fn offline_arm_omits_the_arm_field_on_the_wire() {
+        let report = EvalRunReport {
+            schema_version: EVALS_SCHEMA_VERSION,
+            arm: EvalArm::Offline,
+            generation: 1,
+            inventory_fingerprint: "i".into(),
+            cases_fingerprint: "c".into(),
+            identity: SkillIdentity::new("metrics", None),
+            status: SkillHealthStatus::Untested,
+            results: BTreeMap::new(),
+            cancelled: false,
+            stable: true,
+        };
+        let value = serde_json::to_value(&report).unwrap();
+        assert!(value.get("arm").is_none(), "offline stays byte-compatible");
+        let semantic = EvalRunReport {
+            arm: EvalArm::Semantic,
+            ..report
+        };
+        assert_eq!(
+            serde_json::to_value(&semantic).unwrap()["arm"],
+            serde_json::json!("semantic")
+        );
     }
 
     #[test]

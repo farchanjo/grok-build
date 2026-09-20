@@ -11,12 +11,13 @@ use serde::Deserialize;
 use xai_grok_agent::prompt::skills::{CompatConfig, SkillListing, list_skill_sources_with_plugins};
 use xai_grok_tools::implementations::grok_build::publish_from_fields;
 use xai_grok_tools::implementations::skills::strict::{
-    EvalRunReport, LocalSkillEvidence, PublishScope, SKILLS_API_VERSION, SkillHealthStatus,
-    SkillIdentity, SkillRegressionSummary, SkillsListV1Response, SkillsPublishResponse,
-    SkillsRegressStatusResponse, SkillsValidateResponse, SkillsVersionError, StrictSkillOutcome,
-    build_managed_rows, dest_parent_for_scope, live_cases_fingerprint, load_eval_report,
-    load_eval_suite_from_dir, persist_eval_report, publish_skill_directory, regression_key_matches,
-    regression_store_key, require_api_version, run_eval_suite, validate_strict_skill_dir,
+    EvalArm, EvalRunReport, LocalSkillEvidence, PublishScope, SKILLS_API_VERSION,
+    SkillHealthStatus, SkillIdentity, SkillRegressionSummary, SkillsListV1Response,
+    SkillsPublishResponse, SkillsRegressStatusResponse, SkillsValidateResponse, SkillsVersionError,
+    StrictSkillOutcome, build_managed_rows, dest_parent_for_scope, live_cases_fingerprint,
+    load_eval_report, load_eval_suite_from_dir, persist_eval_report, publish_skill_directory,
+    regression_key_matches, regression_store_key, require_api_version, run_eval_suite,
+    validate_strict_skill_dir,
 };
 use xai_grok_tools::implementations::skills::types::{SkillInfo, SkillScope};
 use xai_grok_tools::util::grok_home::grok_home;
@@ -968,6 +969,7 @@ mod tests {
         let identity = SkillIdentity::new("commit", None);
         let keep = EvalRunReport {
             schema_version: 1,
+            arm: EvalArm::Offline,
             generation: 3,
             inventory_fingerprint: "inv".into(),
             cases_fingerprint: "cases".into(),
@@ -999,6 +1001,7 @@ mod tests {
     fn persisted_report_is_not_stale_when_only_process_generation_differs() {
         let report = EvalRunReport {
             schema_version: 1,
+            arm: EvalArm::Offline,
             generation: 4,
             inventory_fingerprint: "inv".into(),
             cases_fingerprint: "cases".into(),
@@ -1098,6 +1101,7 @@ mod tests {
     fn sample_report(generation: u64, cancelled: bool) -> EvalRunReport {
         EvalRunReport {
             schema_version: 1,
+            arm: EvalArm::Offline,
             generation,
             inventory_fingerprint: "inv".into(),
             cases_fingerprint: "cases".into(),

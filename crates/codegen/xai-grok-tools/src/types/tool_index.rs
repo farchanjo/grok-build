@@ -8,6 +8,8 @@
 
 use std::sync::Arc;
 
+use async_trait::async_trait;
+
 /// A single tool search result.
 #[derive(Debug, Clone)]
 pub struct ToolSearchResult {
@@ -17,7 +19,8 @@ pub struct ToolSearchResult {
     pub server_name: String,
     /// Tool description.
     pub description: String,
-    /// BM25 relevance score.
+    /// Relevance score — BM25, or the fused RRF score when the backend has a
+    /// dense index. Comparable only within one snapshot.
     pub score: f32,
     /// Parameter names from the tool's input schema.
     pub parameters: Vec<String>,
@@ -55,9 +58,22 @@ pub struct ServerSummary {
 /// Implementations must be `Send + Sync` to be stored as `Arc<dyn ToolSearchIndex>`
 /// in `Resources`. No MCP-specific concepts — the concrete implementation
 /// in `xai-grok-shell` maps `mcp_initialized` to `is_ready`.
+#[async_trait]
 pub trait ToolSearchIndex: Send + Sync {
     /// Search and return results + metadata from a single consistent snapshot.
+    ///
+    /// Lexical only: implementations that also carry a dense index override
+    /// [`Self::search_fused`] instead of widening this one.
     fn search_snapshot(&self, query: &str, limit: usize) -> SearchSnapshot;
+
+    /// Search with the dense index fused into the lexical one.
+    ///
+    /// Defaults to [`Self::search_snapshot`], so a lexical-only backend is
+    /// unchanged. Fail-open contract: any embedding/index failure must return
+    /// the lexical snapshot rather than an empty one.
+    async fn search_fused(&self, query: &str, limit: usize) -> SearchSnapshot {
+        self.search_snapshot(query, limit)
+    }
 
     /// List the unique MCP servers in the index with their tool counts.
     ///

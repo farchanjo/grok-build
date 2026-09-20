@@ -41,12 +41,16 @@ use crate::retrieval::{
 };
 
 use super::SkillRefresh;
+use super::decide::{
+    GATE_THRESHOLD, MAX_DECISION_OPTIONS, PrimeDecider, SELECT_QUESTION, VARIANT_CONFIDENCE_FLOOR,
+    VARIANT_QUESTION, declared_variants,
+};
 use super::fusion::{
     automatic_candidate_allowed, fuse_ranks, l2_similarity, prepend_unique, stricter_threshold,
 };
 use super::index::{
     PinnedServiceEmbedder, bounded_cancel, inventory_generation_token, opaque_skill_id,
-    prime_index_for, skill_rerank_document, skills_to_index_items,
+    prime_index_for, skill_decision_text, skills_to_index_items,
 };
 use super::inventory::WorkspaceInventory;
 use super::render::LoadedSkill;
@@ -379,6 +383,9 @@ pub struct SemanticFillOutcome {
     pub hard_error: Option<OrchestratorError>,
     /// Number of non-pinned candidates actually shipped.
     pub shortlist_size: usize,
+    /// True when the gate/choice decided the head: the caller then injects the
+    /// chosen skill alone instead of the configured result cap.
+    pub decided: bool,
 }
 
 fn degrade_from_error(e: &OrchestratorError, profile: &str) -> DegradationNotice {
@@ -442,6 +449,7 @@ pub async fn semantic_fill(
         cancelled: false,
         hard_error: None,
         shortlist_size: 0,
+        decided: false,
     };
 
     if query.trim().is_empty() || cancel.is_cancelled() {
@@ -731,10 +739,17 @@ async fn fill_from_index(
     outcome.shortlist_size = automatic.len();
 
     let mut rest = shortlist.clone();
-    if !shortlist.is_empty() && !profile.reranker_route_ids.is_empty() {
+    // A Jev route in the reranker slot is a *decisions* route, not a
+    // cross-encoder: the gate and the choice below already ask the model about
+    // the shortlist, and stacking a second stage measured negative.
+    let decisions_route = PrimeDecider::is_decisions_profile(service, profile_id);
+    if !shortlist.is_empty() && !profile.reranker_route_ids.is_empty() && !decisions_route {
         let docs: Vec<String> = shortlist
             .iter()
-            .map(|&i| skill_rerank_document(&skills[i]))
+            // The decision index, not the index document: sending bodies to the
+            // rerank stage rescued 3 and broke 9 on the shipped roster and
+            // doubled the tokens (FINDINGS-SKILLS.md §7).
+            .map(|&i| super::index::skill_decision_text(&skills[i]))
             .collect();
         let opts = PipelineOptions {
             bypass_semantic: false,
@@ -808,9 +823,111 @@ async fn fill_from_index(
         }
     }
 
+    // ── Gate, then one choice over the shortlist ──────────────────────────
+    // Measured (`FINDINGS-SKILLS.md` §9): precision 21.7% → 86.5%, harmful
+    // injection on no-skill requests 12/12 → 1/12, injected context a quarter.
+    // Fail-open: no decider, or a failed decision, keeps the fused order.
+    let decider = PrimeDecider::from_profile(service, profile_id, home);
+    if !shortlist.is_empty()
+        && let Some(decider) = decider.as_ref()
+        && let Some(decided) = decide_shortlist(
+            decider,
+            query,
+            skills,
+            &shortlist,
+            pinned_order,
+            &rest,
+            &cancel,
+        )
+        .await
+    {
+        rest = decided;
+        outcome.decided = true;
+    }
+
     outcome.order = prepend_unique(pinned_order, &rest);
     let _ = ranked;
     Ok(())
+}
+
+/// Options for one `choice`: shortlist order, keyed by skill name, each showing
+/// the 200-byte decision index (never the body). Duplicate names collapse onto
+/// the first entry — a `choice` answer can only name one key.
+fn decision_options(skills: &[SkillInfo], shortlist: &[usize]) -> Vec<(String, String)> {
+    let mut seen = HashSet::new();
+    let mut out = Vec::new();
+    for &i in shortlist {
+        if out.len() >= MAX_DECISION_OPTIONS {
+            break;
+        }
+        if seen.insert(skills[i].name.clone()) {
+            out.push((skills[i].name.clone(), skill_decision_text(&skills[i])));
+        }
+    }
+    out
+}
+
+/// Index of the first eligible skill with this exact name.
+fn index_for_name(skills: &[SkillInfo], name: &str) -> Option<usize> {
+    skills.iter().position(|s| s.name == name)
+}
+
+/// Second question, over the umbrella's own declared children only.
+///
+/// The answer only wins when it clears the confidence floor: routing has a
+/// false-positive mode when the umbrella *is* the right answer.
+async fn route_variant(
+    decider: &PrimeDecider,
+    query: &str,
+    skills: &[SkillInfo],
+    umbrella: usize,
+    cancel: &CancellationToken,
+) -> Option<usize> {
+    let options: Vec<(String, String)> = declared_variants(&skills[umbrella])
+        .into_iter()
+        .filter_map(|name| {
+            index_for_name(skills, &name).map(|i| (name.clone(), skill_decision_text(&skills[i])))
+        })
+        .collect();
+    if options.len() < 2 {
+        return None;
+    }
+    let chosen = decider
+        .choose(query, VARIANT_QUESTION, &options, cancel)
+        .await?;
+    if chosen.confidence < VARIANT_CONFIDENCE_FLOOR {
+        return None;
+    }
+    index_for_name(skills, &chosen.key)
+}
+
+/// Gate, then one choice, then optional variant routing.
+///
+/// `Some(order)` when a decision was taken: the head is the chosen skill, or
+/// nothing automatic at all when the gate declined — a missed skill only loses
+/// help, a wrong one occupies context and steers the model. `None` fails open
+/// onto the fused order.
+async fn decide_shortlist(
+    decider: &PrimeDecider,
+    query: &str,
+    skills: &[SkillInfo],
+    shortlist: &[usize],
+    pinned_order: &[usize],
+    rest: &[usize],
+    cancel: &CancellationToken,
+) -> Option<Vec<usize>> {
+    if decider.gate(query, cancel).await? < GATE_THRESHOLD {
+        return Some(pinned_order.to_vec());
+    }
+    let options = decision_options(skills, shortlist);
+    let chosen = decider
+        .choose(query, SELECT_QUESTION, &options, cancel)
+        .await?;
+    let mut picked = index_for_name(skills, &chosen.key)?;
+    if let Some(refined) = route_variant(decider, query, skills, picked, cancel).await {
+        picked = refined;
+    }
+    Some(prepend_unique(&[picked], rest))
 }
 
 /// Smart search over the same index and fusion. Exact name matches are
@@ -879,9 +996,17 @@ pub async fn smart_search_names(
     {
         return None;
     }
+    // The gate answers "is a skill needed for this request", which is the right
+    // question for injection and the wrong one for a user-typed search: a
+    // declined gate must still list the ranking rather than nothing.
+    let order: &Vec<usize> = if out.order.is_empty() && out.shortlist_size > 0 {
+        &ranked
+    } else {
+        &out.order
+    };
     let mut names: Vec<String> = exact;
     let mut seen: HashSet<String> = names.iter().cloned().collect();
-    for &i in &out.order {
+    for &i in order {
         if skills[i].name.to_ascii_lowercase() == q_lower {
             continue;
         }
@@ -1458,6 +1583,56 @@ mod tests {
         assert_eq!(skills[rank[0]].name, "real", "specific paths outrank **");
     }
 
+    // ── Decision stage ───────────────────────────────────────────────
+
+    #[test]
+    fn decision_options_carry_the_bounded_index_not_the_body() {
+        let mut a = skill_desc(
+            "dns",
+            "/s/dns/SKILL.md",
+            "DNS hub. TRIGGER: dns, bind. SKIP: none.",
+        );
+        a.has_user_specified_description = true;
+        a.body = Some("DNS-BODY-SECRET".into());
+        let mut b = skill_desc("bind9-dns", "/s/bind9-dns/SKILL.md", "BIND 9.");
+        b.has_user_specified_description = true;
+        let skills = vec![a, b];
+        let options = decision_options(&skills, &[0, 1]);
+        assert_eq!(options[0].0, "dns");
+        assert_eq!(
+            options[0].1, "dns: DNS hub.",
+            "scaffolding is stripped and the body is not re-read"
+        );
+        assert_eq!(options[1].1, "bind9-dns: BIND 9.");
+        assert!(
+            decision_options(&skills, &[0, 0]).len() == 1,
+            "names collapse"
+        );
+        assert_eq!(index_for_name(&skills, "bind9-dns"), Some(1));
+        assert_eq!(index_for_name(&skills, "missing"), None);
+    }
+
+    #[test]
+    fn decision_index_text_is_capped_and_falls_back_to_the_name() {
+        let long = "x".repeat(400);
+        let mut s = skill_desc("long", "/s/long/SKILL.md", &long);
+        s.has_user_specified_description = true;
+        let text = super::super::index::skill_decision_text(&s);
+        assert!(
+            text.len() <= 200,
+            "capped at the shared index width: {text}"
+        );
+        assert!(text.starts_with("long: "));
+
+        // Derived descriptions are not transmitted: the name carries the entry.
+        let mut derived = skill("derived", "/s/derived/SKILL.md");
+        derived.description = "DERIVED".into();
+        assert_eq!(
+            super::super::index::skill_decision_text(&derived),
+            "derived"
+        );
+    }
+
     // ── Metadata-only boundary ────────────────────────────────────────
 
     #[test]
@@ -1829,17 +2004,19 @@ mod tests {
             out.hard_error
         );
 
-        // Full-catalog indexing: bodies reach the rerank executor, but the
-        // auto-derived description text never does.
+        // The rerank stage no longer re-reads bodies: it sends the bounded
+        // decision index, so the auto-derived description text still never
+        // reaches it and no body does either.
         for docs in ex.rerank_docs() {
-            for token in ["ALPHA-BODY", "BETA-BODY", "GAMMA-BODY"] {
+            for name in ["alpha", "beta", "gamma"] {
                 assert!(
-                    docs.iter().any(|d| d.contains(token)),
-                    "expected {token} in rerank docs: {all:?}",
+                    docs.iter().any(|d| d.contains(name)),
+                    "expected {name} in rerank docs: {all:?}",
                     all = docs
                 );
             }
             for d in &docs {
+                assert!(!d.contains("ALPHA-BODY"), "body re-read leaked: {d}");
                 assert!(!d.contains("DERIVED-DESC"), "derived desc leaked: {d}");
             }
         }
@@ -3270,7 +3447,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn semantic_fill_rerank_docs_include_bodies_omit_absolute_unc_file_url() {
+    async fn semantic_fill_rerank_docs_send_decision_index_omit_absolute_unc_file_url() {
         let ex = Arc::new(RecordingExecutor::new());
         let service = service_with(ex.clone());
         let mut dirty = skill_wtu("deploy", "skills/deploy/SKILL.md", "deploy the release");
@@ -3314,10 +3491,13 @@ mod tests {
         );
         for batch in &docs {
             for d in batch {
+                // The rerank stage sends the bounded decision index: the skill
+                // name travels, the body does not.
                 assert!(
-                    d.contains("DEPLOY-BODY") || d.contains("CLEAN-BODY"),
-                    "body expected: {d}"
+                    d.contains("deploy") || d.contains("format"),
+                    "skill name expected: {d}"
                 );
+                assert!(!d.contains("-BODY"), "body leaked: {d}");
                 assert!(!d.contains("/Users/"), "absolute path leaked: {d}");
                 assert!(!d.contains("file:"), "file URL leaked: {d}");
                 assert!(!d.contains("\\\\"), "UNC leaked: {d}");
@@ -3330,18 +3510,18 @@ mod tests {
             .cloned()
             .collect::<Vec<_>>()
             .join("\n");
+        // The fixtures carry no user-specified description, so the decision
+        // index is the bare skill name.
         assert!(
-            joined.contains("src/**"),
-            "accepted relative path must remain: {joined}"
+            joined.contains("format") || joined.contains("deploy"),
+            "skill name must survive: {joined}"
         );
-        assert!(
-            joined.contains("format rust code"),
-            "accepted bounded trigger must remain: {joined}"
-        );
+        // `paths` metadata is not part of the decision index.
+        assert!(!joined.contains("src/**"), "paths leaked: {joined}");
     }
 
     #[tokio::test]
-    async fn semantic_fill_rerank_docs_include_body_omit_userinfo_and_encoded_paths() {
+    async fn semantic_fill_rerank_docs_send_decision_index_omit_userinfo_and_encoded_paths() {
         let ex = Arc::new(RecordingExecutor::new());
         let service = service_with(ex.clone());
         let mut dirty = skill_wtu("deploy", "skills/deploy/SKILL.md", "deploy the release");
@@ -3404,22 +3584,17 @@ mod tests {
             .collect::<Vec<_>>()
             .join(" | ");
         assert!(
-            joined.contains("PLAIN-BODY"),
-            "full-catalog indexing must include the body: {joined}"
+            joined.contains("deploy"),
+            "skill name must survive in the decision index: {joined}"
         );
-        let joined = docs
-            .iter()
-            .flatten()
-            .cloned()
-            .collect::<Vec<_>>()
-            .join("\n");
+        assert!(!joined.contains("PLAIN-BODY"), "body leaked: {joined}");
+        // `paths` metadata is not part of the decision index either.
+        assert!(!joined.contains("src/**"), "paths leaked: {joined}");
+        // The fixtures carry no user-specified description, so the decision
+        // index is the bare skill name.
         assert!(
-            joined.contains("src/**"),
-            "accepted relative path must remain: {joined}"
-        );
-        assert!(
-            joined.contains("format rust code") || joined.contains("deploy the release"),
-            "accepted bounded trigger must remain: {joined}"
+            joined.contains("format") || joined.contains("deploy"),
+            "skill name must survive: {joined}"
         );
     }
 

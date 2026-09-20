@@ -270,7 +270,7 @@ impl xai_tool_runtime::Tool for SearchTool {
         let tool_index = tool_index.0.clone();
 
         let limit = input.limit.unwrap_or(5) as usize;
-        let snapshot = tool_index.search_snapshot(&input.query, limit);
+        let snapshot = tool_index.search_fused(&input.query, limit).await;
 
         // Event: search_tool.search (telemetry — before grouping)
         let all_results_json: Vec<serde_json::Value> = snapshot
@@ -356,6 +356,7 @@ mod tests {
         snapshot: SearchSnapshot,
     }
 
+    #[async_trait::async_trait]
     impl ToolSearchIndex for StaticToolIndex {
         fn search_snapshot(&self, _query: &str, _limit: usize) -> SearchSnapshot {
             self.snapshot.clone()

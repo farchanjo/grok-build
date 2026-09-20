@@ -14,12 +14,53 @@ pub(super) const SKILL_BUDGET_CONTEXT_PERCENT: f64 = 0.5;
 /// Derived from percentage to prevent drift: (200k tokens * 4 bytes/token * 50%).
 pub(super) const DEFAULT_CHAR_BUDGET: usize =
     (200_000.0 * 4.0 * SKILL_BUDGET_CONTEXT_PERCENT) as usize;
-/// Per-entry cap on description + when_to_use combined. Discovery only — the
-/// full skill body is loaded on invocation, so the listing stays terse. Split
-/// proportionally between the two fields (see `proportional_budgets`).
-const MAX_LISTING_COMBINED_BYTES: usize = 400;
+/// Index width, in bytes, of one skill's advertised text (description +
+/// when_to_use, split proportionally). Discovery only — the full skill body is
+/// loaded on invocation, so the listing stays terse.
+///
+/// Measured on the shipped 172-skill roster (`FINDINGS-SKILLS.md` §4): in the
+/// stacked pipeline accuracy saturates at 200 bytes (57/66 top-1, MRR 0.748) and
+/// never rises again, while the previously shipped 400 paid 8,600 advertisement
+/// tokens per turn for the same result. Do not go below 40: the discriminator
+/// token that separates an umbrella from its lookalike child sits at byte ~55,
+/// and below 40 bytes it disappears for 55 of 58 pairs. The prime decision
+/// index shares this width so the chooser and the advertisement agree.
+pub const SKILL_INDEX_WIDTH_BYTES: usize = 200;
+/// Per-entry cap on description + when_to_use combined (see
+/// [`SKILL_INDEX_WIDTH_BYTES`]).
+const MAX_LISTING_COMBINED_BYTES: usize = SKILL_INDEX_WIDTH_BYTES;
 /// Minimum description length before falling back to names-only.
 const MIN_DESC_LENGTH: usize = 20;
+
+/// Inline scaffolding markers the shipped corpus carries for the keyword
+/// matcher. Everything from the first marker on is a keyword list or a
+/// "use X instead" note, not prose.
+const SCAFFOLD_MARKERS: &[&str] = &["TRIGGER:", "TRIGGERS:", "SKIP:"];
+
+/// Drop the inline `TRIGGER:` / `SKIP:` scaffolding and collapse whitespace.
+///
+/// Free either way — neutral at 400 bytes, +1 top-1 at 60 — but it is what makes
+/// a 200-byte index usable: 140 of 172 descriptions carry the scaffolding, and
+/// it crowds out the prose that a semantic chooser actually reads. Falls back to
+/// the collapsed original when cutting would leave nothing.
+pub fn clean_skill_description(description: &str) -> String {
+    let mut cut = description.len();
+    for marker in SCAFFOLD_MARKERS {
+        if let Some(index) = description.find(marker) {
+            cut = cut.min(index);
+        }
+    }
+    let prose = collapse_whitespace(&description[..cut]);
+    if prose.is_empty() {
+        collapse_whitespace(description)
+    } else {
+        prose
+    }
+}
+
+fn collapse_whitespace(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
 
 /// Recognized prefixes for trigger-phrase sections in skill descriptions.
 /// Stored pre-lowercased to avoid per-call allocations in `extract_trigger_suffix`.
@@ -66,13 +107,17 @@ impl<'a> SkillEntry<'a> {
     ///
     /// When `when_to_use` is present and the description contains a recognized trigger
     /// prefix, returns the portion before the prefix. Otherwise returns the full description.
-    /// Call once and pass the result to `format()` and `proportional_budgets()` to avoid
-    /// redundant `extract_trigger_suffix` allocations.
-    fn func_desc(&self) -> &str {
-        if self.when_to_use.is_some() {
-            extract_trigger_suffix(self.description).map_or(self.description, |(before, _)| before)
-        } else {
-            self.description
+    /// Call once and pass the result to `format()` and `proportional_budgets()`.
+    /// Scaffolding (`TRIGGER:` / `SKIP:`) is stripped first: it is written for a
+    /// keyword matcher and crowds out the prose a reader needs.
+    fn func_desc(&self) -> String {
+        let cleaned = clean_skill_description(self.description);
+        if self.when_to_use.is_none() {
+            return cleaned;
+        }
+        match extract_trigger_suffix(&cleaned).map(|(before, _)| before.len()) {
+            Some(len) => cleaned[..len].to_owned(),
+            None => cleaned,
         }
     }
 
@@ -186,7 +231,9 @@ impl<'a> SkillEntry<'a> {
     ///
     /// Rendering behavior:
     /// - Attribute values: only `"` is escaped to `&quot;`
-    /// - Body content: no XML escaping (passed through verbatim)
+    /// - Body content: no XML escaping (passed through verbatim); the inline
+    ///   `TRIGGER:` / `SKIP:` scaffolding is still dropped, because it is
+    ///   written for a keyword matcher and not for a reader
     /// - Empty/whitespace-only description: self-closing `<agent_skill fullPath="..." />`
     fn format_xml_verbatim(&self) -> String {
         if self.description.trim().is_empty() {
@@ -198,14 +245,14 @@ impl<'a> SkillEntry<'a> {
             format!(
                 "<agent_skill fullPath=\"{}\">{} Use when: {}</agent_skill>\n",
                 jsx_attr_escape(&self.display_path),
-                self.description,
+                clean_skill_description(&self.description),
                 wtu,
             )
         } else {
             format!(
                 "<agent_skill fullPath=\"{}\">{}</agent_skill>\n",
                 jsx_attr_escape(&self.display_path),
-                self.description,
+                clean_skill_description(&self.description),
             )
         }
     }
@@ -235,7 +282,7 @@ impl<'a> SkillListing<'a> {
             .map(|e| {
                 let fd = e.func_desc();
                 let (db, wb) = e.proportional_budgets(fd.len().max(1), MAX_LISTING_COMBINED_BYTES);
-                e.format(fd, db, wb)
+                e.format(&fd, db, wb)
             })
             .collect::<Vec<_>>()
             .join("\n");
@@ -255,7 +302,7 @@ impl<'a> SkillListing<'a> {
                 .map(|e| {
                     let fd = e.func_desc();
                     let (db, wb) = e.proportional_budgets(fd.len().max(1), budget_per_entry);
-                    e.format(fd, db, wb)
+                    e.format(&fd, db, wb)
                 })
                 .collect::<Vec<_>>()
                 .join("\n");
@@ -289,7 +336,7 @@ impl<'a> SkillListing<'a> {
                 let sep = if i > 0 { "\n" } else { "" };
                 let fd = e.func_desc();
                 let (db, wb) = e.proportional_budgets(fd.len().max(1), MAX_LISTING_COMBINED_BYTES);
-                format!("{sep}{}", e.format_xml(fd, db, wb))
+                format!("{sep}{}", e.format_xml(&fd, db, wb))
             })
             .collect();
         if full_listing.len() <= budget {
@@ -315,7 +362,7 @@ impl<'a> SkillListing<'a> {
                     let sep = if i > 0 { "\n" } else { "" };
                     let fd = e.func_desc();
                     let (db, wb) = e.proportional_budgets(fd.len().max(1), budget_per_entry);
-                    format!("{sep}{}", e.format_xml(fd, db, wb))
+                    format!("{sep}{}", e.format_xml(&fd, db, wb))
                 })
                 .collect();
             return Some(listing);
@@ -1182,6 +1229,40 @@ mod tests {
         let text = announce(&skills, 8_000).unwrap();
         // Full description should appear (up to MAX_LISTING_COMBINED_BYTES).
         assert!(text.contains(&desc));
+    }
+
+    #[test]
+    fn clean_skill_description_drops_scaffolding_and_collapses_whitespace() {
+        let raw = "Bind9 DNS.  TRIGGER: bind9, named, rndc. SKIP: plain DNS (use dns hub).";
+        assert_eq!(clean_skill_description(raw), "Bind9 DNS.");
+        // Any marker cuts, whichever comes first.
+        assert_eq!(clean_skill_description("Loki. SKIP: elastic."), "Loki.");
+        assert_eq!(
+            clean_skill_description("Calico.\nTRIGGERS: bgp, felix"),
+            "Calico."
+        );
+        // Prose without scaffolding only loses the extra whitespace.
+        assert_eq!(clean_skill_description("  A  b "), "A b");
+        // A description that is *only* scaffolding falls back to the collapsed
+        // original rather than announcing nothing.
+        assert_eq!(clean_skill_description("TRIGGER: a, b"), "TRIGGER: a, b");
+    }
+
+    #[test]
+    fn listing_strips_scaffolding_at_the_index_width() {
+        let desc =
+            "Elastic Stack log ingestion and search. TRIGGER: elasticsearch, kibana, logstash.";
+        let skills = [skill("elasticsearch-logging", desc)];
+        let text = announce(&skills, 8_000).unwrap();
+        assert!(
+            text.contains("Elastic Stack log ingestion and search."),
+            "{text}"
+        );
+        assert!(
+            !text.contains("TRIGGER:"),
+            "scaffolding must not be listed: {text}"
+        );
+        assert_eq!(SKILL_INDEX_WIDTH_BYTES, 200);
     }
 
     #[test]

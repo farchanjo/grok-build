@@ -31,6 +31,7 @@ use xai_grok_memory::{
     workspace_storage_identity,
 };
 use xai_grok_tools::implementations::skills::types::{SkillInfo, SkillScope};
+use xai_grok_tools::types::skill_discovery_tracker::SKILL_INDEX_WIDTH_BYTES;
 
 use crate::retrieval::{OrchestratorError, PipelineOptions, RetrievalService, stable_home_key};
 
@@ -1139,9 +1140,13 @@ pub fn skill_index_text(skill: &SkillInfo) -> String {
     skill_rerank_document(skill)
 }
 
-/// Remote rerank document: metadata plus the skill body so the semantic and
-/// rerank stages judge the full authored content. The body is capped;
-/// retrieval still returns only skill names.
+/// Index document: metadata plus the skill body. The body is capped; retrieval
+/// still returns only skill names.
+///
+/// The **rerank** stage no longer sends this: it sends
+/// [`skill_decision_text`], because re-reading bodies as a second stage rescued
+/// 3 and broke 9 on the shipped roster and doubled the tokens
+/// (`FINDINGS-SKILLS.md` §7). The FTS/embedding index keeps the body.
 pub fn skill_rerank_document(skill: &SkillInfo) -> String {
     let Some(item) = skill_to_metadata_item(skill) else {
         return String::new();
@@ -1230,6 +1235,42 @@ fn skill_extra_json(skill: &SkillInfo) -> String {
         }
     }
     serde_json::Value::Object(obj).to_string()
+}
+
+/// What a decision question shows about one skill: `name: description`, with
+/// the inline `TRIGGER:` / `SKIP:` scaffolding stripped and the whole string
+/// capped at the shared 200-byte index width.
+///
+/// Frontmatter description only — a body-derived description is never
+/// transmitted, and neither is the body. This is the text the measured pipeline
+/// put in front of the chooser, and it is what keeps the option list comparable
+/// with the advertisement the model already read.
+pub fn skill_decision_text(skill: &SkillInfo) -> String {
+    let description = if skill.has_user_specified_description {
+        xai_grok_tools::types::skill_discovery_tracker::clean_skill_description(&skill.description)
+    } else {
+        String::new()
+    };
+    if description.is_empty() {
+        return cap_bytes(&skill.name, SKILL_INDEX_WIDTH_BYTES);
+    }
+    cap_bytes(
+        &format!("{}: {description}", skill.name),
+        SKILL_INDEX_WIDTH_BYTES,
+    )
+}
+
+/// Truncate to `max` bytes on a char boundary, marking the cut.
+fn cap_bytes(text: &str, max: usize) -> String {
+    if text.len() <= max {
+        return text.to_owned();
+    }
+    // The ellipsis is part of the budget, so the result never exceeds `max`.
+    let mut end = max.saturating_sub("…".len());
+    while end > 0 && !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}…", text[..end].trim_end())
 }
 
 /// Build a privacy-checked metadata item. Returns `None` when the skill

@@ -1,19 +1,37 @@
-//! Concrete `ToolSearchIndex` implementation using BM25.
+//! Concrete `ToolSearchIndex` implementation: BM25, plus an optional dense
+//! index fused into it with the same weighted RRF prime already uses.
 //!
-//! Builds a BM25 index over registered MCP tools and searches it.
-//! The index is rebuilt on each search call (sub-millisecond for tens
-//! to low hundreds of tools).
+//! The BM25 index is rebuilt on each search call (sub-millisecond for tens to
+//! low hundreds of tools). The dense side caches its document vectors keyed on
+//! the toolset fingerprint and the embedding space, so a repeat search embeds
+//! the query only — never the documents.
+//!
+//! Why a dense side at all: a lexical retriever is monolingual, tool
+//! descriptions are English, and requests routinely are not. Measured on a
+//! 100-tool catalog with 35 Portuguese requests (`FINDINGS-TOOLS.md` §3): gold
+//! in the pool 7/35 for BM25 against 33/35 for the embedding. Scale is *not*
+//! the argument — 293 tools is the current ceiling — cross-lingual recall is.
+//! BM25 and the exact-qualified-name short-circuit stay because a `use_tool`
+//! call often names the tool verbatim, which is the one thing BM25 does
+//! better.
 
+use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Arc;
-
 use std::sync::Mutex;
 
+use async_trait::async_trait;
 use bm25::{Language, SearchEngineBuilder};
+use tokio::sync::Mutex as AsyncMutex;
+use tokio_util::sync::CancellationToken;
 use xai_grok_tools::types::tool_index::{
     SearchSnapshot, ServerSummary, ToolSearchIndex, ToolSearchResult,
 };
 
+use crate::retrieval::{PipelineOptions, RetrievalSnapshot};
+
 use super::mcp_servers::MCP_TOOL_NAME_DELIMITER;
+use super::prime::fusion::{W_BM25, W_VECTOR, rrf_contrib};
 
 /// Split a compound identifier into component words.
 ///
@@ -134,6 +152,330 @@ pub struct ToolMetadataSnapshot {
     pub mcp_initialized: bool,
 }
 
+/// Candidate pool taken from each rank list before fusion. Prime fuses a
+/// ten-wide shortlist; the same width keeps the fused head stable while the
+/// model normally asks for five results.
+const FUSION_POOL: usize = 10;
+
+/// Byte budget for one embedding call. Each `RetrievalService::embed` call
+/// carries its own profile input budget, and that budget binds on tokens
+/// (`max_input_tokens`, estimated at 4 bytes/token) as well as bytes — so a
+/// chunked build keeps a large toolset inside it instead of tripping
+/// `InputBudgetExceeded`. 24 KiB leaves headroom under the 32 KiB a default
+/// 8 192-token profile allows, plus room for the query riding the first chunk.
+const MAX_EMBED_BYTES: usize = 24 * 1024;
+
+/// One embedding batch, in input order, plus the space it was produced in.
+pub struct DenseEmbedding {
+    pub vectors: Vec<Vec<f32>>,
+    /// [`crate::retrieval::EmbeddingSpaceId`] fingerprint. Vectors from two
+    /// spaces are never compared with each other.
+    pub space: Option<String>,
+}
+
+/// Embeds tool documents and queries for [`DenseToolIndex`].
+#[async_trait]
+pub trait ToolDocEmbedder: Send + Sync {
+    async fn embed(&self, inputs: Vec<String>) -> Result<DenseEmbedding, String>;
+}
+
+/// Production embedder: resolves the live retrieval registry for the home at
+/// call time, so a config reload or a profile swap is picked up without
+/// rewiring the session.
+#[derive(Debug)]
+pub struct ServiceToolEmbedder {
+    home: PathBuf,
+}
+
+impl ServiceToolEmbedder {
+    pub fn new(home: impl Into<PathBuf>) -> Self {
+        Self { home: home.into() }
+    }
+}
+
+#[async_trait]
+impl ToolDocEmbedder for ServiceToolEmbedder {
+    async fn embed(&self, inputs: Vec<String>) -> Result<DenseEmbedding, String> {
+        let count = inputs.len();
+        if count == 0 {
+            return Err("no embedding inputs".into());
+        }
+        let registry = crate::retrieval::registry_for_home(&self.home)
+            .ok_or("retrieval registry is not installed for this home")?;
+        let service = registry.service();
+        let snapshot = service.load_snapshot();
+        if !snapshot.enabled {
+            return Err("retrieval is disabled".into());
+        }
+        let profile_id = tool_embedding_profile(&snapshot).ok_or("no retrieval profile")?;
+        let stage = service
+            .embed(
+                &profile_id,
+                inputs,
+                PipelineOptions::default(),
+                CancellationToken::new(),
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+        if stage.result.vectors.len() != count {
+            return Err("embedding response has holes".into());
+        }
+        let mut slots: Vec<Option<Vec<f32>>> = vec![None; count];
+        for vector in stage.result.vectors {
+            slots[vector.index] = Some(vector.values);
+        }
+        Ok(DenseEmbedding {
+            vectors: slots
+                .into_iter()
+                .collect::<Option<Vec<_>>>()
+                .ok_or("holes")?,
+            space: Some(stage.embedding_space.fingerprint().to_owned()),
+        })
+    }
+}
+
+/// Profile the dense tool index embeds through: the profile prime already
+/// routes to, then memory, then the first declared profile. No new config
+/// surface — the tool index is one more consumer of the same stack.
+fn tool_embedding_profile(snapshot: &RetrievalSnapshot) -> Option<String> {
+    let declared = |id: &Option<String>| id.clone().filter(|id| snapshot.profiles.contains_key(id));
+    declared(&snapshot.prime.skills.retrieval_profile)
+        .or_else(|| declared(&snapshot.prime.agents.retrieval_profile))
+        .or_else(|| declared(&snapshot.memory_retrieval_profile))
+        .or_else(|| snapshot.profiles.keys().next().cloned())
+}
+
+/// Document vectors cached for one toolset in one embedding space.
+#[derive(Default)]
+struct DenseCache {
+    /// Fingerprint of the documents the vectors were built from.
+    fingerprint: u64,
+    /// Space the vectors live in; a change invalidates them, because cosine
+    /// similarity across two spaces is meaningless.
+    space: Option<String>,
+    built: bool,
+    vectors: Vec<Vec<f32>>,
+}
+
+/// Dense side of the tool search: cached document vectors plus a per-search
+/// query embedding.
+pub struct DenseToolIndex {
+    embedder: Arc<dyn ToolDocEmbedder>,
+    cache: AsyncMutex<DenseCache>,
+}
+
+impl DenseToolIndex {
+    pub fn new(embedder: Arc<dyn ToolDocEmbedder>) -> Self {
+        Self {
+            embedder,
+            cache: AsyncMutex::new(DenseCache::default()),
+        }
+    }
+
+    /// Rank `documents` against `query`, best first, capped to the fusion pool.
+    ///
+    /// `Ok(None)` is "nothing to say" (no documents); `Err` is fail-open to
+    /// BM25 with a secret-free reason.
+    pub async fn rank(
+        &self,
+        query: &str,
+        documents: &[String],
+    ) -> Result<Option<Vec<(usize, f32)>>, String> {
+        if documents.is_empty() {
+            return Ok(None);
+        }
+        let fingerprint = documents_fingerprint(documents);
+        let mut cache = self.cache.lock().await;
+        if cache.built && cache.fingerprint == fingerprint {
+            let (query_vec, space) = self.embed_query(query).await?;
+            if cache.space == space {
+                return Ok(Some(cosine_ranks(&cache.vectors, &query_vec)));
+            }
+        }
+        self.rebuild(&mut cache, fingerprint, query, documents)
+            .await
+            .map(Some)
+    }
+
+    /// Embed one query: the vector and the space it belongs to.
+    async fn embed_query(&self, query: &str) -> Result<(Vec<f32>, Option<String>), String> {
+        let out = self.embedder.embed(vec![query.to_owned()]).await?;
+        let vector = out
+            .vectors
+            .into_iter()
+            .next()
+            .ok_or("empty query embedding")?;
+        Ok((vector, out.space))
+    }
+
+    /// Embed the whole toolset, with the query riding the first chunk so it
+    /// lands in the same space as the documents it is compared against.
+    async fn rebuild(
+        &self,
+        cache: &mut DenseCache,
+        fingerprint: u64,
+        query: &str,
+        documents: &[String],
+    ) -> Result<Vec<(usize, f32)>, String> {
+        let mut vectors: Vec<Vec<f32>> = Vec::with_capacity(documents.len());
+        let mut space = None;
+        let mut query_vec = None;
+        for chunk in chunk_documents(documents) {
+            let mut inputs = Vec::with_capacity(chunk.len() + 1);
+            if query_vec.is_none() {
+                inputs.push(query.to_owned());
+            }
+            inputs.extend(chunk.iter().cloned());
+            let out = self.embedder.embed(inputs).await?;
+            if space.is_none() {
+                space = out.space;
+            }
+            let mut batch = out.vectors.into_iter();
+            if query_vec.is_none() {
+                query_vec = batch.next();
+            }
+            vectors.extend(batch);
+        }
+        if vectors.len() != documents.len() {
+            return Err("embedding count does not match the toolset".into());
+        }
+        let Some(query_vec) = query_vec else {
+            return Err("empty query embedding".into());
+        };
+        let ranks = cosine_ranks(&vectors, &query_vec);
+        cache.fingerprint = fingerprint;
+        cache.space = space;
+        cache.built = true;
+        cache.vectors = vectors;
+        Ok(ranks)
+    }
+}
+
+/// Stable FNV-1a fingerprint of the indexed documents. Any change — a server
+/// connecting, a tool renamed, a description edited — invalidates the cache.
+fn documents_fingerprint(documents: &[String]) -> u64 {
+    const OFFSET_BASIS: u64 = 0xcbf29ce484222325;
+    const PRIME: u64 = 0x00000100000001B3;
+    let mut hash = OFFSET_BASIS;
+    for document in documents {
+        for byte in document.as_bytes().iter().chain(std::iter::once(&0)) {
+            hash ^= u64::from(*byte);
+            hash = hash.wrapping_mul(PRIME);
+        }
+    }
+    hash
+}
+
+/// Split documents into chunks that each fit one embedding call.
+fn chunk_documents(documents: &[String]) -> Vec<&[String]> {
+    let mut chunks: Vec<&[String]> = Vec::new();
+    let mut start = 0;
+    let mut bytes = 0;
+    for (index, document) in documents.iter().enumerate() {
+        let size = document.len() + 1;
+        if index > start && bytes + size > MAX_EMBED_BYTES {
+            chunks.push(&documents[start..index]);
+            start = index;
+            bytes = 0;
+        }
+        bytes += size;
+    }
+    if start < documents.len() {
+        chunks.push(&documents[start..]);
+    }
+    chunks
+}
+
+fn vector_norm(v: &[f32]) -> f32 {
+    v.iter().map(|x| x * x).sum::<f32>().sqrt()
+}
+
+/// Cosine similarity of `document` against `query` (whose norm is precomputed).
+/// A zero vector scores 0 rather than NaN.
+fn cosine(document: &[f32], query: &[f32], query_norm: f32) -> f32 {
+    if document.len() != query.len() {
+        return 0.0;
+    }
+    let dot: f32 = document.iter().zip(query).map(|(x, y)| x * y).sum();
+    let denominator = vector_norm(document) * query_norm;
+    if denominator <= f32::EPSILON {
+        0.0
+    } else {
+        dot / denominator
+    }
+}
+
+/// Documents by descending cosine similarity, capped to the fusion pool.
+/// Deterministic: score desc, then document index asc.
+fn cosine_ranks(vectors: &[Vec<f32>], query: &[f32]) -> Vec<(usize, f32)> {
+    let query_norm = vector_norm(query);
+    let mut scored: Vec<(usize, f32)> = vectors
+        .iter()
+        .enumerate()
+        .map(|(index, vector)| (index, cosine(vector, query, query_norm)))
+        .collect();
+    scored.sort_by(|a, b| {
+        b.1.partial_cmp(&a.1)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.0.cmp(&b.0))
+    });
+    scored.truncate(FUSION_POOL);
+    scored
+}
+
+fn add_fused(fused: &mut Vec<(usize, f64)>, index: usize, contribution: f64) {
+    match fused.iter_mut().find(|(candidate, _)| *candidate == index) {
+        Some(entry) => entry.1 += contribution,
+        None => fused.push((index, contribution)),
+    }
+}
+
+/// Weighted reciprocal-rank fusion of the lexical and dense lists, reusing the
+/// weights prime already fuses skills with (`W_BM25` 0.8, `W_VECTOR` 1.2,
+/// k = 60). Ties break on the dense similarity so a genuine dense match beats
+/// an incidental lexical one.
+fn fuse_rank_lists(bm25: &[usize], dense: &[(usize, f32)], limit: usize) -> Vec<(usize, f64)> {
+    let mut fused: Vec<(usize, f64)> = Vec::new();
+    let mut similarity: HashMap<usize, f32> = HashMap::new();
+    for (rank, &index) in bm25.iter().enumerate() {
+        add_fused(&mut fused, index, rrf_contrib(rank as u32 + 1, W_BM25));
+    }
+    for (rank, &(index, score)) in dense.iter().enumerate() {
+        similarity.insert(index, score);
+        add_fused(&mut fused, index, rrf_contrib(rank as u32 + 1, W_VECTOR));
+    }
+    fused.sort_by(|a, b| {
+        b.1.partial_cmp(&a.1)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| {
+                let a_sim = similarity.get(&a.0).copied().unwrap_or(0.0);
+                let b_sim = similarity.get(&b.0).copied().unwrap_or(0.0);
+                b_sim
+                    .partial_cmp(&a_sim)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .then_with(|| a.0.cmp(&b.0))
+    });
+    fused.truncate(limit);
+    fused
+}
+
+fn truncate_snapshot(mut snapshot: SearchSnapshot, limit: usize) -> SearchSnapshot {
+    snapshot.results.truncate(limit);
+    snapshot
+}
+
+/// The exact-name short-circuit [`Bm25ToolSearchIndex::search_snapshot`] takes
+/// when the query is a qualified or bare tool name. Fusion must not dilute it.
+fn is_exact_hit(query: &str, result: &ToolSearchResult) -> bool {
+    let query = query.trim().to_lowercase();
+    if query.is_empty() {
+        return false;
+    }
+    result.tool_name.to_lowercase() == query
+        || split_qualified_name(&result.tool_name).1.to_lowercase() == query
+}
+
 /// Concrete `ToolSearchIndex` implementation backed by BM25.
 ///
 /// Holds a shared snapshot of MCP tool metadata behind a `std::sync::Mutex`.
@@ -143,15 +485,99 @@ pub struct ToolMetadataSnapshot {
 /// - `TokioMutex::blocking_lock()` panics on single-threaded runtimes
 pub struct Bm25ToolSearchIndex {
     snapshot: Arc<Mutex<ToolMetadataSnapshot>>,
+    /// Dense side. `None` keeps the index lexical-only, so list-only consumers
+    /// and unit tests never pay for an embedder.
+    dense: Option<Arc<DenseToolIndex>>,
 }
 
 impl Bm25ToolSearchIndex {
     pub fn new(snapshot: Arc<Mutex<ToolMetadataSnapshot>>) -> Self {
-        Self { snapshot }
+        Self {
+            snapshot,
+            dense: None,
+        }
+    }
+
+    /// Attach a dense side; it is fused into [`ToolSearchIndex::search_fused`].
+    pub fn with_dense(
+        snapshot: Arc<Mutex<ToolMetadataSnapshot>>,
+        dense: Arc<DenseToolIndex>,
+    ) -> Self {
+        Self {
+            snapshot,
+            dense: Some(dense),
+        }
+    }
+
+    /// Attach the production dense side, embedding through the profile the
+    /// session's own home registry publishes.
+    pub fn with_service_dense(snapshot: Arc<Mutex<ToolMetadataSnapshot>>) -> Self {
+        Self::with_dense(
+            snapshot,
+            Arc::new(DenseToolIndex::new(Arc::new(ServiceToolEmbedder::new(
+                xai_grok_config::grok_home(),
+            )))),
+        )
+    }
+
+    /// Fuse the lexical and dense rank lists over one snapshot.
+    ///
+    /// Returns `None` when the dense side has nothing to contribute (no dense
+    /// index, an exact-name hit, or any embedding failure) — the caller then
+    /// keeps BM25 unchanged.
+    async fn fused_results(&self, query: &str, limit: usize) -> Option<SearchSnapshot> {
+        let pool = limit.max(FUSION_POOL);
+        let lexical = self.search_snapshot(query, pool);
+        if lexical.results.len() == 1 && is_exact_hit(query, &lexical.results[0]) {
+            return None;
+        }
+        let dense = self.dense.clone()?;
+        let snapshot = self.snapshot.lock().unwrap().clone();
+        let documents: Vec<String> = snapshot.tools.iter().map(|t| t.to_document()).collect();
+        let dense_ranks = dense.rank(query, &documents).await.ok()??;
+        let bm25_ranks: Vec<usize> = lexical
+            .results
+            .iter()
+            .filter_map(|result| {
+                snapshot
+                    .tools
+                    .iter()
+                    .position(|tool| tool.qualified_name == result.tool_name)
+            })
+            .collect();
+        let results = fuse_rank_lists(&bm25_ranks, &dense_ranks, limit)
+            .into_iter()
+            .filter_map(|(index, score)| {
+                let meta = snapshot.tools.get(index)?;
+                Some(ToolSearchResult {
+                    tool_name: meta.qualified_name.clone(),
+                    server_name: meta.server_name.clone(),
+                    description: meta.description.clone(),
+                    score: score as f32,
+                    parameters: meta.parameters.clone(),
+                    input_schema: meta.input_schema.clone(),
+                })
+            })
+            .collect();
+        Some(SearchSnapshot {
+            results,
+            total_hidden_tools: lexical.total_hidden_tools,
+            is_ready: lexical.is_ready,
+        })
     }
 }
 
+#[async_trait]
 impl ToolSearchIndex for Bm25ToolSearchIndex {
+    async fn search_fused(&self, query: &str, limit: usize) -> SearchSnapshot {
+        match self.fused_results(query, limit).await {
+            Some(snapshot) => snapshot,
+            // Fail open: no dense index, a single lexical hit, or a dead
+            // embedding all keep the lexical result truncated to `limit`.
+            None => truncate_snapshot(self.search_snapshot(query, limit), limit),
+        }
+    }
+
     fn search_snapshot(&self, query: &str, limit: usize) -> SearchSnapshot {
         let snapshot = self.snapshot.lock().unwrap().clone();
 
@@ -2498,5 +2924,222 @@ mod tests {
                  combined score should be > 0 (was {combined:.3})"
             );
         }
+    }
+
+    // -- dense fusion --
+
+    /// Embedder stub: vectors come from a caller-supplied function, calls are
+    /// recorded, and the space is fixed so a mismatch is testable.
+    struct FakeEmbedder {
+        vector_for: Box<dyn Fn(&str) -> Vec<f32> + Send + Sync>,
+        calls: std::sync::Mutex<Vec<Vec<String>>>,
+        space: std::sync::Mutex<String>,
+        failing: std::sync::atomic::AtomicBool,
+    }
+
+    impl FakeEmbedder {
+        fn new(vector_for: impl Fn(&str) -> Vec<f32> + Send + Sync + 'static) -> Arc<Self> {
+            Arc::new(Self {
+                vector_for: Box::new(vector_for),
+                calls: std::sync::Mutex::new(Vec::new()),
+                space: std::sync::Mutex::new("space-a".into()),
+                failing: std::sync::atomic::AtomicBool::new(false),
+            })
+        }
+
+        fn call_count(&self) -> usize {
+            self.calls.lock().unwrap().len()
+        }
+
+        fn embedded_inputs(&self) -> Vec<String> {
+            self.calls
+                .lock()
+                .unwrap()
+                .iter()
+                .flatten()
+                .cloned()
+                .collect()
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl ToolDocEmbedder for FakeEmbedder {
+        async fn embed(&self, inputs: Vec<String>) -> Result<DenseEmbedding, String> {
+            self.calls.lock().unwrap().push(inputs.clone());
+            if self.failing.load(std::sync::atomic::Ordering::SeqCst) {
+                return Err("embedding down".into());
+            }
+            Ok(DenseEmbedding {
+                vectors: inputs.iter().map(|text| (self.vector_for)(text)).collect(),
+                space: Some(self.space.lock().unwrap().clone()),
+            })
+        }
+    }
+
+    /// Portuguese request against English descriptions: BM25 is blind to it,
+    /// the dense side is not.
+    fn cross_lingual_tools() -> Vec<ToolMetadata> {
+        vec![
+            ToolMetadata {
+                qualified_name: "arithma__subnetCalculator".into(),
+                server_name: "arithma".into(),
+                tool_name: "subnetCalculator".into(),
+                description: "Compute subnets for an IPv4 range".into(),
+                parameters: vec!["cidr".into()],
+                input_schema: serde_json::json!({}),
+            },
+            ToolMetadata {
+                qualified_name: "arithma__convertCookingVolume".into(),
+                server_name: "arithma".into(),
+                tool_name: "convertCookingVolume".into(),
+                description: "Convert cooking volumes between units".into(),
+                parameters: vec!["from".into()],
+                input_schema: serde_json::json!({}),
+            },
+        ]
+    }
+
+    /// Two axes: the "network" direction is the query and the subnet tool.
+    fn network_vector(text: &str) -> Vec<f32> {
+        if text.contains("subnet") || text.contains("sub-rede") {
+            vec![1.0, 0.0]
+        } else {
+            vec![0.0, 1.0]
+        }
+    }
+
+    #[tokio::test]
+    async fn fused_search_recovers_a_cross_lingual_hit() {
+        let embedder = FakeEmbedder::new(network_vector);
+        let index = Bm25ToolSearchIndex::with_dense(
+            make_snapshot(cross_lingual_tools()),
+            Arc::new(DenseToolIndex::new(embedder)),
+        );
+        let snap = index.search_fused("calcular sub-rede", 2).await;
+        assert_eq!(snap.results[0].tool_name, "arithma__subnetCalculator");
+    }
+
+    #[tokio::test]
+    async fn fused_search_keeps_the_exact_name_short_circuit() {
+        // The dense side would rank the other tool first; the exact name wins.
+        let embedder = FakeEmbedder::new(|_: &str| vec![0.0, 1.0]);
+        let index = Bm25ToolSearchIndex::with_dense(
+            make_snapshot(cross_lingual_tools()),
+            Arc::new(DenseToolIndex::new(embedder)),
+        );
+        let snap = index.search_fused("arithma__subnetCalculator", 5).await;
+        assert_eq!(snap.results.len(), 1);
+        assert_eq!(snap.results[0].tool_name, "arithma__subnetCalculator");
+    }
+
+    #[tokio::test]
+    async fn fused_search_embeds_documents_once_per_toolset() {
+        let embedder = FakeEmbedder::new(network_vector);
+        let index = Bm25ToolSearchIndex::with_dense(
+            make_snapshot(cross_lingual_tools()),
+            Arc::new(DenseToolIndex::new(embedder.clone())),
+        );
+        index.search_fused("calcular sub-rede", 2).await;
+        let after_first = embedder.call_count();
+        index.search_fused("converter volume", 2).await;
+        // A warm cache embeds the query only: exactly one more call.
+        assert_eq!(embedder.call_count(), after_first + 1);
+        assert!(
+            embedder
+                .embedded_inputs()
+                .iter()
+                .any(|i| i.contains("subnet"))
+        );
+    }
+
+    #[tokio::test]
+    async fn fused_search_fails_open_to_bm25() {
+        let embedder = FakeEmbedder::new(network_vector);
+        embedder
+            .failing
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        let index = Bm25ToolSearchIndex::with_dense(
+            make_snapshot(cross_lingual_tools()),
+            Arc::new(DenseToolIndex::new(embedder)),
+        );
+        let lexical = index.search_snapshot("subnet", 5);
+        let fused = index.search_fused("subnet", 5).await;
+        let names: Vec<&str> = fused.results.iter().map(|r| r.tool_name.as_str()).collect();
+        let lexical_names: Vec<&str> = lexical
+            .results
+            .iter()
+            .map(|r| r.tool_name.as_str())
+            .collect();
+        assert_eq!(names, lexical_names);
+    }
+
+    #[tokio::test]
+    async fn dense_cache_rebuilds_when_the_space_moves() {
+        let embedder = FakeEmbedder::new(network_vector);
+        let index = Bm25ToolSearchIndex::with_dense(
+            make_snapshot(cross_lingual_tools()),
+            Arc::new(DenseToolIndex::new(embedder.clone())),
+        );
+        index.search_fused("calcular sub-rede", 2).await;
+        let after_first = embedder.call_count();
+        *embedder.space.lock().unwrap() = "space-b".into();
+        index.search_fused("calcular sub-rede", 2).await;
+        // Query probe plus a full rebuild: strictly more than one call.
+        assert!(embedder.call_count() > after_first + 1);
+    }
+
+    #[tokio::test]
+    async fn dense_cache_rebuilds_when_the_toolset_changes() {
+        let embedder = FakeEmbedder::new(network_vector);
+        let snapshot = make_snapshot(cross_lingual_tools());
+        let index = Bm25ToolSearchIndex::with_dense(
+            snapshot.clone(),
+            Arc::new(DenseToolIndex::new(embedder.clone())),
+        );
+        index.search_fused("calcular sub-rede", 2).await;
+        let after_first = embedder.call_count();
+        snapshot.lock().unwrap().tools.push(ToolMetadata {
+            qualified_name: "arithma__ipInSubnet".into(),
+            server_name: "arithma".into(),
+            tool_name: "ipInSubnet".into(),
+            description: "Check whether an address is inside a subnet".into(),
+            parameters: vec![],
+            input_schema: serde_json::json!({}),
+        });
+        index.search_fused("calcular sub-rede", 2).await;
+        // A rebuild is one call carrying the query *and* the whole toolset.
+        assert_eq!(embedder.call_count(), after_first + 1);
+        let calls = embedder.calls.lock().unwrap();
+        assert!(
+            calls.last().unwrap().len() > 1,
+            "a changed toolset must re-embed its documents"
+        );
+    }
+
+    #[tokio::test]
+    async fn search_fused_without_a_dense_side_is_lexical() {
+        let index = Bm25ToolSearchIndex::new(make_snapshot(cross_lingual_tools()));
+        let fused = index.search_fused("subnet", 5).await;
+        let lexical = index.search_snapshot("subnet", 5);
+        assert_eq!(fused.results.len(), lexical.results.len());
+    }
+
+    #[test]
+    fn chunk_documents_splits_on_the_byte_budget() {
+        let small = vec!["a".repeat(100); 4];
+        assert_eq!(chunk_documents(&small).len(), 1);
+        let big = vec!["b".repeat(MAX_EMBED_BYTES); 3];
+        let chunks = chunk_documents(&big);
+        assert_eq!(chunks.len(), 3);
+        assert_eq!(chunks.iter().map(|c| c.len()).sum::<usize>(), 3);
+        assert!(chunk_documents(&[]).is_empty());
+    }
+
+    #[test]
+    fn fuse_rank_lists_merges_and_weights_dense_above_lexical() {
+        let fused = fuse_rank_lists(&[0, 1], &[(1, 0.9), (2, 0.8)], 3);
+        // Candidate 1 appears in both lists and leads.
+        assert_eq!(fused[0].0, 1);
+        assert_eq!(fused.len(), 3);
     }
 }

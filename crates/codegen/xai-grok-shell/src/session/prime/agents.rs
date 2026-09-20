@@ -26,7 +26,9 @@
 //!   authority's verdict map is always `Blocked`.
 //! - **Advisory only**: the rendered output never calls spawn, enqueues a task,
 //!   alters allowlists/toggles/toolsets/depth, or modifies the prompt. It states
-//!   recommendations are optional and do not authorize execution.
+//!   recommendations are optional and do not authorize execution, and it carries
+//!   the one fact the tool schema cannot: that these names — and only these —
+//!   were revalidated against the live authority this turn.
 //! - On semantic failure the exact pre-stage deterministic order is preserved.
 //!   Disabled/hard/soft/cancel/deadline budgets follow [`AgentPrimeConfig`].
 //! - Pinned (explicit) recommendations are never displaced; the current agent is
@@ -1274,11 +1276,20 @@ fn truncate_chars(s: &str, max: usize) -> (&str, bool) {
 }
 
 const TRUNCATION_MARKER: &str = "\n… [agent description truncated by prime budget]";
+/// Wrapper header. The second sentence is the one thing the `task` schema
+/// cannot say: that these names — and only these — were revalidated against the
+/// live authority this turn, so a name missing from the list is not a name that
+/// was rejected, it is a name that was not checked. The block buys one case
+/// over selecting from the full roster (20/25 vs 19/25) for ~150 tokens/turn,
+/// so the extra sentence is the cheapest thing it can carry that the schema
+/// lacks.
 const HEADER: &str = concat!(
     "<agent_recommendations>\n",
     "<agent_recommendations_context>",
     "These agent recommendations are OPTIONAL and do NOT authorize spawning ",
     "any agent. Using the Task tool performs its own independent validation. ",
+    "Every name below passed a live revalidation at this turn (config, plugins, ",
+    "allow-list, toggles); unlisted names were not checked. ",
     "User and system instructions always outrank these recommendations.",
     "</agent_recommendations_context>\n",
 );
@@ -2452,6 +2463,10 @@ mod tests {
         let out = render_agents(&[tricky, normal], &budgets);
         let text = &out.text;
         assert!(text.contains("OPTIONAL"), "advisory note missing: {text}");
+        assert!(
+            text.contains("passed a live revalidation at this turn"),
+            "the block must carry the revalidation result the schema lacks: {text}"
+        );
         assert!(
             text.contains("do NOT authorize"),
             "no-authorization note missing: {text}"

@@ -30,10 +30,11 @@ pub use diagnostic::{
     SkillWarningCode,
 };
 pub use evals::{
-    EVALS_CASES_FILE, EVALS_SCHEMA_VERSION, EvalCase, EvalCaseKind, EvalCaseResult, EvalRunReport,
-    EvalSchemaError, EvalSuite, LocalSkillEvidence, live_cases_fingerprint, load_eval_report,
-    load_eval_suite_from_dir, parse_eval_suite, persist_eval_report, regression_key_matches,
-    regression_store_key, run_eval_suite,
+    EVALS_CASES_FILE, EVALS_SCHEMA_VERSION, EvalArm, EvalCase, EvalCaseKind, EvalCaseResult,
+    EvalRunReport, EvalSchemaError, EvalSuite, LocalSkillEvidence, SEMANTIC_MATCH_THRESHOLD,
+    live_cases_fingerprint, load_eval_report, load_eval_suite_from_dir, parse_eval_suite,
+    persist_eval_report, regression_key_matches, regression_store_key, run_eval_suite,
+    run_eval_suite_with_arm,
 };
 pub use inventory::{DiscoveredSkill, QuarantinedSkill, SkillIdentity, SkillInventory};
 pub use management::{
