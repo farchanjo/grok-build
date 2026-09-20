@@ -683,7 +683,8 @@ impl SessionActor {
         if result.panel_ran
             && let Some(o) = self.goal_tracker.lock().snapshot_mut()
         {
-            o.skeptic0_session_id = result.skeptic0_session_id;
+            o.skeptic0_session_id = result.skeptic0_session_id.clone();
+            o.last_skeptic_votes = result.votes.clone();
             if let Some(anchor) = anchor_to_persist {
                 o.first_final_response = Some(anchor);
             }

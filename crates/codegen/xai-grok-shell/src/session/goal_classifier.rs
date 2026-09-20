@@ -1929,6 +1929,10 @@ pub(crate) struct VerificationStageResult {
     /// fail-open early-exit cannot sever the gatekeeper resume chain
     /// (an N == 1 run still clears the id deliberately).
     pub panel_ran: bool,
+    /// Per-skeptic votes from this panel, in index order (empty when no panel
+    /// ran). The apply path persists them so the status surface can state
+    /// which skeptic refuted and on what.
+    pub votes: Vec<crate::session::goal_tracker::SkepticVote>,
 }
 
 impl From<GoalClassifierOutcome> for VerificationStageResult {
@@ -1938,8 +1942,34 @@ impl From<GoalClassifierOutcome> for VerificationStageResult {
             outcome,
             skeptic0_session_id: None,
             panel_ran: false,
+            votes: Vec::new(),
         }
     }
+}
+
+/// Bounded per-skeptic vote records for the status surface. A synthetic
+/// refute (spawn failure, malformed verdict) has no evidence; its
+/// `fallback_note` carries the reason instead.
+pub(crate) fn skeptic_votes(
+    results: &[SkepticResult],
+) -> Vec<crate::session::goal_tracker::SkepticVote> {
+    results
+        .iter()
+        .map(|r| crate::session::goal_tracker::SkepticVote {
+            skeptic_idx: r.skeptic_idx,
+            refuted: r.refuted,
+            confidence: r.confidence.as_const_str().to_string(),
+            evidence: {
+                let raw = r.fallback_note.as_deref().unwrap_or(r.evidence.as_str());
+                let collapsed = raw.split_whitespace().collect::<Vec<_>>().join(" ");
+                xai_grok_tools::util::truncate_str_with_marker(
+                    &collapsed,
+                    crate::session::goal_tracker::SKEPTIC_VOTE_EVIDENCE_CHARS,
+                )
+                .into_owned()
+            },
+        })
+        .collect()
 }
 
 /// Run the verification stage: the adversarial skeptic panel of
@@ -2269,6 +2299,7 @@ pub(crate) async fn run_verification_stage(
             },
             skeptic0_session_id,
             panel_ran: true,
+            votes: skeptic_votes(&results),
         };
     }
 
@@ -2312,6 +2343,7 @@ pub(crate) async fn run_verification_stage(
         outcome,
         skeptic0_session_id,
         panel_ran: true,
+        votes: skeptic_votes(&results),
     }
 }
 
@@ -3013,6 +3045,31 @@ mod tests {
             fallback_note: None,
             latency_ms: 0,
         }
+    }
+
+    #[test]
+    fn skeptic_votes_carry_index_verdict_and_bounded_evidence() {
+        let mut refuter = skeptic(2, true);
+        refuter.confidence = SkepticConfidence::High;
+        refuter.evidence = "src/lib.rs:42".to_string();
+        let mut passed = skeptic(1, false);
+        passed.evidence = format!("{} tail", "x".repeat(400));
+        let votes = skeptic_votes(&[passed, refuter]);
+        assert_eq!(votes.len(), 2);
+        assert_eq!(votes[1].skeptic_idx, 2);
+        assert!(votes[1].refuted);
+        assert_eq!(votes[1].confidence, "high");
+        assert_eq!(votes[1].evidence, "src/lib.rs:42");
+        // Evidence is collapsed and capped; the full text stays in the
+        // details file.
+        assert!(votes[0].evidence.ends_with('…'), "{}", votes[0].evidence);
+        assert!(
+            votes[0].evidence.len() <= crate::session::goal_tracker::SKEPTIC_VOTE_EVIDENCE_CHARS
+        );
+        // A synthetic refute reports its reason instead of empty evidence.
+        let mut synthetic = skeptic(0, true);
+        synthetic.fallback_note = Some("spawn failed".to_string());
+        assert_eq!(skeptic_votes(&[synthetic])[0].evidence, "spawn failed");
     }
 
     #[test]

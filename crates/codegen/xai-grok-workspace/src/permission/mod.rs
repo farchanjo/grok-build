@@ -14,14 +14,15 @@ mod state;
 pub mod types;
 
 pub use auto_mode::{
-    AUTO_MODE_CLASSIFIER_SYSTEM_PROMPT, AutoFastPath, CLASSIFIER_TURN_MAX_LEN, ClassifierContext,
-    ClassifierFailure, ClassifierMessage, ClassifierMessageRole, ClassifierOutcome,
-    ClassifierPromptType, ClassifierSource, ClassifierTurn, ClassifierVerdict, ClassifyTextChannel,
-    ClassifyTextFn, FixedClassifier, HeuristicPermissionClassifier, LlmPermissionClassifier,
-    PermissionClassifier, SharedClassifier, access_requires_user_interaction, auto_mode_fast_path,
-    build_classifier_messages, classifier_output_json_schema, default_auto_mode_classifier,
-    is_auto_mode_allowlisted_access, is_auto_mode_allowlisted_tool_name,
-    parse_classifier_model_output, parse_classifier_model_text, permission_decision_args,
+    AUTO_MODE_CLASSIFIER_SYSTEM_PROMPT, AUTO_MODE_CLASSIFIER_THRESHOLD, AutoFastPath,
+    CLASSIFIER_TURN_MAX_LEN, ClassifierContext, ClassifierFailure, ClassifierMessage,
+    ClassifierMessageRole, ClassifierOutcome, ClassifierPromptType, ClassifierSource,
+    ClassifierTurn, ClassifierVerdict, ClassifyTextChannel, ClassifyTextFn, FixedClassifier,
+    HeuristicPermissionClassifier, LlmPermissionClassifier, PermissionClassifier, SharedClassifier,
+    access_requires_user_interaction, auto_mode_fast_path, build_classifier_messages,
+    classifier_output_json_schema, default_auto_mode_classifier, is_auto_mode_allowlisted_access,
+    is_auto_mode_allowlisted_tool_name, parse_classifier_model_output, parse_classifier_model_text,
+    permission_decision_args,
 };
 pub use hub_permission::{
     PermissionHookTransport, ToolServerPermissionTransport, access_kind_for_hub_tool,
@@ -33,8 +34,9 @@ pub(crate) fn init_metrics() {
     hub_permission::init_metrics();
 }
 pub use manager::{
-    PermissionHandle, default_always_allow_scope, spawn_permission_manager,
-    spawn_permission_manager_with_hub,
+    BASH_EXEC_FLOOR_ENV, BashFloorCounters, BashFloorKind, BashFloorPromptCounts, PermissionHandle,
+    bash_exec_floor_enabled, default_always_allow_scope, floor_enabled, set_floor_enabled,
+    spawn_permission_manager, spawn_permission_manager_with_hub,
 };
 pub use policy::CompiledPolicy;
 pub use prompter::{

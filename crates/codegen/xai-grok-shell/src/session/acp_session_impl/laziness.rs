@@ -160,7 +160,7 @@ pub(crate) enum DebugDecision {
     /// fired classifier telemetry only.
     NoNudgeNotStalled,
     /// Parsed verdict was `stalled_*` but below the configured
-    /// min-confidence threshold (default 0.7).
+    /// min-confidence threshold (default 0.5).
     NoNudgeLowConfidence,
     /// User input / model switch / timeout / parse error before a
     /// verdict was produced. The corresponding `abort_reason` field

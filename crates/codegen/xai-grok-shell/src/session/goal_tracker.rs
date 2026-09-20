@@ -418,6 +418,28 @@ pub(crate) fn skeptic_scratch_dir(verifier_id: &str, idx: u32) -> PathBuf {
     goal_scratch_root(verifier_id).join(format!("skeptic-{idx}"))
 }
 
+/// One skeptic's vote from the last verification panel.
+///
+/// A refuted goal re-runs the agent, and until this existed there was no
+/// statement of *which* skeptic refuted or on what. The free-text reasoning
+/// stays in the details file; this is the bounded summary the status surface
+/// can carry per panel.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct SkepticVote {
+    /// Panel index. `0` is the resumed reject-gatekeeper: its *not-refuted*
+    /// vote does not count toward approval (it can only veto).
+    pub skeptic_idx: u32,
+    pub refuted: bool,
+    /// `low` / `medium` / `high`.
+    pub confidence: String,
+    /// Bounded `path:line` (or transcript) citation the skeptic gave.
+    pub evidence: String,
+}
+
+/// Longest evidence snippet carried per vote; the full text is in the
+/// per-skeptic details file.
+pub const SKEPTIC_VOTE_EVIDENCE_CHARS: usize = 160;
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct GoalOrchestration {
     pub goal_id: String,
@@ -544,6 +566,11 @@ pub struct GoalOrchestration {
     /// set for an N == 1 sole-judge panel.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub skeptic0_session_id: Option<String>,
+    /// Per-skeptic votes from the most recent verification panel (empty
+    /// before the first panel). Persisted with the goal so `/goal status`
+    /// can state who refuted and on what, and so a resumed session keeps it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub last_skeptic_votes: Vec<SkepticVote>,
     /// Resolved skeptic index → `{model, agent_type}` assignment, frozen at
     /// the first verification panel and reused on every resume so skeptic-0
     /// (and the cold panel) keep stable models across attempts. Index `i`
@@ -971,6 +998,7 @@ impl GoalTracker {
             last_classifier_gaps: None,
             first_final_response: None,
             skeptic0_session_id: None,
+            last_skeptic_votes: Vec::new(),
             skeptic_model_assignment: Vec::new(),
             last_gap_fingerprint: None,
             classifier_stall_count: 0,
@@ -1392,6 +1420,7 @@ pub(crate) fn make_base_orchestration() -> GoalOrchestration {
         last_classifier_gaps: None,
         first_final_response: None,
         skeptic0_session_id: None,
+        last_skeptic_votes: Vec::new(),
         skeptic_model_assignment: Vec::new(),
         last_gap_fingerprint: None,
         classifier_stall_count: 0,

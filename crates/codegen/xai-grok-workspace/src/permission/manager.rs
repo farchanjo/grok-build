@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
 use agent_client_protocol as acp;
 use chrono::Utc;
@@ -165,6 +165,9 @@ pub enum PermissionHandle {
         /// Concurrent in-flight permission requests. Shared across handle clones
         /// (subagents), so the actor can gauge overlapping requests for telemetry.
         in_flight: Arc<AtomicUsize>,
+        /// Prompts forced by each bash confirmation floor. Shared across handle
+        /// clones so subagent prompts land in the same tally.
+        floor_prompts: Arc<BashFloorCounters>,
     },
     AllowAll,
 }
@@ -739,6 +742,18 @@ impl PermissionHandle {
         PermissionHandle::AllowAll
     }
 
+    /// Snapshot of the prompts each bash confirmation floor forced this session.
+    ///
+    /// The floors override a classifier `Allow`, so their cost never shows up in
+    /// the classifier's telemetry; this is where it becomes measurable. All zero
+    /// for [`Self::AllowAll`].
+    pub fn floor_prompt_counts(&self) -> BashFloorPromptCounts {
+        match self {
+            PermissionHandle::Actor { floor_prompts, .. } => floor_prompts.snapshot(),
+            PermissionHandle::AllowAll => BashFloorPromptCounts::default(),
+        }
+    }
+
     /// Set the YOLO mode for the permission manager
     pub fn set_yolo_mode(&self, enabled: bool) {
         if let PermissionHandle::Actor {
@@ -1000,35 +1015,248 @@ fn persisted_bash_auto_allows(
     (state.allow_bash_execute && yolo_pin.is_none()) || state.allowed_bash_commands.contains(cmd)
 }
 
+/// Which bash confirmation floor holds an evaluation.
+///
+/// A floor overrides a classifier `Allow`, so its cost is invisible in the
+/// classifier's own telemetry — [`BashFloorPromptCounts`] is what makes it
+/// measurable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BashFloorKind {
+    /// The command writes a real file.
+    Write,
+    /// The command runs with an environment the classifier cannot vet.
+    UnsafeEnv,
+    /// The command hides work behind an opaque shell.
+    OpaqueShell,
+    /// The command may run an unvetted program. See [`BASH_EXEC_FLOOR_ENV`].
+    Exec,
+}
+
+impl BashFloorKind {
+    /// Stable label for logs and counter readouts.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Write => "write",
+            Self::UnsafeEnv => "unsafe_env",
+            Self::OpaqueShell => "opaque_shell",
+            Self::Exec => "exec",
+        }
+    }
+}
+
+/// Prompts forced by each bash confirmation floor, per session.
+///
+/// Measured on jev-1.13 (2026-09, solaris box): 19 of 127 bash commands in a
+/// working session were floor tax, and 16 of those were the exec floor — the
+/// rest of the floors together cost 3 prompts. That is the baseline any change
+/// to a floor has to beat; read it instead of arguing from the model's view.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct BashFloorPromptCounts {
+    /// Prompts the real-file-write floor forced.
+    pub write: u64,
+    /// Prompts the unsafe-environment floor forced.
+    pub unsafe_env: u64,
+    /// Prompts the opaque-shell floor forced.
+    pub opaque_shell: u64,
+    /// Prompts the exec floor forced (the dominant term; see [`BASH_EXEC_FLOOR_ENV`]).
+    pub exec: u64,
+}
+
+impl BashFloorPromptCounts {
+    /// Count for one floor kind.
+    pub const fn get(&self, kind: BashFloorKind) -> u64 {
+        match kind {
+            BashFloorKind::Write => self.write,
+            BashFloorKind::UnsafeEnv => self.unsafe_env,
+            BashFloorKind::OpaqueShell => self.opaque_shell,
+            BashFloorKind::Exec => self.exec,
+        }
+    }
+
+    /// Every floor-forced prompt this session.
+    pub const fn total(&self) -> u64 {
+        self.write + self.unsafe_env + self.opaque_shell + self.exec
+    }
+}
+
+/// Atomic accumulator behind [`BashFloorPromptCounts`].
+#[derive(Debug, Default)]
+pub struct BashFloorCounters {
+    write: AtomicU64,
+    unsafe_env: AtomicU64,
+    opaque_shell: AtomicU64,
+    exec: AtomicU64,
+}
+
+impl BashFloorCounters {
+    fn counter(&self, kind: BashFloorKind) -> &AtomicU64 {
+        match kind {
+            BashFloorKind::Write => &self.write,
+            BashFloorKind::UnsafeEnv => &self.unsafe_env,
+            BashFloorKind::OpaqueShell => &self.opaque_shell,
+            BashFloorKind::Exec => &self.exec,
+        }
+    }
+
+    /// Count one floor-forced prompt and return the running totals.
+    fn record(&self, kind: BashFloorKind) -> BashFloorPromptCounts {
+        self.counter(kind).fetch_add(1, Ordering::Relaxed);
+        self.snapshot()
+    }
+
+    fn snapshot(&self) -> BashFloorPromptCounts {
+        BashFloorPromptCounts {
+            write: self.write.load(Ordering::Relaxed),
+            unsafe_env: self.unsafe_env.load(Ordering::Relaxed),
+            opaque_shell: self.opaque_shell.load(Ordering::Relaxed),
+            exec: self.exec.load(Ordering::Relaxed),
+        }
+    }
+}
+
+/// Env knob that arms the bash **exec** floor. Default: **on**.
+///
+/// The exec floor is a policy call, not a model one: `exec_risk` marks a command
+/// that may run an unvetted program, and the auto classifier has no say over it.
+/// It stays on until the number below is re-measured.
+///
+/// Measured on jev-1.13 (2026-09, solaris box): 19 of 127 bash commands in a
+/// working session were floor tax and **16 of those were this exec floor** — it
+/// is the dominant term, so it is the one to revisit first. Read
+/// [`PermissionHandle::floor_prompt_counts`] instead of arguing from the model's
+/// view; `GROK_BASH_EXEC_FLOOR=0|false|no|off` disarms it for an A/B run.
+///
+/// Read per decision rather than cached: a `OnceLock` would freeze the first
+/// value and race the in-process env-var tests.
+pub const BASH_EXEC_FLOOR_ENV: &str = "GROK_BASH_EXEC_FLOOR";
+
+/// Per-floor disarm mask, installed from `[permission.floors]` by the shell.
+///
+/// A bit set means "disarmed". An atomic rather than a `OnceLock` because the
+/// settings write must take effect without a restart, and rather than a
+/// `RwLock` because the floors are read on every bash decision.
+static FLOOR_DISARMED: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+fn floor_bit(kind: BashFloorKind) -> u8 {
+    match kind {
+        BashFloorKind::Write => 1,
+        BashFloorKind::UnsafeEnv => 2,
+        BashFloorKind::OpaqueShell => 4,
+        BashFloorKind::Exec => 8,
+    }
+}
+
+/// Arm or disarm one floor. Called by the shell from `[permission.floors]`;
+/// every floor ships armed, so the default leaves today's behaviour intact.
+pub fn set_floor_enabled(kind: BashFloorKind, enabled: bool) {
+    let bit = floor_bit(kind);
+    let mut current = FLOOR_DISARMED.load(std::sync::atomic::Ordering::Relaxed);
+    current = if enabled {
+        current & !bit
+    } else {
+        current | bit
+    };
+    FLOOR_DISARMED.store(current, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Whether one floor is armed. See [`set_floor_enabled`].
+pub fn floor_enabled(kind: BashFloorKind) -> bool {
+    FLOOR_DISARMED.load(std::sync::atomic::Ordering::Relaxed) & floor_bit(kind) == 0
+}
+
+/// Whether the exec floor is armed. See [`BASH_EXEC_FLOOR_ENV`].
+pub fn bash_exec_floor_enabled() -> bool {
+    match std::env::var(BASH_EXEC_FLOOR_ENV) {
+        Ok(v) => !matches!(
+            v.trim().to_ascii_lowercase().as_str(),
+            "0" | "false" | "no" | "off"
+        ),
+        Err(_) => true,
+    }
+}
+
+/// A floor holds only for an ungranted evaluation: an exact grant is the user
+/// having already approved this exact command.
+const fn floor_holds(fires: bool, exact_grant: bool) -> bool {
+    fires && !exact_grant
+}
+
 fn bash_write_floor_requires_prompt(evaluation: Option<&BashEvaluation>) -> bool {
-    evaluation.is_some_and(|evaluation| evaluation.writes_real_file && !evaluation.exact_grant)
+    evaluation.is_some_and(|e| {
+        floor_holds(
+            e.writes_real_file && floor_enabled(BashFloorKind::Write),
+            e.exact_grant,
+        )
+    })
 }
 
 fn bash_unsafe_env_floor_requires_prompt(evaluation: Option<&BashEvaluation>) -> bool {
-    evaluation
-        .is_some_and(|evaluation| evaluation.env_risk != EnvRisk::Safe && !evaluation.exact_grant)
+    evaluation.is_some_and(|e| {
+        floor_holds(
+            e.env_risk != EnvRisk::Safe && floor_enabled(BashFloorKind::UnsafeEnv),
+            e.exact_grant,
+        )
+    })
 }
 
 fn bash_opaque_shell_floor_requires_prompt(evaluation: Option<&BashEvaluation>) -> bool {
-    evaluation.is_some_and(|evaluation| evaluation.has_opaque_shell && !evaluation.exact_grant)
+    evaluation.is_some_and(|e| {
+        floor_holds(
+            e.has_opaque_shell && floor_enabled(BashFloorKind::OpaqueShell),
+            e.exact_grant,
+        )
+    })
+}
+
+/// Exec risk with the [`BASH_EXEC_FLOOR_ENV`] knob applied.
+fn bash_exec_floor_armed(evaluation: &BashEvaluation) -> bool {
+    evaluation.exec_risk && bash_exec_floor_enabled()
 }
 
 fn bash_exec_floor_requires_prompt(evaluation: Option<&BashEvaluation>) -> bool {
-    evaluation.is_some_and(|evaluation| evaluation.exec_risk && !evaluation.exact_grant)
+    evaluation.is_some_and(|e| {
+        floor_holds(
+            bash_exec_floor_armed(e) && floor_enabled(BashFloorKind::Exec),
+            e.exact_grant,
+        )
+    })
+}
+
+/// Which floor holds this evaluation, if any.
+///
+/// First match wins, in the precedence the request floor has always applied: a
+/// command that both writes a real file and runs an unvetted program reports the
+/// cheapest floor to explain. Single source of truth for
+/// [`bash_request_floor_requires_prompt`] and for the per-kind prompt counters.
+fn bash_floor_kind(evaluation: Option<&BashEvaluation>) -> Option<BashFloorKind> {
+    let evaluation = evaluation?;
+    if bash_write_floor_requires_prompt(Some(evaluation)) {
+        return Some(BashFloorKind::Write);
+    }
+    if bash_unsafe_env_floor_requires_prompt(Some(evaluation)) {
+        return Some(BashFloorKind::UnsafeEnv);
+    }
+    if bash_opaque_shell_floor_requires_prompt(Some(evaluation)) {
+        return Some(BashFloorKind::OpaqueShell);
+    }
+    if bash_exec_floor_requires_prompt(Some(evaluation)) {
+        return Some(BashFloorKind::Exec);
+    }
+    None
 }
 
 fn bash_request_floor_requires_prompt(evaluation: Option<&BashEvaluation>) -> bool {
-    bash_write_floor_requires_prompt(evaluation)
-        || bash_unsafe_env_floor_requires_prompt(evaluation)
-        || bash_opaque_shell_floor_requires_prompt(evaluation)
-        || bash_exec_floor_requires_prompt(evaluation)
+    bash_floor_kind(evaluation).is_some()
 }
 
+/// Whether an unvetted environment is the only thing keeping this evaluation
+/// from the classifier. Disarming the exec floor routes an exec-risky command
+/// through here instead of straight back to a prompt.
 fn bash_request_floor_defers_to_classifier(evaluation: Option<&BashEvaluation>) -> bool {
     evaluation.is_some_and(|evaluation| {
         !evaluation.writes_real_file
             && !evaluation.has_opaque_shell
-            && !evaluation.exec_risk
+            && !bash_exec_floor_requires_prompt(Some(evaluation))
             && evaluation.env_risk == EnvRisk::Unvetted
     })
 }
@@ -1286,6 +1514,8 @@ fn spawn_permission_manager_with_pin(
     let side_query_wired = Arc::new(AtomicBool::new(false));
     let in_flight = Arc::new(AtomicUsize::new(0));
     let in_flight_actor = in_flight.clone();
+    let floor_prompts = Arc::new(BashFloorCounters::default());
+    let floor_counters_actor = floor_prompts.clone();
 
     let _task = tokio::task::spawn_local(async move {
         let client_id_ref = client_identifier.as_deref();
@@ -2108,6 +2338,17 @@ fn spawn_permission_manager_with_pin(
                         );
                         continue;
                     }
+                    // A floor-forced prompt is invisible in the classifier's own
+                    // telemetry (the floor overrides its `Allow`), so tally it here
+                    // — the one place a prompt is actually issued.
+                    if let Some(kind) = bash_floor_kind(bash_evaluation.as_ref()) {
+                        let counts = floor_counters_actor.record(kind);
+                        tracing::debug!(
+                            floor = kind.as_str(),
+                            floor_prompts = counts.total(),
+                            "bash confirmation floor forced a prompt"
+                        );
+                    }
                     let (decision, outcome_str, user_prompted) = match &access {
                         AccessKind::Bash(cmd) => {
                             // Segment evaluation above still auto-allows fully-safe
@@ -2358,6 +2599,7 @@ fn spawn_permission_manager_with_pin(
             yolo_pin,
             deny_read_globs: Arc::new(deny_read_globs),
             in_flight,
+            floor_prompts,
         },
         event_rx,
     )
@@ -2367,6 +2609,7 @@ fn spawn_permission_manager_with_pin(
 mod tests {
     use super::*;
     use crate::permission::bash_command_splitting::primary_command_from_script;
+    use std::path::Path;
 
     // ── Managed-policy pin: yolo clamp + persisted bash clamp ──
 
@@ -6862,6 +7105,49 @@ mod tests {
             .await;
     }
 
+    /// The `[permission.floors]` mask disarms one floor at a time and leaves
+    /// the others exactly as they were.
+    #[test]
+    fn floor_mask_disarms_one_floor_at_a_time() {
+        // Every floor that can fire, with the environment left safe so the
+        // precedence walk visits write -> opaque_shell -> exec in order.
+        let evaluation = BashEvaluation {
+            segments: SegmentEvaluation::Unparseable,
+            writes_real_file: true,
+            env_risk: EnvRisk::Safe,
+            exact_grant: false,
+            all_segments_granted: false,
+            has_opaque_shell: true,
+            exec_risk: true,
+            ambient_segments: None,
+        };
+        assert_eq!(
+            bash_floor_kind(Some(&evaluation)),
+            Some(BashFloorKind::Write)
+        );
+        crate::permission::set_floor_enabled(BashFloorKind::Write, false);
+        assert_eq!(
+            bash_floor_kind(Some(&evaluation)),
+            Some(BashFloorKind::OpaqueShell)
+        );
+        crate::permission::set_floor_enabled(BashFloorKind::OpaqueShell, false);
+        assert_eq!(
+            bash_floor_kind(Some(&evaluation)),
+            Some(BashFloorKind::Exec)
+        );
+        crate::permission::set_floor_enabled(BashFloorKind::Exec, false);
+        assert_eq!(bash_floor_kind(Some(&evaluation)), None);
+        // Restore the shipped default so a sibling test is unaffected.
+        for kind in [
+            BashFloorKind::Write,
+            BashFloorKind::UnsafeEnv,
+            BashFloorKind::OpaqueShell,
+            BashFloorKind::Exec,
+        ] {
+            crate::permission::set_floor_enabled(kind, true);
+        }
+    }
+
     #[tokio::test]
     async fn production_exact_grant_and_yolo_bypass_exec_floor() {
         let local = tokio::task::LocalSet::new();
@@ -7028,6 +7314,134 @@ mod tests {
         };
         let granted = evaluate_bash(cmd, &granted_state, true);
         assert!(!bash_opaque_shell_floor_requires_prompt(Some(&granted)));
+    }
+
+    // ── Floor counters + exec-floor policy knob ──
+
+    /// Evaluation with only the flags a floor test needs set.
+    fn floor_eval(exec_risk: bool, env_risk: EnvRisk, exact_grant: bool) -> BashEvaluation {
+        BashEvaluation {
+            segments: SegmentEvaluation::Unparseable,
+            writes_real_file: false,
+            env_risk,
+            exact_grant,
+            all_segments_granted: false,
+            has_opaque_shell: false,
+            exec_risk,
+            ambient_segments: None,
+        }
+    }
+
+    #[test]
+    fn floor_counters_tally_by_kind() {
+        let counters = BashFloorCounters::default();
+        assert_eq!(counters.snapshot(), BashFloorPromptCounts::default());
+
+        counters.record(BashFloorKind::Exec);
+        counters.record(BashFloorKind::Exec);
+        let counts = counters.record(BashFloorKind::Write);
+
+        assert_eq!(counts.exec, 2);
+        assert_eq!(counts.write, 1);
+        assert_eq!(counts.unsafe_env, 0);
+        assert_eq!(counts.opaque_shell, 0);
+        assert_eq!(counts.total(), 3);
+        assert_eq!(counts.get(BashFloorKind::Exec), 2);
+        assert_eq!(counts.get(BashFloorKind::UnsafeEnv), 0);
+    }
+
+    #[test]
+    fn floor_kind_follows_request_floor_precedence() {
+        // Holding the lock pins the exec-floor knob to its default for this test.
+        let _env = crate::LockedTestEnv::lock();
+        let state = PermissionState::default();
+
+        let exec_only = evaluate_bash("echo git $(true)", &state, true);
+        assert!(exec_only.exec_risk && !exec_only.writes_real_file);
+        assert_eq!(bash_floor_kind(Some(&exec_only)), Some(BashFloorKind::Exec));
+
+        let opaque = evaluate_bash("bash -c 'GIT_CONFIG_COUNT=1 git status'", &state, true);
+        assert_eq!(
+            bash_floor_kind(Some(&opaque)),
+            Some(BashFloorKind::OpaqueShell)
+        );
+
+        let unsafe_env = evaluate_bash(UNSAFE_GIT_STATUS, &state, true);
+        assert_eq!(
+            bash_floor_kind(Some(&unsafe_env)),
+            Some(BashFloorKind::UnsafeEnv)
+        );
+
+        assert_eq!(bash_floor_kind(None), None);
+        assert_eq!(
+            bash_floor_kind(Some(&floor_eval(false, EnvRisk::Safe, false))),
+            None
+        );
+    }
+
+    #[test]
+    fn exec_floor_defaults_on_and_is_disarmed_by_env() {
+        // Exec risk alone: the floor is the only thing prompting.
+        let exec_only = floor_eval(true, EnvRisk::Safe, false);
+
+        {
+            let _armed = crate::LockedTestEnv::lock();
+            assert!(bash_exec_floor_enabled());
+            assert_eq!(bash_floor_kind(Some(&exec_only)), Some(BashFloorKind::Exec));
+            assert!(bash_request_floor_requires_prompt(Some(&exec_only)));
+        }
+
+        {
+            let _off = crate::LockedTestEnv::lock().set(BASH_EXEC_FLOOR_ENV, Path::new("0"));
+            assert!(!bash_exec_floor_enabled());
+            assert!(!bash_exec_floor_requires_prompt(Some(&exec_only)));
+            assert!(!bash_request_floor_requires_prompt(Some(&exec_only)));
+            assert_eq!(bash_floor_kind(Some(&exec_only)), None);
+        }
+    }
+
+    #[test]
+    fn disarming_the_exec_floor_hands_an_unvetted_env_to_the_classifier() {
+        // Exec risk on top of an unvetted environment: the env floor still
+        // prompts either way, but disarming lets the classifier decide first.
+        let unvetted = floor_eval(true, EnvRisk::Unvetted, false);
+
+        {
+            let _armed = crate::LockedTestEnv::lock();
+            assert!(bash_request_floor_requires_prompt(Some(&unvetted)));
+            assert!(!bash_request_floor_defers_to_classifier(Some(&unvetted)));
+        }
+
+        {
+            let _off = crate::LockedTestEnv::lock().set(BASH_EXEC_FLOOR_ENV, Path::new("0"));
+            assert!(bash_request_floor_requires_prompt(Some(&unvetted)));
+            assert_eq!(
+                bash_floor_kind(Some(&unvetted)),
+                Some(BashFloorKind::UnsafeEnv)
+            );
+            assert!(bash_request_floor_defers_to_classifier(Some(&unvetted)));
+        }
+    }
+
+    #[test]
+    fn exec_floor_knob_accepts_off_words_and_an_exact_grant_still_wins() {
+        let evaluation = floor_eval(true, EnvRisk::Safe, false);
+        for value in ["0", "false", "NO", "off", " off "] {
+            let _off = crate::LockedTestEnv::lock().set(BASH_EXEC_FLOOR_ENV, Path::new(value));
+            assert!(
+                !bash_exec_floor_requires_prompt(Some(&evaluation)),
+                "{value}"
+            );
+        }
+
+        let _on = crate::LockedTestEnv::lock().set(BASH_EXEC_FLOOR_ENV, Path::new("1"));
+        assert!(bash_exec_floor_requires_prompt(Some(&evaluation)));
+        // An exact grant outranks the floor whether it is armed or not.
+        assert!(!bash_exec_floor_requires_prompt(Some(&floor_eval(
+            true,
+            EnvRisk::Safe,
+            true
+        ))));
     }
 
     #[test]

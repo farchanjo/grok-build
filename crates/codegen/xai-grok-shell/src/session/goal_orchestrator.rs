@@ -212,6 +212,7 @@ pub(crate) fn build_goal_updated(
         // Suppress the counter on the wire when no classifier run has
         // happened yet — mirrors the `total_worker_rounds`-style
         // convention used elsewhere for "no activity" counters.
+        skeptic_votes: o.last_skeptic_votes.clone(),
         classifier_runs_attempted: (o.classifier_runs_attempted > 0)
             .then_some(o.classifier_runs_attempted),
         classifier_max_runs: o.classifier_max_runs,
@@ -256,6 +257,7 @@ pub(crate) fn build_goal_cleared() -> XaiSessionUpdate {
         last_event_timestamp: None,
         deliverables: Vec::new(),
         pause_message: None,
+        skeptic_votes: Vec::new(),
         classifier_runs_attempted: None,
         classifier_max_runs: None,
         last_classifier_verdict: None,

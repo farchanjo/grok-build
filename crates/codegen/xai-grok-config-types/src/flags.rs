@@ -151,7 +151,7 @@ pub struct LazinessDetectorPerModelConfig {
     #[serde(default)]
     pub idle_threshold_ms: Option<u64>,
     /// Minimum classifier confidence required to inject a nudge. `None`
-    /// defers to the harness default (0.7).
+    /// defers to the harness default (0.5 — measured operating point).
     #[serde(default)]
     pub min_confidence: Option<f32>,
     /// When `Some(true)` (or `None` — the default), the classifier sees
