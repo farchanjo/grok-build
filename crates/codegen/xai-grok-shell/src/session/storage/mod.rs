@@ -286,15 +286,46 @@ pub(crate) mod chat_rebuild {
             if let Some(info) = checkpoint_info(&update) {
                 // The durable marker is authoritative. Replace everything rebuilt
                 // before it with the exact compacted model view, then continue
-                // reducing updates appended after the marker.
-                let checkpoint = load_committed_checkpoint(dir, info)?;
-                reducer.reset_for_checkpoint(checkpoint.compacted_history.len());
-                writer.seek(std::io::SeekFrom::Start(0))?;
-                writer.get_mut().set_len(0)?;
-                for item in checkpoint.compacted_history {
-                    serde_json::to_writer(&mut writer, &item)
-                        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
-                    writer.write_all(b"\n")?;
+                // reducing updates appended after the marker. A marker whose
+                // checkpoint file is unreadable (a legacy path shape, a file
+                // removed underneath us) must not fail the whole load: keep the
+                // history rebuilt so far and keep reducing. The strict variant
+                // stays available where the caller needs it (`replay_to_prompt`).
+                match load_committed_checkpoint(dir, info) {
+                    Ok(checkpoint) => {
+                        reducer.reset_for_checkpoint(checkpoint.compacted_history.len());
+                        writer.seek(std::io::SeekFrom::Start(0))?;
+                        writer.get_mut().set_len(0)?;
+                        for item in checkpoint.compacted_history {
+                            serde_json::to_writer(&mut writer, &item)
+                                .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+                            writer.write_all(b"\n")?;
+                        }
+                    }
+                    Err(error) => {
+                        // Distinguish corruption from legacy shape. A marker
+                        // whose path walks out of the session directory is a
+                        // containment problem and must reject; a path that
+                        // stays inside but is not the canonical
+                        // `compaction_checkpoints/<id>.json` is merely legacy
+                        // and the rebuilt history is kept instead.
+                        let escapes = std::path::Path::new(&info.checkpoint_file)
+                            .components()
+                            .any(|component| {
+                                matches!(
+                                    component,
+                                    std::path::Component::ParentDir
+                                        | std::path::Component::RootDir
+                                )
+                            });
+                        if escapes {
+                            return Err(error);
+                        }
+                        tracing::warn!(
+                            %error,
+                            "committed checkpoint is unreadable; keeping the rebuilt history"
+                        );
+                    }
                 }
                 continue;
             }

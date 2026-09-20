@@ -167,7 +167,19 @@ impl JsonlStorageAdapter {
                     (marker.checkpoint_id == pending.checkpoint_id).then_some(*marker)
                 });
             if let Some(marker) = committed_marker {
-                super::load_validated_compaction_checkpoint(&self.session_dir(info), &marker)?;
+                // The committed marker alone proves the compaction finished. A
+                // marker whose `checkpoint_file` is not canonical (a legacy
+                // path) must not fail the whole load: it only means the
+                // checkpoint body cannot be re-read here.
+                if let Err(error) =
+                    super::load_validated_compaction_checkpoint(&self.session_dir(info), &marker)
+                {
+                    tracing::warn!(
+                        checkpoint_id = %pending.checkpoint_id,
+                        %error,
+                        "committed compaction marker has no loadable checkpoint file"
+                    );
+                }
                 tracing::warn!(
                     checkpoint_id = %pending.checkpoint_id,
                     "clearing pending compaction recovery marker after committed checkpoint"
@@ -894,11 +906,13 @@ impl JsonlStorageAdapter {
         };
         let mut entries: Vec<_> = std::fs::read_dir(&workflows_dir)?
             .filter_map(Result::ok)
-            .take(MAX_RESTORED_WORKFLOW_RUNS.saturating_add(1))
             .collect();
-        let entries_truncated = entries.len() > MAX_RESTORED_WORKFLOW_RUNS;
-        entries.truncate(MAX_RESTORED_WORKFLOW_RUNS);
+        // Sort before capping: `read_dir` order is arbitrary, so taking the cap
+        // first would make *which* runs survive depend on the filesystem.
         entries.sort_by_key(|entry| entry.file_name());
+        // Do not truncate here: a rejected entry (symlink, cleared, invalid
+        // manifest) must not consume a slot. The loop stops at the cap.
+        let entries_truncated = entries.len() > MAX_RESTORED_WORKFLOW_RUNS;
         if entries_truncated {
             tracing::warn!(
                 path = %workflows_dir.display(),
@@ -908,6 +922,9 @@ impl JsonlStorageAdapter {
         }
         let mut restored = Vec::new();
         for entry in entries {
+            if restored.len() >= MAX_RESTORED_WORKFLOW_RUNS {
+                break;
+            }
             let run_dir = entry.path();
             let Ok(run_meta) = std::fs::symlink_metadata(&run_dir) else {
                 continue;
