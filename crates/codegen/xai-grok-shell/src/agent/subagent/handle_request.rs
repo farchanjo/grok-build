@@ -1010,6 +1010,25 @@ pub(crate) async fn handle_assigned_subagent_request(
             return;
         }
     }
+    // Stop asking for effort: with neither the call nor the agent definition
+    // declaring one, the child runs at the ladder's default instead of the
+    // parent deciding. Gated on the resolved model accepting the token — an
+    // `Unsupported` model rejects every token and an `Exact` menu without
+    // `medium` rejects that one, and either would fail the spawn. A resume
+    // keeps its source's effort, which the task call cannot override anyway.
+    if effective_runtime.reasoning_effort.is_none()
+        && resume_source.is_none()
+        && ctx
+            .models_manager
+            .validate_reasoning_effort_for_model(
+                effective_model_id.0.as_ref(),
+                xai_grok_agent::config::Effort::DEFAULT_SUBAGENT,
+            )
+            .is_ok()
+    {
+        effective_runtime.reasoning_effort =
+            Some(xai_grok_agent::config::Effort::DEFAULT_SUBAGENT.to_string());
+    }
     if let Some(raw) = effective_runtime.reasoning_effort.as_deref() {
         match ctx
             .models_manager

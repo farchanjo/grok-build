@@ -13,7 +13,7 @@ use serde_json::{Value, json};
 
 use xai_grok_shell::inference::{
     ApiBackend, Client, ConversationItem, ConversationRequest, ConversationToolChoice,
-    InferenceError, ToolCall, ToolSpec, rs,
+    InferenceError, ProviderIdentity, ToolCall, ToolSpec, rs,
 };
 use xai_grok_shell::session::storage::JsonlStorageAdapter;
 use xai_grok_test_support::sse::responses_api_reasoning_and_text_events;
@@ -1079,7 +1079,12 @@ async fn test_stream_error_during_responses_streaming() {
 async fn test_request_includes_headers() {
     let server = MockInferenceServer::start().await.unwrap();
     server.set_response("OK");
-    let client = create_test_client(&server.url(), ApiBackend::ChatCompletions);
+    // `x-grok-conv-id`/`x-grok-req-id` are first-party headers: the adapter only
+    // emits them for the xAI identity (`ProviderIdentity::is_first_party`), and
+    // the shared mock config defaults to a custom identity.
+    let mut config = test_inference_config(&server.url(), ApiBackend::ChatCompletions, &[]);
+    config.provider_identity = ProviderIdentity::Xai;
+    let client = Client::new(config).unwrap();
 
     let request = ConversationRequest::from_items(vec![ConversationItem::user("Hello")])
         .with_conv_id("conv-12345")

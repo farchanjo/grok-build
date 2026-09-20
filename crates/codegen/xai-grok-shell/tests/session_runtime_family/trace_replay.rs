@@ -173,7 +173,9 @@ fn check_assistant_turn(fixture_name: &str, turn: AssistantTurn) {
 
     let collected = collected_from(todo_state_after_turn, backing_task_count);
     let input = collected.as_input();
-    let decision = evaluate_todo_gate(&input);
+    // Offline replay: no decision call, so insertion order under the shipped
+    // item cap.
+    let decision = evaluate_todo_gate(&input, None, 3);
 
     match (expected_gate_decision, decision) {
         (ExpectedGateDecision::Continue, TodoGateDecision::Continue) => {

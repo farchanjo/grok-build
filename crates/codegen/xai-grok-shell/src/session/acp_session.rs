@@ -1465,6 +1465,18 @@ impl SessionActor {
             },
         )
     }
+    /// Names of the agent types this session can spawn right now, from the
+    /// same capture lane the prime recommender and the Task tool use. Used by
+    /// the workflow `validate_only` smoke check to resolve `agent_type`
+    /// literals before a run starts.
+    pub(crate) fn callable_agent_type_names(&self) -> Vec<String> {
+        self.session_callable_agent_authority(None)
+            .agents
+            .iter()
+            .map(|agent| agent.name.clone())
+            .collect()
+    }
+
     /// Get the signals handle for tracking session events.
     fn signals_handle(&self) -> SessionSignalsHandle {
         self.feedback_manager.signals_handle()

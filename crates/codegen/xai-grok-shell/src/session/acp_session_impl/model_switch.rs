@@ -294,7 +294,8 @@ impl SessionActor {
         {
             let bridge = self.agent.borrow().tool_bridge().clone();
             let snapshot = self.tool_metadata_snapshot.clone();
-            let tool_index = crate::session::tool_index::Bm25ToolSearchIndex::new(snapshot);
+            let tool_index =
+                crate::session::tool_index::Bm25ToolSearchIndex::with_service_dense(snapshot);
             bridge
                 .update_resource(xai_grok_tools::types::tool_index::ToolIndex(
                     std::sync::Arc::new(tool_index),
@@ -336,6 +337,9 @@ impl SessionActor {
             }
             self.inject_deny_read_globs().await;
         }
+        // The rebuilt toolset starts from the bare description, so re-apply the
+        // workflow catalog (see `refresh_workflow_tool_catalog`).
+        self.refresh_workflow_tool_catalog();
         {
             let notified = self.mcp_handshakes_done.notified();
             tokio::pin!(notified);

@@ -84,13 +84,26 @@ impl TodoGateReason {
 /// Exposed as `pub` solely so the replay-trace integration test in
 /// `tests/session_runtime_family/trace_replay.rs` can call the gate directly. Not part of the
 /// public API.
+///
+/// `picked` is the pending item a decision call chose to advance next (see
+/// [`SessionActor::pick_todo_gate_item`]); it is rendered first and falls back
+/// to insertion order when absent. `max_items_named` bounds the dump.
 #[doc(hidden)]
-pub fn evaluate_todo_gate(input: &TodoGateInput<'_>) -> TodoGateDecision {
+pub fn evaluate_todo_gate(
+    input: &TodoGateInput<'_>,
+    picked: Option<&str>,
+    max_items_named: u32,
+) -> TodoGateDecision {
     if input.pending.is_empty() && input.in_progress_unbacked.is_empty() {
         return TodoGateDecision::Continue;
     }
     TodoGateDecision::Nudge {
-        reminder: build_todo_gate_reminder(&input.pending, &input.in_progress_unbacked),
+        reminder: build_todo_gate_reminder(
+            &input.pending,
+            &input.in_progress_unbacked,
+            picked,
+            max_items_named,
+        ),
         reason: TodoGateReason::InFlight,
     }
 }
@@ -100,27 +113,53 @@ pub fn evaluate_todo_gate(input: &TodoGateInput<'_>) -> TodoGateDecision {
 /// caller's `format!` pass leaves a single `${{ tools.by_kind.* }}`
 /// for `TemplateRenderer` / `render_prompt` to resolve into the
 /// model-facing tool name.
-pub(super) fn build_todo_gate_reminder(pending: &[&str], unbacked_in_progress: &[&str]) -> String {
+pub(super) fn build_todo_gate_reminder(
+    pending: &[&str],
+    unbacked_in_progress: &[&str],
+    picked: Option<&str>,
+    max_items_named: u32,
+) -> String {
     use std::fmt::Write as _;
+    let cap = (max_items_named.max(1)) as usize;
     let mut buf =
         String::from("You have outstanding todos but ended your turn without a tool call.\n\n");
     if !unbacked_in_progress.is_empty() {
         buf.push_str("In-progress (no backing background task):\n");
-        for c in unbacked_in_progress {
+        for c in unbacked_in_progress.iter().take(cap) {
             let _ = writeln!(buf, "- {c}");
+        }
+        if let Some(more) = unbacked_in_progress.len().checked_sub(cap)
+            && more > 0
+        {
+            let _ = writeln!(buf, "… and {more} more in-progress");
         }
         buf.push('\n');
     }
     if !pending.is_empty() {
         buf.push_str("Pending:\n");
-        for c in pending {
+        // The picked item leads, so "the first pending todo" below is the
+        // decision's answer without repeating its text.
+        let ordered = pick_first(pending, picked);
+        for c in ordered.iter().take(cap) {
             let _ = writeln!(buf, "- {c}");
+        }
+        if let Some(more) = ordered.len().checked_sub(cap)
+            && more > 0
+        {
+            let _ = writeln!(buf, "… and {more} more pending");
         }
         buf.push('\n');
     }
+    // A decision pick leads the list, so the target is the first line rather
+    // than insertion order's "next".
+    let target = if picked.is_some() {
+        "advance the first pending todo listed above"
+    } else {
+        "advance the next pending todo"
+    };
     let _ = write!(
         buf,
-        "Per <task_completion_discipline>, advance the next pending todo \
+        "Per <task_completion_discipline>, {target} \
          with the appropriate tool call NOW. If you have a genuine external \
          blocker (missing credential, denied permission, network unreachable), \
          state it explicitly AND mark the affected todos `cancelled` via \
@@ -128,6 +167,63 @@ pub(super) fn build_todo_gate_reminder(pending: &[&str], unbacked_in_progress: &
     );
     buf
 }
+/// Build the `(state, questions)` pair for the gate's pick.
+///
+/// The instruction is the measured pair verbatim (`script-test/sim_todo_gate.py`:
+/// one choice picks the actionable item 15/18 = 83% against 11/18 = 61% for
+/// insertion order, +4 gains and 0 losses). Options are keyed `item_N` (not the
+/// item text) so the answer maps back by index and a long list stays inside the
+/// question budget; each text is capped and the candidate list is bounded — the
+/// one deviation from the harness, which keyed options by item text.
+pub(super) fn todo_gate_pick_request(pending: &[&str]) -> (serde_json::Value, serde_json::Value) {
+    let mut criteria = serde_json::Map::new();
+    let mut items = Vec::new();
+    for (index, item) in pending
+        .iter()
+        .take(TODO_GATE_PICK_MAX_CANDIDATES)
+        .enumerate()
+    {
+        let id = format!("item_{}", index + 1);
+        let text = xai_grok_tools::util::truncate_str(item, TODO_GATE_PICK_ITEM_CHARS);
+        criteria.insert(id.clone(), serde_json::Value::String(text.to_string()));
+        items.push(serde_json::json!({ "id": id, "text": text }));
+    }
+    let state = serde_json::json!({ "outstanding_todos": items });
+    let questions = serde_json::json!({
+        "next": {
+            "type": "choice",
+            "instructions": "The agent ended its turn with pending todos and no backing \
+                task. Which single pending item should it advance next? Prefer one it \
+                can act on now; skip items blocked on a credential, on another item, or \
+                on a decision that has not been made. Pick the item the agent can start \
+                right now with the tools it has. If an earlier item is blocked, a later \
+                one is the answer.",
+            "criteria": criteria,
+        }
+    });
+    (state, questions)
+}
+
+/// Reorder `pending` so `picked` (when present and actually pending) leads.
+/// Duplicates keep their first position; an unknown `picked` is ignored.
+fn pick_first<'a>(pending: &[&'a str], picked: Option<&str>) -> Vec<&'a str> {
+    let Some(picked) = picked else {
+        return pending.to_vec();
+    };
+    let Some(pos) = pending.iter().position(|item| *item == picked) else {
+        return pending.to_vec();
+    };
+    let mut ordered = Vec::with_capacity(pending.len());
+    ordered.push(pending[pos]);
+    ordered.extend(
+        pending
+            .iter()
+            .enumerate()
+            .filter_map(|(i, item)| (i != pos).then_some(*item)),
+    );
+    ordered
+}
+
 /// Resolve the runtime `ReminderPolicy` from the resolved inputs.
 ///
 /// Precedence: CLI `--todo-gate` > remote `/settings` > built-in default
@@ -146,6 +242,12 @@ pub(crate) fn resolve_reminder_policy(
         }
         if let Some(cap) = remote.todo_gate_max_fires_per_prompt {
             policy.todo_gate.max_fires_per_prompt = cap;
+        }
+        if let Some(max_items) = remote.todo_gate_max_items_named {
+            policy.todo_gate.max_items_named = max_items.max(1);
+        }
+        if let Some(pick) = remote.todo_gate_pick_with_decision {
+            policy.todo_gate.pick_with_decision = pick;
         }
     }
     if todo_gate {
@@ -178,6 +280,14 @@ pub(crate) fn date_rollover_reminder(
 /// Wrapped in grok's `<system-reminder>` shape by [`SessionActor::push_system_reminder`].
 /// See [`SessionActor::maybe_inject_interrupt_reminder`].
 pub(crate) const INTERRUPT_REMINDER: &str = "[Request interrupted by user]";
+/// Wall-clock ceiling for the TodoGate's pick call. The gate runs at turn end,
+/// so it must not inherit the full compaction budget (8s) on every long list;
+/// the measured call is ~300 ms.
+const TODO_GATE_PICK_TIMEOUT_MS: u64 = 2_000;
+/// Most pending items offered to the pick, and the per-item character cap.
+/// Beyond these the question would be as long as the dump it replaces.
+const TODO_GATE_PICK_MAX_CANDIDATES: usize = 24;
+const TODO_GATE_PICK_ITEM_CHARS: usize = 160;
 const WORKFLOW_RESULT_SUMMARY_REMINDER_CAP: usize = 4 * 1024;
 const WORKFLOW_OBJECTIVE_REMINDER_CAP: usize = 256;
 fn workflow_completion_detail(detail: &str) -> std::borrow::Cow<'_, str> {
@@ -465,6 +575,29 @@ fn format_workflow_completion_reminder(
     }
     buf
 }
+/// TodoGate config with the `[todo_gate]` rows overlaid.
+///
+/// The rows are the surface the gate never had — the CLI flag was the only
+/// switch — so they win over the in-memory policy. Each falls back to the
+/// policy value, which is what keeps a build with no `[todo_gate]` table
+/// byte-identical to today.
+fn todo_gate_config(
+    base: xai_grok_agent::system_reminder::TodoGateConfig,
+) -> xai_grok_agent::system_reminder::TodoGateConfig {
+    use crate::session::control::{bool_at, int_at};
+    xai_grok_agent::system_reminder::TodoGateConfig {
+        enabled: bool_at("todo_gate.enabled", base.enabled),
+        max_fires_per_prompt: int_at(
+            "todo_gate.max_fires_per_prompt",
+            i64::from(base.max_fires_per_prompt),
+        )
+        .clamp(1, u32::MAX as i64) as u32,
+        max_items_named: int_at("todo_gate.max_items_named", i64::from(base.max_items_named))
+            .clamp(1, u32::MAX as i64) as u32,
+        pick_with_decision: bool_at("todo_gate.pick_with_decision", base.pick_with_decision),
+    }
+}
+
 /// TodoGate when enabled and the prompt carries `<task_completion_discipline>`
 /// (`{DISCIPLINE_BLOCK}`), but NOT while the goal loop is active — the
 /// continuation directive drives the loop there (see the body).
@@ -774,8 +907,54 @@ impl SessionActor {
         if !active {
             return None;
         }
-        Some(policy.todo_gate)
+        Some(todo_gate_config(policy.todo_gate))
     }
+    /// One decision call choosing which pending item the gate should name
+    /// next, or `None` for insertion order.
+    ///
+    /// Asked only for a list longer than `TodoGateConfig::PICK_THRESHOLD`
+    /// (below it the dump is already cheap and insertion order is as good as
+    /// anything). Every failure path — no credential, timeout, malformed
+    /// answer, unknown label — falls back to insertion order, never to
+    /// "name nothing".
+    pub(super) async fn pick_todo_gate_item(&self, pending: &[&str]) -> Option<String> {
+        use xai_grok_agent::system_reminder::TodoGateConfig;
+        if pending.len() <= TodoGateConfig::PICK_THRESHOLD {
+            return None;
+        }
+        let mut cfg = self.compaction.jev.borrow().clone();
+        cfg.timeout_ms = cfg.timeout_ms.min(TODO_GATE_PICK_TIMEOUT_MS);
+        let client = match crate::session::helpers::jev_prune::JevClient::new(
+            &cfg,
+            &xai_grok_config::grok_home(),
+            Some(&self.session_info.id.0),
+        ) {
+            Ok(client) => client,
+            Err(error) => {
+                tracing::debug!(%error, "todo gate pick unavailable; using insertion order");
+                return None;
+            }
+        };
+
+        let (state, questions) = todo_gate_pick_request(pending);
+        let answers = match client.ask(&state, &questions).await {
+            Ok(answers) => answers,
+            Err(error) => {
+                tracing::debug!(%error, "todo gate pick failed; using insertion order");
+                return None;
+            }
+        };
+        let label = answers.get("next")?.get("choice")?.as_str()?;
+        let index = label
+            .strip_prefix("item_")?
+            .parse::<usize>()
+            .ok()?
+            .checked_sub(1)?;
+        let picked = pending.get(index)?;
+        tracing::debug!(item = %picked, "todo gate decision picked the next item");
+        Some((*picked).to_string())
+    }
+
     /// Gather the inputs needed by `evaluate_todo_gate` from live session
     /// state.
     ///

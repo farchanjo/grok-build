@@ -1361,6 +1361,7 @@ impl SessionActor {
                 match crate::session::helpers::jev_prune::JevClient::new(
                     &jev_cfg,
                     &xai_grok_config::grok_home(),
+                    Some(&self.session_info.id.0),
                 ) {
                     Ok(client) => {
                         match crate::session::helpers::jev_prune::decide(

@@ -937,14 +937,37 @@ impl SessionActor {
                     let mut tracker = self.goal_tracker.lock();
                     tracker.account_elapsed();
                     match tracker.snapshot() {
-                        Some(goal) => format!(
-                            "Goal: {}\nStatus: {:?} | Phase: {:?}\nGoal tokens used: {}\nElapsed: {}",
-                            goal.objective,
-                            goal.status,
-                            goal.phase,
-                            goal_tokens,
-                            crate::session::goal_orchestrator::format_elapsed(goal.elapsed_ms),
-                        ),
+                        Some(goal) => {
+                            let mut text = format!(
+                                "Goal: {}\nStatus: {:?} | Phase: {:?}\nGoal tokens used: {}\nElapsed: {}",
+                                goal.objective,
+                                goal.status,
+                                goal.phase,
+                                goal_tokens,
+                                crate::session::goal_orchestrator::format_elapsed(goal.elapsed_ms),
+                            );
+                            // Which skeptic refuted, and on what: a refuted
+                            // goal re-runs the agent, and without this the
+                            // verdict arrived with no attribution.
+                            if !goal.last_skeptic_votes.is_empty() {
+                                text.push_str("\nLast verification panel:");
+                                for vote in &goal.last_skeptic_votes {
+                                    let verdict = if vote.refuted { "refuted" } else { "passed" };
+                                    text.push_str(&format!(
+                                        "\n- skeptic {} {verdict} ({})",
+                                        vote.skeptic_idx, vote.confidence
+                                    ));
+                                    if !vote.evidence.is_empty() {
+                                        text.push_str(&format!(" — {}", vote.evidence));
+                                    }
+                                }
+                                text.push_str(
+                                    "\n(skeptic 0 is the gatekeeper: its pass does not count \
+                                     toward approval, it can only veto.)",
+                                );
+                            }
+                            text
+                        }
                         None => "No goal is currently set. Use /goal <objective> to start one."
                             .to_string(),
                     }

@@ -4,7 +4,7 @@ use crate::bundle;
 use serde::Deserialize;
 pub use xai_grok_config_types::{
     DEFAULT_RECENCY_DECAY, MemoryDreamConfig, MemoryEmbeddingConfig, MemoryFlushConfig,
-    MemoryGcConfig, MemoryIndexConfig, MemoryInitialInjectionConfig, MemoryMode,
+    MemoryGateConfig, MemoryGcConfig, MemoryIndexConfig, MemoryInitialInjectionConfig, MemoryMode,
     MemorySearchConfig, MemorySessionConfig, MemoryWatcherConfig, MmrConfig, PruningConfig,
     TemporalDecayConfig,
 };
@@ -46,6 +46,8 @@ pub struct MemoryConfig {
     pub gc: MemoryGcConfig,
     /// autoDream consolidation settings.
     pub dream: MemoryDreamConfig,
+    /// Write-gate settings for the append seam (`[memory.gate]`).
+    pub gate: MemoryGateConfig,
     /// Optional named retrieval profile for memory search/index (PR15).
     ///
     /// Additive: when set, references `[retrieval_profiles.<id>]`. Legacy

@@ -974,10 +974,11 @@ impl SessionActor {
                     {
                         // PR18 rendered block, used literally (already single-pass
                         // escaped). Auto/empty/degraded omit the reminder.
-                        prime_skill_reminder =
-                            Some(xai_grok_inference_types::ConversationItem::system_reminder(
+                        prime_skill_reminder = Some(
+                            xai_grok_inference_types::ConversationItem::skill_prime_reminder(
                                 rendered.text,
-                            ));
+                            ),
+                        );
                         skill_injected_chars = rendered.chars as u64;
                         skill_injected_tokens = rendered.tokens_est as u64;
                     }
@@ -1825,11 +1826,43 @@ impl SessionActor {
                 PrimeAccounting::Record(outcome) => Some(outcome),
                 PrimeAccounting::Unchanged => None,
             };
+            // Prime is invisible otherwise: the reminder only lives in
+            // `items`, and its `<system-reminder>` framing is suppressed on the
+            // way back. One marker line records what was sent, which is what
+            // makes the request-build strip honest. Always persisted and always
+            // emitted — nothing else renders it, so the user echo mode does not
+            // apply.
+            let prime_marker = finalized_prime_outcome
+                .as_ref()
+                .filter(|outcome| !outcome.primed_skill_names.is_empty())
+                .map(|outcome| {
+                    crate::session::prime::prime_marker_text(
+                        &outcome.primed_skill_names,
+                        outcome.injected_tokens,
+                    )
+                });
             let mut items: Vec<ConversationItem> = prime_reminder.into_iter().collect();
             for item in &mut items {
                 item.set_prompt_index(current_prompt_index);
             }
             items.push(user_chat);
+            if let Some(marker) = prime_marker {
+                let update = acp::SessionUpdate::UserMessageChunk(
+                    acp::ContentChunk::new(acp::ContentBlock::Text(acp::TextContent::new(marker)))
+                        .meta(crate::session::prime::prime_marker_meta()),
+                );
+                let notification_meta = self.build_notification_meta();
+                let notification =
+                    acp::SessionNotification::new(self.session_info.id.clone(), update)
+                        .meta(notification_meta.as_object().cloned());
+                let _ = self
+                    .notifications
+                    .persistence_tx
+                    .send(PersistenceMsg::Update(
+                        crate::session::storage::SessionUpdate::Acp(Box::new(notification.clone())),
+                    ));
+                self.emit_notification_direct(notification).await;
+            }
             for block in &prompt_blocks {
                 let update = acp::SessionUpdate::UserMessageChunk(
                     acp::ContentChunk::new(block.clone()).meta(user_chunk_meta.clone()),
@@ -3645,7 +3678,19 @@ write the answer as ordinary text.",
                 {
                     let collected = self.collect_todo_gate_input(req_id).await;
                     let input = collected.as_input();
-                    if let TodoGateDecision::Nudge { reminder, reason } = evaluate_todo_gate(&input)
+                    // One decision call, and only for a list longer than the
+                    // pick threshold and only when this fire is not already
+                    // over the cap; every failure falls back to insertion
+                    // order inside the helper.
+                    let picked = if gate_cfg.pick_with_decision
+                        && todo_gate_fires < gate_cfg.max_fires_per_prompt
+                    {
+                        self.pick_todo_gate_item(&input.pending).await
+                    } else {
+                        None
+                    };
+                    if let TodoGateDecision::Nudge { reminder, reason } =
+                        evaluate_todo_gate(&input, picked.as_deref(), gate_cfg.max_items_named)
                     {
                         if todo_gate_fires < gate_cfg.max_fires_per_prompt {
                             todo_gate_fires += 1;
@@ -3657,6 +3702,7 @@ write the answer as ordinary text.",
                                 backing_task_count = input.backing_task_count,
                                 todo_gate_fires,
                                 reason = reason.as_str(),
+                                picked = picked.as_deref().unwrap_or(""),
                                 "turn-end TodoGate: nudging model to advance remaining todos"
                             );
                             self.events

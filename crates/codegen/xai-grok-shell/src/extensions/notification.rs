@@ -946,6 +946,13 @@ pub enum SessionUpdate {
         /// also gates rendering on `is_paused()` as a defence in depth.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         pause_message: Option<String>,
+        /// Per-skeptic votes from the most recent verification panel, in
+        /// index order (empty before the first panel). Skeptic `0` is the
+        /// resumed reject-gatekeeper: its *not-refuted* vote does not count
+        /// toward approval, it can only veto. Rendered by the pager's status
+        /// surface; the free-text reasoning stays in the details file.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        skeptic_votes: Vec<crate::session::goal_tracker::SkepticVote>,
         /// Number of times the goal-achievement classifier has run for
         /// this goal. `None` when no classifier run has occurred yet
         /// (matches the `total_worker_rounds`-style convention of
@@ -2330,6 +2337,7 @@ mod tests {
             finished_subagent_tokens: 0,
             deliverables: vec![],
             pause_message: None,
+            skeptic_votes: Vec::new(),
             classifier_runs_attempted: Some(2),
             classifier_max_runs: Some(3),
             last_classifier_verdict: Some(GoalClassifierVerdict::NotAchieved),
@@ -2368,6 +2376,7 @@ mod tests {
             finished_subagent_tokens: 0,
             deliverables: vec![],
             pause_message: None,
+            skeptic_votes: Vec::new(),
             classifier_runs_attempted: None,
             classifier_max_runs: None,
             last_classifier_verdict: None,

@@ -45,6 +45,11 @@ pub fn bootstrap(
     let t_config_resolve = Instant::now();
     let cfg = resolve_config(cfg, auth_manager);
     cfg.validate_model_filters()?;
+    // Phase-4 control rows, parsed once from the resolved table so the
+    // permission floors (read per bash decision) never touch the disk.
+    if let Ok(root) = crate::config::load_effective_config() {
+        crate::session::control::install(&root);
+    }
     log_phase("startup.shell.config_resolve", &t_config_resolve);
     let t_init_process = Instant::now();
     init_process(&cfg, auth_manager);

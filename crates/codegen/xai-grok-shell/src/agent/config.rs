@@ -1153,13 +1153,23 @@ impl std::error::Error for CompactionConfigError {}
 /// ```toml
 /// [compaction.jev]
 /// enabled = false
-/// model = "~typesafe/jev-latest"
+/// transport = "openrouter"
 /// ```
+///
+/// `transport` moves the endpoint, the model string, the `provider` block and
+/// the credential chain **together**; the individual overrides below stay for
+/// the unusual case only.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct JevPruneConfig {
     /// Master switch. `false` (default) makes zero Jev requests.
     pub enabled: bool,
+    /// Which wire the decisions call rides. Default `openrouter` — today's
+    /// behaviour. Native and OpenRouter are not interchangeable field by
+    /// field: the native endpoint with the `~typesafe/` prefix 404s, and the
+    /// OpenRouter endpoint with a bare `jev-latest` fails model resolution.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub transport: Option<crate::session::helpers::jev_prune::JevTransport>,
     /// Jev model reference. A plain string: the decisions endpoint is not a
     /// chat/completions surface, so the model is not a catalog entry.
     #[serde(skip_serializing_if = "Option::is_none")]
