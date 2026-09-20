@@ -72,6 +72,8 @@ pub(crate) struct WorkflowManager {
     telemetry: TelemetryHook,
     session_cmd_tx: mpsc::UnboundedSender<crate::session::commands::SessionCommand>,
     templates: HashMap<String, String>,
+    /// Resolved Jev policy handed to every run's host service (`decide()`).
+    jev: Option<crate::session::helpers::jev_prune::ResolvedJevPrune>,
     active: HashMap<String, ActiveRun>,
     retiring: Vec<(String, oneshot::Receiver<()>)>,
 }
@@ -95,6 +97,7 @@ impl WorkflowManager {
         telemetry: TelemetryHook,
         session_cmd_tx: mpsc::UnboundedSender<crate::session::commands::SessionCommand>,
         templates: HashMap<String, String>,
+        jev: Option<crate::session::helpers::jev_prune::ResolvedJevPrune>,
     ) -> Self {
         Self {
             session_id,
@@ -111,6 +114,7 @@ impl WorkflowManager {
             telemetry,
             session_cmd_tx,
             templates,
+            jev,
             active: HashMap::new(),
             retiring: Vec::new(),
         }
@@ -275,6 +279,7 @@ impl WorkflowManager {
                 templates: self.templates.clone(),
                 telemetry: self.telemetry.clone(),
                 cancel: cancel.clone(),
+                jev: self.jev.clone(),
             },
             host_rx,
         );
@@ -440,6 +445,7 @@ impl WorkflowManager {
             Arc::new(|_, _, _| {}),
             mpsc::unbounded_channel().0,
             std::collections::HashMap::new(),
+            None,
         )));
         (manager, tracker)
     }
@@ -752,6 +758,7 @@ mod tests {
             Arc::new(|_, _, _| {}),
             mpsc::unbounded_channel().0,
             HashMap::new(),
+            None,
         );
         (manager, event_rx, cancels)
     }
@@ -1356,9 +1363,27 @@ mod tests {
                 .into(),
         )
         .unwrap();
-        let (_run_id, _outcome_rx) = manager.launch(resolved, spec()).unwrap();
-        let SubagentEvent::Spawn(req) = subagent_rx.recv().await.expect("spawn") else {
-            panic!("expected spawn");
+        let (run_id, outcome_rx) = manager.launch(resolved, spec()).unwrap();
+        // A failing run fails fast: the executor reports through `outcome_rx`
+        // while this test would otherwise wait on `subagent_rx` until the
+        // 300 s nextest timeout. Bound the wait and surface the outcome.
+        let ev = match tokio::time::timeout(std::time::Duration::from_secs(5), subagent_rx.recv())
+            .await
+        {
+            Ok(ev) => ev,
+            Err(_) => {
+                let status = manager
+                    .tracker
+                    .lock()
+                    .get(&run_id)
+                    .map(|s| s.status.as_str().to_string());
+                let outcome =
+                    tokio::time::timeout(std::time::Duration::from_secs(2), outcome_rx).await;
+                panic!("no subagent spawn within 5s: status={status:?} outcome={outcome:?}");
+            }
+        };
+        let Some(SubagentEvent::Spawn(req)) = ev else {
+            panic!("expected a spawn event");
         };
         assert_eq!(req.runtime_overrides.output_token_budget, None);
         let _ = req.result_tx.send(SubagentResult {

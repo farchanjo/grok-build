@@ -270,12 +270,22 @@ impl Default for ModelsManager {
     fn default() -> Self {
         let grok_home = crate::util::grok_home::grok_home();
         let auth_manager = Arc::new(AuthManager::new(&grok_home, GrokComConfig::default()));
+        let cfg = config::Config::default();
+        // The selection id must exist in the catalog this manager carries:
+        // consumers resolve `current_model_id()` against it, so an empty
+        // catalog made every workflow and assigned spawn fail as "not
+        // uniquely resolvable: default (no catalog match)".
+        const DEFAULT_MODEL_ID: &str = "default";
+        let models = IndexMap::from([(
+            DEFAULT_MODEL_ID.to_owned(),
+            ModelEntry::fallback(DEFAULT_MODEL_ID, &cfg.endpoints),
+        )]);
         Self::new(
             None,
-            IndexMap::new(),
-            acp::ModelId::new("default"),
+            models,
+            acp::ModelId::new(DEFAULT_MODEL_ID),
             auth_manager,
-            config::Config::default(),
+            cfg,
         )
     }
 }
@@ -684,13 +694,61 @@ impl ModelsManager {
     /// model identified by `model_id`. Returns the default (disabled)
     /// config when the id isn't in the catalog — same fallback
     /// semantics as the `auto_compact_threshold_percent` lookup.
+    /// Effective laziness policy for one model.
+    ///
+    /// The per-model `[models.<id>.laziness_detector]` block wins where it is
+    /// set; the global `[laziness]` rows are the default underneath, so one
+    /// flip can turn the detector on for every model without editing each one.
+    /// A per-model block is all-or-nothing (it is a whole struct), so the
+    /// overlay only fills the fields it leaves at their disabled default.
     pub fn laziness_detector_for(&self, model_id: &str) -> config::LazinessDetectorPerModelConfig {
-        self.inner
+        let mut policy = self
+            .inner
             .models
             .read()
             .get(model_id)
             .map(|e| e.info().laziness_detector.clone())
-            .unwrap_or_default()
+            .unwrap_or_default();
+        self.apply_laziness_defaults(&mut policy);
+        policy
+    }
+
+    /// Overlay the global `[laziness]` rows under a per-model policy.
+    fn apply_laziness_defaults(&self, policy: &mut config::LazinessDetectorPerModelConfig) {
+        use crate::session::control::{bool_at, int_at};
+        if policy == &config::LazinessDetectorPerModelConfig::default() {
+            // No per-model block: the global rows are the whole policy.
+            policy.enabled = bool_at("laziness.enabled", policy.enabled);
+            policy.max_nudges_per_session = int_at(
+                "laziness.max_nudges_per_session",
+                i64::from(policy.max_nudges_per_session),
+            ) as u32;
+            policy.idle_threshold_ms = Some(int_at(
+                "laziness.idle_threshold_ms",
+                policy.idle_threshold_ms.unwrap_or(10_000) as i64,
+            ) as u64);
+            policy.min_confidence = Some(
+                int_at(
+                    "laziness.min_confidence",
+                    f32_to_percent(policy.min_confidence.unwrap_or(0.5)),
+                ) as f32
+                    / 100.0,
+            );
+            return;
+        }
+        // A per-model block exists: only fill the knobs it left unset.
+        if policy.idle_threshold_ms.is_none() {
+            policy.idle_threshold_ms = Some(int_at("laziness.idle_threshold_ms", 10_000) as u64);
+        }
+        if policy.min_confidence.is_none() {
+            policy.min_confidence = Some(int_at("laziness.min_confidence", 50) as f32 / 100.0);
+        }
+        if policy.max_nudges_per_session == 0 {
+            policy.max_nudges_per_session = int_at("laziness.max_nudges_per_session", 0) as u32;
+        }
+        if !policy.enabled {
+            policy.enabled = bool_at("laziness.enabled", false);
+        }
     }
 
     /// Test-only catalog poke: inserts a `ModelEntry` keyed by `id`,
@@ -2794,6 +2852,11 @@ fn read_models_cache_at(
         status: "valid",
         models: Some(cache.models),
     }
+}
+
+/// Percent rendering of a `0.0..=1.0` confidence, for the integer config row.
+fn f32_to_percent(value: f32) -> i64 {
+    (f64::from(value.clamp(0.0, 1.0)) * 100.0).round() as i64
 }
 
 #[cfg(test)]

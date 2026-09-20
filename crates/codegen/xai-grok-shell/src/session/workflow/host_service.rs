@@ -12,6 +12,7 @@ use xai_workflow::{
 
 use crate::agent::subagent::assigned_spawn::TrustedAssignedSpawnSender;
 use crate::agent::subagent::exact_route::ExactRoute;
+use crate::session::helpers::jev_prune::{JevClient, ResolvedJevPrune};
 
 use super::notify::WorkflowNotifySender;
 use super::schema_contract::{
@@ -31,6 +32,12 @@ const WORKFLOW_MAX_PHASE_BYTES: usize = 256;
 const WORKFLOW_MAX_LOG_BYTES: usize = 4 * 1024;
 const WORKFLOW_CHILD_DRAIN_TIMEOUT: Duration = Duration::from_secs(20);
 const WORKFLOW_MAX_SCRATCH_NAME_BYTES: usize = 255;
+/// Cap on one `decide()` state payload. A decisions call is a per-call cost
+/// and the state is resent verbatim, so an unbounded one would quietly turn
+/// into a large request.
+const WORKFLOW_MAX_DECIDE_STATE_BYTES: usize = 256 * 1024;
+/// Cap on the whole `decide()` questions object (it rides the same request).
+const WORKFLOW_MAX_DECIDE_QUESTIONS_BYTES: usize = 256 * 1024;
 const SCRATCH_ARTIFACT_ROOT: &str = "scratch";
 
 pub(crate) type TelemetryHook = Arc<dyn Fn(&str, &serde_json::Value, bool) + Send + Sync>;
@@ -54,6 +61,10 @@ pub(crate) struct WorkflowHostParams {
     pub templates: std::collections::HashMap<String, String>,
     pub telemetry: TelemetryHook,
     pub cancel: CancellationToken,
+    /// Resolved Jev policy (`[compaction.jev]`). Its `enabled` flag gates the
+    /// compaction prune only; `decide()` uses the endpoint/model/credential
+    /// and is available whenever a credential resolves.
+    pub jev: Option<ResolvedJevPrune>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -76,6 +87,7 @@ pub(crate) fn spawn_workflow_host_service(
             agent_runs: AtomicU32::new(0),
             script_telemetry_events: AtomicU32::new(0),
             scratch_io: tokio::sync::Mutex::new(()),
+            jev_client: std::sync::OnceLock::new(),
             params,
         });
         loop {
@@ -121,6 +133,10 @@ fn reply_cancelled(message: WorkflowHostMessage) {
         | R::GitDiffSince { reply, .. } => {
             let _ = reply.send(Err(HostError::Cancelled));
         }
+        // `Decide` answers a JSON value, so it cannot share the arm above.
+        R::Decide { reply, .. } => {
+            let _ = reply.send(Err(HostError::Cancelled));
+        }
         R::Phase { .. } | R::Log { .. } | R::Telemetry { .. } => {}
     }
 }
@@ -130,6 +146,9 @@ struct HostService {
     agent_runs: AtomicU32,
     script_telemetry_events: AtomicU32,
     scratch_io: tokio::sync::Mutex<()>,
+    /// Built once per host service (one run). `Err` keeps the reason for the
+    /// log line; every `decide()` after the first reuses the same verdict.
+    jev_client: std::sync::OnceLock<Result<JevClient, String>>,
     params: WorkflowHostParams,
 }
 
@@ -236,6 +255,16 @@ impl HostService {
                 tokio::spawn(async move {
                     let result = svc.spawn_agent(opts).await;
                     let _ = reply.send(result);
+                });
+            }
+            WorkflowHostRequest::Decide {
+                state,
+                questions,
+                reply,
+            } => {
+                let svc = self.clone();
+                tokio::spawn(async move {
+                    let _ = reply.send(svc.decide(state, questions).await);
                 });
             }
             WorkflowHostRequest::Phase { title, replayed } => {
@@ -346,6 +375,56 @@ impl HostService {
         self.params.tracker.lock().elapsed_ms(&self.params.run_id)
     }
 
+    /// One decisions call: `state` + `questions` in, the `answers` object out.
+    ///
+    /// Cancellation wins the race: `pause()` and `cancel()` both cancel the
+    /// run token, so a paused run must not keep a request in flight. A failure
+    /// is a plain error the script can catch, never a silent empty answer.
+    async fn decide(
+        &self,
+        state: serde_json::Value,
+        questions: serde_json::Value,
+    ) -> Result<serde_json::Value, HostError> {
+        if state.to_string().len() > WORKFLOW_MAX_DECIDE_STATE_BYTES {
+            return Err(HostError::Failed(format!(
+                "decide() state exceeds {WORKFLOW_MAX_DECIDE_STATE_BYTES} bytes"
+            )));
+        }
+        if questions.to_string().len() > WORKFLOW_MAX_DECIDE_QUESTIONS_BYTES {
+            return Err(HostError::Failed(format!(
+                "decide() questions exceed {WORKFLOW_MAX_DECIDE_QUESTIONS_BYTES} bytes"
+            )));
+        }
+        let Some(cfg) = self.params.jev.clone() else {
+            return Err(HostError::Unsupported(
+                "decide() is unavailable: no Jev policy is resolved".into(),
+            ));
+        };
+        let client = self.jev_client(&cfg)?;
+        tokio::select! {
+            answers = client.ask(&state, &questions) => answers
+                .map_err(|error| HostError::Failed(format!("decide() failed: {error}"))),
+            _ = self.params.cancel.cancelled() => Err(HostError::Cancelled),
+        }
+    }
+
+    /// The run's single Jev client. Built once; a missing credential is kept
+    /// as a reason so every later `decide()` reports the same thing.
+    fn jev_client(&self, cfg: &ResolvedJevPrune) -> Result<&JevClient, HostError> {
+        self.jev_client
+            .get_or_init(|| {
+                let home = self
+                    .params
+                    .grok_home
+                    .clone()
+                    .unwrap_or_else(xai_grok_config::grok_home);
+                JevClient::new(cfg, &home, Some(&self.params.parent_session_id))
+                    .map_err(|error| error.to_string())
+            })
+            .as_ref()
+            .map_err(|reason| HostError::Unsupported(format!("decide() is unavailable: {reason}")))
+    }
+
     async fn spawn_agent_assigned(
         &self,
         opts: AgentOpts,
@@ -357,13 +436,26 @@ impl HostService {
             .unwrap_or_else(|| self.params.models_manager.current_model_id().0.to_string());
         let identities = self.params.models_manager.models();
         let identity =
-            crate::agent::model_identity::resolve_model_identity(&identities, &requested)
-                .resolved()
-                .ok_or_else(|| {
-                    HostError::Failed(format!(
-                        "workflow model is not uniquely resolvable: {requested}"
-                    ))
-                })?;
+            match crate::agent::model_identity::resolve_model_identity(&identities, &requested) {
+                crate::agent::model_identity::ModelIdentityResolution::Resolved(identity) => {
+                    identity
+                }
+                crate::agent::model_identity::ModelIdentityResolution::Ambiguous {
+                    candidates,
+                    ..
+                } => {
+                    let names: Vec<&str> = candidates.iter().map(|c| c.as_str()).collect();
+                    return Err(HostError::Failed(format!(
+                        "workflow model is not uniquely resolvable: {requested} (candidates: {})",
+                        names.join(", ")
+                    )));
+                }
+                crate::agent::model_identity::ModelIdentityResolution::Missing { .. } => {
+                    return Err(HostError::Failed(format!(
+                        "workflow model is not uniquely resolvable: {requested} (no catalog match)"
+                    )));
+                }
+            };
         let route = crate::session::route_context::resolve_for_models_manager_with_selection(
             &self.params.inference_config,
             &self.params.models_manager,
@@ -507,6 +599,7 @@ impl HostService {
                         model_override_provenance: ModelOverrideProvenance::Tool,
                         capability_mode,
                         isolation,
+                        skills_hint: xai_tool_types::sanitize_string_list(opts.skills_hint.clone()),
                         output_schema: None,
                         ..Default::default()
                     },
@@ -551,15 +644,20 @@ impl HostService {
             );
 
             let send_result = match assigned.as_ref() {
-                Some((assignment_seq, route)) => self
-                    .params
-                    .assigned_spawn_sender
-                    .as_ref()
-                    .ok_or_else(|| {
-                        HostError::Failed("assigned spawn capability unavailable".into())
-                    })?
-                    .send_workflow(*assignment_seq, Box::new(request), route.clone())
-                    .map_err(|error| error.to_string()),
+                // Production sessions always carry the ACP-minted capability
+                // (the coordinator hands one to every host it builds). A host
+                // built without a coordinator keeps the legacy event path
+                // instead of failing the whole run.
+                Some((assignment_seq, route)) => match self.params.assigned_spawn_sender.as_ref() {
+                    Some(sender) => sender
+                        .send_workflow(*assignment_seq, Box::new(request), route.clone())
+                        .map_err(|error| error.to_string()),
+                    None => self
+                        .params
+                        .subagent_event_tx
+                        .send(SubagentEvent::Spawn(Box::new(request)))
+                        .map_err(|_| "subagent coordinator channel closed".to_string()),
+                },
                 None => self
                     .params
                     .subagent_event_tx
@@ -990,6 +1088,7 @@ mod tests {
             templates: Default::default(),
             telemetry: Arc::new(|_, _, _| {}),
             cancel: cancel.clone(),
+            jev: None,
         };
 
         let (host_tx, host_rx) = mpsc::unbounded_channel();
@@ -1068,6 +1167,7 @@ mod tests {
             templates: Default::default(),
             telemetry: Arc::new(|_, _, _| {}),
             cancel: cancel.clone(),
+            jev: None,
         };
 
         let (host_tx, host_rx) = mpsc::unbounded_channel();

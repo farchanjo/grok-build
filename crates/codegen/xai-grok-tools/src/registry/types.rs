@@ -372,11 +372,26 @@ fn resolve_asset_store_blocking(
 ) -> Result<xai_file_utils::assets::SharedAssetStore, xai_file_utils::assets::AssetError> {
     let future = xai_file_utils::assets::resolve_asset_store(settings, context);
     match tokio::runtime::Handle::try_current() {
-        Ok(handle) if handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread => {
+        Ok(handle)
+            if handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread
+                && block_in_place_is_legal() =>
+        {
             tokio::task::block_in_place(|| handle.block_on(future))
         }
         _ => futures::executor::block_on(future),
     }
+}
+
+/// Whether `block_in_place` may run on this thread right now.
+///
+/// The runtime flavor is not enough: a `LocalSet` driven on a multi-thread
+/// runtime reports `MultiThread` while tokio still marks the context as
+/// non-blockable, and `block_in_place` panics with "can call blocking only
+/// when running on the multi-threaded runtime". Tokio exposes no predicate for
+/// that context, so probe it once — the probe runs before the real call and
+/// never touches the future, so a panic cannot lose it.
+fn block_in_place_is_legal() -> bool {
+    std::panic::catch_unwind(|| tokio::task::block_in_place(|| {})).is_ok()
 }
 /// Default metadata for dynamically registered tools (e.g., MCP tools)
 /// that don't implement `ToolMetadata`.
@@ -1440,6 +1455,24 @@ impl FinalizedToolset {
     pub async fn get_resource_cloned<T: Clone + Send + Sync + 'static>(&self) -> Option<T> {
         self.resources.lock().await.get::<T>().cloned()
     }
+    /// Replace a registered tool's advertised description in place.
+    ///
+    /// Session-scoped catalogs (workflows discovered from disk, which are not
+    /// known when the toolset is finalized) use this instead of a per-session
+    /// toolset rebuild. Returns `false` for an unknown or filtered-out name.
+    pub fn set_tool_description(&self, name: &str, description: &str) -> bool {
+        let mut tools = self.tools.write();
+        let Some(tool) = tools.iter_mut().find(|t| t.client_name == name) else {
+            return false;
+        };
+        tool.definition.function.description = Some(description.to_owned());
+        tool.metadata = Arc::new(DefaultToolMetadata {
+            kind: tool.metadata.kind(),
+            description: description.to_owned(),
+        });
+        true
+    }
+
     /// Get only built-in tool definitions (exclude MCP tools).
     pub fn tool_definitions_builtins_only(&self) -> Vec<ToolDefinition> {
         self.tools
