@@ -1411,6 +1411,14 @@ pub(super) fn dispatch_dashboard_dispatch_slash(app: &mut AppView, text: String)
                     .jev
                     .as_ref()
                     .is_some_and(|jev| jev.enabled),
+                compaction_jev_transport: app
+                    .compaction_config
+                    .jev
+                    .as_ref()
+                    .and_then(|jev| jev.transport)
+                    .unwrap_or_default()
+                    .as_str()
+                    .to_owned(),
                 ..Default::default()
             },
         };

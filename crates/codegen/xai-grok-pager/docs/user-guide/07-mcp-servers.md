@@ -194,6 +194,15 @@ The model has access to two built-in tools for working with MCP servers:
 - `search_tool` — Discover available integration tools across all enabled MCP servers. Use this to find tools by name or description.
 - `use_tool` — Call an integration tool discovered via `search_tool`. Specify the fully-qualified tool name (e.g., `github__create_issue`).
 
+`search_tool` ranks lexically (BM25 over the tool names, descriptions and
+parameter names) and, when a retrieval profile with an embedding route is
+configured, also ranks semantically and fuses the two lists with weighted
+reciprocal-rank fusion. The semantic arm is what finds an English-described
+tool from a non-English request; the lexical arm keeps an exact
+qualified-name query instant, which is how `use_tool` is normally called.
+Document vectors are cached per toolset, so a repeat search embeds only the
+query, and any embedding failure falls back to the lexical ranking alone.
+
 ---
 
 ## Compatibility

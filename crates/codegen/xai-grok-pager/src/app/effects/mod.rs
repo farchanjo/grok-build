@@ -4042,20 +4042,14 @@ pub(crate) fn execute(
         Effect::SaveMemoryNote { agent_id, text, cwd } => {
             tasks
                 .spawn(async move {
-                    let result = tokio::task::spawn_blocking(move || {
-                            let storage = xai_grok_shell::session::memory::MemoryStorage::new(
-                                &cwd,
-                                None,
-                            );
-                            storage
-                                .append_to_memory(
-                                    xai_grok_shell::session::memory::MemoryScope::Global,
-                                    &text,
-                                )
-                        })
+                    // The write gate rules first: worth, coverage, then the
+                    // scope the note belongs to. With `[memory.gate]` absent,
+                    // with no credential, or on any Jev failure, `admit_note`
+                    // appends exactly where the historical path did.
+                    let result = xai_grok_shell::session::memory::gate::admit_note(&cwd, &text)
                         .await
-                        .map_err(|e| format!("task join error: {e}"))
-                        .and_then(|r| r.map_err(|e| format!("{e}")));
+                        .map(|_| ())
+                        .map_err(|e| format!("{e}"));
                     TaskResult::MemoryNoteSaved {
                         agent_id,
                         result,

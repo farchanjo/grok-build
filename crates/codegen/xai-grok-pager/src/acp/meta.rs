@@ -94,6 +94,9 @@ pub mod user_message_chunk_meta {
     /// When true, the chunk must not become a scrollback user prompt
     /// ([`xai_grok_shell::session::PromptOrigin::hide_user_echo_from_scrollback`]).
     pub const HIDE_FROM_SCROLLBACK: &str = "hideFromScrollback";
+    /// Prime marker line (`xai_grok_shell::session::prime::PRIME_MARKER_META`).
+    /// Rendered as its own block and exempt from every suppression path.
+    pub const PRIME_MARKER: &str = "primeMarker";
 }
 
 impl NotificationMeta {

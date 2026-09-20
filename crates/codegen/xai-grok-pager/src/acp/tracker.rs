@@ -1304,6 +1304,23 @@ impl AcpUpdateTracker {
                 scrollback.finish_running(entry_id);
             }
         }
+        // Prime marker: one line saying what prime injected. Handled before
+        // every suppression path — the chunk meta flag, the prompt-id
+        // classification, and the legacy `<system-reminder>` text prefix — so
+        // the marker renders once regardless of which path would have claimed
+        // it. The reminder itself stays hidden.
+        if chunk
+            .meta
+            .as_ref()
+            .and_then(|m| m.get(user_message_chunk_meta::PRIME_MARKER))
+            .and_then(|v| v.as_bool())
+            == Some(true)
+        {
+            scrollback.push_block(RenderBlock::UserPrompt(
+                crate::scrollback::blocks::UserPromptBlock::new(text),
+            ));
+            return true;
+        }
         if self.skip_next_user_echo {
             self.skip_next_user_echo = false;
             if text.contains("<command-name>") {
@@ -6716,6 +6733,51 @@ mod tests {
             "digit anchor: user text with both phrases but no leading count still renders"
         );
         assert_eq!(sb.len(), 3);
+    }
+
+    /// The prime marker must survive every suppression path: the meta flag, the
+    /// prompt-id classification, and the legacy `<system-reminder>` text prefix.
+    /// The reminder itself stays hidden.
+    #[test]
+    fn prime_marker_renders_through_every_suppression_path() {
+        let mut sb = ScrollbackState::new();
+        let mut tracker = AcpUpdateTracker::new();
+        let mut marker_meta = acp::Meta::new();
+        marker_meta.insert(
+            user_message_chunk_meta::PRIME_MARKER.into(),
+            serde_json::json!(true),
+        );
+
+        assert!(
+            tracker.handle_update(
+                user_message_with_chunk_meta(
+                    "<system-reminder>\u{25c6} primed: dns, bind9-dns (1.2k tokens)</system-reminder>",
+                    marker_meta,
+                ),
+                &meta_with_prompt_id("notifications-019e0000"),
+                &mut sb,
+            ),
+            "a prime marker renders even where both other paths would suppress"
+        );
+        assert_eq!(sb.len(), 1);
+        match &sb.get(0).unwrap().block {
+            RenderBlock::UserPrompt(block) => {
+                assert!(block.text.contains("primed: dns"), "{}", block.text);
+            }
+            other => panic!("expected UserPrompt, got {other:?}"),
+        }
+
+        assert!(
+            !tracker.handle_update(
+                user_message(
+                    "<system-reminder>\n<skill_prime>body</skill_prime>\n</system-reminder>"
+                ),
+                &meta(),
+                &mut sb,
+            ),
+            "the reminder itself stays hidden"
+        );
+        assert_eq!(sb.len(), 1);
     }
     /// Helper: UserMessageChunk with `skillTokenRanges` in content-block meta.
     fn user_message_with_token_ranges(text: &str, ranges: serde_json::Value) -> acp::SessionUpdate {

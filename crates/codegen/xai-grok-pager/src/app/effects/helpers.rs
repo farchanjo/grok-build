@@ -1359,6 +1359,34 @@ pub(crate) async fn persist_setting(
                 .await
                 .map_err(|e| e.to_string())
         }
+        "compaction_jev_transport" => {
+            let SettingValue::Enum(transport) = value else {
+                return Err(kind_mismatch("compaction_jev_transport", "Enum", &value));
+            };
+            xai_grok_shell::util::config::set_jev_transport(transport.to_string())
+                .await
+                .map_err(|e| e.to_string())
+        }
+        // Phase-4 control rows write their dotted config path directly.
+        key if xai_grok_shell::session::control::is_control(key) => {
+            let scalar = match value {
+                SettingValue::Bool(v) => {
+                    xai_grok_shell::util::config::ControlScalar::Bool(v)
+                }
+                SettingValue::Int(v) => {
+                    xai_grok_shell::util::config::ControlScalar::Int(v)
+                }
+                SettingValue::Enum(v) => {
+                    xai_grok_shell::util::config::ControlScalar::Str(v.to_string())
+                }
+                SettingValue::String(v) => {
+                    xai_grok_shell::util::config::ControlScalar::Str(v.clone())
+                }
+            };
+            xai_grok_shell::util::config::set_control(key, scalar)
+                .await
+                .map_err(|e| e.to_string())
+        }
         "media_routing" => {
             let SettingValue::Enum(s) = value else {
                 return Err(kind_mismatch("media_routing", "Enum", &value));

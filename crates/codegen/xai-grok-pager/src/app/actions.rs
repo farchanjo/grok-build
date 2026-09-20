@@ -660,6 +660,20 @@ pub enum Action {
     /// `Effect::PersistSetting`. Live-applied: the reload fan-out picks the
     /// new value up without a restart.
     SetCompactionJevEnabled(bool),
+    /// Write one Phase-4 control row by its dotted config path.
+    ///
+    /// One variant for the whole control table: the shell already declares
+    /// each row's path, type and default, so a new knob costs no action, no
+    /// setter and no persist arm. The typed `Set*` variants stay for the rows
+    /// that predate the table.
+    SetControl(&'static str, crate::settings::SettingValue),
+    /// Set the Jev transport (`native` | `openrouter`).
+    ///
+    /// SHELL-owned: persisted to `[compaction.jev].transport` via
+    /// `Effect::PersistSetting`. The transport moves the endpoint, the model
+    /// string, the `provider` block and the credential chain together, so this
+    /// is the only knob the user needs for the common case.
+    SetJevTransport(String),
     /// Set media routing (`auto` | `tools_only` | `off`).
     /// SHELL-owned: persisted to `[media].mode` via `Effect::PersistSetting`.
     SetMediaRouting(String),
