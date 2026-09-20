@@ -269,13 +269,44 @@ fn stamp_event_id_for(session_id: &acp::SessionId, meta: &mut Option<acp::Meta>)
 /// announced on the parent's bridge. The owner stamp routes the card to the
 /// creating session while it is alive; a dead owner falls back to this bridge.
 fn frame_session_for(owner: Option<&str>, config: &NotificationBridgeConfig) -> acp::SessionId {
-    match crate::session::delivery::route(owner, config.session_id.0.as_ref()) {
-        crate::session::delivery::Delivery::Routed(target) => {
-            acp::SessionId::new(target.session_id)
-        }
-        crate::session::delivery::Delivery::Local => config.session_id.clone(),
-    }
+    route_frame(owner, config).0
 }
+
+/// Resolve the owner of a frame once, for both its session id and its
+/// persistence channel.
+fn route_frame(
+    owner: Option<&str>,
+    config: &NotificationBridgeConfig,
+) -> (
+    acp::SessionId,
+    Option<crate::session::delivery::SessionDeliveryTarget>,
+) {
+    let routed = match crate::session::delivery::route(owner, config.session_id.0.as_ref()) {
+        crate::session::delivery::Delivery::Routed(target) => Some(target),
+        crate::session::delivery::Delivery::Local => None,
+    };
+    let frame_session_id = routed.as_ref().map_or_else(
+        || config.session_id.clone(),
+        |target| acp::SessionId::new(target.session_id.clone()),
+    );
+    (frame_session_id, routed)
+}
+
+/// Persistence channel a frame belongs to: the owner's when routed, this
+/// bridge's otherwise.
+///
+/// Without this a frame addressed to the owner was written to the holder's
+/// transcript — a foreign `sessionId` in the holder's file, and nothing in the
+/// owner's after it reloads.
+fn frame_persistence<'a>(
+    routed: &'a Option<crate::session::delivery::SessionDeliveryTarget>,
+    config: &'a NotificationBridgeConfig,
+) -> &'a tokio::sync::mpsc::UnboundedSender<PersistenceMsg> {
+    routed
+        .as_ref()
+        .map_or(&config.persistence.tx, |target| &target.persistence_tx)
+}
+
 fn stamp_scheduler_meta(
     session_id: &acp::SessionId,
     meta: &mut Option<acp::Meta>,
@@ -367,7 +398,7 @@ async fn handle_scheduled_task_removed(
 ) -> Result<(), String> {
     tracing::info!(task_id = %removed.task_id, "Scheduled task removed");
     let result: Result<Box<serde_json::value::RawValue>, String> = async {
-        let frame_session_id = frame_session_for(removed.owner_session_id.as_deref(), config);
+        let (frame_session_id, routed) = route_frame(removed.owner_session_id.as_deref(), config);
         let mut meta = None;
         stamp_scheduler_meta(
             &frame_session_id,
@@ -387,11 +418,11 @@ async fn handle_scheduled_task_removed(
             .map_err(|error| format!("failed to serialize scheduled task deletion: {error}"))?;
         let update = crate::session::storage::SessionUpdate::Xai(Box::new(notification));
         if acknowledgement.is_some() {
+            // The durable append targets this bridge's session file, which owns
+            // the scheduler state; the live write goes to the frame's owner.
             durable_append_landed(config.persistence.append_update_durably(update).await)?;
         } else {
-            config
-                .persistence
-                .tx
+            frame_persistence(&routed, config)
                 .send(PersistenceMsg::Update(update))
                 .map_err(|_| "session persistence stopped".to_owned())?;
         }
@@ -1149,7 +1180,8 @@ async fn handle_notification(
         }
         ToolNotification::ScheduledTaskCreated(created) => {
             tracing::info!(task_id = %created.task_id, "Scheduled task created");
-            let frame_session_id = frame_session_for(created.owner_session_id.as_deref(), config);
+            let (frame_session_id, routed) =
+                route_frame(created.owner_session_id.as_deref(), config);
             let mut meta = None;
             stamp_scheduler_meta(
                 &frame_session_id,
@@ -1167,7 +1199,7 @@ async fn handle_notification(
                 },
                 meta: meta.map(serde_json::Value::Object),
             };
-            let _ = config.persistence.tx.send(PersistenceMsg::Update(
+            let _ = frame_persistence(&routed, config).send(PersistenceMsg::Update(
                 crate::session::storage::SessionUpdate::Xai(Box::new(notification.clone())),
             ));
             if let Ok(params) = serde_json::to_value(&notification)
@@ -1590,6 +1622,53 @@ mod tests {
                 Ok(SessionCommand::InjectNotification { .. })
             ),
             "the bridge's own session must not also inject it"
+        );
+        crate::session::delivery::unregister("child-session");
+    }
+
+    /// A routed card is persisted to the *owner's* transcript, not the holder's:
+    /// the frame names the owner, and the owner is where it must survive a reload.
+    #[tokio::test]
+    async fn routed_card_persists_to_the_owner() {
+        let (config, mut gateway_rx, mut bridge_persistence_rx, _cmd_rx) = make_test_config_full();
+        let (owner_tx, _owner_rx) = mpsc::unbounded_channel();
+        let (owner_persistence_tx, mut owner_persistence_rx) = mpsc::unbounded_channel();
+        crate::session::delivery::register(crate::session::delivery::SessionDeliveryTarget {
+            session_id: "child-session".to_string(),
+            cmd_tx: owner_tx,
+            persistence_tx: owner_persistence_tx,
+            mcp_state: std::sync::Weak::new(),
+            push_stats: Arc::new(parking_lot::Mutex::new(Default::default())),
+            subscription_registry: Arc::new(parking_lot::Mutex::new(Default::default())),
+            task_completion_reservations: Default::default(),
+        });
+
+        let created = xai_grok_tools::notification::types::ScheduledTaskCreated {
+            task_id: "sched-persist".to_string(),
+            owner_session_id: Some("child-session".to_string()),
+            prompt: "watch ci".to_string(),
+            human_schedule: "every 5 minutes".to_string(),
+            next_fire_at: None,
+            generation: "gen-1".to_string(),
+            revision: 1,
+        };
+        let mut state = BridgeState::default();
+        handle_notification(
+            &config,
+            ToolNotification::ScheduledTaskCreated(created),
+            &mut state,
+        )
+        .await;
+
+        // Drain the gateway so the frame is definitely built.
+        while gateway_rx.try_recv().is_ok() {}
+        assert!(
+            owner_persistence_rx.try_recv().is_ok(),
+            "the owner's transcript must receive the card"
+        );
+        assert!(
+            bridge_persistence_rx.try_recv().is_err(),
+            "the holder's transcript must not receive a frame addressed to the owner"
         );
         crate::session::delivery::unregister("child-session");
     }
@@ -2520,24 +2599,41 @@ mod tests {
         })
     }
     #[tokio::test]
-    async fn cross_session_monitor_event_is_dropped() {
+    async fn cross_session_monitor_event_is_routed_to_its_owner() {
         let (config, mut gateway_rx, _persistence_rx, mut cmd_rx) = make_test_config_full();
+        // Routing requires a *registered* owner: an unknown owner is delivered
+        // locally on purpose, so a dead session cannot swallow its events.
+        let (owner_tx, mut owner_rx) = mpsc::unbounded_channel();
+        let (owner_persistence_tx, _owner_persistence_rx) = mpsc::unbounded_channel();
+        crate::session::delivery::register(crate::session::delivery::SessionDeliveryTarget {
+            session_id: "other-session".to_string(),
+            cmd_tx: owner_tx,
+            persistence_tx: owner_persistence_tx,
+            mcp_state: std::sync::Weak::new(),
+            push_stats: Arc::new(parking_lot::Mutex::new(HashMap::new())),
+            subscription_registry: Arc::new(parking_lot::Mutex::new(HashMap::new())),
+            task_completion_reservations: Default::default(),
+        });
         let notification = make_monitor_event_notification("mon-foreign", Some("other-session"));
-        let mut state = BridgeState::default();
         handle_notification(&config, notification, &mut BridgeState::default()).await;
         assert!(
             cmd_rx.try_recv().is_err(),
-            "cross-session monitor event must not be injected into this session"
+            "a foreign owner's event must not be injected into this session"
         );
-        while let Ok(msg) = gateway_rx.try_recv() {
-            if let xai_acp_lib::AcpClientMessage::ExtNotification(args) = msg {
-                assert_ne!(
-                    args.request.method.as_ref(),
-                    "x.ai/monitor_event",
-                    "cross-session monitor event must not be forwarded to the pager"
-                );
-            }
-        }
+        assert!(
+            matches!(
+                owner_rx.try_recv().expect("owner must receive the inject"),
+                SessionCommand::InjectNotification { .. }
+            ),
+            "the event must reach its owner"
+        );
+        // The pager still hears about it: the frame is addressed to the owner,
+        // so the transport holder forwards rather than swallows it.
+        assert!(matches!(
+            gateway_rx.try_recv(),
+            Ok(xai_acp_lib::AcpClientMessage::ExtNotification(_))
+        ));
+        crate::session::delivery::unregister("other-session");
     }
     #[tokio::test]
     async fn same_session_monitor_event_is_injected() {

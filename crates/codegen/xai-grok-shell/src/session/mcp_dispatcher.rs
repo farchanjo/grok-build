@@ -647,38 +647,49 @@ pub async fn drop_dead_clients(
     dead: &[DeadClient],
 ) -> Vec<McpServerName> {
     let mut stale = Vec::new();
+    let mut evicted = Vec::new();
     if dead.is_empty() {
         return stale;
     }
-    let mut state = mcp_state.lock().await;
-    for d in dead {
-        let Some(current) = state.owned_clients.get(&d.server) else {
-            // Nothing registered: nothing to evict, and the death
-            // status is still accurate — don't mark stale.
-            continue;
-        };
-        if d.closed.contains(&current.client_id()) {
-            // Keep the owners of the streams this client held: the replacement
-            // is built only after this eviction (see `pending_restore_owners`),
-            // so the re-subscribe sweep would otherwise stamp them all with the
-            // respawning session.
-            let owners = current.subscription_owners();
-            state.stash_subscription_owners(&d.server, owners);
-            state.owned_clients.remove(&d.server);
-            tracing::info!(
-                server = %d.server,
-                closed_ids = ?d.closed,
-                "mcp status dispatcher dropped dead client from owned_clients",
-            );
-        } else {
-            stale.push(d.server.clone());
-            tracing::info!(
-                server = %d.server,
-                closed_ids = ?d.closed,
-                current_client_id = current.client_id(),
-                "mcp status dispatcher: stale TransportClosed for a replaced client, keeping current client",
-            );
+    {
+        let mut state = mcp_state.lock().await;
+        for d in dead {
+            let Some(current) = state.owned_clients.get(&d.server) else {
+                // Nothing registered: nothing to evict, and the death
+                // status is still accurate — don't mark stale.
+                continue;
+            };
+            if d.closed.contains(&current.client_id()) {
+                // Keep the owners of the streams this client held: the
+                // replacement is built only after this eviction (see
+                // `pending_restore_owners`), so the re-subscribe sweep would
+                // otherwise stamp them all with the respawning session.
+                let owners = current.subscription_owners();
+                state.stash_subscription_owners(&d.server, owners);
+                state.owned_clients.remove(&d.server);
+                evicted.push(d.server.clone());
+                tracing::info!(
+                    server = %d.server,
+                    closed_ids = ?d.closed,
+                    "mcp status dispatcher dropped dead client from owned_clients",
+                );
+            } else {
+                stale.push(d.server.clone());
+                tracing::info!(
+                    server = %d.server,
+                    closed_ids = ?d.closed,
+                    current_client_id = current.client_id(),
+                    "mcp status dispatcher: stale TransportClosed for a replaced client, keeping current client",
+                );
+            }
         }
+    }
+    // Outside the lock: retraction walks every registered session's state,
+    // including this one. A session that imported the client must stop
+    // resolving it, exactly as the holder just did; if a restart follows, the
+    // replacement is broadcast back to them.
+    for server in &evicted {
+        crate::session::delivery::retract_shared_client(server).await;
     }
     stale
 }

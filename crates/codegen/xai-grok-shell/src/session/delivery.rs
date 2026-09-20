@@ -133,8 +133,10 @@ pub(crate) fn unregister_if_same(session_id: &str, cmd_tx: &UnboundedSender<Sess
 /// A respawn builds a new `McpClient` and installs it in the *respawning*
 /// session's `owned_clients`; sessions that imported the old one through
 /// `SharedMcpPool` keep the dead `Arc` and would run their next tool call on a
-/// closed transport. Only `shared_clients` entries are touched — the respawner
-/// already holds it as owned.
+/// closed transport. Owners are skipped (they already hold it as owned, and a
+/// `shared_clients` duplicate would register their tools twice); an importer
+/// whose entry was retracted gets it back, and a session that never imported
+/// the server is left alone.
 pub(crate) async fn broadcast_shared_client(server: &str, client: &Arc<McpClient>) {
     let registered: Vec<SessionDeliveryTarget> = targets().load().values().cloned().collect();
     for target in registered {
@@ -142,14 +144,48 @@ pub(crate) async fn broadcast_shared_client(server: &str, client: &Arc<McpClient
             continue;
         };
         let mut state = state.lock().await;
-        if state.shared_clients.contains_key(server) {
-            state
-                .shared_clients
-                .insert(server.to_string(), Arc::clone(client));
+        if state.owned_clients.contains_key(server) {
+            continue;
+        }
+        let held = state.shared_clients.contains_key(server);
+        let retracted = state.retracted_shared_clients.remove(server);
+        if !held && !retracted {
+            continue;
+        }
+        state
+            .shared_clients
+            .insert(server.to_string(), Arc::clone(client));
+        tracing::info!(
+            server,
+            session_id = %target.session_id,
+            reconnected = held,
+            "shared MCP client re-pointed at the fresh transport"
+        );
+    }
+}
+
+/// Tell every session that imported `server` that its client is gone.
+///
+/// The counterpart of [`broadcast_shared_client`] for the other half of the
+/// cycle: when the transport dies and nothing replaces it (auto-restart
+/// disabled, or all restart attempts exhausted), the importers must not keep
+/// resolving a client the holder already evicted — their tools would fail with
+/// a transport error instead of the "server gone" they get on the holder.
+/// Sessions that still hold the entry are marked, so a later respawn hands them
+/// the replacement.
+pub(crate) async fn retract_shared_client(server: &str) {
+    let registered: Vec<SessionDeliveryTarget> = targets().load().values().cloned().collect();
+    for target in registered {
+        let Some(state) = target.mcp_state.upgrade() else {
+            continue;
+        };
+        let mut state = state.lock().await;
+        if state.shared_clients.remove(server).is_some() {
+            state.retracted_shared_clients.insert(server.to_string());
             tracing::info!(
                 server,
                 session_id = %target.session_id,
-                "shared MCP client re-pointed at the fresh transport"
+                "shared MCP client retracted: the holder evicted the transport"
             );
         }
     }
@@ -357,6 +393,60 @@ mod tests {
         );
 
         for id in ["importer", "holder", "bystander"] {
+            unregister(id);
+        }
+    }
+
+    /// A retracted client comes back on the next broadcast, and owners are never
+    /// given a `shared_clients` duplicate.
+    #[tokio::test]
+    async fn retract_then_broadcast_round_trips_for_importers_only() {
+        let importer_state = Arc::new(tokio::sync::Mutex::new(
+            crate::session::mcp_servers::McpState::new(vec![]),
+        ));
+        let holder_state = Arc::new(tokio::sync::Mutex::new(
+            crate::session::mcp_servers::McpState::new(vec![]),
+        ));
+        let dead = Arc::new(crate::session::mcp_servers::McpClient::stub("srv"));
+        importer_state
+            .lock()
+            .await
+            .shared_clients
+            .insert("srv".to_string(), Arc::clone(&dead));
+        holder_state
+            .lock()
+            .await
+            .owned_clients
+            .insert("srv".to_string(), Arc::clone(&dead));
+
+        for (id, state) in [("importer", &importer_state), ("holder", &holder_state)] {
+            let (mut t, _rx) = target(id);
+            t.mcp_state = Arc::downgrade(state);
+            register(t);
+        }
+
+        retract_shared_client("srv").await;
+        assert!(
+            importer_state.lock().await.shared_clients.is_empty(),
+            "an importer must stop resolving the evicted client"
+        );
+        assert!(
+            holder_state.lock().await.owned_clients.contains_key("srv"),
+            "retraction only touches importers"
+        );
+
+        let fresh = Arc::new(crate::session::mcp_servers::McpClient::stub("srv"));
+        broadcast_shared_client("srv", &fresh).await;
+        assert!(
+            Arc::ptr_eq(&importer_state.lock().await.shared_clients["srv"], &fresh),
+            "the importer gets the replacement after a retraction"
+        );
+        assert!(
+            !holder_state.lock().await.shared_clients.contains_key("srv"),
+            "the holder keeps it owned, with no duplicate registration"
+        );
+
+        for id in ["importer", "holder"] {
             unregister(id);
         }
     }

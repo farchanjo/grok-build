@@ -386,6 +386,13 @@ pub struct McpState {
     /// every URI with the respawning session, migrating a subagent's streams to
     /// the parent on every reconnect.
     pub pending_restore_owners: HashMap<McpServerName, HashMap<String, String>>,
+    /// Servers whose `shared_clients` entry was removed because the holder
+    /// evicted the transport.
+    ///
+    /// Tells a later respawn which sessions should get the replacement back:
+    /// only the ones that had imported it, not every session that lacks an
+    /// owned entry.
+    pub retracted_shared_clients: std::collections::HashSet<McpServerName>,
     event_writer: xai_file_utils::events::EventWriter,
     /// Sender wired by the session actor to its `StatusDispatcher`
     /// task.  When `Some`, the state — and every [`McpClient`] reached
@@ -463,6 +470,7 @@ impl McpState {
             disabled_tools: HashMap::new(),
             disabled_tool_registrations: HashMap::new(),
             pending_restore_owners: HashMap::new(),
+            retracted_shared_clients: std::collections::HashSet::new(),
             event_writer: xai_file_utils::events::EventWriter::noop(),
             client_event_tx: None,
             owner_session_id: None,
@@ -4570,6 +4578,13 @@ fn drain_mcp_stderr_to_log(server_name: &str, mut stderr: tokio::process::ChildS
     });
 }
 
+/// Expand `{{session_id}}` / `${session_id}` in configured MCP headers.
+///
+/// When no session is available the header is **dropped** — an empty value
+/// would be worse, since a server reads a present-but-blank header as a
+/// deliberate value. That drop is the only silent branch in the session-id
+/// carrier set, so it is logged: without the line, the same server behaves
+/// differently under two sessions with nothing to explain why.
 fn expand_session_id_headers(
     headers: Vec<acp::HttpHeader>,
     session_id: Option<&str>,
@@ -4584,6 +4599,11 @@ fn expand_session_id_headers(
                     .replace("${session_id}", session_id);
                 Some((header.name, expanded))
             } else if contains_session_placeholder(&value) {
+                tracing::debug!(
+                    header = %header.name,
+                    value = %value,
+                    "MCP header dropped: no session available to expand {{session_id}}",
+                );
                 None
             } else {
                 Some((header.name, value))
@@ -5023,6 +5043,39 @@ impl ClientHandler for GrokClientHandler {
 mod tests {
     use super::*;
     use std::path::PathBuf;
+
+    fn header(name: &str, value: &str) -> acp::HttpHeader {
+        acp::HttpHeader::new(name, value)
+    }
+
+    /// With a session, both placeholder spellings expand in place.
+    #[test]
+    fn session_placeholder_expands_when_a_session_exists() {
+        let headers = vec![
+            header("x-a", "{{session_id}}"),
+            header("x-b", "pre-${session_id}-post"),
+            header("x-c", "static"),
+        ];
+        assert_eq!(
+            expand_session_id_headers(headers, Some("s1")),
+            vec![
+                ("x-a".to_owned(), "s1".to_owned()),
+                ("x-b".to_owned(), "pre-s1-post".to_owned()),
+                ("x-c".to_owned(), "static".to_owned()),
+            ]
+        );
+    }
+
+    /// Without a session the placeholder header is dropped and a static one
+    /// survives — the branch this test pins is the one that used to be silent.
+    #[test]
+    fn session_placeholder_header_is_dropped_without_a_session() {
+        let headers = vec![header("x-a", "{{session_id}}"), header("x-b", "static")];
+        assert_eq!(
+            expand_session_id_headers(headers, None),
+            vec![("x-b".to_owned(), "static".to_owned())]
+        );
+    }
 
     /// A single undecodable line on an MCP stdio server's stdout must NOT
     /// collapse the transport: if the decode error surfaced as `None`, the
