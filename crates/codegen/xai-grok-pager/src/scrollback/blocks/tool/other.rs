@@ -244,12 +244,38 @@ impl BlockContent for OtherToolCallBlock {
         }
 
         match ctx.mode {
-            DisplayMode::Collapsed => BlockOutput {
-                lines: vec![
-                    self.collapsed_line(&theme, muted_collapsed, Some(ctx.content_width()))
-                        .into(),
-                ],
-            },
+            DisplayMode::Collapsed => {
+                let width = ctx.content_width();
+                // A failed row must state WHY without an expand: a tool that never
+                // produced output (a rejected `monitor`) collapses to this single
+                // line, and the reason otherwise lives only in `error`/`output`.
+                // The title yields a third of the width so a long label cannot
+                // hide the reason entirely.
+                let reason = self
+                    .error
+                    .as_deref()
+                    .map(|e| e.split('\n').next().unwrap_or(e).trim())
+                    .filter(|e| !e.is_empty());
+                let reason_budget = reason.map_or(0, |_| (width / 3).clamp(16, 60));
+                let mut line = self.collapsed_line(
+                    &theme,
+                    muted_collapsed,
+                    Some(width.saturating_sub(reason_budget)),
+                );
+                if let Some(reason) = reason {
+                    let text = crate::render::line_utils::truncate_str(
+                        reason,
+                        reason_budget.saturating_sub(2),
+                    );
+                    line.spans.push(Span::styled(
+                        format!("  {text}"),
+                        ratatui::style::Style::default().fg(theme.accent_error),
+                    ));
+                }
+                BlockOutput {
+                    lines: vec![line.into()],
+                }
+            }
             DisplayMode::Truncated | DisplayMode::Expanded => {
                 let mut lines: Vec<BlockLine> =
                     vec![self.collapsed_line(&theme, false, None).into()];
@@ -540,4 +566,61 @@ fn parse_ask_user_qa_pairs(output: &str) -> Vec<(String, String)> {
     }
 
     vec![]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::appearance::AppearanceConfig;
+
+    fn ctx() -> BlockContext {
+        BlockContext {
+            mode: DisplayMode::Collapsed,
+            is_running: false,
+            width: 120,
+            raw: false,
+            max_lines: None,
+            appearance: AppearanceConfig::default(),
+            is_selected: false,
+            cwd: None,
+        }
+    }
+
+    fn collapsed_text(block: &OtherToolCallBlock) -> String {
+        block.output(&ctx()).lines[0]
+            .content
+            .spans
+            .iter()
+            .map(|s| s.content.as_ref())
+            .collect()
+    }
+
+    /// A failed Other tool (e.g. a rejected `monitor`) collapses to one line —
+    /// the reason must be on it, not only behind an expand.
+    #[test]
+    fn collapsed_failed_row_states_the_reason() {
+        let block = OtherToolCallBlock::new("Start monitor", "probe")
+            .with_error("persistent must be true when timeout_ms exceeds 36000000ms");
+        let text = collapsed_text(&block);
+        assert!(text.contains("Start monitor"), "{text}");
+        assert!(text.contains("persistent must be true"), "{text}");
+    }
+
+    #[test]
+    fn collapsed_successful_row_has_no_reason() {
+        let block = OtherToolCallBlock::new("Start monitor", "probe");
+        let text = collapsed_text(&block);
+        assert!(text.contains("Start monitor"), "{text}");
+        assert!(!text.contains("persistent must be true"), "{text}");
+    }
+
+    /// Multi-line errors collapse to their first line (one row, one reason).
+    #[test]
+    fn collapsed_reason_keeps_the_first_line_only() {
+        let block =
+            OtherToolCallBlock::new("Fetch", "url").with_error("first line\nsecond line\nthird");
+        let text = collapsed_text(&block);
+        assert!(text.contains("first line"), "{text}");
+        assert!(!text.contains("second line"), "{text}");
+    }
 }

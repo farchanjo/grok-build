@@ -260,6 +260,12 @@ pub struct AcpUpdateTracker {
     /// Populated when a task tool call is detected (variant == "Task"),
     /// consumed by the acp_handler when `SubagentSpawned` arrives.
     pub(crate) task_tool_background: std::collections::HashMap<String, bool>,
+    /// Base `ToolCall`s for suppressed `task` calls, keyed by tool-call ID.
+    ///
+    /// A task call carries no row of its own — the subagent row replaces it —
+    /// but a *rejected* call spawns no subagent, so the row is the only trace the
+    /// user gets. Kept until the call's terminal update (cleared on success).
+    task_tool_calls: std::collections::HashMap<String, acp::ToolCall>,
     /// Tool call IDs marked as background (`is_background=true`).
     ///
     /// First-detection (no scrollback entry yet): defers entry creation until
@@ -881,6 +887,7 @@ impl AcpUpdateTracker {
         self.retry_activity = None;
         self.suppressed_tools.clear();
         self.blocking_waits.clear();
+        self.task_tool_calls.clear();
         self.orphan_updates.clear();
         self.skip_next_skill_body = false;
     }
@@ -1034,6 +1041,8 @@ impl AcpUpdateTracker {
             || is_workflow_tool(&tc)
         {
             if is_task_tool(&tc) {
+                self.task_tool_calls
+                    .insert(tc.tool_call_id.0.to_string(), tc.clone());
                 let is_background = tc
                     .meta
                     .as_ref()
@@ -1126,6 +1135,14 @@ impl AcpUpdateTracker {
             return false;
         }
         if self.suppressed_tools.contains(&tc_id_str) {
+            // Keep the stored task base current. The terminal update carries only
+            // the status and the reason; the refined title and the args (the
+            // description a rejection row is titled with) arrive on an earlier
+            // update, which this branch otherwise drops.
+            if let Some(base) = self.task_tool_calls.remove(&tc_id_str) {
+                let refreshed = merge_tool_call_update(base, tcu.clone());
+                self.task_tool_calls.insert(tc_id_str.clone(), refreshed);
+            }
             if let Some(ref raw_input) = tcu.fields.raw_input {
                 let variant = raw_input.get("variant").and_then(|v| v.as_str());
                 if is_task_variant(variant) {
@@ -1167,6 +1184,19 @@ impl AcpUpdateTracker {
             ) {
                 self.suppressed_tools.remove(&tc_id_str);
                 self.blocking_waits.remove(&tc_id_str);
+                // A rejected task call spawns no subagent: push the row the
+                // suppression withheld, carrying the rejection reason.
+                if matches!(status, acp::ToolCallStatus::Failed)
+                    && let Some(base) = self.task_tool_calls.remove(&tc_id_str)
+                {
+                    let mut merged = merge_tool_call_update(base, tcu);
+                    let description = extract_raw_field(&merged, "description");
+                    merged.title = failed_task_row_title(&merged, description.as_deref());
+                    let block = tool_call_to_block(&merged, self.session_cwd.as_deref());
+                    self.finish_completed_tool(block, scrollback, is_replay);
+                } else {
+                    self.task_tool_calls.remove(&tc_id_str);
+                }
             }
             return false;
         }
@@ -2412,6 +2442,19 @@ fn is_task_tool(tc: &acp::ToolCall) -> bool {
     matches!(tc.title.as_str(), "task" | "Task" | "spawn_subagent")
         || is_task_variant(extract_variant(tc))
 }
+/// Row title for a rejected `task` call: the refined title when it names the
+/// task, else `raw_input.description` (the eager announce titles the call with
+/// the tool function name, which reads as noise on the row).
+fn failed_task_row_title(tc: &acp::ToolCall, description: Option<&str>) -> String {
+    let title = tc.title.trim();
+    if !title.is_empty() && !matches!(title, "task" | "Task" | "spawn_subagent") {
+        return title.to_string();
+    }
+    description
+        .filter(|d| !d.trim().is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| "task".to_string())
+}
 fn is_goal_tool(tc: &acp::ToolCall) -> bool {
     tc.title == "update_goal"
         || tc.title.starts_with("Goal:")
@@ -2962,6 +3005,102 @@ mod tests {
             acp::ToolCallId::new(Arc::from(id)),
             acp::ToolCallUpdateFields::new().status(Some(acp::ToolCallStatus::Completed)),
         ))
+    }
+    /// A failed tool update carrying `text` as the rejection reason.
+    fn tool_update_failed(id: &str, text: &str) -> acp::SessionUpdate {
+        acp::SessionUpdate::ToolCallUpdate(acp::ToolCallUpdate::new(
+            acp::ToolCallId::new(Arc::from(id)),
+            acp::ToolCallUpdateFields::new()
+                .status(Some(acp::ToolCallStatus::Failed))
+                .content(vec![acp::ToolCallContent::from(acp::ContentBlock::Text(
+                    acp::TextContent::new(text.to_string()),
+                ))]),
+        ))
+    }
+    /// An intermediate `task` update: refined title + args, no terminal status.
+    fn task_update_refined(id: &str, description: &str) -> acp::SessionUpdate {
+        acp::SessionUpdate::ToolCallUpdate(acp::ToolCallUpdate::new(
+            acp::ToolCallId::new(Arc::from(id)),
+            acp::ToolCallUpdateFields::new()
+                .title(description.to_string())
+                .raw_input(serde_json::json!({"variant": "Task", "description": description})),
+        ))
+    }
+    /// A failed `task` update carrying the reason and the description.
+    fn task_update_failed_with_description(
+        id: &str,
+        text: &str,
+        description: &str,
+    ) -> acp::SessionUpdate {
+        acp::SessionUpdate::ToolCallUpdate(acp::ToolCallUpdate::new(
+            acp::ToolCallId::new(Arc::from(id)),
+            acp::ToolCallUpdateFields::new()
+                .status(Some(acp::ToolCallStatus::Failed))
+                .raw_input(serde_json::json!({"variant": "Task", "description": description}))
+                .content(vec![acp::ToolCallContent::from(acp::ContentBlock::Text(
+                    acp::TextContent::new(text.to_string()),
+                ))]),
+        ))
+    }
+    /// A `task` tool call rejected by validation must still render a row: it is
+    /// suppressed because the subagent row replaces it, but a rejection spawns
+    /// no subagent — without the row the failure leaves no trace at all.
+    #[test]
+    fn rejected_task_call_renders_a_row_with_the_reason() {
+        let mut sb = ScrollbackState::new();
+        let mut tracker = AcpUpdateTracker::new();
+        let mut call = match tool_call("tc-task", acp::ToolKind::Other, "spawn_subagent") {
+            acp::SessionUpdate::ToolCall(tc) => tc,
+            other => panic!("expected a tool call, got {other:?}"),
+        };
+        // The streaming announce titles the call with the tool name and carries
+        // no description; the refined title and the args arrive on an
+        // intermediate update, the reason on the terminal one.
+        call.raw_input = Some(serde_json::json!({"variant": "Task"}));
+        tracker.handle_update(acp::SessionUpdate::ToolCall(call), &meta(), &mut sb);
+        assert_eq!(sb.len(), 0, "a live task call stays suppressed");
+        tracker.handle_update(
+            task_update_refined("tc-task", "bg-bad-type"),
+            &meta(),
+            &mut sb,
+        );
+        assert_eq!(sb.len(), 0, "an intermediate update stays suppressed");
+
+        tracker.handle_update(
+            task_update_failed_with_description(
+                "tc-task",
+                "Unknown subagent type: invented-agent",
+                "bg-bad-type",
+            ),
+            &meta(),
+            &mut sb,
+        );
+        assert_eq!(sb.len(), 1, "the rejection must render a row");
+        let text = sb
+            .get(0)
+            .unwrap()
+            .block
+            .searchable_text()
+            .expect("row must carry text");
+        assert!(text.contains("bg-bad-type"), "{text}");
+        assert!(text.contains("Unknown subagent type"), "{text}");
+        assert!(!sb.get(0).unwrap().is_running, "the row must be finished");
+    }
+
+    /// A successful task call stays suppressed (the subagent row replaces it).
+    #[test]
+    fn successful_task_call_stays_suppressed() {
+        let mut sb = ScrollbackState::new();
+        let mut tracker = AcpUpdateTracker::new();
+        let mut call = match tool_call("tc-task-ok", acp::ToolKind::Other, "spawn_subagent") {
+            acp::SessionUpdate::ToolCall(tc) => tc,
+            other => panic!("expected a tool call, got {other:?}"),
+        };
+        call.raw_input = Some(serde_json::json!({"variant": "Task", "description": "ok"}));
+        tracker.handle_update(acp::SessionUpdate::ToolCall(call), &meta(), &mut sb);
+        tracker.handle_update(tool_update_completed("tc-task-ok"), &meta(), &mut sb);
+        assert_eq!(sb.len(), 0);
+        assert!(tracker.task_tool_calls.is_empty());
     }
     fn user_message(text: &str) -> acp::SessionUpdate {
         acp::SessionUpdate::UserMessageChunk(acp::ContentChunk::new(acp::ContentBlock::Text(
