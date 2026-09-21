@@ -116,6 +116,13 @@ jobs:
       # overhead. Empty string disables it for this run.
       CARGO_BUILD_RUSTC_WRAPPER: ""
       CARGO_INCREMENTAL: "0"
+      # Optional mirror for the ripgrep release asset, set as a repository
+      # variable (e.g. http://<mirror>/github/BurntSushi/ripgrep/releases/download).
+      # An unset variable renders as empty, which both build scripts read as
+      # "use the public GitHub URL"; they also fall back to it when the mirror
+      # fails, and retry the CDN three times per base.
+      GROK_SHELL_RG_DOWNLOAD_BASE: ${{ vars.GROK_RG_DOWNLOAD_BASE }}
+      GROK_TOOLS_RG_DOWNLOAD_BASE: ${{ vars.GROK_RG_DOWNLOAD_BASE }}
     steps:
       - uses: actions/checkout@v4
 

@@ -8,17 +8,24 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 const RG_VER: &str = "15.0.0";
+/// Default source of the ripgrep release asset.
+const RG_DOWNLOAD_BASE: &str = "https://github.com/BurntSushi/ripgrep/releases/download";
+/// Mirror override for [`RG_DOWNLOAD_BASE`]. An empty value reads as unset: a
+/// workflow `vars.*` renders to an empty string when the variable is missing.
+const RG_DOWNLOAD_BASE_ENV: &str = "GROK_SHELL_RG_DOWNLOAD_BASE";
+/// Escape hatch that skips the download entirely.
+const RG_BUNDLE_PATH_ENV: &str = "GROK_SHELL_BUNDLE_RG_PATH";
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Only bundle in release builds to avoid slowing down cargo check.
-    println!("cargo:rerun-if-env-changed=GROK_SHELL_BUNDLE_RG_PATH");
-    println!("cargo:rerun-if-env-changed=GROK_SHELL_RG_DOWNLOAD_BASE");
+    println!("cargo:rerun-if-env-changed={RG_BUNDLE_PATH_ENV}");
+    println!("cargo:rerun-if-env-changed={RG_DOWNLOAD_BASE_ENV}");
     // Declare our custom cfg to the compiler so cfg(bundle_rg) is recognized by lints
     println!("cargo:rustc-check-cfg=cfg(bundle_rg)");
 
     // Decide whether to bundle: path override OR release build. Bail before
     // touching the filesystem so debug `cargo check` needs no environment.
-    let path_override = env::var("GROK_SHELL_BUNDLE_RG_PATH").ok();
+    let path_override = env::var(RG_BUNDLE_PATH_ENV).ok();
     let is_release = env::var("PROFILE").as_deref() == Ok("release");
     if path_override.is_none() && !is_release {
         return Ok(());
@@ -100,31 +107,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // internal mirror (e.g. GROK_SHELL_RG_DOWNLOAD_BASE=http://<mirror>/github/
     // BurntSushi/ripgrep/releases/download). Defaults to the public GitHub
     // releases URL.
-    let download_base = env::var("GROK_SHELL_RG_DOWNLOAD_BASE")
-        .unwrap_or_else(|_| "https://github.com/BurntSushi/ripgrep/releases/download".to_string());
-    let url = format!(
-        "{base}/{v}/ripgrep-{v}-{t}.tar.gz",
-        base = download_base.trim_end_matches('/'),
-        v = RG_VER,
-        t = asset_triple
-    );
-
-    let bytes: Vec<u8> = {
-        let resp = reqwest::blocking::get(&url).map_err(|e| {
-            format!(
-                "Failed to download ripgrep: {}\nSet GROK_SHELL_BUNDLE_RG_PATH to a local rg for offline builds.",
-                e
-            )
-        })?;
-        if !resp.status().is_success() {
-            return Err(format!(
-                "HTTP {} downloading ripgrep. Set GROK_SHELL_BUNDLE_RG_PATH for offline builds.",
-                resp.status()
-            )
-            .into());
-        }
-        resp.bytes()?.to_vec()
-    };
+    let (bytes, url) = fetch_rg_archive(asset_triple)?;
 
     let gz = flate2::read::GzDecoder::new(&bytes[..]);
     let mut ar = tar::Archive::new(gz);
@@ -153,6 +136,62 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     Ok(())
+}
+
+/// Download base for the ripgrep release asset: the mirror when configured,
+/// else the public GitHub releases URL.
+fn rg_download_base() -> String {
+    env::var(RG_DOWNLOAD_BASE_ENV)
+        .ok()
+        .map(|v| v.trim().trim_end_matches('/').to_string())
+        .filter(|v| !v.is_empty())
+        .unwrap_or_else(|| RG_DOWNLOAD_BASE.to_string())
+}
+
+/// Fetch the ripgrep release asset for `asset_triple`, returning the bytes and
+/// the URL that served them.
+///
+/// The release-asset CDN answers 5xx in bursts, and a single 504 used to fail
+/// the whole build job: retry three times per base with backoff. A configured
+/// mirror that keeps failing falls back to the public GitHub URL, so a mirror
+/// outage cannot break a build.
+fn fetch_rg_archive(asset_triple: &str) -> Result<(Vec<u8>, String), Box<dyn std::error::Error>> {
+    const ATTEMPTS: u32 = 3;
+    let mut bases = vec![rg_download_base()];
+    if bases[0] != RG_DOWNLOAD_BASE {
+        bases.push(RG_DOWNLOAD_BASE.to_string());
+    }
+    let mut last_err = String::new();
+    for base in &bases {
+        let url = format!(
+            "{base}/{v}/ripgrep-{v}-{t}.tar.gz",
+            v = RG_VER,
+            t = asset_triple
+        );
+        for attempt in 1..=ATTEMPTS {
+            match reqwest::blocking::get(&url) {
+                Ok(resp) if resp.status().is_success() => match resp.bytes() {
+                    Ok(bytes) => return Ok((bytes.to_vec(), url)),
+                    Err(e) => last_err = format!("reading the body of {url} failed: {e}"),
+                },
+                Ok(resp) => last_err = format!("HTTP {} from {url}", resp.status()),
+                // The transport error already embeds the URL.
+                Err(e) => last_err = e.to_string(),
+            }
+            if attempt < ATTEMPTS {
+                let backoff = std::time::Duration::from_millis(1000 * 3u64.pow(attempt - 1));
+                println!(
+                    "cargo:warning=ripgrep download attempt {attempt}/{ATTEMPTS} failed ({last_err}); retrying in {}ms",
+                    backoff.as_millis()
+                );
+                std::thread::sleep(backoff);
+            }
+        }
+    }
+    Err(format!(
+        "Failed to download ripgrep after {ATTEMPTS} attempts per base: {last_err}\nSet {RG_BUNDLE_PATH_ENV} to a local rg for offline builds."
+    )
+    .into())
 }
 
 fn is_bazel_build(manifest_dir: &Path) -> bool {
