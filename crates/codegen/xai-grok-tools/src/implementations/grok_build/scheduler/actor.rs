@@ -1876,11 +1876,9 @@ mod tests {
         let (handle, cancel, mut notifications, _subagent_rx) = make_test_actor_with_subagents();
         create_due_task_owned(&handle, "watch ci", "child-session").await;
 
-        let created = loop {
-            match next_event(&mut notifications).await {
-                ToolNotification::ScheduledTaskCreated(created) => break created,
-                other => panic!("expected a ScheduledTaskCreated, got {other:?}"),
-            }
+        let created = match next_event(&mut notifications).await {
+            ToolNotification::ScheduledTaskCreated(created) => created,
+            other => panic!("expected a ScheduledTaskCreated, got {other:?}"),
         };
         assert_eq!(
             created.owner_session_id.as_deref(),
@@ -1896,6 +1894,7 @@ mod tests {
         let (handle, cancel, mut notifications, _subagent_rx) = make_test_actor_with_subagents();
         let task_id = create_due_one_shot_owned(&handle, "one shot", "child-session").await;
 
+        // The creation card precedes the removal one: skip until the removal.
         let removed = loop {
             match next_event(&mut notifications).await {
                 ToolNotification::ScheduledTaskRemoved(removed) if removed.task_id == task_id => {
