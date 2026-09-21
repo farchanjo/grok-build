@@ -625,6 +625,16 @@ them). Local helpers that mirror it, for parity checks only:
   `make verify` then also asserts both slices are present and executes the
   Intel slice under Rosetta when available.
 
+**Runner pools.** Tag builds run on the self-hosted `grok-*` runners (this Mac
+for macOS, `l-agent-lnx` on psc for Linux, `gha-runner-win` on psc for Windows);
+branch pushes stay on the GitHub-hosted images, which are ephemeral, parallel,
+and never occupy the development machines. `workflow_dispatch` accepts
+`runners: self-hosted|hosted` to force either pool, and the hosted labels stay
+in the matrix as the fallback. Both crates' build scripts retry the ripgrep
+release asset three times per base and fall back to the public URL, and
+`GROK_SHELL_RG_DOWNLOAD_BASE` / `GROK_TOOLS_RG_DOWNLOAD_BASE` (forwarded from the
+`GROK_RG_DOWNLOAD_BASE` repository variable) can point them at a mirror.
+
 Do not run `make build`, `make deploy`, `make deploy-binary`,
 `make deploy-wrapper`, or `make verify` in ordinary edit loops. Deployment and
 verify targets require an explicit user request.
