@@ -2499,6 +2499,7 @@ fn inject_subagent_completed_prompt(
         subagent_type: request.subagent_type.clone(),
         description: request.description.clone(),
         success: result.success && !result.cancelled,
+        error: result.error.clone().filter(|_| !result.success),
         duration_ms: result.duration_ms,
         tool_calls: result.tool_calls,
         turns: result.turns,
@@ -2563,80 +2564,122 @@ fn inject_subagent_completed_prompt(
         });
     }
 }
-/// Post-`insert_pending`, pre-`SubagentSpawned` failure: just send via oneshot;
-/// `PendingGuard::drop` handles the queue side effects.
-pub(crate) fn send_failure(request: SubagentRequest, error: &str) {
-    let _ = request.result_tx.send(SubagentResult {
-        success: false,
-        error: Some(error.to_string()),
-        ..Default::default()
-    });
-}
-fn send_pre_spawn_cancelled(request: SubagentRequest, error: &str) {
-    let _ = request.result_tx.send(SubagentResult {
-        success: false,
-        cancelled: true,
-        error: Some(error.to_string()),
-        subagent_id: request.id,
-        ..Default::default()
-    });
-}
-/// Fail BEFORE `insert_pending`. Sends via oneshot; for background-mode
-/// requests also records a synthetic `CompletedSubagent` + emits a
-/// `SubagentFinished` notification (persisted + live).
-fn send_pre_spawn_failure(
+/// Fail a spawn that never reached `SubagentSpawned`.
+///
+/// Reports the terminal state on every surface that would otherwise stay
+/// silent: records the synthetic failure (so `get_command_or_subagent_output`
+/// finds it), emits `SubagentFinished` (so the client renders a failed row
+/// instead of nothing), and — for a background spawn — wakes the parent with
+/// the reason. The model-facing error travels on the oneshot as before.
+///
+/// `PendingGuard::drop` stays as the backstop for paths that return without a
+/// `send_failure` call; its record is a no-op once this ran, because the
+/// pending entry is already gone.
+fn send_failure(
     request: SubagentRequest,
     error: &str,
     coordinator: &std::cell::RefCell<SubagentCoordinator>,
     ctx: &SubagentSpawnContext,
     gateway: &GatewaySender,
 ) {
-    let SubagentRequest {
-        id,
-        subagent_type,
-        description,
-        parent_prompt_id,
-        owner,
-        result_tx,
-        run_in_background,
-        surface_completion,
-        ..
-    } = request;
-    if run_in_background {
-        let notification_subagent_id = id.clone();
-        coordinator.borrow_mut().record_pre_spawn_failure(
-            id,
-            subagent_type,
-            description,
-            parent_prompt_id,
-            ctx.parent_session_id.clone(),
-            owner,
-            error,
-            surface_completion,
-        );
-        emit_subagent_notification(
-            gateway,
-            &ctx.parent_session_id,
-            SessionUpdate::SubagentFinished {
-                subagent_id: notification_subagent_id,
-                child_session_id: String::new(),
-                status: "failed".to_string(),
-                error: Some(error.to_string()),
-                tool_calls: 0,
-                turns: 0,
-                duration_ms: 0,
-                tokens_used: 0,
-                output: None,
-                will_wake: false,
-            },
-            ctx.parent_cmd_tx.as_ref(),
-        );
-    }
-    let _ = result_tx.send(SubagentResult {
+    send_failure_with(request, error, false, coordinator, ctx, gateway)
+}
+/// [`send_failure`] for a spawn cancelled before it ever started.
+fn send_failure_cancelled(
+    request: SubagentRequest,
+    error: &str,
+    coordinator: &std::cell::RefCell<SubagentCoordinator>,
+    ctx: &SubagentSpawnContext,
+    gateway: &GatewaySender,
+) {
+    send_failure_with(request, error, true, coordinator, ctx, gateway)
+}
+/// [`send_failure`] for the transport-level paths (`assigned_spawn` enqueue, an
+/// evicted parent session) that hold neither a spawn context nor a gateway.
+/// The model still receives the error through the oneshot; the client learns
+/// nothing until a poll, so only these paths stay off the notification wire.
+pub(crate) fn send_failure_bare(request: SubagentRequest, error: &str) {
+    let subagent_id = request.id.clone();
+    let _ = request.result_tx.send(SubagentResult {
         success: false,
         error: Some(error.to_string()),
+        subagent_id,
         ..Default::default()
     });
+}
+fn send_failure_with(
+    request: SubagentRequest,
+    error: &str,
+    cancelled: bool,
+    coordinator: &std::cell::RefCell<SubagentCoordinator>,
+    ctx: &SubagentSpawnContext,
+    gateway: &GatewaySender,
+) {
+    let subagent_id = request.id.clone();
+    let result = SubagentResult {
+        success: false,
+        cancelled,
+        error: Some(error.to_string()),
+        subagent_id: subagent_id.clone(),
+        child_session_id: subagent_id.clone(),
+        ..Default::default()
+    };
+    // Only a background spawn needs the synthetic entry: a blocking one returns
+    // the error inline, and a completion summary would duplicate it on the next
+    // turn. The entry is what makes the failure pollable (`get_task_output`).
+    if request.run_in_background {
+        coordinator.borrow_mut().record_pre_spawn_failure(
+            subagent_id.clone(),
+            request.subagent_type.clone(),
+            request.description.clone(),
+            request.parent_prompt_id.clone(),
+            ctx.parent_session_id.clone(),
+            request.owner.clone(),
+            error,
+            request.surface_completion,
+            cancelled,
+        );
+    }
+    let will_wake = should_auto_wake_subagent(
+        request.run_in_background,
+        cancelled,
+        ctx.auto_wake_enabled,
+        false,
+        false,
+        ctx.goal_loop_active
+            .load(std::sync::atomic::Ordering::Relaxed),
+        ctx.parent_cmd_tx.is_some(),
+    );
+    emit_subagent_notification(
+        gateway,
+        &ctx.parent_session_id,
+        SessionUpdate::SubagentFinished {
+            subagent_id: subagent_id.clone(),
+            child_session_id: subagent_id.clone(),
+            status: if cancelled { "cancelled" } else { "failed" }.to_string(),
+            error: Some(error.to_string()),
+            description: Some(request.description.clone()),
+            tool_calls: 0,
+            turns: 0,
+            duration_ms: 0,
+            tokens_used: 0,
+            output: None,
+            will_wake,
+        },
+        ctx.parent_cmd_tx.as_ref(),
+    );
+    if will_wake {
+        inject_subagent_completed_prompt(
+            &subagent_id,
+            &result,
+            &request,
+            &ctx.task_completion_reservations,
+            ctx.parent_cmd_tx.as_ref(),
+            &ctx.task_output_tool_name,
+            &ctx.synthetic_trace_tx,
+        );
+    }
+    let _ = request.result_tx.send(result);
 }
 /// Post-`SubagentSpawned` failure: oneshot + `SubagentFinished` + `meta.json` update.
 fn fail_subagent(
@@ -2677,6 +2720,7 @@ fn fail_subagent(
             child_session_id: child_session_id.0.to_string(),
             status: result.status().to_string(),
             error: result.error.clone(),
+            description: Some(request.description.clone()),
             tool_calls: 0,
             turns: 0,
             duration_ms,
@@ -2730,6 +2774,7 @@ fn cancel_pending_subagent_at_promote(
             child_session_id: child_session_id.0.to_string(),
             status: result.status().to_string(),
             error: result.error.clone(),
+            description: Some(request.description.clone()),
             tool_calls: 0,
             turns: 0,
             duration_ms,
@@ -3362,6 +3407,7 @@ fn cancelled_orphan_finish(
         child_session_id,
         status: "cancelled".to_string(),
         error: Some(ORPHAN_RECONCILE_REASON.to_string()),
+        description: None,
         tool_calls: 0,
         turns: 0,
         duration_ms,
@@ -3525,6 +3571,7 @@ pub(crate) fn reconcile_orphaned_subagents(
                         child_session_id: m.child_session_id,
                         status: m.status,
                         error: m.error,
+                        description: Some(m.description),
                         tool_calls: m.tool_calls.unwrap_or(0),
                         turns: m.turns.unwrap_or(0),
                         duration_ms: m.duration_ms.unwrap_or(0),

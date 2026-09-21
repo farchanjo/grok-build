@@ -65,7 +65,7 @@ impl AssignedSpawnState {
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         if let Err(error) = assignments.insert(key.clone(), route) {
             drop(assignments);
-            crate::agent::subagent::send_failure(
+            crate::agent::subagent::send_failure_bare(
                 *request,
                 &format!("Assigned spawn rejected: {error}"),
             );
@@ -78,7 +78,7 @@ impl AssignedSpawnState {
             let _removed = assignments.take(&key);
             debug_assert!(_removed.is_some());
             drop(assignments);
-            crate::agent::subagent::send_failure(
+            crate::agent::subagent::send_failure_bare(
                 *error.0.request,
                 "Subagent coordinator channel closed before assigned spawn acceptance.",
             );
@@ -120,14 +120,14 @@ impl TrustedAssignedSpawnSender {
         route: ExactRoute,
     ) -> Result<(), AssignedSpawnError> {
         let Some(run_id) = self.workflow_run_id.as_deref() else {
-            crate::agent::subagent::send_failure(
+            crate::agent::subagent::send_failure_bare(
                 *request,
                 "Assigned spawn rejected: workflow assignment capability is unbound",
             );
             return Err(AssignedSpawnError::InvalidKey);
         };
         let Some(key) = AssignmentKey::workflow(run_id, sequence) else {
-            crate::agent::subagent::send_failure(
+            crate::agent::subagent::send_failure_bare(
                 *request,
                 "Assigned spawn rejected: workflow assignment key is invalid",
             );
@@ -177,7 +177,7 @@ impl AssignedSpawnReceiver {
                 assignment_key = spawn.key.as_str(),
                 "assigned spawn arrived without its trusted exact-route capability"
             );
-            crate::agent::subagent::send_failure(
+            crate::agent::subagent::send_failure_bare(
                 *spawn.request,
                 "Assigned exact-route capability was missing or already consumed.",
             );
@@ -199,7 +199,7 @@ impl Drop for AssignedSpawnReceiver {
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
                 .take(&spawn.key);
             debug_assert!(_removed.is_some());
-            crate::agent::subagent::send_failure(
+            crate::agent::subagent::send_failure_bare(
                 *spawn.request,
                 "Subagent coordinator stopped before assigned spawn acceptance.",
             );

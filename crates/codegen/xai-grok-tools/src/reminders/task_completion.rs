@@ -476,6 +476,7 @@ pub fn format_subagent_completion(
     c: &SubagentCompletionSummary,
     task_output_name: Option<&str>,
 ) -> String {
+    use std::fmt::Write as _;
     let status = if c.success {
         "successfully"
     } else {
@@ -496,6 +497,9 @@ pub fn format_subagent_completion(
         Some(_) => "\n",
         None => "\n\n",
     });
+    if let Some(error) = c.error.as_deref() {
+        let _ = writeln!(out, "Error: {error}");
+    }
     render_completion_output_delivery(&mut out, &c.subagent_id, &c.output, task_output_name, None);
     out
 }
@@ -519,9 +523,13 @@ pub fn format_between_turn_completions(
         let secs = c.duration_ms as f64 / 1000.0;
         let _ = write!(
             buf,
-            "- [{}] {:?} \u{2014} {status} ({secs:.1}s, {} tool calls)\n  subagent_id: {}",
-            c.subagent_type, c.description, c.tool_calls, c.subagent_id,
+            "- [{}] {:?} \u{2014} {status} ({secs:.1}s, {} tool calls)",
+            c.subagent_type, c.description, c.tool_calls,
         );
+        if let Some(error) = c.error.as_deref() {
+            let _ = write!(buf, ": {error}");
+        }
+        let _ = write!(buf, "\n  subagent_id: {}", c.subagent_id);
         match task_output_name {
             Some(_) => buf.push_str(". "),
             None => buf.push_str("\n  "),
@@ -1583,6 +1591,7 @@ mod tests {
             subagent_type: "general-purpose".into(),
             description: "test task".into(),
             success,
+            error: (!success).then(|| "test task failed".to_string()),
             duration_ms: 5000,
             tool_calls: 3,
             turns: 2,

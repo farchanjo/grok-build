@@ -15,6 +15,7 @@ fn summary(
         subagent_type: typ.into(),
         description: desc.into(),
         success,
+        error: (!success).then(|| format!("{desc} failed")),
         duration_ms: ms,
         tool_calls: tools,
         turns: 1,

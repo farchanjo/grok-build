@@ -588,6 +588,10 @@ pub struct SubagentCompletionSummary {
     pub subagent_type: String,
     pub description: String,
     pub success: bool,
+    /// Failure reason when `success` is false. Carried so a wake (or the
+    /// between-turn reminder) states WHY the child failed instead of leaving
+    /// the parent to poll for the reason.
+    pub error: Option<String>,
     pub duration_ms: u64,
     pub tool_calls: u32,
     pub turns: u32,
@@ -1394,6 +1398,7 @@ mod tests {
             subagent_type: "general-purpose".into(),
             description: "test task".into(),
             success: true,
+            error: None,
             duration_ms: 1500,
             tool_calls: 7,
             turns: 3,

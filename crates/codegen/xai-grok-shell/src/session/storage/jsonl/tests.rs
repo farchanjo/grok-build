@@ -584,6 +584,7 @@ async fn test_subagent_notifications_round_trip() {
             child_session_id: "child-001".to_string(),
             status: "completed".to_string(),
             error: None,
+            description: None,
             tool_calls: 5,
             turns: 2,
             duration_ms: 12345,

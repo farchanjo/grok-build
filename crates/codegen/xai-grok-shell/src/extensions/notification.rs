@@ -673,6 +673,11 @@ pub enum SessionUpdate {
         /// Error message if the subagent failed.
         #[serde(skip_serializing_if = "Option::is_none")]
         error: Option<String>,
+        /// Short human-readable description of the task. Carried so a client can
+        /// title a row for a finish whose `SubagentSpawned` never arrived (the
+        /// subagent failed during spawn initialization). Missing reads as `None`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        description: Option<String>,
         /// Number of tool calls made by the subagent.
         tool_calls: u32,
         /// Number of conversation turns taken by the subagent.
@@ -1995,6 +2000,7 @@ mod tests {
             child_session_id: "c".into(),
             status: "completed".into(),
             error: None,
+            description: None,
             tool_calls: 1,
             turns: 1,
             duration_ms: 200,
@@ -2047,6 +2053,7 @@ mod tests {
             child_session_id: "cs-rt".into(),
             status: "completed".into(),
             error: None,
+            description: None,
             tool_calls: 5,
             turns: 2,
             duration_ms: 10_000,

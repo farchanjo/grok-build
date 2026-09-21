@@ -381,6 +381,7 @@ impl SubagentCoordinator {
                 subagent_type: pending.subagent_type.clone(),
                 description: pending.description.clone(),
                 success,
+                error: result.error.clone().filter(|_| !success),
                 duration_ms: result.duration_ms,
                 tool_calls: result.tool_calls,
                 turns: result.turns,
@@ -418,6 +419,7 @@ impl SubagentCoordinator {
         self.completion_notify.notify_waiters();
     }
     /// Record a synthetic failure for a subagent that never reached `pending`.
+    #[allow(clippy::too_many_arguments)]
     pub fn record_pre_spawn_failure(
         &mut self,
         subagent_id: String,
@@ -428,6 +430,7 @@ impl SubagentCoordinator {
         owner: SubagentOwner,
         error: &str,
         surface_completion: bool,
+        cancelled: bool,
     ) {
         self.record_failure_completion(FailureCompletion {
             subagent_id,
@@ -441,7 +444,7 @@ impl SubagentCoordinator {
             started_at: std::time::Instant::now(),
             error,
             surface_completion,
-            cancelled: false,
+            cancelled,
         });
     }
     /// Insert a synthetic failed entry, push a completion summary, notify waiters.
@@ -509,6 +512,7 @@ impl SubagentCoordinator {
                     subagent_type,
                     description,
                     success: false,
+                    error: Some(error.to_string()),
                     duration_ms: 0,
                     tool_calls: 0,
                     turns: 0,
@@ -684,6 +688,7 @@ impl SubagentCoordinator {
                     subagent_type: completed.subagent_type.clone(),
                     description: completed.description.clone(),
                     success,
+                    error: completed.result.error.clone().filter(|_| !success),
                     duration_ms: completed.result.duration_ms,
                     tool_calls: completed.result.tool_calls,
                     turns: completed.result.turns,

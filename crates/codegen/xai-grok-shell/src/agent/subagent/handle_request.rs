@@ -363,25 +363,28 @@ pub(crate) async fn handle_assigned_subagent_request(
         cwd: ctx.parent_cwd.to_string_lossy().to_string(),
     });
     if let Some(error) = assigned_platform_error(assigned_route.is_some()) {
-        send_failure(request, error);
+        send_failure(request, error, coordinator, &ctx, gateway);
         return;
     }
     if assigned_route.is_none() {
         if coordinator.borrow().has_assigned_identity(&request.id) {
-            send_failure(request, "Public subagent spawn cannot replace an assigned identity.");
+            send_failure(request, "Public subagent spawn cannot replace an assigned identity.", coordinator, &ctx, gateway);
             return;
         }
         match identity_store::lookup(&parent_session_dir, &request.id) {
             Ok(identity_store::Lookup::Missing)
             | Ok(identity_store::Lookup::LegacyUnassigned { .. }) => {}
             Ok(identity_store::Lookup::Assigned { .. }) => {
-                send_failure(request, "Public subagent spawn cannot replace an assigned identity.");
+                send_failure(request, "Public subagent spawn cannot replace an assigned identity.", coordinator, &ctx, gateway);
                 return;
             }
             Err(error) => {
                 send_failure(
                     request,
                     &format!("Subagent metadata identity is invalid: {error}"),
+                    coordinator,
+                    &ctx,
+                    gateway,
                 );
                 return;
             }
@@ -393,13 +396,13 @@ pub(crate) async fn handle_assigned_subagent_request(
         ));
     if request.owner.is_workflow() && request.cancel_token.is_cancelled() {
         parent_wait_guard.take();
-        send_pre_spawn_cancelled(request, "Subagent was cancelled");
+        send_failure_cancelled(request, "Subagent was cancelled", coordinator, &ctx, gateway);
         return;
     }
     let Some(mut definition) = resolve_agent_definition(&request.subagent_type, &ctx)
     else {
         let msg = format!("Unknown subagent type: {}", request.subagent_type);
-        send_pre_spawn_failure(request, &msg, coordinator, &ctx, gateway);
+        send_failure(request, &msg, coordinator, &ctx, gateway);
         return;
     };
     match gate_subagent_type(&request.subagent_type, &ctx) {
@@ -408,7 +411,7 @@ pub(crate) async fn handle_assigned_subagent_request(
                 "Subagent '{}' is disabled via [subagents.toggle] in config.toml",
                 request.subagent_type
             );
-            send_pre_spawn_failure(request, &msg, coordinator, &ctx, gateway);
+            send_failure(request, &msg, coordinator, &ctx, gateway);
             return;
         }
         SubagentValidateTypeOutcome::NotAllowed { allowed } => {
@@ -417,7 +420,7 @@ pub(crate) async fn handle_assigned_subagent_request(
                 allowed.join(", "),
                 request.subagent_type
             );
-            send_pre_spawn_failure(request, &msg, coordinator, &ctx, gateway);
+            send_failure(request, &msg, coordinator, &ctx, gateway);
             return;
         }
         _ => {}
@@ -454,7 +457,7 @@ pub(crate) async fn handle_assigned_subagent_request(
             assigned_meta_owner: None,
         });
     if !inserted_pending {
-        send_failure(request, "Subagent identity is already owned by an assigned child.");
+        send_failure(request, "Subagent identity is already owned by an assigned child.", coordinator, &ctx, gateway);
         return;
     }
     let mut pending_guard = PendingGuard {
@@ -519,7 +522,7 @@ pub(crate) async fn handle_assigned_subagent_request(
             "Persona resolution failed, aborting subagent spawn"
         );
         pending_guard.set_error(err.clone());
-        send_failure(request, err);
+        send_failure(request, err, coordinator, &ctx, gateway);
         return;
     }
     if let Some(ref warn) = effective_runtime.role_prompt_warning {
@@ -541,7 +544,7 @@ pub(crate) async fn handle_assigned_subagent_request(
                  Wait for it to complete before resuming."
             );
             drop(coord);
-            send_failure(request, &msg);
+            send_failure(request, &msg, coordinator, &ctx, gateway);
             return;
         }
         match coord
@@ -557,7 +560,7 @@ pub(crate) async fn handle_assigned_subagent_request(
                      The subagent may have been evicted or the ID is invalid."
                 );
                 drop(coord);
-                send_failure(request, &msg);
+                send_failure(request, &msg, coordinator, &ctx, gateway);
                 return;
             }
             Err(error) => {
@@ -565,7 +568,7 @@ pub(crate) async fn handle_assigned_subagent_request(
                     "Cannot resume from subagent '{resume_id}': durable identity is invalid ({error})."
                 );
                 drop(coord);
-                send_failure(request, &msg);
+                send_failure(request, &msg, coordinator, &ctx, gateway);
                 return;
             }
         }
@@ -585,7 +588,7 @@ pub(crate) async fn handle_assigned_subagent_request(
             request.runtime_overrides.persona.as_deref(),
             &source.source,
         ) {
-            send_failure(request, &e.to_string());
+            send_failure(request, &e.to_string(), coordinator, &ctx, gateway);
             return;
         }
     }
@@ -597,7 +600,7 @@ pub(crate) async fn handle_assigned_subagent_request(
         ctx.auth_manager.current_or_expired().is_some_and(|a| a.is_session_auth()),
     ) {
         pending_guard.set_error(error.clone());
-        send_failure(request, &error);
+        send_failure(request, &error, coordinator, &ctx, gateway);
         return;
     }
     let (worktree_path, owned_worktree) = if let Some(ref source) = resume_source {
@@ -775,7 +778,7 @@ pub(crate) async fn handle_assigned_subagent_request(
     if partial_worktree_failed {
         let message = "Failed to create an isolated subagent worktree cleanly.";
         pending_guard.set_error(message.into());
-        send_failure(request, message);
+        send_failure(request, message, coordinator, &ctx, gateway);
         return;
     }
     if let Some(raw_cwd) = request.cwd.as_deref() {
@@ -789,7 +792,7 @@ pub(crate) async fn handle_assigned_subagent_request(
                         } else {
                             format!("cwd \"{cwd_path}\" does not exist")
                         };
-                        send_failure(request, &msg);
+                        send_failure(request, &msg, coordinator, &ctx, gateway);
                         return;
                     }
                 }
@@ -816,7 +819,7 @@ pub(crate) async fn handle_assigned_subagent_request(
                 Ok(attachments) => attachments,
                 Err(message) => {
                     pending_guard.set_error(message.clone());
-                    send_failure(request, &message);
+                    send_failure(request, &message, coordinator, &ctx, gateway);
                     return;
                 }
             }
@@ -971,7 +974,7 @@ pub(crate) async fn handle_assigned_subagent_request(
         if let Some(error) =
             assigned_unknown_model_error(assigned_route.is_some(), model_unknown)
         {
-            send_failure(request, error);
+            send_failure(request, error, coordinator, &ctx, gateway);
             return;
         }
         if model_unknown {
@@ -1006,7 +1009,7 @@ pub(crate) async fn handle_assigned_subagent_request(
                  is no longer available in the model catalogue.",
                 source.subagent_id,
             );
-            send_failure(request, &msg);
+            send_failure(request, &msg, coordinator, &ctx, gateway);
             return;
         }
     }
@@ -1040,7 +1043,7 @@ pub(crate) async fn handle_assigned_subagent_request(
                     "Invalid reasoning_effort '{raw}' for model '{}': {error}",
                     effective_model_id.0
                 );
-                send_failure(request, &message);
+                send_failure(request, &message, coordinator, &ctx, gateway);
                 return;
             }
         }
@@ -1060,6 +1063,9 @@ pub(crate) async fn handle_assigned_subagent_request(
             send_failure(
                 request,
                 &format!("Assigned exact model route unusable: {e}"),
+                coordinator,
+                &ctx,
+                gateway,
             );
             return;
         }
@@ -1082,6 +1088,9 @@ pub(crate) async fn handle_assigned_subagent_request(
         send_failure(
             request,
             "Assigned exact model route drifted after final child model resolution.",
+            coordinator,
+            &ctx,
+            gateway,
         );
         return;
     }
@@ -1095,7 +1104,7 @@ pub(crate) async fn handle_assigned_subagent_request(
             "Cannot resume from subagent '{}': assigned model route is no longer exact.",
             source.subagent_id,
         );
-        send_failure(request, &message);
+        send_failure(request, &message, coordinator, &ctx, gateway);
         return;
     }
     let subagent_id = request.id.clone();
@@ -1147,7 +1156,7 @@ pub(crate) async fn handle_assigned_subagent_request(
                 error = %msg,
                 "Resume-copy failed, aborting subagent spawn"
             );
-            send_failure(request, &msg);
+            send_failure(request, &msg, coordinator, &ctx, gateway);
             return;
         }
     };
@@ -1227,6 +1236,9 @@ pub(crate) async fn handle_assigned_subagent_request(
                     send_failure(
                         request,
                         "Assigned subagent ownership was replaced during initialization.",
+                        coordinator,
+                        &ctx,
+                        gateway,
                     );
                     return;
                 }
@@ -1236,7 +1248,7 @@ pub(crate) async fn handle_assigned_subagent_request(
             Err(error) => {
                 let message = format!("Failed to commit assigned subagent identity: {error}");
                 pending_guard.set_error(message.clone());
-                send_failure(request, &message);
+                send_failure(request, &message, coordinator, &ctx, gateway);
                 return;
             }
         }
@@ -1253,13 +1265,16 @@ pub(crate) async fn handle_assigned_subagent_request(
                 send_failure(
                     request,
                     "Public subagent spawn cannot replace an assigned identity.",
+                    coordinator,
+                    &ctx,
+                    gateway,
                 );
                 return;
             }
             Err(error) => {
                 let message = format!("Subagent metadata identity is invalid: {error}");
                 pending_guard.set_error(message.clone());
-                send_failure(request, &message);
+                send_failure(request, &message, coordinator, &ctx, gateway);
                 return;
             }
         }
@@ -2828,6 +2843,7 @@ pub(crate) async fn handle_assigned_subagent_request(
             child_session_id: result.child_session_id.clone(),
             status: result.status().to_string(),
             error: result.error.clone(),
+            description: Some(request.description.clone()),
             tool_calls: result.tool_calls,
             turns: result.turns,
             duration_ms: result.duration_ms,

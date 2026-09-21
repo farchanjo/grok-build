@@ -87,7 +87,7 @@ impl MvpAgent {
                                     this.subagent_coordinator
                                         .borrow_mut()
                                         .remove_loop_owner(&request.id);
-                                    crate::agent::subagent::send_failure(
+                                    crate::agent::subagent::send_failure_bare(
                                         request,
                                         "Parent session not found (evicted or torn down); cannot spawn subagent.",
                                     );

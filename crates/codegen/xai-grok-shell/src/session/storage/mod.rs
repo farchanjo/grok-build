@@ -4046,6 +4046,7 @@ mod tests {
                 child_session_id: "ca".into(),
                 status: "cancelled".into(),
                 error: Some("interrupted by process restart".into()),
+                description: None,
                 tool_calls: 0,
                 turns: 0,
                 duration_ms: 0,

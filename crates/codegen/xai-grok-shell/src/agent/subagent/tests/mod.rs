@@ -8,7 +8,7 @@ use super::handle_request::{
     resolve_attachments, resolve_final_exact_route, usage_is_incomplete,
 };
 use crate::test_support::lsp_runtime::{
-    DummyLspDispatch, ctx_with_toggle, make_request, test_gateway,
+    DummyLspDispatch, ctx_with_toggle, make_request, test_gateway, test_gateway_with_receiver,
 };
 use xai_grok_tools::implementations::skills::types::SkillInfo;
 use xai_grok_workspace::file_system::AsyncFileSystem;
@@ -228,6 +228,7 @@ async fn emit_subagent_notification_stamps_one_event_id_on_both_paths() {
             child_session_id: "child-1".into(),
             status: "completed".into(),
             error: None,
+            description: None,
             tool_calls: 0,
             turns: 0,
             duration_ms: 5,
@@ -3386,12 +3387,13 @@ async fn invalid_reasoning_effort_fails_before_subagent_spawn() {
 async fn background_unknown_type_records_failure_completion() {
     let ctx = ctx_with_toggle(HashMap::new());
     let coordinator = std::cell::RefCell::new(SubagentCoordinator::new());
-    let gateway = test_gateway();
+    let (gateway, mut gateway_rx) = test_gateway_with_receiver();
     let (request, result_rx) = make_background_request("totally-invented-type");
     assert_background_pre_spawn_failure(
             ctx,
             &coordinator,
             &gateway,
+            &mut gateway_rx,
             request,
             result_rx,
             "Unknown subagent type",
@@ -3402,6 +3404,7 @@ async fn assert_background_pre_spawn_failure(
     ctx: SubagentSpawnContext,
     coordinator: &std::cell::RefCell<SubagentCoordinator>,
     gateway: &GatewaySender,
+    gateway_rx: &mut tokio::sync::mpsc::UnboundedReceiver<xai_acp_lib::AcpClientMessage>,
     request: SubagentRequest,
     result_rx: oneshot::Receiver<SubagentResult>,
     expected_error_substring: &str,
@@ -3432,18 +3435,143 @@ async fn assert_background_pre_spawn_failure(
     assert_eq!(summaries.len(), 1);
     assert_eq!(summaries[0].subagent_id, subagent_id);
     assert!(!summaries[0].success);
+    assert!(
+        summaries[0]
+            .error
+            .as_deref()
+            .is_some_and(|e| e.contains(expected_error_substring)),
+        "the completion summary must carry the reason: {:?}",
+        summaries[0].error,
+    );
+
+    // The client must learn about the failure too: a `SubagentFinished` keyed by
+    // the real child id, carrying the description, so a row can render. Without
+    // this the spawn is invisible (no `SubagentSpawned` ever fires).
+    let mut found = false;
+    while let Ok(msg) = gateway_rx.try_recv() {
+        let xai_acp_lib::AcpClientMessage::ExtNotification(args) = msg else {
+            continue;
+        };
+        let body = args.request.params.get();
+        if !body.contains("subagent_finished") {
+            continue;
+        }
+        assert!(body.contains(&subagent_id), "finish must carry the id: {body}");
+        assert!(
+            body.contains(&format!("\"child_session_id\":\"{subagent_id}\"")),
+            "finish must carry a usable child_session_id: {body}"
+        );
+        assert!(body.contains("\"description\":"), "finish must carry a description: {body}");
+        assert!(body.contains(expected_error_substring));
+        found = true;
+    }
+    assert!(found, "pre-spawn failure must emit SubagentFinished to the client");
+}
+
+/// A background spawn that dies during initialization must wake the parent with
+/// the reason — the same contract a failure *after* the spawn already honors.
+/// Without it the model is told "you will be notified" and never is.
+#[tokio::test]
+async fn background_pre_spawn_failure_wakes_the_parent_with_the_reason() {
+    use crate::test_support::lsp_runtime::ctx_with_toggle_and_cmd_tx;
+    let (ctx, mut cmd_rx) = ctx_with_toggle_and_cmd_tx(HashMap::new());
+    let coordinator = std::cell::RefCell::new(SubagentCoordinator::new());
+    let gateway = test_gateway();
+    let (request, _result_rx) = make_background_request("invented-wake");
+    let subagent_id = request.id.clone();
+
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            Box::pin(handle_subagent_request(request, ctx, &coordinator, &gateway)).await;
+        })
+        .await;
+
+    let mut wake = None;
+    while let Ok(cmd) = cmd_rx.try_recv() {
+        if let SessionCommand::Prompt {
+            prompt_id,
+            prompt_blocks,
+            ..
+        } = cmd
+        {
+            wake = Some((prompt_id, prompt_blocks));
+        }
+    }
+    let (prompt_id, blocks) = wake.expect("pre-spawn failure must wake the parent");
+    assert_eq!(prompt_id, format!("subagent-completed-{subagent_id}"));
+    let text: String = blocks
+        .iter()
+        .map(|b| match b {
+            acp::ContentBlock::Text(t) => t.text.clone(),
+            _ => String::new(),
+        })
+        .collect();
+    assert!(
+        text.contains("with failure"),
+        "wake body must report the failure: {text}"
+    );
+    assert!(
+        text.contains("Unknown subagent type"),
+        "wake body must carry the reason: {text}"
+    );
+}
+
+/// The post-`insert_pending` / pre-spawn path (a bad attachment, a bad cwd, a
+/// partial worktree) used to emit nothing at all: the client showed no row and
+/// the model learned only on the next turn.
+#[tokio::test]
+async fn background_bad_attachment_reports_the_failure() {
+    let ctx = ctx_with_toggle(HashMap::new());
+    let coordinator = std::cell::RefCell::new(SubagentCoordinator::new());
+    let (gateway, mut gateway_rx) = test_gateway_with_receiver();
+    let (mut request, result_rx) = make_background_request("explore");
+    request.runtime_overrides.attachments = vec!["/definitely/missing.bin".to_string()];
+
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            Box::pin(handle_subagent_request(request, ctx, &coordinator, &gateway)).await;
+        })
+        .await;
+
+    let result = result_rx.await.expect("should receive result");
+    assert!(!result.success);
+    assert!(
+        result
+            .error
+            .as_deref()
+            .is_some_and(|e| e.contains("does not exist")),
+        "unexpected result: {result:?}"
+    );
+    let mut found = false;
+    while let Ok(msg) = gateway_rx.try_recv() {
+        let xai_acp_lib::AcpClientMessage::ExtNotification(args) = msg else {
+            continue;
+        };
+        let body = args.request.params.get();
+        if body.contains("subagent_finished") {
+            assert!(body.contains("does not exist"), "reason missing: {body}");
+            found = true;
+        }
+    }
+    assert!(
+        found,
+        "a spawn that dies before `SubagentSpawned` must still emit SubagentFinished"
+    );
 }
 #[tokio::test]
 async fn background_disabled_type_records_failure_completion() {
     let toggle = HashMap::from([("explore".to_string(), false)]);
     let ctx = ctx_with_toggle(toggle);
     let coordinator = std::cell::RefCell::new(SubagentCoordinator::new());
-    let gateway = test_gateway();
+    let (gateway, mut gateway_rx) = test_gateway_with_receiver();
     let (request, result_rx) = make_background_request("explore");
     assert_background_pre_spawn_failure(
             ctx,
             &coordinator,
             &gateway,
+            &mut gateway_rx,
             request,
             result_rx,
             "[subagents.toggle]",
@@ -3455,12 +3583,13 @@ async fn background_not_allowed_type_records_failure_completion() {
     let mut ctx = ctx_with_toggle(HashMap::new());
     ctx.allowed_subagent_types = Some(vec!["plan".to_string()]);
     let coordinator = std::cell::RefCell::new(SubagentCoordinator::new());
-    let gateway = test_gateway();
+    let (gateway, mut gateway_rx) = test_gateway_with_receiver();
     let (request, result_rx) = make_background_request("explore");
     assert_background_pre_spawn_failure(
             ctx,
             &coordinator,
             &gateway,
+            &mut gateway_rx,
             request,
             result_rx,
             "not allowed",
@@ -3608,7 +3737,10 @@ async fn background_unknown_type_emits_subagent_finished_notification() {
             assert!(body.contains(&subagent_id));
             assert!(body.contains("\"status\":\"failed\""));
             assert!(body.contains("Unknown subagent type"));
-            assert!(body.contains("\"will_wake\":false"));
+            // The parent holds a command channel, so the failure wakes it: the
+            // spawn is background and nothing else would ever report the death.
+            assert!(body.contains("\"will_wake\":true"));
+            assert!(body.contains("\"child_session_id\":"));
             found_live = true;
             break;
         }
@@ -3893,6 +4025,7 @@ fn record_pre_spawn_failure_populates_completed_and_summary() {
             SubagentOwner::Task,
             "Unknown subagent type: invented",
             true,
+            false,
         );
     let lookup = coordinator.lookup("sub-x");
     match lookup {
@@ -3927,6 +4060,7 @@ fn record_pre_spawn_failure_skips_buffer_when_flag_false() {
             SubagentOwner::Task,
             "Unknown subagent type: invented",
             false,
+            false,
         );
     assert!(coordinator.drain_pending_completions_for("").is_empty());
     assert!(coordinator.lookup("sub-hidden-pre").is_some());
@@ -3946,6 +4080,7 @@ async fn record_pre_spawn_failure_notifies_waiters() {
             SubagentOwner::Task,
             "error",
             true,
+            false,
         );
     tokio::time::timeout(std::time::Duration::from_millis(50), waiter)
         .await
@@ -3967,6 +4102,7 @@ async fn record_pre_spawn_failure_notifies_all_waiters() {
             SubagentOwner::Task,
             "error",
             true,
+            false,
         );
     let timeout = std::time::Duration::from_millis(50);
     tokio::time::timeout(timeout, waiter_a).await.expect("waiter_a must wake");
@@ -4002,6 +4138,7 @@ fn record_pre_spawn_failure_clears_stale_pending_entry() {
             SubagentOwner::Task,
             "Unknown subagent type: invented",
             true,
+            false,
         );
     assert!(!coordinator.pending.contains_key("sub-z"));
     match coordinator.lookup("sub-z") {
