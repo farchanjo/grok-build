@@ -76,6 +76,60 @@ pub struct SubagentInfo {
     pub child_updates_replayed: bool,
 }
 impl SubagentInfo {
+    /// Minimal entry for a `SubagentFinished` whose `SubagentSpawned` never
+    /// arrived: the subagent failed (or was cancelled) while spawning, so the
+    /// terminal event is the only one the client ever sees. The fields the
+    /// spawn notification would have carried come from the finish itself; the
+    /// rest stay blank. The entry is born terminal.
+    pub fn orphan_finish(
+        subagent_id: &str,
+        child_session_id: &str,
+        description: Option<&str>,
+        status: &str,
+        error: Option<&str>,
+    ) -> Self {
+        let now = Instant::now();
+        Self {
+            subagent_id: Arc::from(subagent_id),
+            child_session_id: Arc::from(child_session_id),
+            description: Arc::from(description.unwrap_or_default()),
+            subagent_type: Arc::from(""),
+            persona: None,
+            role: None,
+            model: None,
+            context_source: None,
+            resumed_from: None,
+            capability_mode: None,
+            workflow_run_id: None,
+            context_normalized: false,
+            parent_prompt_id: None,
+            started_at: now,
+            last_progress_at: now,
+            finished: true,
+            status: Some(Arc::from(status)),
+            error: error.map(Arc::from),
+            duration_ms: None,
+            tool_calls: None,
+            turns: None,
+            turn_count: None,
+            tool_call_count: None,
+            tokens_used: None,
+            context_window_tokens: None,
+            context_usage_pct: None,
+            tools_used: Vec::new(),
+            error_count: None,
+            activity_label: None,
+            is_background: false,
+            pending_kill: false,
+            kill_requested_at: None,
+            scrollback_entry_id: None,
+            prompt: None,
+            child_cwd: None,
+            worktree_path: None,
+            child_updates_replayed: false,
+        }
+    }
+
     /// Whether the subagent is currently running (not finished).
     pub fn is_running(&self) -> bool {
         !self.finished

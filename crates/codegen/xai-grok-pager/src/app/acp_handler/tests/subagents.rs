@@ -867,3 +867,96 @@
         );
     }
 
+    /// A `SubagentFinished` with NO preceding `SubagentSpawned` must not be
+    /// dropped. The shell's pre-spawn failure path (`send_pre_spawn_failure`)
+    /// emits exactly this shape for a background spawn: `child_session_id` is
+    /// empty and `subagent_id` carries the real id, so keying the lookup on
+    /// `child_session_id` alone loses the terminal state (and with it any row
+    /// or pane entry the user could see).
+    #[test]
+    fn finished_without_spawn_leaves_a_terminal_trace() {
+        let mut app = make_app_with_agent("sess-orphan-finish");
+        let finished = XaiSessionUpdate::SubagentFinished {
+            subagent_id: "sa-pre-spawn".into(),
+            child_session_id: String::new(),
+            status: "failed".into(),
+            error: Some("attachment \"/x\" does not exist".into()),
+            description: None,
+            tool_calls: 0,
+            turns: 0,
+            duration_ms: 0,
+            tokens_used: 0,
+            output: None,
+            will_wake: false,
+        };
+        let _ = handle(
+            make_ext_session_notification("sess-orphan-finish", finished),
+            &mut app,
+        );
+
+        let agent = app.agents.get(&AgentId(0)).unwrap();
+        let terminal: Vec<_> = agent
+            .subagent_sessions
+            .values()
+            .filter(|info| info.finished)
+            .collect();
+        assert_eq!(
+            terminal.len(),
+            1,
+            "a finish without a spawn must leave exactly one terminal entry, keys: {:?}",
+            agent.subagent_sessions.keys().collect::<Vec<_>>()
+        );
+        assert_eq!(terminal[0].status.as_deref(), Some("failed"));
+        assert_eq!(
+            terminal[0].error.as_deref(),
+            Some("attachment \"/x\" does not exist")
+        );
+
+        let has_row = (0..agent.scrollback.len()).any(|i| {
+            agent
+                .scrollback
+                .get(i)
+                .is_some_and(|e| matches!(e.block, RenderBlock::Subagent(_)))
+        });
+        assert!(has_row, "the failed subagent must render a scrollback row");
+    }
+
+    /// Same shape with a real `child_session_id` (the spawn notification was
+    /// lost, e.g. across a reconnect): the finish must still finalize rather
+    /// than fall into the void.
+    #[test]
+    fn finished_with_lost_spawn_finalizes_by_subagent_id() {
+        let mut app = make_app_with_agent("sess-lost-spawn");
+        let finished = XaiSessionUpdate::SubagentFinished {
+            subagent_id: "sa-lost".into(),
+            child_session_id: "child-lost".into(),
+            status: "failed".into(),
+            error: Some("session error".into()),
+            description: None,
+            tool_calls: 0,
+            turns: 0,
+            duration_ms: 0,
+            tokens_used: 0,
+            output: None,
+            will_wake: false,
+        };
+        let _ = handle(
+            make_ext_session_notification("sess-lost-spawn", finished),
+            &mut app,
+        );
+
+        let agent = app.agents.get(&AgentId(0)).unwrap();
+        let info = agent
+            .subagent_sessions
+            .get("child-lost")
+            .or_else(|| agent.subagent_sessions.get("sa-lost"))
+            .unwrap_or_else(|| {
+                panic!(
+                    "a finish for a lost spawn must land, keys: {:?}",
+                    agent.subagent_sessions.keys().collect::<Vec<_>>()
+                )
+            });
+        assert!(info.finished, "the entry must be terminal");
+        assert_eq!(info.status.as_deref(), Some("failed"));
+    }
+

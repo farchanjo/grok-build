@@ -561,9 +561,11 @@ pub(super) fn handle_session_notification(notif: &acp::ExtNotification, app: &mu
             true
         }
         XaiSessionUpdate::SubagentFinished {
+            subagent_id,
             child_session_id,
             status,
             error,
+            description,
             tool_calls,
             turns,
             duration_ms,
@@ -571,6 +573,7 @@ pub(super) fn handle_session_notification(notif: &acp::ExtNotification, app: &mu
             ..
         } => {
             tracing::info!(
+                subagent_id = %subagent_id,
                 child_session_id = %child_session_id,
                 status = %status,
                 tool_calls = tool_calls,
@@ -578,39 +581,69 @@ pub(super) fn handle_session_notification(notif: &acp::ExtNotification, app: &mu
                 duration_ms = duration_ms,
                 "Subagent finished"
             );
+            // A finish with no preceding spawn: the subagent failed during spawn
+            // initialization, so the shell emits only this terminal event. Key the
+            // entry by the child id when there is one, else by the subagent id (the
+            // two are the same value for real spawns), and synthesize the entry so
+            // the failure renders instead of vanishing.
+            let key = resolve_finished_subagent_key(agent, &subagent_id, &child_session_id);
+            if !agent.subagent_sessions.contains_key(&key) {
+                agent.subagent_sessions.insert(
+                    key.clone(),
+                    crate::app::subagent::SubagentInfo::orphan_finish(
+                        &subagent_id,
+                        &key,
+                        description.as_deref(),
+                        &status,
+                        error.as_deref(),
+                    ),
+                );
+            }
             let elapsed_dur = std::time::Duration::from_millis(duration_ms);
-            let info_ref = agent.subagent_sessions.get(&child_session_id);
+            let info_ref = agent.subagent_sessions.get(&key);
             let entry_id = info_ref.and_then(|s| s.scrollback_entry_id);
             let is_background = info_ref.is_some_and(|s| s.is_background);
-            let description = info_ref.map(|s| s.description.clone()).unwrap_or_default();
+            let description = info_ref
+                .map(|s| s.description.clone())
+                .unwrap_or_else(|| Arc::from(description.as_deref().unwrap_or_default()));
             if let Some(eid) = entry_id {
                 agent.scrollback.finish_running(eid);
             }
-            sync_subagent_activity(agent, &child_session_id, None);
-            if is_background {
+            sync_subagent_activity(agent, &key, None);
+            // A row is pushed when the spawn already rendered one as a background
+            // row, and whenever there is no row at all (the synthesized case) —
+            // otherwise the finish would land on nothing.
+            if is_background || entry_id.is_none() {
                 let block = match status.as_str() {
                     "completed" => {
                         RenderBlock::Subagent(crate::scrollback::blocks::SubagentBlock::completed(
                             description.as_ref(),
-                            child_session_id.as_str(),
+                            key.as_str(),
                             elapsed_dur,
                         ))
                     }
                     "cancelled" => {
                         RenderBlock::Subagent(crate::scrollback::blocks::SubagentBlock::cancelled(
                             description.as_ref(),
-                            child_session_id.as_str(),
+                            key.as_str(),
                             elapsed_dur,
                         ))
                     }
                     _ => RenderBlock::Subagent(crate::scrollback::blocks::SubagentBlock::failed(
                         description.as_ref(),
-                        child_session_id.as_str(),
+                        key.as_str(),
                         elapsed_dur,
                         error.clone(),
                     )),
                 };
-                agent.scrollback.push_block(block);
+                let row_id = agent.scrollback.push_block(block);
+                // The synthesized entry owns its row: the pane's view/kill actions
+                // scroll to it, so record it when the spawn never set one.
+                if entry_id.is_none()
+                    && let Some(info) = agent.subagent_sessions.get_mut(&key)
+                {
+                    info.scrollback_entry_id = Some(row_id);
+                }
             } else if let Some(eid) = entry_id
                 && let Some(entry) = agent.scrollback.get_by_id_mut(eid)
             {
@@ -636,7 +669,7 @@ pub(super) fn handle_session_notification(notif: &acp::ExtNotification, app: &mu
                 }
                 entry.invalidate_cache();
             }
-            if let Some(info) = agent.subagent_sessions.get_mut(&child_session_id) {
+            if let Some(info) = agent.subagent_sessions.get_mut(&key) {
                 info.finished = true;
                 info.status = Some(Arc::from(status));
                 info.error = error.map(Arc::from);
@@ -651,7 +684,7 @@ pub(super) fn handle_session_notification(notif: &acp::ExtNotification, app: &mu
                 info.last_progress_at = std::time::Instant::now();
             }
             let resuming = agent.session.loading_replay;
-            if let Some(child_view) = agent.subagent_views.get_mut(&child_session_id) {
+            if let Some(child_view) = agent.subagent_views.get_mut(&key) {
                 child_view.session.state = AgentState::Idle;
                 if !resuming {
                     crate::app::subagent::finalize_finished_child_view(child_view, elapsed_dur);
@@ -1257,6 +1290,34 @@ pub(super) fn apply_session_event(
         _ => false,
     }
 }
+/// Resolve the `subagent_sessions` key a `SubagentFinished` belongs to.
+///
+/// Prefers the child session id, then falls back to a lookup by `subagent_id`
+/// (the two are the same value for a real spawn, and the finish for a spawn
+/// that died during initialization carries only the subagent id). Falls back to
+/// the non-empty of the two so a caller can synthesize the missing entry.
+fn resolve_finished_subagent_key(
+    agent: &AgentView,
+    subagent_id: &str,
+    child_session_id: &str,
+) -> String {
+    if !child_session_id.is_empty() && agent.subagent_sessions.contains_key(child_session_id) {
+        return child_session_id.to_string();
+    }
+    if let Some((key, _)) = agent
+        .subagent_sessions
+        .iter()
+        .find(|(_, info)| info.subagent_id.as_ref() == subagent_id)
+    {
+        return key.clone();
+    }
+    if child_session_id.is_empty() {
+        subagent_id.to_string()
+    } else {
+        child_session_id.to_string()
+    }
+}
+
 /// True if the trailing run of session/system blocks contains a
 /// [`SessionEvent::CompactionFailed`]. Used so we don't stack a [`SessionEvent::ContextTooLarge`]
 /// prompt on top of the compaction handler's "too large to compact" message.

@@ -1286,6 +1286,7 @@ pub(super) fn test_subagent_finished(child_sid: &str) -> XaiSessionUpdate {
         child_session_id: child_sid.into(),
         status: "completed".into(),
         error: None,
+        description: None,
         tool_calls: 2,
         turns: 1,
         duration_ms: 500,
