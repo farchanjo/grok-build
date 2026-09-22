@@ -2,6 +2,7 @@
 //! arms, and the free helpers only the loop consumes.
 #![allow(clippy::items_after_test_module)]
 use super::*;
+use crate::session::compaction_config::{CompactionGuard, CompactionKind};
 /// The `YoloToggled` event to emit after `set_yolo_mode(requested)`, given the
 /// previous state and the post-call ACTUAL state (read back via
 /// `is_yolo_mode()`). Returns `Some(actual)` only on a real change.
@@ -40,6 +41,70 @@ fn cleanup_session_scratch(session: &SessionActor) {
     );
 }
 impl SessionActor {
+    /// Enter the compaction safe point for a rolling job, if it is free.
+    ///
+    /// The guard must outlive the job's whole lifecycle — it is what keeps
+    /// promotion, the notification drain, the idle emission and the laziness
+    /// classifier from appending to a conversation a summary is being prepared
+    /// from. For a rolling job that means: admission here, release by the
+    /// completion arm taking it back out of [`CompactionConfig::rolling_guard`].
+    pub(super) fn enter_rolling_compaction(
+        self: &Arc<Self>,
+        completion_tx: mpsc::UnboundedSender<(String, PromptTurnResult)>,
+    ) -> Option<CompactionGuard> {
+        self.compaction.enter(
+            CompactionKind::Rolling,
+            Self::wake_hook(CompactionKind::Rolling, self, completion_tx),
+        )
+    }
+
+    /// Enter the safe point for a manual `/compact`, if it is free.
+    ///
+    /// Call under the state lock: the same critical section that rules out a
+    /// running turn must also rule out a promotion slipping in before the job's
+    /// first poll.
+    pub(super) fn enter_manual_compaction(
+        self: &Arc<Self>,
+        completion_tx: mpsc::UnboundedSender<(String, PromptTurnResult)>,
+    ) -> Option<CompactionGuard> {
+        self.compaction.enter(
+            CompactionKind::Manual,
+            Self::wake_hook(CompactionKind::Manual, self, completion_tx),
+        )
+    }
+
+    /// What runs when a guard drops: clear the flag, then re-kick the waiters.
+    ///
+    /// Holds a `Weak` so a guard parked in an actor field does not keep the
+    /// actor alive. The resume is spawned because `Drop` is sync and the resume
+    /// awaits.
+    fn wake_hook(
+        kind: CompactionKind,
+        actor: &Arc<Self>,
+        completion_tx: mpsc::UnboundedSender<(String, PromptTurnResult)>,
+    ) -> impl FnOnce() + 'static {
+        let weak = Arc::downgrade(actor);
+        move || {
+            let Some(actor) = weak.upgrade() else {
+                return;
+            };
+            // Only this kind's flag: the two gates are independent, so clearing
+            // both on one release would open the other's while it still runs.
+            let flag = match kind {
+                CompactionKind::Rolling => &actor.compaction.rolling_in_flight,
+                CompactionKind::Manual => &actor.compaction.manual_in_flight,
+            };
+            flag.store(false, std::sync::atomic::Ordering::Release);
+            tracing::debug!(
+                ?kind,
+                "compaction gate released; re-kicking safe-point waiters"
+            );
+            tokio::task::spawn_local(async move {
+                resume_after_compaction(&actor, &completion_tx).await;
+            });
+        }
+    }
+
     /// Install this session's MCP client event lane: a tee that fans client
     /// events into the status dispatcher and the resource pump.
     ///
@@ -508,10 +573,14 @@ async fn maybe_schedule_rolling_compaction(
             job.cancel_sequence = cancel_sequence;
             match rolling_job_tx.try_send(job) {
                 Ok(()) => {
-                    session
-                        .compaction
-                        .rolling_in_flight
-                        .store(true, std::sync::atomic::Ordering::Release);
+                    match session.enter_rolling_compaction(completion_tx.clone()) {
+                        Some(guard) => {
+                            session.compaction.rolling_guard.replace(Some(guard));
+                        }
+                        None => tracing::warn!(
+                            "rolling compaction admitted but the safe-point gate was taken"
+                        ),
+                    }
                     session
                         .send_xai_notification(
                             crate::extensions::notification::SessionUpdate::AutoCompactStarted {
@@ -817,6 +886,12 @@ pub(super) async fn run_session(
                 // actor loop is between command/completion handlers. The shared
                 // fail-stop token above also covers any race after this call.
                 result = rolling_result_rx.recv(), if rolling_worker_live => {
+                    // Take the gate first, so it reopens on every path out of
+                    // this arm — including the indeterminate early return
+                    // below, which used to skip the release and leave the safe
+                    // point closed for the rest of the session. The guard drops
+                    // at the end of the arm: flag cleared, waiters re-kicked.
+                    let _gate = session.compaction.rolling_guard.borrow_mut().take();
                     if let Some(result) = result {
                         if session.apply_rolling_compaction_result(result).await
                             == xai_chat_state::CasSpliceResult::PersistenceIndeterminate
@@ -828,11 +903,6 @@ pub(super) async fn run_session(
                         tracing::warn!("rolling compaction worker exited");
                         rolling_worker_live = false;
                     }
-                    session.compaction.rolling_in_flight.store(
-                        false,
-                        std::sync::atomic::Ordering::Release,
-                    );
-                    resume_after_compaction(&session, &completion_tx).await;
                 }
                 // ChatStateActor events — coordination signals for session-level concerns.
                 event = chat_state_event_rx.recv() => {
@@ -1598,11 +1668,11 @@ pub(super) async fn run_session(
                             // rows wait — the compaction runs first and
                             // promotion re-kicks when it resolves, so
                             // `pending_inputs` must NOT block an explicit
-                            // user `/compact`. The flag is set under the same
+                            // user `/compact`. The gate is taken under the same
                             // state lock so no `SessionCommand::Prompt`
                             // promote can slip between this arm and the
                             // spawned task's first poll.
-                            {
+                            let gate = {
                                 let state = session.state.lock().await;
                                 if state.running_task.is_some() {
                                     drop(state);
@@ -1613,47 +1683,31 @@ pub(super) async fn run_session(
                                         )));
                                     continue;
                                 }
-                                if session
-                                    .compaction
-                                    .manual_in_flight
-                                    .compare_exchange(
-                                        false,
-                                        true,
-                                        std::sync::atomic::Ordering::AcqRel,
-                                        std::sync::atomic::Ordering::Acquire,
-                                    )
-                                    .is_err()
-                                {
-                                    drop(state);
-                                    let _ = respond_to.send(Err(
-                                        acp::Error::invalid_request().data(
-                                            "a compaction is already running".to_string(),
-                                        ),
-                                    ));
-                                    continue;
+                                match session.enter_manual_compaction(completion_tx.clone()) {
+                                    Some(gate) => gate,
+                                    None => {
+                                        drop(state);
+                                        let _ = respond_to.send(Err(
+                                            acp::Error::invalid_request().data(
+                                                "a compaction is already running".to_string(),
+                                            ),
+                                        ));
+                                        continue;
+                                    }
                                 }
-                            }
+                            };
                             let s = session.clone();
-                            let ctx = completion_tx.clone();
                             tokio::task::spawn_local(async move {
-                                // Promotion pauses while the flag is set:
-                                // manual compaction holds no `running_task`
-                                // slot, so without this a promoted turn
-                                // mutates the conversation and the apply CAS
-                                // drops the finished summary (see
-                                // `CompactionConfig::manual_in_flight`).
+                                // The gate is held for the whole job: manual
+                                // compaction takes no `running_task` slot, so
+                                // without it a promoted turn mutates the
+                                // conversation and the apply CAS drops the
+                                // finished summary. Dropping the guard when
+                                // this task ends clears the flag and re-kicks
+                                // every waiter, on the error paths too.
+                                let _gate = gate;
                                 let compact_session = s.run_compact(user_context).await;
-                                s.compaction.manual_in_flight.store(
-                                    false,
-                                    std::sync::atomic::Ordering::Release,
-                                );
                                 let _ = respond_to.send(compact_session);
-                                // The queue paused on the gate; resume every
-                                // waiter now that the safe point has arrived
-                                // (same re-kick discipline as the rolling
-                                // apply path, including the deferred
-                                // classifier).
-                                resume_after_compaction(&s, &ctx).await;
                             });
                         }
                         SessionCommand::ReloadPlugins { registry } => {

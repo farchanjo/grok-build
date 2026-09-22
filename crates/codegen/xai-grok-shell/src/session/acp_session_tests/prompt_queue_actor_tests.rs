@@ -1942,6 +1942,126 @@ async fn compaction_admitted_mid_promotion_still_blocks_the_turn() {
         .await;
 }
 
+/// Dropping the guard reopens the gate *and* wakes the waiters, with no
+/// completion path calling a resume of its own.
+///
+/// That is the property the bare `store(true)` / `store(false)` pair could not
+/// give: release used to be a line each completion arm had to remember, and the
+/// rolling arm's `PersistenceIndeterminate` early return skipped it. Here the
+/// test drops the guard and calls nothing else, so only `Drop` can be
+/// responsible for the wake.
+#[tokio::test]
+async fn dropping_the_compaction_gate_reopens_it_and_wakes_waiters() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (actor, _rx) = build_actor().await;
+            {
+                let mut state = actor.state.lock().await;
+                state.pending_inputs.push_back(user_item("p1", "alice"));
+            }
+            let (completion_tx, _completion_rx) = tokio::sync::mpsc::unbounded_channel();
+
+            let gate = actor
+                .clone()
+                .enter_manual_compaction(completion_tx.clone())
+                .expect("the gate starts free");
+            assert!(
+                actor.compaction.in_flight(),
+                "holding the gate is in flight"
+            );
+
+            // Held: a promotion attempt gives way and leaves the queue alone.
+            actor
+                .clone()
+                .maybe_start_running_task(completion_tx.clone())
+                .await;
+            {
+                let state = actor.state.lock().await;
+                assert!(
+                    state.running_task.is_none(),
+                    "nothing may promote while the gate is held"
+                );
+                assert_eq!(state.pending_inputs.len(), 1);
+            }
+
+            // Drop it and call nothing else. `Drop` must clear the flag and
+            // re-kick promotion on its own.
+            drop(gate);
+            assert!(
+                !actor.compaction.in_flight(),
+                "dropping the guard must reopen the gate"
+            );
+
+            let mut promoted = false;
+            for _ in 0..16 {
+                tokio::task::yield_now().await;
+                if actor.state.lock().await.running_task.is_some() {
+                    promoted = true;
+                    break;
+                }
+            }
+            assert!(
+                promoted,
+                "dropping the guard must re-kick the promotion that gave way"
+            );
+        })
+        .await;
+}
+
+/// The two gates are independent: releasing one must not open the other.
+#[tokio::test]
+async fn releasing_one_compaction_gate_leaves_the_other_closed() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (actor, _rx) = build_actor().await;
+            let (completion_tx, _completion_rx) = tokio::sync::mpsc::unbounded_channel();
+
+            let rolling = actor
+                .clone()
+                .enter_rolling_compaction(completion_tx.clone())
+                .expect("rolling gate free");
+            assert!(
+                actor
+                    .clone()
+                    .enter_rolling_compaction(completion_tx.clone())
+                    .is_none(),
+                "a second rolling job must not take a held gate"
+            );
+
+            drop(rolling);
+            assert!(
+                !actor
+                    .compaction
+                    .rolling_in_flight
+                    .load(std::sync::atomic::Ordering::Acquire)
+            );
+            assert!(
+                !actor
+                    .compaction
+                    .manual_in_flight
+                    .load(std::sync::atomic::Ordering::Acquire),
+                "releasing rolling must not open the manual gate"
+            );
+
+            // And the manual gate is genuinely usable afterwards.
+            let manual = actor
+                .clone()
+                .enter_manual_compaction(completion_tx)
+                .expect("manual gate free after rolling released");
+            assert!(
+                actor
+                    .compaction
+                    .manual_in_flight
+                    .load(std::sync::atomic::Ordering::Acquire)
+            );
+            drop(manual);
+            assert!(!actor.compaction.in_flight());
+        })
+        .await;
+}
+
 /// `in_flight()` is the single read both guards and every idle predicate use;
 /// if it ever misses a flag, the guards that consume it lose that flag's
 /// protection silently.

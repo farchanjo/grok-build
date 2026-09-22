@@ -418,6 +418,52 @@ impl PrefireState {
     }
 }
 
+/// Which compaction holds the safe point. Selects the flag released on drop.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CompactionKind {
+    Rolling,
+    Manual,
+}
+
+/// RAII hold on the compaction safe point.
+///
+/// Holding a guard is what makes the conversation safe to summarize: nothing
+/// may append to it until the guard is dropped. A guard rather than a
+/// `store(true)` / `store(false)` pair, because release then runs on *every*
+/// exit path — `?`, an early `return`, a panic — instead of on each completion
+/// path remembering to do it. The rolling completion arm's
+/// `PersistenceIndeterminate` early return used to skip the release outright and
+/// leave the safe point closed.
+///
+/// `Drop` is sync and the wake is async, so the release closure spawns.
+pub struct CompactionGuard {
+    kind: CompactionKind,
+    release: Option<Box<dyn FnOnce()>>,
+}
+
+impl CompactionGuard {
+    /// Build a guard. The caller has already won the `compare_exchange` on the
+    /// flag matching `kind`; `release` clears it and wakes the waiters.
+    pub fn new(kind: CompactionKind, release: impl FnOnce() + 'static) -> Self {
+        Self {
+            kind,
+            release: Some(Box::new(release)),
+        }
+    }
+
+    pub fn kind(&self) -> CompactionKind {
+        self.kind
+    }
+}
+
+impl Drop for CompactionGuard {
+    fn drop(&mut self) {
+        if let Some(release) = self.release.take() {
+            release();
+        }
+    }
+}
+
 pub struct CompactionConfig {
     /// Context window usage percentage (0-100) at which auto-compact triggers.
     ///
@@ -482,6 +528,11 @@ pub struct CompactionConfig {
     /// Held only for the duration of one classifier run, so a deferred spawn
     /// releases it and the re-kick can still fire.
     pub laziness_in_flight: AtomicBool,
+    /// Holds the rolling job's gate for as long as the job owns the safe point:
+    /// from admission until its result is applied or discarded. Taken by the
+    /// completion arm, whose `Drop` clears the flag and re-kicks the waiters —
+    /// so the release cannot be skipped by an early return between the two.
+    pub rolling_guard: RefCell<Option<CompactionGuard>>,
 }
 
 impl CompactionConfig {
@@ -502,6 +553,28 @@ impl CompactionConfig {
     pub fn in_flight(&self) -> bool {
         self.rolling_in_flight.load(Ordering::Acquire)
             || self.manual_in_flight.load(Ordering::Acquire)
+    }
+
+    /// Enter the safe point for `kind`, if it is free.
+    ///
+    /// Returns `None` when that kind already holds the gate, matching the
+    /// single-job-per-kind rule. The caller must keep the guard alive for the
+    /// whole job; dropping it is what reopens the gate.
+    ///
+    /// `wake` runs on release. It receives the `CompactionKind` so a caller can
+    /// log which gate reopened.
+    pub fn enter(
+        &self,
+        kind: CompactionKind,
+        wake: impl FnOnce() + 'static,
+    ) -> Option<CompactionGuard> {
+        let flag = match kind {
+            CompactionKind::Rolling => &self.rolling_in_flight,
+            CompactionKind::Manual => &self.manual_in_flight,
+        };
+        flag.compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .ok()?;
+        Some(CompactionGuard::new(kind, wake))
     }
 }
 
