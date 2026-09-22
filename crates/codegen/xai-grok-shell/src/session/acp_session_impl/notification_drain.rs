@@ -169,20 +169,10 @@ impl SessionActor {
             tracing::debug!("prompt promotion paused for pending user cancellation");
             return;
         }
-        if self
-            .compaction
-            .rolling_in_flight
-            .load(std::sync::atomic::Ordering::Acquire)
-        {
-            tracing::debug!("prompt promotion paused for rolling compaction safe point");
-            return;
-        }
-        if self
-            .compaction
-            .manual_in_flight
-            .load(std::sync::atomic::Ordering::Acquire)
-        {
-            tracing::debug!("prompt promotion paused for manual compaction safe point");
+        // Admission guard. `in_flight()` covers both compaction kinds; a guard
+        // that reads only one flag silently loses protection for the other.
+        if self.compaction.in_flight() {
+            tracing::debug!("prompt promotion paused for compaction safe point");
             return;
         }
         // Fast path under the lock: nothing to promote.
@@ -332,11 +322,15 @@ impl SessionActor {
             )
             .await;
 
-        if self
-            .compaction
-            .rolling_in_flight
-            .load(std::sync::atomic::Ordering::Acquire)
-        {
+        // Re-check at the promotion point, not just at admission. The
+        // admission guard above runs before the first lock, and this function
+        // then awaits (`load_config`, `update_resource`); a compaction admitted
+        // in that window would otherwise be overtaken by a turn that appends
+        // to the conversation, bumping `structural_epoch` and making the
+        // finished summary stale. Must consult the *same* predicate as the
+        // admission guard — checking only one flag here is how the manual
+        // case used to slip through.
+        if self.compaction.in_flight() {
             return;
         }
         let promotion_sequence = self.compaction.cancel.cancel_sequence();
@@ -460,7 +454,7 @@ impl SessionActor {
             // Shared idle predicate — same conditions Layer 3 uses via
             // `is_session_idle_for_injection`. Inlined here so the
             // `mut state` borrow can survive into the take/push below.
-            if !is_session_idle_for_injection(&state) {
+            if !is_session_idle_for_injection(&state, self.compaction.in_flight()) {
                 return;
             }
 
@@ -519,7 +513,7 @@ impl SessionActor {
     pub(super) async fn emit_session_idle_if_idle(&self) {
         {
             let state = self.state.lock().await;
-            if !is_session_idle_for_injection(&state) {
+            if !is_session_idle_for_injection(&state, self.compaction.in_flight()) {
                 return;
             }
         }

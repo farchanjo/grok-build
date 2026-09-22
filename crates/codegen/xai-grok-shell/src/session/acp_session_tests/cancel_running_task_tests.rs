@@ -213,6 +213,7 @@ async fn persist_ack_waits_for_disk_flush_before_success() {
                     cancel: Default::default(),
                     rolling_in_flight: std::sync::atomic::AtomicBool::new(false),
                     manual_in_flight: std::sync::atomic::AtomicBool::new(false),
+                    laziness_in_flight: std::sync::atomic::AtomicBool::new(false),
                 },
                 memory: crate::session::memory_state::SessionMemory {
                     flush_config: crate::config::MemoryFlushConfig::default(),
@@ -774,6 +775,7 @@ async fn first_turn_memory_injection_disabled_does_not_persist_to_chat_history()
                     cancel: Default::default(),
                     rolling_in_flight: std::sync::atomic::AtomicBool::new(false),
                     manual_in_flight: std::sync::atomic::AtomicBool::new(false),
+                    laziness_in_flight: std::sync::atomic::AtomicBool::new(false),
                 },
                 memory: crate::session::memory_state::SessionMemory {
                     flush_config: crate::config::MemoryFlushConfig::default(),
@@ -1105,6 +1107,7 @@ async fn cancel_running_task_teardown_clears_running_and_pending_work() {
                     cancel: Default::default(),
                                         rolling_in_flight: std::sync::atomic::AtomicBool::new(false),
                     manual_in_flight: std::sync::atomic::AtomicBool::new(false),
+                    laziness_in_flight: std::sync::atomic::AtomicBool::new(false),
                 },
                 memory: crate::session::memory_state::SessionMemory {
                     flush_config: crate::config::MemoryFlushConfig::default(),
@@ -2461,6 +2464,7 @@ async fn cancel_propagates_to_sampler_handle_so_no_further_emission() {
                     cancel: Default::default(),
                                         rolling_in_flight: std::sync::atomic::AtomicBool::new(false),
                     manual_in_flight: std::sync::atomic::AtomicBool::new(false),
+                    laziness_in_flight: std::sync::atomic::AtomicBool::new(false),
                 },
                 memory: crate::session::memory_state::SessionMemory {
                     flush_config: crate::config::MemoryFlushConfig::default(),

@@ -1943,6 +1943,7 @@ pub(crate) async fn spawn_session_actor(
                 cancel: compaction_cancel.clone(),
                 rolling_in_flight: std::sync::atomic::AtomicBool::new(false),
                 manual_in_flight: std::sync::atomic::AtomicBool::new(false),
+                laziness_in_flight: std::sync::atomic::AtomicBool::new(false),
             }
         },
         memory: super::memory_state::SessionMemory {

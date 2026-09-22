@@ -542,6 +542,32 @@ async fn maybe_schedule_rolling_compaction(
     }
 }
 
+/// Re-kick the work that paused on the compaction safe point.
+///
+/// Called exactly once, right after the in-flight flag is cleared — by the
+/// rolling apply path and by the manual `/compact` handler. Every waiter is
+/// re-checked rather than only the one whose absence was noticed, because a
+/// compaction pauses all of them and they are gated by one shared predicate.
+///
+/// Order is deliberate: a queued prompt is user work and outranks a synthetic
+/// notification turn, so promotion goes first; the drain then sees a running
+/// turn and correctly defers to the next turn end. The idle emission follows,
+/// because its only other call site is the turn-end handler, which a compaction
+/// admitted at turn end skips past. The classifier is spawned so its idle wait
+/// never blocks the actor loop.
+async fn resume_after_compaction(
+    session: &Arc<SessionActor>,
+    completion_tx: &mpsc::UnboundedSender<(String, PromptTurnResult)>,
+) {
+    SessionActor::maybe_start_running_task(session.clone(), completion_tx.clone()).await;
+    SessionActor::maybe_drain_notifications(session.clone(), completion_tx.clone()).await;
+    session.emit_session_idle_if_idle().await;
+    let s = session.clone();
+    tokio::task::spawn_local(async move {
+        s.maybe_fire_laziness_check().await;
+    });
+}
+
 async fn stop_after_indeterminate_compaction(session: &SessionActor) {
     session
         .cancel_running_task(
@@ -806,10 +832,7 @@ pub(super) async fn run_session(
                         false,
                         std::sync::atomic::Ordering::Release,
                     );
-                    SessionActor::maybe_start_running_task(
-                        session.clone(),
-                        completion_tx.clone(),
-                    ).await;
+                    resume_after_compaction(&session, &completion_tx).await;
                 }
                 // ChatStateActor events — coordination signals for session-level concerns.
                 event = chat_state_event_rx.recv() => {
@@ -1625,15 +1648,12 @@ pub(super) async fn run_session(
                                     std::sync::atomic::Ordering::Release,
                                 );
                                 let _ = respond_to.send(compact_session);
-                                // The queue paused on the gate; resume it now
-                                // that the safe point has arrived (same
-                                // re-kick discipline as the rolling apply path).
-                                SessionActor::maybe_start_running_task(
-                                    s.clone(),
-                                    ctx.clone(),
-                                )
-                                .await;
-                                SessionActor::maybe_drain_notifications(s, ctx).await;
+                                // The queue paused on the gate; resume every
+                                // waiter now that the safe point has arrived
+                                // (same re-kick discipline as the rolling
+                                // apply path, including the deferred
+                                // classifier).
+                                resume_after_compaction(&s, &ctx).await;
                             });
                         }
                         SessionCommand::ReloadPlugins { registry } => {
@@ -1887,7 +1907,7 @@ pub(super) async fn run_session(
                             // decision. Cheap: a single state lock.
                             let busy = {
                                 let state = session.state.lock().await;
-                                state_is_busy(&state)
+                                state_is_busy(&state, session.compaction.in_flight())
                             };
                             let _ = respond_to.send(busy);
                         }

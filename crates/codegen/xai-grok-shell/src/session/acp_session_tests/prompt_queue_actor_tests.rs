@@ -1887,6 +1887,99 @@ async fn manual_compaction_pauses_and_then_resumes_prompt_promotion() {
         .await;
 }
 
+/// A compaction admitted *while a promotion is already past its admission
+/// guard* must still stop that promotion.
+///
+/// `maybe_start_running_task` reads the flags once before its first lock and
+/// then awaits (`load_config`, `update_resource`) before it actually promotes.
+/// The existing `manual_compaction_pauses_and_then_resumes_prompt_promotion`
+/// sets the flag before the call, so it only ever exercises the admission
+/// guard; this one lands the admission in the window between the guard and the
+/// promotion point, which is where the manual case used to slip through and
+/// start a turn against a compaction that then lost its summary to a stale CAS.
+#[tokio::test]
+async fn compaction_admitted_mid_promotion_still_blocks_the_turn() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (actor, _rx) = build_actor().await;
+            {
+                let mut state = actor.state.lock().await;
+                state.pending_inputs.push_back(user_item("p1", "alice"));
+            }
+            let (completion_tx, _completion_rx) = tokio::sync::mpsc::unbounded_channel();
+
+            // Hold the state lock so the promoter blocks on its first
+            // acquisition — which is *after* its admission guard has already
+            // read the flags as clear.
+            let guard = actor.state.lock().await;
+            let promoter = actor.clone();
+            let handle = tokio::task::spawn_local(async move {
+                promoter.maybe_start_running_task(completion_tx).await;
+            });
+            // Let the promoter run up to the lock it cannot take yet.
+            tokio::task::yield_now().await;
+
+            // Compaction is admitted exactly here: past the admission guard,
+            // before the promotion point.
+            actor
+                .compaction
+                .manual_in_flight
+                .store(true, std::sync::atomic::Ordering::Release);
+            drop(guard);
+            handle.await.unwrap();
+
+            {
+                let state = actor.state.lock().await;
+                assert!(
+                    state.running_task.is_none(),
+                    "a compaction admitted mid-promotion must still stop the turn"
+                );
+                assert_eq!(state.pending_inputs.len(), 1);
+            }
+            assert!(actor.current_prompt_id.lock().unwrap().is_none());
+        })
+        .await;
+}
+
+/// `in_flight()` is the single read both guards and every idle predicate use;
+/// if it ever misses a flag, the guards that consume it lose that flag's
+/// protection silently.
+#[tokio::test]
+async fn compaction_in_flight_covers_both_kinds() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (actor, _rx) = build_actor().await;
+            let compaction = &actor.compaction;
+            let ordering = std::sync::atomic::Ordering::Release;
+
+            assert!(
+                !compaction.in_flight(),
+                "nothing in flight on a fresh actor"
+            );
+
+            compaction.rolling_in_flight.store(true, ordering);
+            assert!(compaction.in_flight(), "rolling must be visible");
+
+            compaction.rolling_in_flight.store(false, ordering);
+            assert!(
+                !compaction.in_flight(),
+                "clearing rolling must clear in_flight"
+            );
+
+            compaction.manual_in_flight.store(true, ordering);
+            assert!(compaction.in_flight(), "manual must be visible");
+
+            compaction.rolling_in_flight.store(true, ordering);
+            assert!(
+                compaction.in_flight(),
+                "both kinds set must still read as in flight"
+            );
+        })
+        .await;
+}
+
 #[tokio::test]
 async fn pending_compaction_cancel_pauses_and_then_resumes_prompt_promotion() {
     let local = tokio::task::LocalSet::new();

@@ -2963,6 +2963,7 @@ mod inline_auto_compact_flow_tests {
                 cancel: Default::default(),
                 rolling_in_flight: std::sync::atomic::AtomicBool::new(false),
                 manual_in_flight: std::sync::atomic::AtomicBool::new(false),
+                laziness_in_flight: std::sync::atomic::AtomicBool::new(false),
             },
             memory: crate::session::memory_state::SessionMemory {
                 flush_config: crate::config::MemoryFlushConfig::default(),

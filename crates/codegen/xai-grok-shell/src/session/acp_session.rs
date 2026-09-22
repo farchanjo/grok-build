@@ -450,20 +450,33 @@ impl State {
 /// so they share one definition of idleness, with no drift between them.
 ///
 /// Returns `true` exactly when: no turn is running, no user prompt is
-/// queued, and interactive Ctrl+C has not suppressed notifications pending
-/// genuine user re-engagement.
-pub(crate) fn is_session_idle_for_injection(state: &State) -> bool {
+/// queued, interactive Ctrl+C has not suppressed notifications pending
+/// genuine user re-engagement, and **no compaction is in flight**.
+///
+/// The compaction term is what keeps the safe point honest. A rolling
+/// compaction is admitted precisely when the session is otherwise idle, so
+/// without it the session reads as idle for the whole summarization round-trip:
+/// a laziness nudge then appends to the conversation and the apply CAS rejects
+/// the finished summary as `Stale`. Callers pass
+/// `CompactionConfig::in_flight()` — the predicate stays a pure function of
+/// `State` so it is unit-testable without an actor.
+pub(crate) fn is_session_idle_for_injection(state: &State, compaction_in_flight: bool) -> bool {
     state.running_task.is_none()
         && state.pending_inputs.is_empty()
         && !state.notifications_suppressed
+        && !compaction_in_flight
 }
 /// Predicate behind `SessionCommand::IsBusy`: the session has work in flight
-/// when a turn is running **or** inputs are queued. Consulted by the leader's
-/// idle-unload decision on client disconnect. Kept as a free function so
-/// it can be unit-tested directly against a `State` without spawning a full
-/// actor + leader.
-pub(crate) fn state_is_busy(state: &State) -> bool {
-    state.running_task.is_some() || !state.pending_inputs.is_empty()
+/// when a turn is running **or** inputs are queued **or** a compaction is
+/// running. Consulted by the leader's idle-unload decision on client
+/// disconnect. Kept as a free function so it can be unit-tested directly
+/// against a `State` without spawning a full actor + leader.
+///
+/// Compaction counts as work: it holds the conversation's safe point and a
+/// summarization round-trip is in progress, so unloading the session mid-way
+/// would drop it.
+pub(crate) fn state_is_busy(state: &State, compaction_in_flight: bool) -> bool {
+    state.running_task.is_some() || !state.pending_inputs.is_empty() || compaction_in_flight
 }
 use crate::auth::AuthManager;
 #[derive(Clone)]

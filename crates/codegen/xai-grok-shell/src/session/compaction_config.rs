@@ -468,6 +468,41 @@ pub struct CompactionConfig {
     /// this is set (same safe-point discipline as `rolling_in_flight`), and
     /// the handler re-kicks promotion when compaction resolves.
     pub manual_in_flight: AtomicBool,
+    /// Guards the deferred Layer-3 laziness classifier against a double fire.
+    ///
+    /// The classifier is spawned at turn end, which is also where a rolling
+    /// compaction is admitted — so the spawn usually finds the safe point taken
+    /// and returns, and the compaction's completion re-kicks it. Without this
+    /// flag the re-kick could overlap a classifier that already started, and
+    /// two runs would both read `nudges_used_this_session`, both decide to
+    /// nudge, and both append a reminder.
+    ///
+    /// Lives here rather than on `SessionActor` because it is part of the same
+    /// safe-point handshake and this struct has far fewer literal sites.
+    /// Held only for the duration of one classifier run, so a deferred spawn
+    /// releases it and the re-kick can still fire.
+    pub laziness_in_flight: AtomicBool,
+}
+
+impl CompactionConfig {
+    /// True while any compaction holds the conversation's safe point.
+    ///
+    /// This is the single read for "a compaction owns the conversation". Every
+    /// guard that must not append to the conversation while a summary is being
+    /// prepared reads this, not the individual flags: the two flags are set by
+    /// different call sites, and a guard that checks only one of them silently
+    /// loses its protection for the other.
+    ///
+    /// A compaction appends nothing itself, but every append bumps
+    /// `ChatState::structural_epoch` (`push_message` in the chat-state actor),
+    /// and the apply CAS rejects a summary whose source epoch moved. So an
+    /// append that lands mid-compaction does not corrupt anything — it just
+    /// makes the compaction's tokens worthless, which is the outcome this
+    /// guards against.
+    pub fn in_flight(&self) -> bool {
+        self.rolling_in_flight.load(Ordering::Acquire)
+            || self.manual_in_flight.load(Ordering::Acquire)
+    }
 }
 
 #[cfg(test)]

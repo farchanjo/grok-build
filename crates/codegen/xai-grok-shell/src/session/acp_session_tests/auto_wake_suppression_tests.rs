@@ -1824,15 +1824,19 @@ async fn state_is_busy_reflects_queued_inputs() {
             {
                 let state = actor.state.lock().await;
                 assert!(
-                    !state_is_busy(&state),
+                    !state_is_busy(&state, false),
                     "an idle actor (no turn, empty queue) must report not busy"
+                );
+                assert!(
+                    state_is_busy(&state, true),
+                    "a compaction in flight must report busy even with no turn and an empty queue"
                 );
             }
             {
                 let mut state = actor.state.lock().await;
                 state.pending_inputs.push_back(user_input("queued-1"));
                 assert!(
-                    state_is_busy(&state),
+                    state_is_busy(&state, false),
                     "a non-empty pending_inputs queue must report busy"
                 );
             }
@@ -1840,7 +1844,7 @@ async fn state_is_busy_reflects_queued_inputs() {
                 let mut state = actor.state.lock().await;
                 state.pending_inputs.clear();
                 assert!(
-                    !state_is_busy(&state),
+                    !state_is_busy(&state, false),
                     "clearing the queue must return to not busy"
                 );
             }

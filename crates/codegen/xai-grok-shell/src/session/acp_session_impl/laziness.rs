@@ -345,6 +345,33 @@ impl SessionActor {
     /// in both modes — debug mode adds logging, it does not bypass
     /// the production decision logic.
     pub(crate) async fn maybe_fire_laziness_check(self: Arc<Self>) {
+        // Single in-flight slot, the same `try_begin`/`finish` discipline as
+        // `PrefireState`. Two ways in: the turn-end spawn and the re-kick the
+        // compaction completion issues when it releases the safe point. The
+        // guard is released on every return path, including the deferral, so a
+        // spawn that gave way to a compaction does not block the re-kick.
+        if self
+            .compaction
+            .laziness_in_flight
+            .compare_exchange(
+                false,
+                true,
+                std::sync::atomic::Ordering::AcqRel,
+                std::sync::atomic::Ordering::Acquire,
+            )
+            .is_err()
+        {
+            tracing::debug!("laziness classifier already in flight; skipping spawn");
+            return;
+        }
+        self.clone().run_laziness_check().await;
+        self.compaction
+            .laziness_in_flight
+            .store(false, std::sync::atomic::Ordering::Release);
+    }
+
+    /// The classifier body. Called only under the `laziness_in_flight` guard.
+    async fn run_laziness_check(self: Arc<Self>) {
         let model_id_acp = self.models_manager.current_model_id();
         let model_id = model_id_acp.0.to_string();
         let cfg = self.models_manager.laziness_detector_for(&model_id);
@@ -364,7 +391,7 @@ impl SessionActor {
         // turn end to maximize eval-set coverage).
         if !debug_mode {
             let state = self.state.lock().await;
-            if !is_session_idle_for_injection(&state) {
+            if !is_session_idle_for_injection(&state, self.compaction.in_flight()) {
                 return;
             }
         }
@@ -438,7 +465,7 @@ impl SessionActor {
         // `evaluate_laziness` sees consistent state with production.
         let nudges_used = {
             let state = self.state.lock().await;
-            if !debug_mode && !is_session_idle_for_injection(&state) {
+            if !debug_mode && !is_session_idle_for_injection(&state, self.compaction.in_flight()) {
                 return;
             }
             state.nudges_used_this_session
@@ -818,7 +845,7 @@ impl SessionActor {
             self.emit_laziness_abort(reason);
             return;
         }
-        if !debug_mode && !is_session_idle_for_injection(&state) {
+        if !debug_mode && !is_session_idle_for_injection(&state, self.compaction.in_flight()) {
             // The idle predicate failed for some reason that is
             // NOT a fresh user prompt or model switch (e.g. a
             // notification drain queued a synthetic input, or the

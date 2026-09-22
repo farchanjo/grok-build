@@ -147,6 +147,7 @@ async fn create_test_actor(
             cancel: Default::default(),
             rolling_in_flight: std::sync::atomic::AtomicBool::new(false),
             manual_in_flight: std::sync::atomic::AtomicBool::new(false),
+            laziness_in_flight: std::sync::atomic::AtomicBool::new(false),
         },
         memory: crate::session::memory_state::SessionMemory {
             flush_config: crate::config::MemoryFlushConfig::default(),
@@ -719,6 +720,7 @@ async fn create_test_actor_with_memory(
             cancel: Default::default(),
             rolling_in_flight: std::sync::atomic::AtomicBool::new(false),
             manual_in_flight: std::sync::atomic::AtomicBool::new(false),
+            laziness_in_flight: std::sync::atomic::AtomicBool::new(false),
         },
         memory: crate::session::memory_state::SessionMemory {
             flush_config: memory_config
@@ -1556,6 +1558,7 @@ async fn test_e2e_idle_resume_refreshes_model_metadata() {
                     cancel: Default::default(),
                     rolling_in_flight: std::sync::atomic::AtomicBool::new(false),
                     manual_in_flight: std::sync::atomic::AtomicBool::new(false),
+                    laziness_in_flight: std::sync::atomic::AtomicBool::new(false),
                 },
                 memory: crate::session::memory_state::SessionMemory {
                     flush_config: crate::config::MemoryFlushConfig::default(),
