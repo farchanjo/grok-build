@@ -158,24 +158,48 @@ jobs:
         # every job with `rustup: command not found` before this existed.
         shell: bash
         run: |
-          if command -v rustup >/dev/null 2>&1; then
-            rustup --version
+          # The runner reads GITHUB_PATH itself, so a Windows job needs the
+          # native path form, not git-bash's /c/... form. Put the cargo bin dir
+          # on PATH unconditionally: a runner may already have rustup installed
+          # there and merely be missing the PATH entry, which is cheaper to fix
+          # than to reinstall.
+          cargo_bin="${CARGO_HOME:-$HOME/.cargo}/bin"
+          if command -v cygpath >/dev/null 2>&1; then
+            cargo_bin="$(cygpath -w "$cargo_bin")"
+          fi
+          echo "$cargo_bin" >> "$GITHUB_PATH"
+
+          if [ -x "$cargo_bin/rustup" ] || [ -x "$cargo_bin/rustup.exe" ] \
+             || command -v rustup >/dev/null 2>&1; then
+            echo "rustup already available ($cargo_bin)"
             exit 0
           fi
+
           echo "rustup not found; bootstrapping"
           curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs -o "$RUNNER_TEMP/rustup-init.sh"
-          sh "$RUNNER_TEMP/rustup-init.sh" -y --no-modify-path --profile minimal --default-toolchain none
-          # The runner reads GITHUB_PATH natively, so a Windows job needs the
-          # native form of the install dir, not git-bash's /c/... form.
+          # Under git-bash the installer infers a *-gnu host tuple, while every
+          # Windows job builds --target *-msvc; without pinning it, rustup
+          # installs a std the build cannot use. RUSTUP_INIT_SKIP_PATH_CHECK
+          # silences the "cannot install while Rust is installed" refusal on a
+          # machine that has Rust from elsewhere.
+          host_flag=""
           case "$(uname -s)" in
-            MINGW*|MSYS*|CYGWIN*) echo "$USERPROFILE\\.cargo\\bin" >> "$GITHUB_PATH" ;;
-            *) echo "${CARGO_HOME:-$HOME/.cargo}/bin" >> "$GITHUB_PATH" ;;
+            MINGW*|MSYS*|CYGWIN*) host_flag="--default-host x86_64-pc-windows-msvc" ;;
           esac
+          RUSTUP_INIT_SKIP_PATH_CHECK=yes \
+            sh "$RUNNER_TEMP/rustup-init.sh" -y --no-modify-path --profile minimal \
+              --default-toolchain none $host_flag
 
       - name: Install pinned toolchain (rust-toolchain.toml)
         shell: bash
         run: |
           channel="$(awk -F'"' '/^[[:space:]]*channel/{print $2}' rust-toolchain.toml)"
+          # Qualify the host on Windows so the toolchain matches what the matrix
+          # builds, independently of whatever default_host_tuple the runner's
+          # rustup happens to carry.
+          case "$(uname -s)" in
+            MINGW*|MSYS*|CYGWIN*) channel="${channel}-x86_64-pc-windows-msvc" ;;
+          esac
           echo "Installing pinned toolchain: $channel"
           rustup toolchain install "$channel" --profile minimal
           rustup default "$channel"
