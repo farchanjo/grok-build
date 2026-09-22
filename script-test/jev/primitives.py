@@ -43,6 +43,8 @@ def score(instructions: str, criteria: list[str]) -> dict[str, Any]:
 @dataclass(frozen=True)
 class NoulAnswer:
     noul: float
+    # ``confidence`` is max(p, 1-p) on the wire: a separability signal, not p.
+    confidence: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -76,6 +78,29 @@ class Response:
     input_tokens: int = 0
     output_tokens: int = 0
     latency_ms: float = 0.0
+    # Provenance, filled in by the two-tier client. Empty on a direct call.
+    source: str = ""
+    escalated: bool = False
+    agreement: bool | None = None
+    primary_confidence: float = 0.0
+    secondary_model: str = ""
+    secondary_latency_ms: float = 0.0
+
+    def confidence(self, key: str) -> float:
+        """The answer's own separability signal, uniform across question types."""
+        answer = self.answers.get(key)
+        if answer is None:
+            raise BadAnswer(f"{key!r} has no answer")
+        return getattr(answer, "confidence", 0.0)
+
+    def pick(self, key: str) -> str | None:
+        """The chosen label for a choice, or the yes/no verdict for a noul."""
+        answer = self.answers.get(key)
+        if isinstance(answer, ChoiceAnswer):
+            return answer.choice
+        if isinstance(answer, NoulAnswer):
+            return "yes" if answer.noul >= 0.5 else "no"
+        return None
 
     def noul(self, key: str) -> float:
         answer = self.answers.get(key)
@@ -110,7 +135,10 @@ def parse_answers(raw: dict[str, Any]) -> dict[str, Answer]:
             raise BadAnswer(f"answer {key!r} is {type(body).__name__}, not an object")
         kind = body.get("type")
         if kind == "noul":
-            parsed[key] = NoulAnswer(noul=_as_float(body.get("noul"), f"{key}.noul"))
+            parsed[key] = NoulAnswer(
+                noul=_as_float(body.get("noul"), f"{key}.noul"),
+                confidence=_as_float(body.get("confidence", 0.0), f"{key}.confidence"),
+            )
         elif kind == "choice":
             probabilities = body.get("probabilities")
             if not isinstance(probabilities, dict):

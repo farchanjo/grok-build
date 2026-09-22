@@ -24,11 +24,12 @@ from . import keys, primitives
 
 NATIVE = "native"
 OPENROUTER = "openrouter"
+LAYA = "laya"
 
 
 @dataclass(frozen=True)
 class Transport:
-    """Everything that differs between the two wires."""
+    """Everything that differs between the wires."""
 
     name: str
     endpoint: str
@@ -36,6 +37,11 @@ class Transport:
     key_names: tuple[str, ...]
     sends_provider_block: bool
     notes: str = ""
+    requires_auth: bool = True
+    # Laya validates ``state`` as an object; a bare string is a 422. When this is
+    # set, ``Client.ask`` wraps a string state as ``{"message": ...}``.
+    wraps_text_state: bool = False
+    retry_statuses: frozenset[int] = frozenset({429, 529})
 
 
 TRANSPORTS: dict[str, Transport] = {
@@ -55,6 +61,18 @@ TRANSPORTS: dict[str, Transport] = {
         sends_provider_block=True,
         notes="alpha proxy; same as [compaction.jev] in the repository",
     ),
+    LAYA: Transport(
+        name=LAYA,
+        endpoint="http://192.168.200.32:8803/v1/decide",
+        model="typed-decisions",
+        key_names=(),
+        sends_provider_block=False,
+        notes="self-hosted LAN, no auth; state must be an object; checkpoints differ by ~2x",
+        requires_auth=False,
+        wraps_text_state=True,
+        # Single-shot and deterministic, so a 5xx retry cannot change the answer.
+        retry_statuses=frozenset({429, 500, 502, 503, 504}),
+    ),
 }
 
 
@@ -72,6 +90,9 @@ def factory(name: str, *, endpoint: str | None = None, model: str | None = None)
             key_names=base.key_names,
             sends_provider_block=base.sends_provider_block,
             notes=base.notes,
+            requires_auth=base.requires_auth,
+            wraps_text_state=base.wraps_text_state,
+            retry_statuses=base.retry_statuses,
         )
     return base
 
@@ -90,20 +111,17 @@ class Client:
     """A resolved transport plus one connection pool."""
 
     transport: Transport
-    api_key: str = field(repr=False)
+    api_key: str = field(repr=False, default="")
     key_source: str = ""
     provider: dict[str, Any] | None = None
     timeout_s: float = 30.0
     _http: httpx.Client = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
-        self._http = httpx.Client(
-            timeout=httpx.Timeout(self.timeout_s),
-            headers={
-                "Authorization": f"Bearer {self.api_key}",
-                "Content-Type": "application/json",
-            },
-        )
+        headers = {"Content-Type": "application/json"}
+        if self.api_key:
+            headers["Authorization"] = f"Bearer {self.api_key}"
+        self._http = httpx.Client(timeout=httpx.Timeout(self.timeout_s), headers=headers)
 
     @classmethod
     def build(
@@ -119,9 +137,14 @@ class Client:
 
         ``endpoint``/``model`` are factory overrides; every other keyword goes to
         the client, so a caller never has to know which layer a knob belongs to.
+        A transport with no ``key_names`` (Laya, on the LAN) resolves to no
+        credential and sends no ``Authorization`` header.
         """
         transport = factory(name, endpoint=endpoint, model=model)
-        key, source = keys.resolve(*transport.key_names)
+        if transport.key_names:
+            key, source = keys.resolve(*transport.key_names)
+        else:
+            key, source = "", "none (lan)"
         return cls(transport=transport, api_key=key, key_source=source, provider=provider, **client_kwargs)
 
     def close(self) -> None:
@@ -133,6 +156,12 @@ class Client:
     def __exit__(self, *exc: object) -> None:
         self.close()
 
+    def _normalise_state(self, state: Any) -> Any:
+        """Laya validates ``state`` as an object; Jev accepts a bare string too."""
+        if self.transport.wraps_text_state and isinstance(state, str):
+            return {"message": state}
+        return state
+
     def ask(self, state: Any, questions: dict[str, Any], *, attempts: int = 3) -> primitives.Response:
         """One evaluation request, retrying 429/529 with backoff.
 
@@ -142,12 +171,12 @@ class Client:
         """
         body: dict[str, Any] = {
             "model": self.transport.model,
-            "state": state,
+            "state": self._normalise_state(state),
             "questions": questions,
         }
         if self.transport.sends_provider_block and self.provider:
             body["provider"] = self.provider
-        retryable = {429, 529}
+        retryable = set(self.transport.retry_statuses)
         for attempt in range(1, attempts + 1):
             started = time.perf_counter()
             try:

@@ -26,6 +26,7 @@ from rich.console import Console
 from rich.table import Table
 
 from jev import primitives, transports
+from jev.tier import TieredClient
 
 ROOT = Path(__file__).parent
 CASES = ROOT / "cases"
@@ -72,7 +73,7 @@ def label(entry: dict[str, Any], fallback: str) -> dict[str, Any]:
 
 
 def run_cases(
-    client: transports.Client,
+    client: transports.Client | TieredClient,
     cases: list[dict[str, Any]],
     experiment: str,
     variant: str,
@@ -94,7 +95,34 @@ def measure(call: Call, response: primitives.Response) -> Call:
     call.latency_ms = response.latency_ms
     call.input_tokens = response.input_tokens
     call.output_tokens = response.output_tokens
+    if response.source:
+        call.extra["source"] = response.source
+        call.extra["primary_confidence"] = round(response.primary_confidence, 4)
+        call.extra["agreement"] = response.agreement
+        call.extra["escalated"] = response.escalated
     return call
+
+
+def build_client(name: str, timeout_s: float = 60.0) -> tuple[Any, str]:
+    """A direct client, or the two-tier policy when ``name`` is ``tiered``.
+
+    Returns the client and a banner line. The tiered client mirrors ``Client.ask``
+    so every experiment below runs unchanged against either.
+    """
+    if name != "tiered":
+        client = transports.Client.build(name, timeout_s=timeout_s)
+        banner = (
+            f"transport=[bold]{client.transport.name}[/bold] endpoint={client.transport.endpoint} "
+            f"model={client.transport.model} key={client.key_source}"
+        )
+        return client, banner
+    tier = TieredClient.build(timeout_s=timeout_s)
+    banner = (
+        f"transport=[bold]tiered[/bold] {tier.primary.transport.name} "
+        f"({tier.primary.transport.model}) -> gate -> {tier.secondary.transport.name} "
+        f"gates={tier.gates} default={tier.default_gate}"
+    )
+    return tier, banner
 
 
 # ── experiments ────────────────────────────────────────────────────────────
@@ -126,7 +154,7 @@ def skill_questions(roster: list[dict[str, str]], width: int | None) -> dict[str
     }
 
 
-def experiment_skills(client: transports.Client, width: int | None, variant: str) -> list[Call]:
+def experiment_skills(client: transports.Client | TieredClient, width: int | None, variant: str) -> list[Call]:
     roster = load("roster.json")
     cases = [label(c, "request") for c in load("skill_cases.json")]
 
@@ -355,7 +383,7 @@ def report(transport: str, all_calls: list[Call]) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--transport", default="native", choices=sorted(transports.TRANSPORTS))
+    parser.add_argument("--transport", default="native", choices=sorted(transports.TRANSPORTS) + ["tiered"])
     parser.add_argument(
         "--experiment",
         default="all",
@@ -374,11 +402,9 @@ def main() -> None:
     started = time.time()
     all_calls: list[Call] = []
 
-    with transports.Client.build(args.transport, timeout_s=60.0) as client:
-        console.print(
-            f"transport=[bold]{client.transport.name}[/bold] endpoint={client.transport.endpoint} "
-            f"model={client.transport.model} key={client.keys_source if hasattr(client, 'keys_source') else client.key_source}"
-        )
+    client, banner = build_client(args.transport)
+    with client:
+        console.print(banner)
         if args.experiment in ("all", "skills"):
             widths: list[tuple[int | None, str]] = (
                 [(60, "short"), (None, "full")] if args.variants == "both" else [(60, "short") if args.variants == "short" else (None, "full")]
@@ -393,6 +419,13 @@ def main() -> None:
             all_calls += experiment_workflow(client)
 
     report(args.transport, all_calls)
+    if isinstance(client, TieredClient):
+        stats = client.stats
+        console.print(
+            f"\ntier: {stats.calls} calls, gate accepted {stats.accepted}, "
+            f"escalated {stats.escalated} ({stats.escalation_rate:.1%}), "
+            f"agreed {stats.agreed}, disagreed {stats.disagreed}"
+        )
 
     raw = OUT / f"results-{args.transport}.jsonl"
     with raw.open("w", encoding="utf-8") as handle:

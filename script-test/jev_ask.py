@@ -30,12 +30,16 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from jev import primitives  # noqa: E402
+from jev.tier import TieredClient  # noqa: E402
 from jev.transports import Client, TRANSPORTS, TransportError  # noqa: E402
 
 LOG_PATH = Path(__file__).resolve().parent / "jev-decisions.jsonl"
 
 
-def _client(transport: str, timeout_s: float) -> Client:
+def _client(transport: str, timeout_s: float) -> Client | TieredClient:
+    """``tiered`` is the Laya-first policy; anything else is a direct transport."""
+    if transport == "tiered":
+        return TieredClient.build(timeout_s=timeout_s)
     return Client.build(transport, timeout_s=timeout_s)
 
 
@@ -65,6 +69,11 @@ def _log(extra: dict[str, object] | None, response: primitives.Response) -> None
             key: _render(key, response.answers[key])[0] for key in sorted(response.answers)
         },
     }
+    if response.source:
+        record["source"] = response.source
+        record["escalated"] = response.escalated
+        record["agreement"] = response.agreement
+        record["primary_confidence"] = round(response.primary_confidence, 4)
     if extra:
         record.update({key: value for key, value in extra.items() if key != "argv"})
     try:
@@ -81,6 +90,11 @@ def _emit(response: primitives.Response, extra: dict[str, object] | None = None)
         "input_tokens": response.input_tokens,
         "output_tokens": response.output_tokens,
     }
+    if response.source:
+        header["source"] = response.source
+        header["primary_confidence"] = round(response.primary_confidence, 4)
+        header["agreement"] = response.agreement
+        header["escalated"] = response.escalated
     if extra:
         header.update(extra)
     print(json.dumps(header, ensure_ascii=False))
@@ -226,7 +240,7 @@ def build_parser() -> argparse.ArgumentParser:
     common.add_argument(
         "--transport",
         default=argparse.SUPPRESS,
-        choices=sorted(TRANSPORTS) + ["both"],
+        choices=sorted(TRANSPORTS) + ["both", "tiered"],
     )
     common.add_argument("--timeout", type=float, default=argparse.SUPPRESS)
 
