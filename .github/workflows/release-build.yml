@@ -193,16 +193,21 @@ jobs:
       - name: Install pinned toolchain (rust-toolchain.toml)
         shell: bash
         run: |
-          channel="$(awk -F'"' '/^[[:space:]]*channel/{print $2}' rust-toolchain.toml)"
-          # Qualify the host on Windows so the toolchain matches what the matrix
-          # builds, independently of whatever default_host_tuple the runner's
-          # rustup happens to carry.
+          # rust-toolchain.toml names a bare channel, so every rustup shim
+          # resolves it through default_host_tuple — and on a Windows runner that
+          # tuple is inferred as *-gnu from the git-bash environment. The matrix
+          # builds --target *-msvc, so a gnu-resolved toolchain has no std for it
+          # and the build dies with `can't find crate for core`. Pin the host
+          # before installing; this is the tuple the shims will use, so it also
+          # covers the `rust-toolchain.toml` lookup itself.
           case "$(uname -s)" in
-            MINGW*|MSYS*|CYGWIN*) channel="${channel}-x86_64-pc-windows-msvc" ;;
+            MINGW*|MSYS*|CYGWIN*) rustup set default-host x86_64-pc-windows-msvc ;;
           esac
+          channel="$(awk -F'"' '/^[[:space:]]*channel/{print $2}' rust-toolchain.toml)"
           echo "Installing pinned toolchain: $channel"
           rustup toolchain install "$channel" --profile minimal
           rustup default "$channel"
+          rustup show
 
       - name: Add the macOS cross target
         # macos-15 runners are arm64: the x86_64 row is cross-compiled. The
