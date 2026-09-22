@@ -150,6 +150,28 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Ensure rustup is available
+        # The self-hosted grok-* runners are development machines: nothing
+        # guarantees rustup is installed or on the runner's PATH, and the very
+        # next step is the first thing every job runs. Hosted images ship it, so
+        # this is a no-op there. A tag build routed to self-hosted failed on
+        # every job with `rustup: command not found` before this existed.
+        shell: bash
+        run: |
+          if command -v rustup >/dev/null 2>&1; then
+            rustup --version
+            exit 0
+          fi
+          echo "rustup not found; bootstrapping"
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs -o "$RUNNER_TEMP/rustup-init.sh"
+          sh "$RUNNER_TEMP/rustup-init.sh" -y --no-modify-path --profile minimal --default-toolchain none
+          # The runner reads GITHUB_PATH natively, so a Windows job needs the
+          # native form of the install dir, not git-bash's /c/... form.
+          case "$(uname -s)" in
+            MINGW*|MSYS*|CYGWIN*) echo "$USERPROFILE\\.cargo\\bin" >> "$GITHUB_PATH" ;;
+            *) echo "${CARGO_HOME:-$HOME/.cargo}/bin" >> "$GITHUB_PATH" ;;
+          esac
+
       - name: Install pinned toolchain (rust-toolchain.toml)
         shell: bash
         run: |
