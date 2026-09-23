@@ -692,11 +692,10 @@ fn eval_case(
     };
     match case.kind {
         EvalCaseKind::ShouldTrigger => {
-            skill_named(subject, case.skill.as_deref()) && matches(subject)
+            trigger_evidence(subject, peers, case.skill.as_deref()).is_some_and(&matches)
         }
-        EvalCaseKind::ShouldNotTrigger => {
-            skill_named(subject, case.skill.as_deref()) && !matches(subject)
-        }
+        EvalCaseKind::ShouldNotTrigger => trigger_evidence(subject, peers, case.skill.as_deref())
+            .is_some_and(|evidence| !matches(evidence)),
         EvalCaseKind::ExplicitPin => skill_named(subject, case.skill.as_deref()),
         EvalCaseKind::PathTrigger => {
             skill_named(subject, case.skill.as_deref())
@@ -731,6 +730,22 @@ fn eval_case(
 
 fn skill_named(subject: &LocalSkillEvidence, expected: Option<&str>) -> bool {
     expected.is_some_and(|name| subject.name == name)
+}
+
+/// Evidence for the skill a trigger case names: the subject itself, or a peer
+/// when the case is about another skill in the same inventory (a
+/// `should_not_trigger` on a peer is how a suite pins "this phrase belongs to
+/// them, not to me"). `None` when the name matches neither.
+fn trigger_evidence<'a>(
+    subject: &'a LocalSkillEvidence,
+    peers: &'a [LocalSkillEvidence],
+    expected: Option<&str>,
+) -> Option<&'a LocalSkillEvidence> {
+    let name = expected?;
+    if subject.name == name {
+        return Some(subject);
+    }
+    peers.iter().find(|peer| peer.name == name)
 }
 
 /// Simple glob: exact, `*`, `**`, prefix `dir/**`, and suffix `**/file`.
