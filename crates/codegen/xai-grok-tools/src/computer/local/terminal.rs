@@ -85,6 +85,19 @@ const MAX_RETAINED_OUTPUT_FILE_BYTES: u64 = 64 * 1024 * 1024; // 64 MiB
 /// only, no output), so 100 entries is ~10 KB.
 const MAX_COMPLETED_TASK_SNAPSHOTS: usize = 100;
 
+/// Extra drain attempts per tick, per stream, after the pipe reports empty.
+/// A momentarily empty pipe returns `Pending` even while the producer is still
+/// running, so a single pass moves one pipe-buffer per tick — 512 B on hosts
+/// with small pipes, i.e. ~5 KB/s against the 100 ms tick. Yielding between
+/// attempts lets the producer refill; the cap keeps a firehose writer from
+/// monopolising the actor tick.
+const MAX_EMPTY_DRAIN_RETRIES: usize = 64;
+
+/// Reads per stream per tick. A producer that keeps the pipe full would
+/// otherwise hold the drain loop (and therefore the whole actor tick, including
+/// the size guard) forever; the remainder is picked up on the next tick.
+const MAX_DRAIN_READS_PER_TICK: usize = 256;
+
 fn notification_interval() -> Duration {
     Duration::from_millis(DEFAULT_NOTIFICATION_INTERVAL_MS)
 }
@@ -1702,7 +1715,12 @@ impl LocalTerminalActor {
         // Read all available stdout (non-blocking)
         let mut stdout_eof = false;
         if let Some(stdout) = process.child.stdout.as_mut() {
+            let mut empty_retries = 0;
+            let mut reads = 0;
             loop {
+                if reads >= MAX_DRAIN_READS_PER_TICK {
+                    break;
+                }
                 let mut buf = [0u8; READ_BUFFER_SIZE];
                 match try_read_nonblocking(stdout, &mut buf) {
                     Some(Ok(0)) => {
@@ -1711,10 +1729,16 @@ impl LocalTerminalActor {
                     }
                     Some(Ok(n)) => {
                         new_bytes.extend_from_slice(&buf[..n]);
+                        empty_retries = 0;
+                        reads += 1;
                     }
                     Some(Err(_)) => {
                         stdout_eof = true;
                         break;
+                    }
+                    None if empty_retries < MAX_EMPTY_DRAIN_RETRIES => {
+                        empty_retries += 1;
+                        tokio::task::yield_now().await;
                     }
                     None => break, // No data available right now — move on
                 }
@@ -1724,7 +1748,12 @@ impl LocalTerminalActor {
         // Read all available stderr (non-blocking)
         let mut stderr_eof = false;
         if let Some(stderr) = process.child.stderr.as_mut() {
+            let mut empty_retries = 0;
+            let mut reads = 0;
             loop {
+                if reads >= MAX_DRAIN_READS_PER_TICK {
+                    break;
+                }
                 let mut buf = [0u8; READ_BUFFER_SIZE];
                 match try_read_nonblocking(stderr, &mut buf) {
                     Some(Ok(0)) => {
@@ -1733,10 +1762,16 @@ impl LocalTerminalActor {
                     }
                     Some(Ok(n)) => {
                         new_bytes.extend_from_slice(&buf[..n]);
+                        empty_retries = 0;
+                        reads += 1;
                     }
                     Some(Err(_)) => {
                         stderr_eof = true;
                         break;
+                    }
+                    None if empty_retries < MAX_EMPTY_DRAIN_RETRIES => {
+                        empty_retries += 1;
+                        tokio::task::yield_now().await;
                     }
                     None => break, // No data available right now — move on
                 }
@@ -3938,7 +3973,13 @@ mod tests {
         };
 
         let result = backend.run(request).await.unwrap();
-        assert_eq!(result.exit_code, Some(0));
+        assert_eq!(
+            result.exit_code,
+            Some(0),
+            "command should exit cleanly; got exit_code={:?} signal={:?}",
+            result.exit_code,
+            result.signal
+        );
 
         // Output is under 64 MB, so file should have full content (no truncation).
         let file_size = tokio::fs::metadata(&output_file).await.unwrap().len();
