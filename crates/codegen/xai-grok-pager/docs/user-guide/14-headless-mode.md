@@ -27,6 +27,11 @@ watching a blank transcript:
 ✗ run_terminal_command od brand finalize
 ```
 
+Each row is wrapped in a single code span, because a consumer that renders the
+transcript as markdown would otherwise pair the underscores in tool names
+(`run_terminal_command` reads as run*terminal*command). Arguments are collapsed
+to one line, with `$HOME` shortened to `~` and truncated at 60 characters.
+
 When a model call runs long enough that nothing else is written, a single space
 is emitted. A space collapses under markdown rendering and lands on its own line
 for line-oriented consumers, so an idle watchdog (OpenDesign fails a run after

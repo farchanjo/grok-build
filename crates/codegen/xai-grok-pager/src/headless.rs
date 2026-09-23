@@ -745,10 +745,23 @@ fn tool_primary_arg(input: &serde_json::Value) -> Option<String> {
         if let Some(value) = map.get(key).and_then(|value| value.as_str())
             && !value.trim().is_empty()
         {
-            return Some(truncate_arg(value.trim(), 88));
+            return Some(shorten_arg(value.trim()));
         }
     }
     None
+}
+
+/// Row-sized argument: one line, home collapsed to `~`, backticks stripped (the
+/// row is wrapped in a code span) and truncated.
+fn shorten_arg(value: &str) -> String {
+    let flat = value.replace('\n', " ").replace('`', "");
+    let home = std::env::var("HOME").unwrap_or_default();
+    let collapsed = if home.is_empty() {
+        flat
+    } else {
+        flat.replace(&home, "~")
+    };
+    truncate_arg(&collapsed, 60)
 }
 
 fn truncate_arg(value: &str, max: usize) -> String {
@@ -836,18 +849,21 @@ fn emit_plain_tool_line(
     if !plain_tool_trail_enabled() {
         return;
     }
-    let mut line = format!("{} {}", tool_status_marker(status), identity.name);
+    let mut row = format!("{} {}", tool_status_marker(status), identity.name);
     if let Some(input) = input {
         if let Some(arg) = tool_primary_arg(input) {
-            line.push(' ');
-            line.push_str(&arg);
+            row.push(' ');
+            row.push_str(&arg);
         }
         if let Some(stat) = tool_diff_stat(input) {
-            line.push(' ');
-            line.push_str(&stat);
+            row.push(' ');
+            row.push_str(&stat);
         }
     }
-    write_stdout(&format!("\n{line}\n"));
+    // One code span per row: a consumer that renders markdown would otherwise
+    // pair the underscores in tool names, so `run_terminal_command` shows up as
+    // run*terminal*command and `search_tool` swallows the next one on the line.
+    write_stdout(&format!("\n`{row}`\n"));
 }
 
 /// Tool output as text. ACP diffs are projected as `path (+added -removed)` so a
