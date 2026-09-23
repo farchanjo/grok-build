@@ -114,7 +114,7 @@ fn schema_default_offset() -> Option<i64> {
 }
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
 pub struct ReadFileInput {
-    #[serde(rename = "target_file")]
+    #[serde(rename = "target_file", alias = "path", alias = "file_path")]
     #[schemars(
         description = "The path of the file to read. You can use either a relative path in the workspace or an absolute path. If an absolute path is provided, it will be preserved as is."
     )]
@@ -751,6 +751,23 @@ mod tests {
         resources.insert(NotificationHandle(ToolNotificationHandle::noop()));
         resources
     }
+    /// `target_file` is the documented key, but `path` / `file_path` are the
+    /// near-misses models actually send — accepting them avoids a wasted turn.
+    #[test]
+    fn accepts_path_aliases_for_target_file() {
+        for key in ["target_file", "path", "file_path"] {
+            let parsed: ReadFileInput = serde_json::from_value(serde_json::json!({
+                key: "/tmp/a.txt",
+                "offset": 10,
+                "limit": 5
+            }))
+            .unwrap_or_else(|e| panic!("{key} must parse: {e}"));
+            assert_eq!(parsed.path, "/tmp/a.txt");
+            assert_eq!(parsed.offset, Some(10));
+            assert_eq!(parsed.limit, Some(5));
+        }
+    }
+
     #[tokio::test]
     async fn read_file_basic() {
         let tmp = TempDir::new().unwrap();
