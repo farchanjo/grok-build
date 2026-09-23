@@ -88,10 +88,13 @@ dump_bash_state() {
     local content="$1"
     local var_name="$2"
     if [[ -n "$content" ]]; then
-      builtin printf 'grok_snap_%s=$(command base64 -d <<'"'"'GROK_SNAP_EOF_%s'"'"'\n' "$var_name" "$var_name"
-      command base64 <<<"$content" | command tr -d '\n'
-      builtin printf '\nGROK_SNAP_EOF_%s\n' "$var_name"
-      builtin printf ')\n'
+      # No here-string and no here-doc: both deadlock when the payload is
+      # larger than the OS pipe buffer but smaller than bash's here-doc
+      # temp-file threshold (512 B .. 64 KiB on a host whose pipes hold 512
+      # bytes), because the writer blocks before the reader is scheduled.
+      local encoded
+      encoded=$(builtin printf '%s' "$content" | command base64 | command tr -d '\n')
+      builtin printf "grok_snap_%s=\$(builtin printf '%%s' '%s' | command base64 -d)\n" "$var_name" "$encoded"
       builtin printf 'eval "$grok_snap_%s"\n' "$var_name"
     fi
   }
@@ -144,10 +147,13 @@ function dump_zsh_state() {
     local content="$1"
     local var_name="$2"
     if [[ -n "$content" ]]; then
-      builtin printf 'grok_snap_%s=$(command base64 -d <<'"'"'GROK_SNAP_EOF_%s'"'"'\n' "$var_name" "$var_name"
-      command base64 <<<"$content" | command tr -d '\n'
-      builtin printf '\nGROK_SNAP_EOF_%s\n' "$var_name"
-      builtin printf ')\n'
+      # No here-string and no here-doc: both deadlock when the payload is
+      # larger than the OS pipe buffer but smaller than bash's here-doc
+      # temp-file threshold (512 B .. 64 KiB on a host whose pipes hold 512
+      # bytes), because the writer blocks before the reader is scheduled.
+      local encoded
+      encoded=$(builtin printf '%s' "$content" | command base64 | command tr -d '\n')
+      builtin printf "grok_snap_%s=\$(builtin printf '%%s' '%s' | command base64 -d)\n" "$var_name" "$encoded"
       builtin printf 'eval "$grok_snap_%s"\n' "$var_name"
     fi
   }
@@ -1189,5 +1195,32 @@ mod tests {
         assert_eq!(state.cwd, prev_cwd);
         let (_, stdout) = run_command(&mut state, "echo $SURVIVE_TEST").await;
         assert_eq!(stdout.trim(), "yes");
+    }
+
+    /// A state blob larger than the OS pipe buffer used to deadlock the dump:
+    /// bash writes here-strings and here-docs into a pipe whose reader has not
+    /// been scheduled yet, and only switches to a temp file past its own 64 KiB
+    /// threshold. On a host whose pipes hold 512 bytes that window covers every
+    /// ordinary snapshot, so keep a payload inside it.
+    #[tokio::test]
+    async fn large_state_blob_roundtrips() {
+        if !bash_available() {
+            return;
+        }
+        let cwd = std::env::current_dir().unwrap();
+        let mut state = ShellState::init(ShellKind::Bash, &cwd).await.unwrap();
+
+        let value = "y".repeat(40_000);
+        let (code, _) = run_command(&mut state, &format!("export BIG_STATE={value}")).await;
+        assert_eq!(code, 0);
+        assert!(
+            state.snapshot.len() > value.len(),
+            "snapshot should carry the large value, got {} bytes",
+            state.snapshot.len()
+        );
+
+        let (code, stdout) = run_command(&mut state, "printf '%s' \"${#BIG_STATE}\"").await;
+        assert_eq!(code, 0);
+        assert_eq!(stdout.trim(), value.len().to_string());
     }
 }
