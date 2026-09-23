@@ -4,8 +4,10 @@
 //! `spawn_grok_shell`, sends the ACP lifecycle (init → auth → session → prompt),
 //! streams text to stdout, and exits cleanly via `CancellationToken`.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
@@ -316,11 +318,84 @@ fn apply_agent_flag(agent: &Option<String>, config: &mut xai_grok_shell::agent::
 
 // ── Emitter ──────────────────────────────────────────────────────────────
 
+/// Idle gap after which a keepalive space is written to stdout. Consumers that
+/// treat "no stdout" as a hang (OpenDesign kills a run after 600s of silence)
+/// stay alive through long model calls, and a space is invisible once the
+/// transcript is rendered. `GROK_HEADLESS_KEEPALIVE_MS=0` disables it.
+const DEFAULT_KEEPALIVE_MS: u64 = 20_000;
+
+static STDOUT_EPOCH: OnceLock<Instant> = OnceLock::new();
+static LAST_STDOUT_AT_MS: AtomicU64 = AtomicU64::new(0);
+static KEEPALIVE_RUNNING: AtomicBool = AtomicBool::new(false);
+
+fn millis_since_start() -> u64 {
+    STDOUT_EPOCH.get_or_init(Instant::now).elapsed().as_millis() as u64
+}
+
+/// Write to stdout and stamp the keepalive clock. Every headless stdout write
+/// goes through here so the keepalive only fires on a genuine silence.
+fn write_stdout(text: &str) {
+    use std::io::Write as _;
+    print!("{text}");
+    let _ = std::io::stdout().flush();
+    LAST_STDOUT_AT_MS.store(millis_since_start(), Ordering::Relaxed);
+}
+
+fn keepalive_interval() -> Duration {
+    let ms = std::env::var("GROK_HEADLESS_KEEPALIVE_MS")
+        .ok()
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .unwrap_or(DEFAULT_KEEPALIVE_MS);
+    Duration::from_millis(ms)
+}
+
+/// Background heartbeat for headless runs. A bare space lands on its own line,
+/// where line-oriented consumers trim it away, and inside a streamed sentence
+/// it collapses under markdown rendering.
+fn spawn_stdout_keepalive(interval: Duration) {
+    if interval.is_zero() {
+        return;
+    }
+    KEEPALIVE_RUNNING.store(true, Ordering::Relaxed);
+    let tick = (interval / 4).max(Duration::from_millis(250));
+    std::thread::spawn(move || {
+        while KEEPALIVE_RUNNING.load(Ordering::Relaxed) {
+            std::thread::sleep(tick);
+            let idle = millis_since_start().saturating_sub(LAST_STDOUT_AT_MS.load(Ordering::Relaxed));
+            if idle >= interval.as_millis() as u64 {
+                write_stdout(" ");
+            }
+        }
+    });
+}
+
+fn stop_stdout_keepalive() {
+    KEEPALIVE_RUNNING.store(false, Ordering::Relaxed);
+}
+
+/// Display identity of one tool call, remembered for the whole call because the
+/// shell stamps it only on the opening frame.
+#[derive(Clone, Default)]
+struct ToolIdentity {
+    name: String,
+    kind: Option<String>,
+    label: Option<String>,
+}
+
 struct HeadlessEmitter {
     format: OutputFormat,
     parse_structured_output: bool,
     text_buffer: String,
     thought_buffer: String,
+    /// `plain` only: a thought run is open, so the next text chunk closes it.
+    thought_run: bool,
+    /// Tool identity per call id. The shell stamps name/kind/label on the
+    /// opening frame only; every later update for the same call must reuse it.
+    tool_identity: HashMap<String, ToolIdentity>,
+    /// Tool-call ids whose input was already streamed. The shell stamps tool
+    /// identity first and the parsed input on a later refinement update, so the
+    /// row is filled in exactly once instead of once per update.
+    tool_input_emitted: HashSet<String>,
     /// Agent's schema-validated output (both backends), read from the
     /// prompt-response `_meta`.
     structured_output: Option<Result<serde_json::Value, String>>,
@@ -335,6 +410,9 @@ impl HeadlessEmitter {
             parse_structured_output,
             text_buffer: String::new(),
             thought_buffer: String::new(),
+            thought_run: false,
+            tool_identity: HashMap::new(),
+            tool_input_emitted: HashSet::new(),
             structured_output: None,
             usage: None,
         }
@@ -364,19 +442,24 @@ impl HeadlessEmitter {
     fn reset_streaming_attempt(&mut self) {
         self.text_buffer.clear();
         if matches!(self.format, OutputFormat::StreamingJson) {
-            println!("{}", serde_json::json!({"type":"streaming_attempt_reset"}));
+            write_stdout("{\"type\":\"streaming_attempt_reset\"}\n");
         }
     }
 
     fn on_text_chunk(&mut self, text: &str) {
         match self.format {
             OutputFormat::Plain => {
-                use std::io::Write as _;
-                print!("{text}");
-                let _ = std::io::stdout().flush();
+                if self.thought_run {
+                    self.thought_run = false;
+                    write_stdout("\n");
+                }
+                write_stdout(text);
             }
             OutputFormat::StreamingJson => {
-                println!("{}", serde_json::json!({"type":"text","data": text}));
+                write_stdout(&format!(
+                    "{}\n",
+                    serde_json::json!({"type":"text","data": text})
+                ));
                 if self.parse_structured_output {
                     self.text_buffer.push_str(text);
                 }
@@ -389,14 +472,120 @@ impl HeadlessEmitter {
 
     fn on_thought_chunk(&mut self, text: &str) {
         match self.format {
-            OutputFormat::Plain => { /* no-op */ }
+            OutputFormat::Plain => {
+                if plain_thoughts_enabled() {
+                    if !self.thought_run {
+                        self.thought_run = true;
+                        write_stdout("\n\u{b7} ");
+                    }
+                    write_stdout(text);
+                }
+            }
             OutputFormat::StreamingJson => {
-                println!("{}", serde_json::json!({"type":"thought","data": text}));
+                write_stdout(&format!(
+                    "{}\n",
+                    serde_json::json!({"type":"thought","data": text})
+                ));
             }
             OutputFormat::Json => {
                 self.thought_buffer.push_str(text);
             }
         }
+    }
+
+    /// Tool-call start. `streaming-json` gets a frame straight away (identity
+    /// first, input on a later refinement); `plain` waits for the input so its
+    /// single trail line carries the argument.
+    fn on_tool_call(&mut self, call: &acp::ToolCall) {
+        let id = call.tool_call_id.0.to_string();
+        let input = tool_call_input(call.raw_input.as_ref(), call.meta.as_ref());
+        let identity = self.resolve_tool_identity(&id, call.meta.as_ref(), Some(&call.title));
+        match self.format {
+            OutputFormat::StreamingJson => {
+                if input.is_some() {
+                    self.tool_input_emitted.insert(id.clone());
+                }
+                let frame = tool_call_frame(&id, &identity, Some(&call.status), input.as_ref());
+                write_stdout(&format!("{frame}\n"));
+            }
+            OutputFormat::Plain => {
+                if let Some(input) = input
+                    && self.tool_input_emitted.insert(id.clone())
+                {
+                    emit_plain_tool_line(&identity, Some(&input), Some(&call.status));
+                }
+            }
+            OutputFormat::Json => {}
+        }
+    }
+
+    /// Tool-call refinement: the parsed input once it lands, then the terminal
+    /// result. The input row is emitted at most once per call.
+    fn on_tool_call_update(&mut self, update: &acp::ToolCallUpdate) {
+        let id = update.tool_call_id.0.to_string();
+        let status = update.fields.status.as_ref();
+        let is_error = matches!(status, Some(acp::ToolCallStatus::Failed));
+        let terminal = is_error || matches!(status, Some(acp::ToolCallStatus::Completed));
+        let input = tool_call_input(update.fields.raw_input.as_ref(), update.meta.as_ref());
+        let identity = self.resolve_tool_identity(
+            &id,
+            update.meta.as_ref(),
+            update.fields.title.as_deref(),
+        );
+        let already_emitted = self.tool_input_emitted.contains(&id);
+
+        if let Some(input) = input.as_ref()
+            && !already_emitted
+        {
+            self.tool_input_emitted.insert(id.clone());
+            match self.format {
+                OutputFormat::StreamingJson => {
+                    let frame = tool_call_frame(&id, &identity, status, Some(input));
+                    write_stdout(&format!("{frame}\n"));
+                }
+                OutputFormat::Plain => emit_plain_tool_line(&identity, Some(input), status),
+                OutputFormat::Json => {}
+            }
+        } else if terminal && !already_emitted && matches!(self.format, OutputFormat::Plain) {
+            // The parsed input never landed — leave a row behind anyway.
+            self.tool_input_emitted.insert(id.clone());
+            emit_plain_tool_line(&identity, None, status);
+        } else if terminal && is_error && already_emitted && matches!(self.format, OutputFormat::Plain)
+        {
+            // A started row that then failed: say so on its own line.
+            emit_plain_tool_line(&identity, None, status);
+        }
+
+        if terminal && matches!(self.format, OutputFormat::StreamingJson) {
+            let content = update.fields.content.as_deref().unwrap_or_default();
+            let frame = serde_json::json!({
+                "type": "tool_result",
+                "toolUseId": id,
+                "content": tool_content_text(content),
+                "isError": is_error,
+            });
+            write_stdout(&format!("{frame}\n"));
+        }
+    }
+
+    /// Name/kind/label for a call, remembered across its updates.
+    fn resolve_tool_identity(
+        &mut self,
+        id: &str,
+        meta: Option<&acp::Meta>,
+        title: Option<&str>,
+    ) -> ToolIdentity {
+        let known = self.tool_identity.get(id).cloned().unwrap_or_default();
+        let identity = ToolIdentity {
+            name: tool_stamp_str(meta, "name")
+                .or_else(|| (!known.name.is_empty()).then(|| known.name.clone()))
+                .or_else(|| title.map(str::to_owned))
+                .unwrap_or_else(|| "tool".to_owned()),
+            kind: tool_stamp_str(meta, "kind").or(known.kind),
+            label: tool_stamp_str(meta, "label").or(known.label),
+        };
+        self.tool_identity.insert(id.to_owned(), identity.clone());
+        identity
     }
 
     fn attach_structured_output(&self, target: &mut serde_json::Value) {
@@ -445,9 +634,14 @@ impl HeadlessEmitter {
     }
 
     fn on_end(&mut self, stop_reason: &str, session_id: &str, request_id: &str) {
+        stop_stdout_keepalive();
+        if self.thought_run {
+            self.thought_run = false;
+            write_stdout("\n");
+        }
         match self.format {
             OutputFormat::Plain => {
-                println!();
+                write_stdout("\n");
             }
             OutputFormat::StreamingJson => {
                 let mut end = serde_json::json!({
@@ -460,19 +654,19 @@ impl HeadlessEmitter {
                     attach_result_usage(&mut end, usage);
                 }
                 self.attach_structured_output(&mut end);
-                println!("{end}");
+                write_stdout(&format!("{end}\n"));
             }
             OutputFormat::Json => {
                 let result = self.build_json_result(stop_reason, session_id, request_id);
-                println!(
-                    "{}",
-                    serde_json::to_string_pretty(&result).unwrap_or_else(|_| result.to_string())
-                );
+                let text =
+                    serde_json::to_string_pretty(&result).unwrap_or_else(|_| result.to_string());
+                write_stdout(&format!("{text}\n"));
             }
         }
     }
 
     fn on_error(&self, message: &str) {
+        stop_stdout_keepalive();
         match self.format {
             OutputFormat::Plain => eprintln!("{message}"),
             OutputFormat::StreamingJson | OutputFormat::Json => {
@@ -480,7 +674,7 @@ impl HeadlessEmitter {
                 if let Some(usage) = &self.usage {
                     attach_result_usage(&mut err, usage);
                 }
-                println!("{err}");
+                write_stdout(&format!("{err}\n"));
             }
         }
     }
@@ -488,6 +682,191 @@ impl HeadlessEmitter {
 
 fn attach_result_usage(result: &mut serde_json::Value, usage: &serde_json::Value) {
     xai_grok_shell::extensions::notification::attach_result_usage_fail_closed(result, usage);
+}
+
+/// The `x.ai/tool` identity envelope the shell stamps on the initial `ToolCall`
+/// and on every refinement update for the same call.
+fn tool_stamp(meta: Option<&acp::Meta>) -> Option<&serde_json::Value> {
+    meta.and_then(|m| m.get(xai_grok_tools::tool_taxonomy::TOOL_META_KEY))
+}
+
+fn tool_stamp_value(meta: Option<&acp::Meta>, key: &str) -> Option<serde_json::Value> {
+    tool_stamp(meta)?.get(key).cloned()
+}
+
+fn tool_stamp_str(meta: Option<&acp::Meta>, key: &str) -> Option<String> {
+    Some(tool_stamp(meta)?.get(key)?.as_str()?.to_owned())
+}
+
+/// Argument JSON is streamed as `{"raw": "<partial>"}` before the parsed object
+/// lands; only the parsed form is worth projecting onto a tool row.
+fn is_partial_raw_input(value: &serde_json::Value) -> bool {
+    value
+        .as_object()
+        .is_some_and(|map| map.len() == 1 && map.contains_key("raw"))
+}
+
+/// Parsed tool input, preferring the streamed `rawInput` object over the
+/// identity stamp the shell attaches.
+fn tool_call_input(
+    raw_input: Option<&serde_json::Value>,
+    meta: Option<&acp::Meta>,
+) -> Option<serde_json::Value> {
+    raw_input
+        .filter(|value| !is_partial_raw_input(value))
+        .cloned()
+        .or_else(|| tool_stamp_value(meta, "input"))
+        .filter(|value| !value.is_null())
+}
+
+fn tool_status_marker(status: Option<&acp::ToolCallStatus>) -> &'static str {
+    match status {
+        Some(acp::ToolCallStatus::Failed) => "\u{2717}",
+        Some(acp::ToolCallStatus::Completed) => "\u{2713}",
+        _ => "\u{25b8}",
+    }
+}
+
+/// The one argument that identifies a tool row: the file it touches, or the
+/// command/pattern it runs.
+fn tool_primary_arg(input: &serde_json::Value) -> Option<String> {
+    const KEYS: [&str; 7] = [
+        "file_path", "path", "target_file", "command", "pattern", "query", "url",
+    ];
+    let map = input.as_object()?;
+    for key in KEYS {
+        if let Some(value) = map.get(key).and_then(|value| value.as_str())
+            && !value.trim().is_empty()
+        {
+            return Some(truncate_arg(value.trim(), 88));
+        }
+    }
+    None
+}
+
+fn truncate_arg(value: &str, max: usize) -> String {
+    let flat = value.replace('\n', " ");
+    if flat.chars().count() <= max {
+        return flat;
+    }
+    let head: String = flat.chars().take(max.saturating_sub(1)).collect();
+    format!("{head}\u{2026}")
+}
+
+/// `+added -removed` for a file write/edit, mirroring the diff stat agents with
+/// structured streams report. Absent for tools that do not touch files.
+fn tool_diff_stat(input: &serde_json::Value) -> Option<String> {
+    if let Some(content) = input.get("content").and_then(|value| value.as_str()) {
+        return Some(format!("(+{} -0)", text_line_count(content)));
+    }
+    let old = input.get("old_string").and_then(|value| value.as_str())?;
+    let new = input
+        .get("new_string")
+        .and_then(|value| value.as_str())
+        .unwrap_or("");
+    Some(format!("(+{} -{})", text_line_count(new), text_line_count(old)))
+}
+
+/// `plain` tool trail is on by default: without it a text-only consumer sees a
+/// blank transcript for the whole turn.
+fn plain_tool_trail_enabled() -> bool {
+    !matches!(
+        std::env::var("GROK_HEADLESS_TOOL_TRAIL").as_deref(),
+        Ok("0") | Ok("false") | Ok("off")
+    )
+}
+
+/// Thoughts are opt-in in `plain`: reasoning models emit far more thought than
+/// prose, and a text-only consumer has no separate pane for them.
+fn plain_thoughts_enabled() -> bool {
+    matches!(
+        std::env::var("GROK_HEADLESS_THOUGHTS").as_deref(),
+        Ok("1") | Ok("true") | Ok("on")
+    )
+}
+
+fn tool_status_wire(status: &acp::ToolCallStatus) -> &'static str {
+    match status {
+        acp::ToolCallStatus::Pending => "pending",
+        acp::ToolCallStatus::InProgress => "in_progress",
+        acp::ToolCallStatus::Completed => "completed",
+        acp::ToolCallStatus::Failed => "failed",
+        _ => "unknown",
+    }
+}
+
+/// One `tool_call` frame. The stamp is authoritative for name/kind/input;
+/// `title` is a fallback for builds that do not stamp the call.
+fn tool_call_frame(
+    id: &str,
+    identity: &ToolIdentity,
+    status: Option<&acp::ToolCallStatus>,
+    input: Option<&serde_json::Value>,
+) -> serde_json::Value {
+    serde_json::json!({
+        "type": "tool_call",
+        "id": id,
+        "name": identity.name,
+        "kind": identity.kind,
+        "label": identity.label,
+        "status": status.map(tool_status_wire),
+        "input": input.cloned(),
+    })
+}
+
+/// `plain` carries no structured frames, so a tool row is rendered into the
+/// transcript as one compact line. A blank line either side keeps it its own
+/// markdown block instead of merging into the surrounding prose.
+fn emit_plain_tool_line(
+    identity: &ToolIdentity,
+    input: Option<&serde_json::Value>,
+    status: Option<&acp::ToolCallStatus>,
+) {
+    if !plain_tool_trail_enabled() {
+        return;
+    }
+    let mut line = format!("{} {}", tool_status_marker(status), identity.name);
+    if let Some(input) = input {
+        if let Some(arg) = tool_primary_arg(input) {
+            line.push(' ');
+            line.push_str(&arg);
+        }
+        if let Some(stat) = tool_diff_stat(input) {
+            line.push(' ');
+            line.push_str(&stat);
+        }
+    }
+    write_stdout(&format!("\n{line}\n"));
+}
+
+/// Tool output as text. ACP diffs are projected as `path (+added -removed)` so a
+/// text-only consumer still sees which file changed and by how much.
+fn tool_content_text(content: &[acp::ToolCallContent]) -> String {
+    let mut parts: Vec<String> = Vec::with_capacity(content.len());
+    for item in content {
+        match item {
+            acp::ToolCallContent::Content(block) => {
+                if let acp::ContentBlock::Text(text) = &block.content {
+                    parts.push(text.text.clone());
+                }
+            }
+            acp::ToolCallContent::Diff(diff) => parts.push(format!(
+                "{} (+{} -{})",
+                diff.path.display(),
+                text_line_count(&diff.new_text),
+                diff.old_text
+                    .as_deref()
+                    .map(text_line_count)
+                    .unwrap_or_default(),
+            )),
+            _ => {}
+        }
+    }
+    parts.join("\n")
+}
+
+fn text_line_count(text: &str) -> usize {
+    if text.is_empty() { 0 } else { text.lines().count() }
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────────
@@ -896,6 +1275,8 @@ pub async fn run_single_turn(
     };
 
     let mut emitter = HeadlessEmitter::new(options.output_format, options.json_schema.is_some());
+    // A long model call writes nothing; keep a consumer's silence watchdog fed.
+    spawn_stdout_keepalive(keepalive_interval());
 
     // Launch the models + remote-settings prefetch before the config work below
     // so its network round trip overlaps it. Without this, the shell's
@@ -1629,6 +2010,10 @@ fn handle_headless_acp_message(
                             }
                             emitter.on_thought_chunk(&text.text);
                         }
+                    }
+                    acp::SessionUpdate::ToolCall(call) => emitter.on_tool_call(call),
+                    acp::SessionUpdate::ToolCallUpdate(update) => {
+                        emitter.on_tool_call_update(update);
                     }
                     _ => {}
                 }

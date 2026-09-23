@@ -14,6 +14,30 @@ grok -p "Your prompt here"
 
 Grok processes the prompt, runs any necessary tools, and prints the result to stdout. The process exits when the response is complete.
 
+### Progress on stdout
+
+`plain` streams the response text, and renders each tool call as one compact
+line so a consumer that only reads stdout can follow a long run instead of
+watching a blank transcript:
+
+```
+▸ read_file DESIGN.md
+▸ run_terminal_command od brand preview product-7da427
+▸ write system/kit.html (+42 -0)
+✗ run_terminal_command od brand finalize
+```
+
+When a model call runs long enough that nothing else is written, a single space
+is emitted. A space collapses under markdown rendering and lands on its own line
+for line-oriented consumers, so an idle watchdog (OpenDesign fails a run after
+600s of silence) stays fed without polluting the answer.
+
+| Variable | Default | Effect |
+| -------- | ------- | ------ |
+| `GROK_HEADLESS_TOOL_TRAIL` | on | `0` / `false` / `off` drops the tool trail |
+| `GROK_HEADLESS_THOUGHTS` | off | `1` / `true` / `on` prints a `· ` thought block |
+| `GROK_HEADLESS_KEEPALIVE_MS` | `20000` | Idle gap before a keepalive space; `0` disables |
+
 ---
 
 ## Command-Line Options
@@ -223,8 +247,13 @@ Event types:
 | ---------- | -------------------------------------------------------------- |
 | `text`     | A chunk of the agent's response text                            |
 | `thought`  | Internal reasoning (thinking tokens)                            |
+| `tool_call` | A tool call started or was refined: `id`, `name`, `kind`, `input` |
+| `tool_result` | A tool call finished: `toolUseId`, `content`, `isError`      |
 | `end`      | Final event with metadata and spend fields when available       |
 | `error`    | An error occurred (carries `message`, and spend fields if any)  |
+
+`tool_call` is emitted once for identity and again when the parsed input lands
+(`input` is `null` on the first frame); `tool_result` follows on completion.
 
 `end` is always the last event. Spend fields on `end` match the json object
 shape (snake_case uncached `input_tokens`, safe cost floats).
