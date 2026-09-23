@@ -8,7 +8,7 @@ use crate::types::tool::{ToolKind, ToolNamespace};
 use crate::util::mcp_truncate::{McpTruncateContext, truncate_tool_output};
 
 /// Input for the `use_tool` meta-dispatch tool.
-#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct UseToolInput {
     /// The qualified name of the integration tool to call (e.g., "linear__save_issue").
     /// Must be a tool previously discovered via `search_tool`.
@@ -17,6 +17,41 @@ pub struct UseToolInput {
     /// Use the parameter schema returned by `search_tool` to construct this.
     #[schemars(schema_with = "object_value_schema")]
     pub tool_input: serde_json::Value,
+}
+
+/// Wire form of [`UseToolInput`].
+///
+/// Models also emit the inner arguments flattened at the top level, or nested
+/// under `input`, instead of the canonical `tool_input` object. Both used to
+/// fail the whole call with `missing field tool_input`, so the raw shape is
+/// deserialized here and normalized into the canonical one.
+#[derive(Deserialize)]
+struct UseToolInputWire {
+    tool_name: String,
+    #[serde(default, alias = "input")]
+    tool_input: Option<serde_json::Value>,
+    /// Keys sent at the top level instead of inside `tool_input`.
+    #[serde(flatten)]
+    extra: serde_json::Map<String, serde_json::Value>,
+}
+
+impl<'de> Deserialize<'de> for UseToolInput {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let wire = UseToolInputWire::deserialize(deserializer)?;
+        let tool_input = wire.tool_input.unwrap_or_else(|| {
+            let mut map = wire.extra;
+            // The envelope tag is not an argument of the target tool.
+            map.remove("variant");
+            serde_json::Value::Object(map)
+        });
+        Ok(Self {
+            tool_name: wire.tool_name,
+            tool_input,
+        })
+    }
 }
 
 fn object_value_schema(_gen: &mut schemars::SchemaGenerator) -> schemars::Schema {
@@ -532,6 +567,62 @@ mod tests {
         let mut ctx = new_ctx();
         ctx.extensions.insert(InnerDispatch(Arc::new(dispatch)));
         ctx
+    }
+
+    /// Models also flatten the inner arguments to the top level instead of
+    /// nesting them under `tool_input`.
+    #[test]
+    fn accepts_flattened_tool_input() {
+        let parsed: UseToolInput = serde_json::from_value(serde_json::json!({
+            "tool_name": "ssh__ssh_exec",
+            "session_id": "abc",
+            "command": "whoami"
+        }))
+        .expect("flattened arguments must parse");
+        assert_eq!(parsed.tool_name, "ssh__ssh_exec");
+        assert_eq!(parsed.tool_input["command"], "whoami");
+        assert!(parsed.tool_input.get("tool_name").is_none());
+    }
+
+    /// `input` is a common near-miss for the canonical `tool_input`.
+    #[test]
+    fn accepts_input_alias() {
+        let parsed: UseToolInput = serde_json::from_value(serde_json::json!({
+            "tool_name": "chrome-devtools__evaluate",
+            "input": {"expression": "document.title"}
+        }))
+        .expect("`input` alias must parse");
+        assert_eq!(parsed.tool_input["expression"], "document.title");
+    }
+
+    /// The canonical shape still wins, and a target tool that takes no
+    /// arguments parses as an empty object instead of failing.
+    #[test]
+    fn accepts_canonical_and_empty_input() {
+        let canonical: UseToolInput = serde_json::from_value(serde_json::json!({
+            "tool_name": "arithma__evaluate",
+            "tool_input": {"expression": "1+1"}
+        }))
+        .unwrap();
+        assert_eq!(canonical.tool_input["expression"], "1+1");
+
+        let bare: UseToolInput =
+            serde_json::from_value(serde_json::json!({"tool_name": "ssh__sub_list"}))
+                .expect("missing inner arguments must parse as an empty object");
+        assert_eq!(bare.tool_input, serde_json::json!({}));
+    }
+
+    /// The envelope tag must not leak into the target tool's arguments.
+    #[test]
+    fn drops_the_envelope_variant_key() {
+        let parsed: UseToolInput = serde_json::from_value(serde_json::json!({
+            "variant": "UseTool",
+            "tool_name": "ssh__ssh_exec",
+            "command": "ls"
+        }))
+        .unwrap();
+        assert!(parsed.tool_input.get("variant").is_none());
+        assert_eq!(parsed.tool_input["command"], "ls");
     }
 
     #[tokio::test]
