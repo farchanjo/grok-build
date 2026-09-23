@@ -361,7 +361,8 @@ fn spawn_stdout_keepalive(interval: Duration) {
     std::thread::spawn(move || {
         while KEEPALIVE_RUNNING.load(Ordering::Relaxed) {
             std::thread::sleep(tick);
-            let idle = millis_since_start().saturating_sub(LAST_STDOUT_AT_MS.load(Ordering::Relaxed));
+            let idle =
+                millis_since_start().saturating_sub(LAST_STDOUT_AT_MS.load(Ordering::Relaxed));
             if idle >= interval.as_millis() as u64 {
                 write_stdout(" ");
             }
@@ -527,11 +528,8 @@ impl HeadlessEmitter {
         let is_error = matches!(status, Some(acp::ToolCallStatus::Failed));
         let terminal = is_error || matches!(status, Some(acp::ToolCallStatus::Completed));
         let input = tool_call_input(update.fields.raw_input.as_ref(), update.meta.as_ref());
-        let identity = self.resolve_tool_identity(
-            &id,
-            update.meta.as_ref(),
-            update.fields.title.as_deref(),
-        );
+        let identity =
+            self.resolve_tool_identity(&id, update.meta.as_ref(), update.fields.title.as_deref());
         let already_emitted = self.tool_input_emitted.contains(&id);
 
         if let Some(input) = input.as_ref()
@@ -550,7 +548,10 @@ impl HeadlessEmitter {
             // The parsed input never landed — leave a row behind anyway.
             self.tool_input_emitted.insert(id.clone());
             emit_plain_tool_line(&identity, None, status);
-        } else if terminal && is_error && already_emitted && matches!(self.format, OutputFormat::Plain)
+        } else if terminal
+            && is_error
+            && already_emitted
+            && matches!(self.format, OutputFormat::Plain)
         {
             // A started row that then failed: say so on its own line.
             emit_plain_tool_line(&identity, None, status);
@@ -731,7 +732,13 @@ fn tool_status_marker(status: Option<&acp::ToolCallStatus>) -> &'static str {
 /// command/pattern it runs.
 fn tool_primary_arg(input: &serde_json::Value) -> Option<String> {
     const KEYS: [&str; 7] = [
-        "file_path", "path", "target_file", "command", "pattern", "query", "url",
+        "file_path",
+        "path",
+        "target_file",
+        "command",
+        "pattern",
+        "query",
+        "url",
     ];
     let map = input.as_object()?;
     for key in KEYS {
@@ -764,7 +771,11 @@ fn tool_diff_stat(input: &serde_json::Value) -> Option<String> {
         .get("new_string")
         .and_then(|value| value.as_str())
         .unwrap_or("");
-    Some(format!("(+{} -{})", text_line_count(new), text_line_count(old)))
+    Some(format!(
+        "(+{} -{})",
+        text_line_count(new),
+        text_line_count(old)
+    ))
 }
 
 /// `plain` tool trail is on by default: without it a text-only consumer sees a
@@ -866,7 +877,11 @@ fn tool_content_text(content: &[acp::ToolCallContent]) -> String {
 }
 
 fn text_line_count(text: &str) -> usize {
-    if text.is_empty() { 0 } else { text.lines().count() }
+    if text.is_empty() {
+        0
+    } else {
+        text.lines().count()
+    }
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────────
