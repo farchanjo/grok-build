@@ -2795,15 +2795,34 @@ impl SessionActor {
                     name.clone(),
                     arguments_delta.clone(),
                 );
-                if name.as_deref() == Some("StructuredOutput")
-                    || matches!(
-                        &emit,
-                        crate::session::streaming_tool_calls::StreamingToolCallEmit::Announce {
-                            name: tool_name,
-                            ..
-                        } if tool_name == "StructuredOutput"
-                    )
+                // The envelope JSON is buffered and decoded by the tool-complete
+                // path, so the argument stream stays hidden. The opening frame
+                // still goes out: without it a consumer that renders tool rows
+                // has a result with no identity to name it.
+                if let crate::session::streaming_tool_calls::StreamingToolCallEmit::Announce {
+                    id: call_id,
+                    name: tool_name,
+                    ..
+                } = &emit
+                    && tool_name == "StructuredOutput"
                 {
+                    let meta = self.stamp_tool_meta(None, tool_name, None);
+                    self.send_update(
+                        acp::SessionUpdate::ToolCall(
+                            acp::ToolCall::new(
+                                acp::ToolCallId::new(Arc::from(call_id.as_str())),
+                                tool_name.clone(),
+                            )
+                            .kind(acp::ToolKind::Other)
+                            .status(acp::ToolCallStatus::Pending)
+                            .meta(meta),
+                        ),
+                        None,
+                    )
+                    .await;
+                    return;
+                }
+                if name.as_deref() == Some("StructuredOutput") {
                     return;
                 }
                 match emit {
