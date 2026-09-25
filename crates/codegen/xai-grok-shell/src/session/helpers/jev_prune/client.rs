@@ -37,7 +37,8 @@ pub struct JevClient {
     /// `status` and in a 401 so a two-transport setup stays debuggable.
     credential_source: CredentialSource,
     /// Derived session key (`{session_id}:jev`), or `None` when the caller has
-    /// no session. Sent as the body's `session_id`.
+    /// no session. Sent as the body's `session_id` on the OpenRouter transport
+    /// only; see [`JevTransport::sends_session_id`].
     session_key: Option<String>,
     provider: Option<Value>,
     client: reqwest::Client,
@@ -108,7 +109,11 @@ impl JevClient {
         // The derived lane key. `bootstrap_room` is left to the transports
         // that define it (SGLang/vLLM on the chat path); neither Jev endpoint
         // is documented to act on it, so inventing one here would be a guess.
-        if let Some(key) = &self.session_key {
+        // `session_id` is OpenRouter-only: the native endpoint rejects the
+        // field outright, so sending it there fails the whole prune.
+        if self.transport.sends_session_id()
+            && let Some(key) = &self.session_key
+        {
             body.insert("session_id".to_owned(), Value::String(key.clone()));
         }
         if let Some(provider) = &self.provider {
@@ -312,6 +317,41 @@ mod tests {
         assert_eq!(body["session_id"], json!("01a0b71b:jev"));
         // Jev defines no room of its own; the chat path keeps its own.
         assert!(body.get("bootstrap_room").is_none());
+        let _ = shutdown.send(());
+    }
+
+    /// The native endpoint rejects unknown top-level fields, `session_id`
+    /// included: a body carrying it answers `400 api_usage_error` while the
+    /// same body without it answers 200. The lane key must therefore not be
+    /// sent on that transport, even when the caller has a session.
+    #[tokio::test]
+    async fn native_never_sends_the_session_id() {
+        use std::sync::{Arc, Mutex};
+        let seen: Arc<Mutex<Option<Value>>> = Arc::new(Mutex::new(None));
+        let captured = Arc::clone(&seen);
+        let app = axum::Router::new().route(
+            "/decisions",
+            axum::routing::post(move |axum::Json(body): axum::Json<Value>| {
+                let captured = Arc::clone(&captured);
+                async move {
+                    *captured.lock().unwrap() = Some(body);
+                    axum::Json(json!({ "answers": {} }))
+                }
+            }),
+        );
+        let (base, shutdown) = spawn_server(app).await;
+        let dir = tempfile::tempdir().unwrap();
+        let mut resolved = cfg(format!("{base}/decisions"));
+        resolved.transport = JevTransport::Native;
+        resolved.api_key_env = Some(TEST_KEY_ENV.to_owned());
+        unsafe { std::env::set_var(TEST_KEY_ENV, "test-key") };
+        let client = JevClient::new(&resolved, dir.path(), Some("01a0b71b")).unwrap();
+        // The key is still derived; the transport alone decides whether it ships.
+        assert_eq!(client.session_key(), Some("01a0b71b:jev"));
+        client.ask(&json!({}), &json!({})).await.unwrap();
+        let body = seen.lock().unwrap().clone().expect("body captured");
+        assert!(body.get("session_id").is_none(), "body: {body}");
+        assert!(body.get("provider").is_none(), "body: {body}");
         let _ = shutdown.send(());
     }
 

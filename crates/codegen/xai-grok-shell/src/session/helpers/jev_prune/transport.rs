@@ -94,6 +94,21 @@ impl JevTransport {
         }
     }
 
+    /// Whether the derived lane key rides the body as `session_id`.
+    ///
+    /// OpenRouter-only for the same reason as [`Self::sends_provider_block`]:
+    /// the native endpoint rejects unknown top-level fields, and it answers a
+    /// body carrying `session_id` with `400 api_usage_error` — a generic
+    /// "Invalid request" that hides the real cause. Measured 2026-09-25
+    /// against `jev-1.13`: identical bodies, 200 without the field and 400
+    /// with it.
+    pub const fn sends_session_id(self) -> bool {
+        match self {
+            Self::Native => false,
+            Self::Openrouter => true,
+        }
+    }
+
     /// Credential names tried, in order, before the profile store.
     pub const fn key_names(self) -> &'static [&'static str] {
         match self {
@@ -285,6 +300,14 @@ mod tests {
     fn provider_block_is_openrouter_only() {
         assert!(JevTransport::Openrouter.sends_provider_block());
         assert!(!JevTransport::Native.sends_provider_block());
+    }
+
+    /// The native endpoint 400s on any unknown top-level field, so the lane
+    /// key is OpenRouter-only exactly like the provider block.
+    #[test]
+    fn session_id_is_openrouter_only() {
+        assert!(JevTransport::Openrouter.sends_session_id());
+        assert!(!JevTransport::Native.sends_session_id());
     }
 
     #[test]
