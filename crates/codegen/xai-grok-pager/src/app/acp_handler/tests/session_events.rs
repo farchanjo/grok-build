@@ -1,6 +1,55 @@
 #![cfg_attr(rustfmt, rustfmt::skip)]
     use super::*;
 
+    /// A rolling compaction rewrites the transcript, not the plan. Clearing the
+    /// pane on completion dropped a list that still lived in the shell's
+    /// Resources, and nothing re-emits a `Plan` afterwards — so the badge and
+    /// the pane went empty until the model called `todo_write` again.
+    #[test]
+    fn auto_compaction_completion_keeps_the_todo_list() {
+        let mut app = make_app_with_agent("sess-1");
+        {
+            let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+            agent.todo.update_todos(vec![
+                xai_grok_shell::tools::TodoItem {
+                    content: "alpha".into(),
+                    priority: Default::default(),
+                    status: xai_grok_shell::tools::TodoStatus::Pending,
+                    meta: None,
+                },
+                xai_grok_shell::tools::TodoItem {
+                    content: "beta".into(),
+                    priority: Default::default(),
+                    status: xai_grok_shell::tools::TodoStatus::Pending,
+                    meta: None,
+                },
+            ]);
+        }
+        handle(
+            make_ext_session_notification(
+                "sess-1",
+                XaiSessionUpdate::AutoCompactCompleted {
+                    tokens_before: Some(900_000),
+                    tokens_after: 40_000,
+                    elapsed_ms: Some(500),
+                    summary_preview: None,
+                },
+            ),
+            &mut app,
+        );
+        let names: Vec<String> = app.agents[&AgentId(0)]
+            .todo
+            .todos()
+            .iter()
+            .map(|t| t.content.clone())
+            .collect();
+        assert_eq!(
+            names,
+            vec!["alpha".to_owned(), "beta".to_owned()],
+            "compaction must not drop the plan from the pane"
+        );
+    }
+
     // ── apply_session_event ────────────────────────────────────────────
 
     #[test]

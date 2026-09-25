@@ -255,7 +255,13 @@ pub(super) fn handle_session_notification(notif: &acp::ExtNotification, app: &mu
             );
             if let XaiSessionUpdate::AutoCompactCompleted { tokens_after, .. } = update {
                 refresh_context_used(agent, *tokens_after);
-                agent.todo.update_todos(Vec::new());
+                // A rolling compaction rewrites the transcript, not the plan:
+                // `TodoState` lives in Resources and the compaction explicitly
+                // protects it (`plan_protected_tail_count`). Clearing the pane
+                // here therefore dropped a list that still existed, and nothing
+                // re-emits a `Plan` afterwards — so the badge and the pane went
+                // empty until the model happened to call `todo_write` again.
+                // Keep whatever the client already has.
             }
             changed
         }
