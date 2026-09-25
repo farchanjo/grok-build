@@ -142,6 +142,25 @@ service error text.
   (`alpha/decisions` on an OpenRouter base URL, `systemone` on the native
   TypeSafe one); the `openai_compatible` default is `/rerank`.
 
+  The base and the endpoint are a pair, and the endpoint cannot escape the
+  base's path prefix. OpenRouter serves decisions under `/api`, **not** under
+  the OpenAI-compatible `/api/v1`: pairing `alpha/decisions` with the built-in
+  `openrouter` provider (base `https://openrouter.ai/api/v1`) joins to
+  `/api/v1/alpha/decisions` and answers **404**, silently degrading the whole
+  decision path. Either declare a provider whose base ends at `/api`:
+
+      [model_providers.openrouter-decisions]
+      kind = "openrouter"
+      base_url = "https://openrouter.ai/api"
+
+      [reranker_models.jev-openrouter]
+      provider = "openrouter-decisions"
+      protocol = "jev"
+      endpoint = "alpha/decisions"
+
+  or, on the native TypeSafe side, pair `systemone` with the base that already
+  ends in `/v1` (`https://api.typesafe.ai/v1`).
+
 ### Solaris no-auth configuration evidence
 
 Solaris references here are **configuration evidence only**. Grok Build does
