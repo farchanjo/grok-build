@@ -539,6 +539,37 @@ fn knn_space_error(profile_id: &str) -> OrchestratorError {
     }
 }
 
+/// The semantic stage stopped before the shortlist and restored the pre-stage
+/// order. That is a legitimate outcome (cold index, cooldown, embed failure),
+/// but it leaves no trace at all: the caller sees an ordinary selection, and
+/// the Jev gate/choice is simply never asked. Without this line "prime stopped
+/// deciding" is invisible in the log.
+///
+/// `debug` because the common causes are transient and self-healing.
+fn note_shortlist_bail(profile_id: &str, stage: crate::retrieval::RetrievalStage, reason: &str) {
+    tracing::debug!(
+        profile_id,
+        stage = stage.as_str(),
+        reason,
+        "prime semantic fill stopped before the shortlist; jev decision skipped"
+    );
+}
+
+/// The live index sits in a different embedding space than the pinned route.
+///
+/// Unlike a transient bail this one does not resolve by itself: every prompt
+/// keeps failing until a vector rebuild rewrites the space. It is `warn`, and
+/// it names the remedy, because the symptom is otherwise a silent "Jev stopped
+/// working".
+fn note_space_mismatch(profile_id: &str, detail: &str) {
+    tracing::warn!(
+        profile_id,
+        detail,
+        "prime index embedding space does not match the pinned route; \
+         jev decision skipped until the vectors are rebuilt"
+    );
+}
+
 async fn fill_from_index(
     service: &RetrievalService,
     profile_id: &str,
@@ -641,6 +672,11 @@ async fn fill_from_index(
     let space_after = handle.knn_space_for_pin(&frozen);
 
     let Some(query_vec) = query_vec else {
+        note_shortlist_bail(
+            profile_id,
+            crate::retrieval::RetrievalStage::Embed,
+            "query embed unavailable",
+        );
         restore_pre_stage_order(
             outcome,
             pinned_order,
@@ -658,9 +694,15 @@ async fn fill_from_index(
         {
             Ok(hits) => hits,
             Err(super::index::PrimeIndexError::SpaceMismatch) => {
+                note_space_mismatch(profile_id, "knn re-check after the select");
                 return Err(knn_space_error(profile_id));
             }
-            Err(_) => {
+            Err(other) => {
+                note_shortlist_bail(
+                    profile_id,
+                    crate::retrieval::RetrievalStage::Candidates,
+                    &format!("knn unavailable: {other}"),
+                );
                 restore_pre_stage_order(
                     outcome,
                     pinned_order,
@@ -672,9 +714,22 @@ async fn fill_from_index(
             }
         },
         (false, _) | (_, Err(super::index::PrimeIndexError::SpaceMismatch)) => {
+            note_space_mismatch(
+                profile_id,
+                if pin_still_frozen {
+                    "pinned route space differs from the live index"
+                } else {
+                    "the live pin moved away from the frozen space"
+                },
+            );
             return Err(knn_space_error(profile_id));
         }
         _ => {
+            note_shortlist_bail(
+                profile_id,
+                crate::retrieval::RetrievalStage::Candidates,
+                "index space not ready",
+            );
             restore_pre_stage_order(
                 outcome,
                 pinned_order,
