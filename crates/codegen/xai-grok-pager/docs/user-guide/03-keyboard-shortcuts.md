@@ -151,6 +151,22 @@ Actions that affect the agent session, available from the agent screen.
 
 ---
 
+## Todo Pane Keys
+
+While the todos pane is focused (`Ctrl+T`):
+
+| Key | Action |
+| --- | --- |
+| `d` | Mark the highlighted item **done** |
+| `x` | **Cancel** the highlighted item |
+| `p` | Reopen it as **pending** |
+| `i` | Mark it **in progress** |
+| `h` | Show/hide done and cancelled items |
+
+The keys are absolute rather than a toggle, and they are bare letters: a modified press belongs to whoever else bound it. They are inert while the pane's search/filter bar has the keyboard, so typing a query never closes an entry.
+
+Closing an item is **not** a local edit. The pane sends `x.ai/plan/update` to the shell, which mutates the same plan state the model's `todo_write` writes and re-emits the plan; the pane then repaints from it. That is what keeps the two from diverging — otherwise the model would still see the item as pending and its next `todo_write` would resurrect it.
+
 ## Image Paste & Drag-and-Drop
 
 | Action | macOS | Linux | Windows |

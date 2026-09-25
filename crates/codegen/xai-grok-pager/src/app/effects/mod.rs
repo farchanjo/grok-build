@@ -1781,6 +1781,37 @@ pub(crate) fn execute(
                     }
                 });
         }
+        Effect::SetTodoStatus {
+            session_id,
+            index,
+            status,
+        } => {
+            let tx = acp_tx.clone();
+            let sid = session_id.0.to_string();
+            tasks.spawn(async move {
+                // Position, not id: the ACP `Plan` payload carries no identifier,
+                // and the shell's plan order is the order the pane renders.
+                let params = serde_json::json!({
+                    "sessionId": sid.clone(),
+                    "changes": [{ "index": index, "status": status }],
+                });
+                let req = acp::ExtRequest::new(
+                    "x.ai/plan/update",
+                    serde_json::value::to_raw_value(&params)
+                        .expect("serialize plan/update params")
+                        .into(),
+                );
+                match acp_send(req, &tx).await {
+                    // Success needs no UI work: the shell re-emits the Plan and
+                    // the existing Plan handler repaints the pane from it.
+                    Ok(_) => TaskResult::TodoStatusApplied { session_id: sid },
+                    Err(e) => TaskResult::TodoStatusFailed {
+                        session_id: sid,
+                        error: sanitize_user_error(&e.to_string()),
+                    },
+                }
+            });
+        }
         Effect::KillSubagent { session_id, subagent_id } => {
             let tx = acp_tx.clone();
             tasks

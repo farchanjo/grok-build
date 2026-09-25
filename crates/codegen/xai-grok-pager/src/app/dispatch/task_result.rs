@@ -590,6 +590,14 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             }
             vec![]
         }
+        TaskResult::TodoStatusApplied { session_id: _ } => vec![],
+        TaskResult::TodoStatusFailed { session_id, error } => {
+            tracing::warn!(session_id = %session_id, error = %error, "plan/update failed");
+            if let Some(agent) = find_agent_by_session_id(&mut app.agents, &session_id) {
+                agent.show_toast(&format!("couldn't update the todo: {error}"));
+            }
+            vec![]
+        }
         TaskResult::ChangelogFetched { markdown, entries } => {
             app.changelog_markdown = markdown;
             app.changelog_bullets =

@@ -521,6 +521,32 @@ pub(super) fn dispatch_kill_bg_task(app: &mut AppView, task_id: String) -> Vec<E
     }]
 }
 
+/// Push one plan-entry status change to the shell.
+///
+/// The pane keeps no local copy: the shell mutates the same state `todo_write`
+/// writes and re-emits the Plan, which the existing Plan handler applies. So a
+/// successful request needs no result arm.
+pub(super) fn dispatch_set_todo_status(
+    app: &mut AppView,
+    index: usize,
+    status: xai_grok_shell::tools::TodoStatus,
+) -> Vec<Effect> {
+    let ActiveView::Agent(id) = app.active_view else {
+        return vec![];
+    };
+    let Some(agent) = app.agents.get_mut(&id) else {
+        return vec![];
+    };
+    let Some(session_id) = agent.session.session_id.clone() else {
+        return vec![];
+    };
+    vec![Effect::SetTodoStatus {
+        session_id,
+        index,
+        status,
+    }]
+}
+
 /// Cancel an async asset transfer job (`asset_job_cancel`).
 ///
 /// Marks the row `pending_kill` optimistically — the shell's terminal

@@ -6902,6 +6902,26 @@ pub(crate) mod tests {
             "the minimal todo-panel flag must never flip outside minimal mode"
         );
     }
+
+    /// The pane itself still opens outside minimal mode: `ToggleTodos` is the
+    /// registered action, so this path must follow the binding rather than a
+    /// hardcoded Ctrl-T.
+    #[test]
+    fn non_minimal_ctrl_t_toggles_the_todo_overlay() {
+        let mut app = test_app_with_agent();
+        app.screen_mode = ScreenMode::Inline;
+        assert!(!app.agents[&AgentId(0)].todo.is_visible());
+        let _ = app.handle_input(&key_event(KeyCode::Char('t'), KeyModifiers::CONTROL));
+        assert!(
+            app.agents[&AgentId(0)].todo.is_visible(),
+            "Ctrl+T must open the todo pane"
+        );
+        let _ = app.handle_input(&key_event(KeyCode::Char('t'), KeyModifiers::CONTROL));
+        assert!(
+            !app.agents[&AgentId(0)].todo.is_visible(),
+            "Ctrl+T again must close it"
+        );
+    }
     /// The minimal info-row transcript hint and the Ctrl+O key remap are gated
     /// on the same predicate. Ctrl+O opens the transcript pager unless it is
     /// the interject chord (Apple Terminal) AND an interject would actually

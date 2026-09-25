@@ -1082,7 +1082,12 @@ impl AgentView {
         }
         if let Event::Key(key) = ev
             && key.kind != KeyEventKind::Release
-            && key!('t', CONTROL).matches(key)
+            // Through the registry, like ToggleTasks below: `ToggleTodos` is a
+            // registered action (Ctrl-T by default) but `action_for` maps it to
+            // `None`, so nothing dispatched it by id and this hardcoded check
+            // was the only path. A rebound Ctrl-T therefore did nothing, and
+            // unbinding it still toggled.
+            && registry.matches_id(ActionId::ToggleTodos, key)
         {
             self.todo.overlay.toggle();
             self.todo.on_state_change();

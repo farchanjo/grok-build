@@ -193,6 +193,21 @@ impl TodoState {
         self.todos.values()
     }
 
+    /// Set the status of the `index`-th item, in insertion order.
+    ///
+    /// Position-addressed because the ACP `Plan` payload carries no id, so a
+    /// client can only name an item by where it sits in the plan. Returns
+    /// `false` when the index is out of range.
+    pub fn set_status_at(&mut self, index: usize, status: TodoStatus) -> bool {
+        match self.todos.get_index_mut(index) {
+            Some((_, todo)) => {
+                todo.status = status;
+                true
+            }
+            None => false,
+        }
+    }
+
     pub fn todo_items_with_ids(&self) -> impl Iterator<Item = (&TodoId, &TodoItem)> + '_ {
         self.todos.iter()
     }
@@ -697,6 +712,24 @@ mod tests {
         assert_eq!(get_item(&state, "1").status, TodoStatus::Pending);
         assert_eq!(get_item(&state, "2").content, "Task B");
         assert_eq!(get_item(&state, "2").status, TodoStatus::InProgress);
+    }
+
+    /// Clients address a plan entry by position, because the ACP `Plan` payload
+    /// carries no id. The index must follow insertion order, and an out-of-range
+    /// index must be reported rather than silently ignored.
+    #[test]
+    fn set_status_at_addresses_by_insertion_order() {
+        let mut state = seed_state(&[
+            ("a", "Alpha", TodoStatus::Pending),
+            ("b", "Beta", TodoStatus::Pending),
+        ]);
+
+        assert!(state.set_status_at(1, TodoStatus::Completed));
+        assert_eq!(get_item(&state, "a").status, TodoStatus::Pending);
+        assert_eq!(get_item(&state, "b").status, TodoStatus::Completed);
+
+        assert!(!state.set_status_at(9, TodoStatus::Cancelled));
+        assert_eq!(get_item(&state, "a").status, TodoStatus::Pending);
     }
 
     #[test]

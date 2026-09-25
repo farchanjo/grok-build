@@ -943,6 +943,10 @@ pub fn build_hints(
                 crate::key!('h'),
                 if show_done { "hide done" } else { "show done" },
             ));
+            // Close keys, mirrored from `todo_pane::close_status_for_key`.
+            hints.push(HintItem::new(crate::key!('d'), "done"));
+            hints.push(HintItem::new(crate::key!('x'), "cancel"));
+            hints.push(HintItem::new(crate::key!('p'), "reopen"));
             hints
         }
         ActivePane::Queue => {

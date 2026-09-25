@@ -451,6 +451,15 @@ pub enum Action {
     CancelTurnChoice(crate::views::modal::CancelTurnChoice),
     /// Kill a background task by task_id.
     KillBgTask(String),
+    /// Set the status of a plan entry, addressed by its position in the plan.
+    ///
+    /// Sent to the shell as `x.ai/plan/update` so the change lands in the same
+    /// state the model's `todo_write` mutates; the shell re-emits the Plan and
+    /// the pane follows it.
+    SetTodoStatus {
+        index: usize,
+        status: xai_grok_shell::tools::TodoStatus,
+    },
     /// Kill (cancel) a subagent by subagent_id.
     KillSubagent(String),
     /// Cancel an async asset transfer job by job_id (`asset_job_cancel`).
@@ -1858,6 +1867,12 @@ pub enum Effect {
         session_id: acp::SessionId,
         task_id: String,
     },
+    /// Push one plan-entry status change to the shell (`x.ai/plan/update`).
+    SetTodoStatus {
+        session_id: acp::SessionId,
+        index: usize,
+        status: xai_grok_shell::tools::TodoStatus,
+    },
     /// Cancel a subagent via `x.ai/subagent/cancel`.
     KillSubagent {
         session_id: acp::SessionId,
@@ -2796,6 +2811,17 @@ pub enum TaskResult {
         session_id: String,
         task_id: String,
         error: String,
+    },
+    /// A `x.ai/plan/update` request failed. Success needs no result arm: the
+    /// shell re-emits the Plan and the pane follows it.
+    TodoStatusFailed {
+        session_id: String,
+        error: String,
+    },
+    /// A `x.ai/plan/update` request landed; the Plan re-emission carries the
+    /// visible change.
+    TodoStatusApplied {
+        session_id: String,
     },
     /// Model switch completed (effort, if any, was applied in the same request).
     SwitchModelComplete {

@@ -339,6 +339,46 @@ impl SessionActor {
     }
 }
 
+/// Apply client-requested todo status changes, then re-emit the plan.
+///
+/// Returns how many changes matched an entry. Runs on the actor because it owns
+/// both the shared resource handle and the update stream: the mutation and the
+/// re-emission happen together, so the pane never has to keep a local copy that
+/// could drift from the state the model writes.
+async fn apply_todo_statuses(
+    session: &SessionActor,
+    changes: &[crate::session::commands::TodoStatusChange],
+) -> usize {
+    use xai_grok_tools::implementations::grok_build::todo::TodoState;
+    use xai_grok_tools::types::resources::State;
+
+    let bridge = session.agent.borrow().tool_bridge().clone();
+    let resources = bridge.shared_resources().await;
+    let (applied, items) = {
+        let mut res = resources.lock().await;
+        let state = res.get_or_default::<State<TodoState>>();
+        let mut applied = 0usize;
+        for change in changes {
+            if state.0.set_status_at(change.index, change.status) {
+                applied += 1;
+            }
+        }
+        let items = state.0.todo_items().cloned().collect::<Vec<_>>();
+        (applied, items)
+    };
+    if applied == 0 {
+        return 0;
+    }
+    let entries = items
+        .into_iter()
+        .map(crate::tools::todo::plan_entry_from_todo_item)
+        .collect();
+    session
+        .send_update(acp::SessionUpdate::Plan(acp::Plan::new(entries)), None)
+        .await;
+    applied
+}
+
 #[cfg(test)]
 mod execution_mode_image_budget_tests {
     use super::*;
@@ -1373,6 +1413,13 @@ pub(super) async fn run_session(
                         SessionCommand::GetSessionInfo { responds_to } => {
                             let info = session.build_session_info().await;
                             let _ = responds_to.send(info);
+                        }
+                        SessionCommand::SetTodoStatuses {
+                            changes,
+                            responds_to,
+                        } => {
+                            let applied = apply_todo_statuses(&session, &changes).await;
+                            let _ = responds_to.send(applied);
                         }
                         SessionCommand::BackgroundForegroundCommand { tool_call_id, respond_to } => {
                             let result = session.agent.borrow().tool_bridge()

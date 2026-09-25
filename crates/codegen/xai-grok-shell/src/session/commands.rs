@@ -10,6 +10,20 @@ use crate::session::signals::TurnDeltaSnapshot;
 use agent_client_protocol as acp;
 use tokio::sync::oneshot;
 
+/// One client-requested todo status change.
+///
+/// Addressed by *position*, not by id: the ACP `Plan` payload carries content,
+/// priority, status and meta but no identifier, so the pane can only name an
+/// item by where it sits in the plan. The plan is emitted in state order and
+/// the pane renders in that same order, so a position is stable between two
+/// emissions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct TodoStatusChange {
+    /// Absolute index into the plan, in state order.
+    pub index: usize,
+    pub status: crate::tools::todo::TodoStatus,
+}
+
 /// Session-authoritative model identities for ACP prompt setup.
 ///
 /// `selection_model_id` is the canonical catalog key. `wire_model` is the
@@ -329,6 +343,18 @@ pub enum SessionCommand {
     /// Snapshot for `/session-info`.
     GetSessionInfo {
         responds_to: oneshot::Sender<SessionInfoData>,
+    },
+    /// Apply client-requested status changes to the session's todo plan.
+    ///
+    /// The todo pane is a view of the plan, so closing an item there has to land
+    /// in the same `State<TodoState>` the model's `todo_write` mutates —
+    /// otherwise the two diverge and the next `todo_write` silently resurrects
+    /// the item. Only the actor holds both the resource handle and the update
+    /// channel, so it performs the change and re-emits the Plan.
+    SetTodoStatuses {
+        changes: Vec<TodoStatusChange>,
+        /// Number of changes that matched a plan entry.
+        responds_to: oneshot::Sender<usize>,
     },
     /// Compacts the current session, saving on the context window
     CompactSession {

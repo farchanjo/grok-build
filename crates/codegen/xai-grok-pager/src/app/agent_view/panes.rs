@@ -276,10 +276,12 @@ impl AgentView {
     pub(super) fn handle_todo_key(
         &mut self,
         key: &KeyEvent,
-        _registry: &ActionRegistry,
+        registry: &ActionRegistry,
     ) -> InputOutcome {
         use crate::views::overlay::{handle_overlay_key, handle_overlay_nav_key};
-        if key!('t', CONTROL).matches(key) {
+        // Registry lookup, not a hardcoded Ctrl-T: the pane's own close key must
+        // follow a rebind exactly like the global opener in `handle_input`.
+        if registry.matches_id(ActionId::ToggleTodos, key) {
             self.todo.overlay.toggle();
             self.todo.on_state_change();
             if !self.todo.overlay.focused {
@@ -288,6 +290,12 @@ impl AgentView {
             return InputOutcome::Changed;
         }
         let has_input = self.todo.list_state.input_mode().is_some();
+        // Close keys win over the list: they are bare letters the list leaves
+        // free, and they must not fire while the search/filter bar has the
+        // keyboard (typing "done" would otherwise close entries).
+        if !has_input && let Some((index, status)) = self.todo.close_request(key) {
+            return InputOutcome::Action(Action::SetTodoStatus { index, status });
+        }
         let action = handle_overlay_key(&mut self.todo.overlay, key).or_else(|| {
             if !has_input {
                 handle_overlay_nav_key(&mut self.todo.overlay, key)

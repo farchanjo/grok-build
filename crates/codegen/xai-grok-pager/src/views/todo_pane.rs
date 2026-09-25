@@ -3,11 +3,32 @@
 //! Wraps the canonical `TodoItem` type with a `ListItem` implementation
 //! that provides status-icon prefixes and styled content.
 
+use crossterm::event::KeyModifiers;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use xai_grok_shell::tools::{TodoItem, TodoStatus};
 
 use super::list_pane::ListItem;
+
+/// The status a close key applies to the highlighted entry.
+///
+/// Absolute rather than a toggle: the entry's own status is already on screen,
+/// so each key names its target directly and stays predictable. `Space` is
+/// taken by the overlay's paging and `Enter` by the list, which is why these
+/// are letters. Bare keys only — a modified press belongs to whoever else
+/// bound it.
+pub fn close_status_for_key(key: &KeyEvent) -> Option<TodoStatus> {
+    if key.modifiers != KeyModifiers::NONE {
+        return None;
+    }
+    match key.code {
+        KeyCode::Char('d') => Some(TodoStatus::Completed),
+        KeyCode::Char('x') => Some(TodoStatus::Cancelled),
+        KeyCode::Char('p') => Some(TodoStatus::Pending),
+        KeyCode::Char('i') => Some(TodoStatus::InProgress),
+        _ => None,
+    }
+}
 
 // ---------------------------------------------------------------------------
 // TodoPaneStyle — per-status colors
@@ -433,6 +454,23 @@ impl TodoPane {
         self.list_state.handle_key_event(key, &self.entries)
     }
 
+    /// The `(plan index, status)` a close key requests, when an entry is
+    /// highlighted.
+    ///
+    /// Entries carry the absolute plan index as their id, so a filtered list
+    /// (`h` hides done items) still names the right plan position. Returns
+    /// `None` while the search/filter bar owns the keyboard, so typing `d` into
+    /// a query does not close anything.
+    pub fn close_request(&self, key: &KeyEvent) -> Option<(usize, TodoStatus)> {
+        if self.list_state.input_mode().is_some() {
+            return None;
+        }
+        let status = close_status_for_key(key)?;
+        self.list_state
+            .selected_id()
+            .map(|id| (id as usize, status))
+    }
+
     pub fn handle_paste(&mut self, text: &str) -> bool {
         self.list_state.handle_paste(text, &self.entries)
     }
@@ -525,6 +563,62 @@ impl TodoPane {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn item(content: &str, status: TodoStatus) -> TodoItem {
+        TodoItem {
+            content: content.into(),
+            priority: Default::default(),
+            status,
+            meta: None,
+        }
+    }
+
+    /// Close keys are absolute and bare: `d`/`x`/`p`/`i` name a target status,
+    /// and a modified press belongs to whoever else bound it.
+    #[test]
+    fn close_keys_name_absolute_statuses() {
+        let press = |c: char| KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE);
+        assert_eq!(
+            close_status_for_key(&press('d')),
+            Some(TodoStatus::Completed)
+        );
+        assert_eq!(
+            close_status_for_key(&press('x')),
+            Some(TodoStatus::Cancelled)
+        );
+        assert_eq!(close_status_for_key(&press('p')), Some(TodoStatus::Pending));
+        assert_eq!(
+            close_status_for_key(&press('i')),
+            Some(TodoStatus::InProgress)
+        );
+        assert_eq!(close_status_for_key(&press('h')), None);
+        assert_eq!(
+            close_status_for_key(&KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL)),
+            None,
+            "a modified press is not a close key"
+        );
+    }
+
+    /// The request carries the *plan* index, so hiding done items must not
+    /// renumber the survivors.
+    #[test]
+    fn close_request_uses_the_plan_index_not_the_row() {
+        let mut pane = TodoPane::new();
+        pane.update_todos(vec![
+            item("alpha", TodoStatus::Completed),
+            item("beta", TodoStatus::Pending),
+            item("gamma", TodoStatus::Pending),
+        ]);
+        pane.toggle_show_done();
+        pane.rebuild_entries();
+        assert_eq!(pane.entries.len(), 2, "fixture: alpha is filtered out");
+
+        pane.list_state.select_by_id(2);
+        let request = pane
+            .close_request(&KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE))
+            .expect("a close request for the highlighted entry");
+        assert_eq!(request, (2, TodoStatus::Completed));
+    }
 
     fn counts(completed: usize, cancelled: usize) -> TodoCounts {
         TodoCounts {
