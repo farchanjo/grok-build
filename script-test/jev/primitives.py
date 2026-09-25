@@ -85,6 +85,9 @@ class Response:
     primary_confidence: float = 0.0
     secondary_model: str = ""
     secondary_latency_ms: float = 0.0
+    # Why the primary leg was skipped, when it failed outright. Empty when the
+    # primary answered (even if the gate then escalated).
+    primary_error: str = ""
 
     def confidence(self, key: str) -> float:
         """The answer's own separability signal, uniform across question types."""

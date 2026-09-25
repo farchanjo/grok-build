@@ -74,6 +74,8 @@ def _log(extra: dict[str, object] | None, response: primitives.Response) -> None
         record["escalated"] = response.escalated
         record["agreement"] = response.agreement
         record["primary_confidence"] = round(response.primary_confidence, 4)
+    if response.primary_error:
+        record["primary_error"] = response.primary_error
     if extra:
         record.update({key: value for key, value in extra.items() if key != "argv"})
     try:
@@ -95,6 +97,8 @@ def _emit(response: primitives.Response, extra: dict[str, object] | None = None)
         header["primary_confidence"] = round(response.primary_confidence, 4)
         header["agreement"] = response.agreement
         header["escalated"] = response.escalated
+    if response.primary_error:
+        header["primary_error"] = response.primary_error
     if extra:
         header.update(extra)
     print(json.dumps(header, ensure_ascii=False))

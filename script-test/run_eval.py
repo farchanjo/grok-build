@@ -421,8 +421,11 @@ def main() -> None:
     report(args.transport, all_calls)
     if isinstance(client, TieredClient):
         stats = client.stats
+        # `primary_failures` first: a dead cheap leg makes every call escalate,
+        # which otherwise reads as a gate that never fires.
         console.print(
-            f"\ntier: {stats.calls} calls, gate accepted {stats.accepted}, "
+            f"\ntier: {stats.calls} calls, primary failed {stats.primary_failures}, "
+            f"gate accepted {stats.accepted}, "
             f"escalated {stats.escalated} ({stats.escalation_rate:.1%}), "
             f"agreed {stats.agreed}, disagreed {stats.disagreed}"
         )

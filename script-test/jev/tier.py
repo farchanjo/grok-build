@@ -23,6 +23,14 @@ payload:
 A disagreement between the two engines is the escalation trigger: it marks a case
 for review even though the tier still returns Jev's answer, because the tier has
 no third engine to consult.
+
+3. **A dead primary escalates, it does not raise.** The LAN engine is the one
+   that can vanish (host off, port closed) while the paid one is a public
+   endpoint. Measured 2026-09-25 with Laya unreachable: the gate never ran and
+   the whole call raised `TransportError`, so the tier was strictly worse than
+   Jev alone. `ask` now catches a failed primary — transport error or an answer
+   the gate cannot read — and buys the second opinion unconditionally, recording
+   the reason in `Response.primary_error`.
 """
 
 from __future__ import annotations
@@ -31,7 +39,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from . import primitives
-from .transports import Client
+from .transports import Client, TransportError
 
 # Measured on cases/ with model="typed-decisions", by sweeping a verification run
 # offline (sweep_tier_gate.py). These values are set where the tier stops losing
@@ -62,6 +70,8 @@ class TierStats:
     disagreed: int = 0
     primary_ms: float = 0.0
     secondary_ms: float = 0.0
+    # Calls where the cheap leg failed outright, so the gate never ran.
+    primary_failures: int = 0
 
     @property
     def escalation_rate(self) -> float:
@@ -127,7 +137,11 @@ class TieredClient:
 
         Returns the primary's answers when the gate passes, or when both engines
         agree. Returns the secondary's answers on a split, since the secondary is
-        the more accurate of the two on every workload measured so far.
+        the more accurate of the two on every workload measured so far. A
+        *failed* primary — unreachable LAN engine, non-2xx, or an answer the gate
+        cannot read — escalates instead of raising: the tier exists to put a
+        cheap leg in front of an expensive one, not to make the expensive one
+        unreachable when the cheap one dies.
 
         Provenance on the returned response:
 
@@ -135,16 +149,34 @@ class TieredClient:
           primary, because the two answers are identical and the primary's object
           is the one returned.
         - ``escalated`` — the secondary was consulted, i.e. a paid call happened.
-        - ``agreement`` — ``None`` when no second opinion was bought, else
-          ``True``/``False``. A ``False`` here is the "send it to a human" flag.
+        - ``agreement`` — ``None`` when no second opinion was bought or none
+          could be compared, else ``True``/``False``. A ``False`` here is the
+          "send it to a human" flag.
+        - ``primary_error`` — why the primary was skipped, when it failed. The
+          gate never ran in that case, so ``primary_confidence`` stays 0.0.
         """
         driver = self._driver(questions)
-        first = self.primary.ask(state, questions, attempts=attempts)
         self.stats.calls += 1
-        self.stats.primary_ms += first.latency_ms
 
-        confidence = first.confidence(driver)
-        if confidence >= self.gate_for(driver):
+        first: primitives.Response | None = None
+        failure = ""
+        try:
+            first = self.primary.ask(state, questions, attempts=attempts)
+        except (TransportError, primitives.BadAnswer) as error:
+            failure = f"{type(error).__name__}: {error}"
+            self.stats.primary_failures += 1
+
+        confidence = 0.0
+        if first is not None:
+            self.stats.primary_ms += first.latency_ms
+            try:
+                confidence = first.confidence(driver)
+            except primitives.BadAnswer as error:
+                failure = f"{type(error).__name__}: {error}"
+                first = None
+                self.stats.primary_failures += 1
+
+        if first is not None and confidence >= self.gate_for(driver):
             self.stats.accepted += 1
             first.source = self.primary.transport.name
             first.primary_confidence = confidence
@@ -153,6 +185,15 @@ class TieredClient:
         second = self.secondary.ask(state, questions, attempts=attempts)
         self.stats.escalated += 1
         self.stats.secondary_ms += second.latency_ms
+
+        if first is None:
+            # No first opinion to compare against: the paid answer stands alone,
+            # and `agreement` stays `None` because nothing was agreed.
+            second.source = self.secondary.transport.name
+            second.escalated = True
+            second.agreement = None
+            second.primary_error = failure
+            return second
 
         agreed = first.pick(driver) == second.pick(driver)
         chosen = first if agreed else second
@@ -167,4 +208,5 @@ class TieredClient:
         chosen.escalated = True
         chosen.secondary_model = second.model
         chosen.secondary_latency_ms = second.latency_ms
+        chosen.primary_error = failure
         return chosen
