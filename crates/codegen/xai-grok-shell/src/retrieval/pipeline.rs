@@ -346,7 +346,17 @@ pub async fn embed_with_profile(
                     if merged_model.is_none() {
                         merged_model = Some(result.model.clone());
                     }
-                    merged_vectors.extend(result.vectors);
+                    // Each sub-request indexes its own payload, so the vectors
+                    // that come back are numbered from zero. Rebase them onto
+                    // the stage input: a consumer that trusts `index` (the
+                    // dense tool index does) would otherwise slot every chunk
+                    // into the same leading positions and read the tail as
+                    // missing vectors.
+                    let offset = merged_vectors.len();
+                    for mut vector in result.vectors {
+                        vector.index += offset;
+                        merged_vectors.push(vector);
+                    }
                 }
                 Err(err) => {
                     let class = RouteFailureClass::from_retrieval_error(&err);
@@ -385,6 +395,22 @@ pub async fn embed_with_profile(
             }
         }
         if route_failed {
+            continue;
+        }
+        // A short merge means a sub-request answered with fewer vectors than
+        // it was handed. The next route is a better bet than handing a
+        // consumer a batch that no longer lines up with its inputs.
+        if merged_vectors.len() != texts.len() {
+            tracing::warn!(
+                profile = %ctx.profile.id,
+                route = %route_id,
+                inputs = texts.len(),
+                vectors = merged_vectors.len(),
+                "embed stage merge lost vectors; failing over to the next route"
+            );
+            last_failure = Some(RouteFailureClass::Malformed);
+            ctx.cooldown
+                .record_failure(cd_key.clone(), RouteFailureClass::Malformed);
             continue;
         }
         // First successful route pins this embedding space only. Failed

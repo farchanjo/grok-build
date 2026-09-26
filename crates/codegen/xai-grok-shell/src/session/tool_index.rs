@@ -3142,4 +3142,84 @@ mod tests {
         assert_eq!(fused[0].0, 1);
         assert_eq!(fused.len(), 3);
     }
+
+    /// Live probe: how long one query embedding through the real home
+    /// registry takes, whether repeats stay cheap, and what a corpus-sized
+    /// batch costs. Run with `--run-ignored all` and `LIVE_HOME` set to a
+    /// profile that has a retrieval registry configured.
+    #[tokio::test(flavor = "current_thread")]
+    #[ignore = "probes the live home registry and its embedding providers"]
+    async fn live_probe_embed_latency() {
+        let home = std::path::PathBuf::from(
+            std::env::var("LIVE_HOME").unwrap_or_else(|_| "/Users/farchanjo/.grok".to_string()),
+        );
+        let _ = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::DEBUG)
+            .with_env_filter("retrieval_orchestrator=debug")
+            .try_init();
+        let registry = crate::retrieval::RetrievalRegistry::load_from_home(home.clone());
+        crate::retrieval::install_registry_for_home(home.clone(), registry);
+        let embedder = ServiceToolEmbedder::new(home.clone());
+
+        for round in 1..=3 {
+            let started = std::time::Instant::now();
+            let out = embedder
+                .embed(vec!["search tools for ssh".to_string()])
+                .await;
+            eprintln!(
+                "query round {round}: result={:?} elapsed={:?}",
+                out.as_ref().map(|o| o.space.clone()),
+                started.elapsed()
+            );
+        }
+
+        // Bisect the provider's per-request input cap: embed N docs in one
+        // call for growing N and report where vectors start going missing.
+        for batch in [
+            2usize, 4, 8, 16, 24, 32, 48, 64, 96, 128, 160, 192, 256, 320,
+        ] {
+            let inputs = (0..batch)
+                .map(|i| {
+                    format!(
+                        "tool_{i}__do_thing: performs operation {i} over the network with \
+                         retries and exponential backoff"
+                    )
+                })
+                .collect::<Vec<_>>();
+            let started = std::time::Instant::now();
+            let out = embedder.embed(inputs).await;
+            let got = out.as_ref().map(|o| o.vectors.len()).unwrap_or(0);
+            eprintln!(
+                "batch {batch:>3}: got={got} {} elapsed={:?}",
+                if got == batch { "OK" } else { "HOLES" },
+                started.elapsed()
+            );
+        }
+
+        // Production shape: a toolset-sized corpus through the real dense
+        // index, which chunks by bytes and rebuilds through the same service.
+        let docs: Vec<String> = (0..315)
+            .map(|i| {
+                format!(
+                    "server_{}__tool_{i}: performs operation {i} over the network with retries \
+                     and exponential backoff, honoring workspace permissions",
+                    i % 12
+                )
+            })
+            .collect();
+        let index = DenseToolIndex::new(Arc::new(ServiceToolEmbedder::new(home.clone())));
+        let started = std::time::Instant::now();
+        match index.rank("search tools for ssh", &docs).await {
+            Ok(Some(ranks)) => eprintln!(
+                "dense corpus ({} docs in {} chunks): ranks={} head={:?} elapsed={:?}",
+                docs.len(),
+                chunk_documents(&docs).len(),
+                ranks.len(),
+                &ranks[..ranks.len().min(3)],
+                started.elapsed()
+            ),
+            Ok(None) => eprintln!("dense corpus: no documents"),
+            Err(error) => eprintln!("dense corpus: err={error} elapsed={:?}", started.elapsed()),
+        }
+    }
 }

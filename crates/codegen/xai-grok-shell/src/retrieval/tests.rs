@@ -1447,6 +1447,52 @@ async fn embed_input_splits_into_route_bounded_subrequests() {
     assert_eq!(fake.embed_calls(), vec!["emb-a", "emb-a"]);
     // Sub-requests share one route attempt.
     assert_eq!(stage.attempts_used, 1);
+    // Indices are stage-level, not per-sub-request: both sub-requests answer
+    // with index 0 locally, and a consumer slotting by `index` must still see
+    // two distinct positions.
+    let indices: Vec<usize> = stage.result.vectors.iter().map(|v| v.index).collect();
+    assert_eq!(indices, vec![0, 1]);
+}
+
+#[tokio::test]
+async fn merged_subrequests_keep_stage_level_indices() {
+    let clock = Arc::new(MockClock::new());
+    let reg = RetrievalRegistry::disabled_with_clock("/tmp/pr17-embmerge", clock);
+    let mut graph = test_graph_two_embed_routes();
+    graph.embedding_models.get_mut("emb-a").unwrap().batch_size = 2;
+    let (views, meta) = test_provider_views_capable(&["acct-a", "acct-b"]);
+    reg.publish_build_input(
+        0,
+        SnapshotBuildInput {
+            graph,
+            graph_generation: 1,
+            provider_generation: 1,
+            provider_views: views,
+            provider_meta: meta,
+            parse_warnings: Vec::new(),
+        },
+    );
+    let fake = Arc::new(FakeRetrievalExecutor::new());
+    fake.set_embed("emb-a", FakeEmbedScript::Ok { dims: 8, fill: 0.1 });
+    let (svc, _) = service(reg, Arc::clone(&fake));
+    let texts: Vec<String> = (0..5).map(|i| format!("doc-{i}")).collect();
+    let stage = svc
+        .embed(
+            "default",
+            texts,
+            PipelineOptions::default(),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("five documents must split into three ordered sub-requests");
+    // Three sub-requests of 2/2/1 share one attempt.
+    assert_eq!(fake.embed_calls().len(), 3);
+    assert_eq!(stage.attempts_used, 1);
+    // The merged batch must be a contiguous 0..5 permutation, so a consumer
+    // slotting by index reconstructs the input order instead of reading the
+    // tail as holes.
+    let indices: Vec<usize> = stage.result.vectors.iter().map(|v| v.index).collect();
+    assert_eq!(indices, vec![0, 1, 2, 3, 4]);
 }
 
 #[tokio::test]
