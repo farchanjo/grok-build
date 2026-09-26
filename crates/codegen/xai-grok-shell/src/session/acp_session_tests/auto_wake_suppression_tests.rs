@@ -123,6 +123,7 @@ fn pending_notification_cap_keeps_newest_entries() {
         notifications_suppressed: true,
         rewindable: false,
         nudges_used_this_session: 0,
+        drain_settle_pending: false,
     };
     for index in 0..(MAX_PENDING_NOTIFICATIONS + 3) {
         SessionActor::push_pending_notification(
@@ -166,6 +167,7 @@ fn pending_notification_byte_budget_drops_oldest() {
             notifications_suppressed: true,
             rewindable: false,
             nudges_used_this_session: 0,
+            drain_settle_pending: false,
         }
     }
 
@@ -1980,6 +1982,99 @@ async fn task_wake_admission_dead_reply_parks_fallback_and_releases_reservation(
             assert!(
                 !reservations.contains(task_id),
                 "the parked fallback must release the reservation"
+            );
+        })
+        .await;
+}
+
+fn mcp_push_notification(uri: &str) -> PendingNotification {
+    PendingNotification {
+        prompt_id: format!("mcp-resource-{uri}"),
+        prompt_blocks: vec![acp::ContentBlock::Text(acp::TextContent::new(format!(
+            "MCP push from server `stub` (subscribed resource `{uri}`) — output arrived"
+        )))],
+        priority: NotificationPriority::Later,
+        source: NotificationSource::McpResourceUpdated {
+            server: "stub".to_string(),
+            uri: uri.to_string(),
+        },
+    }
+}
+
+/// Sibling-lane arrivals inside the settle window batch into ONE drain turn.
+/// Without the settle, each arrival starts its own model turn — the
+/// many-lanes replay storm.
+#[tokio::test(flavor = "current_thread")]
+async fn settle_window_batches_arrivals_into_one_drain_turn() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (gateway_tx, _) =
+                tokio::sync::mpsc::unbounded_channel::<xai_acp_lib::AcpClientMessage>();
+            let (persistence_tx, _) = tokio::sync::mpsc::unbounded_channel::<PersistenceMsg>();
+            let actor = std::sync::Arc::new(
+                create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await,
+            );
+            let (completion_tx, _completion_rx) =
+                tokio::sync::mpsc::unbounded_channel::<(String, PromptTurnResult)>();
+
+            // First lane arrives: schedules the delayed drain.
+            {
+                let mut state = actor.state.lock().await;
+                SessionActor::push_pending_notification(
+                    &mut state,
+                    mcp_push_notification("lane-a"),
+                );
+            }
+            SessionActor::schedule_notification_drain(actor.clone(), completion_tx.clone()).await;
+
+            // Second lane lands inside the window; its schedule must dedupe.
+            {
+                let mut state = actor.state.lock().await;
+                SessionActor::push_pending_notification(
+                    &mut state,
+                    mcp_push_notification("lane-b"),
+                );
+            }
+            SessionActor::schedule_notification_drain(actor.clone(), completion_tx.clone()).await;
+
+            // The settle defers the drain: nothing has started yet.
+            {
+                let state = actor.state.lock().await;
+                assert!(
+                    state.pending_inputs.iter().all(|input| !matches!(
+                        input.origin,
+                        crate::session::PromptOrigin::NotificationDrain
+                    )),
+                    "the drain must wait out the settle window"
+                );
+                assert!(state.running_task.is_none());
+            }
+
+            // After the window: exactly one batched turn carries both lanes.
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+            let mut batch_items: Vec<String> = Vec::new();
+            while std::time::Instant::now() < deadline {
+                let conversation = actor.chat_state_handle.get_conversation().await;
+                batch_items = conversation
+                    .iter()
+                    .map(|item| item.text_content())
+                    .filter(|text| text.contains("MCP push"))
+                    .collect();
+                if !batch_items.is_empty() {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+            }
+            assert_eq!(
+                batch_items.len(),
+                1,
+                "both arrivals must batch into one drain turn: {batch_items:?}"
+            );
+            assert!(
+                batch_items[0].contains("lane-a") && batch_items[0].contains("lane-b"),
+                "both lanes must ride the same batch: {}",
+                batch_items[0]
             );
         })
         .await;

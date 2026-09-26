@@ -29,6 +29,17 @@ fn pending_notification_bytes(notification: &PendingNotification) -> usize {
         .sum()
 }
 
+/// Settle window before an idle notification drain starts a synthetic turn.
+///
+/// A single push usually arrives with company: a chatty MCP server pushes one
+/// `updated` per subscribed stream, and sibling streams (ssh lanes, monitors)
+/// land milliseconds apart. Draining immediately turns each arrival into its
+/// own model turn; waiting out this window lets the arrivals batch into one.
+/// Turn-end and cancel drains stay immediate — they run where a batch already
+/// exists.
+pub(super) const NOTIFICATION_DRAIN_SETTLE: std::time::Duration =
+    std::time::Duration::from_millis(500);
+
 /// A notification buffered for idle-gated drain (see `maybe_drain_notifications`).
 pub(crate) struct PendingNotification {
     pub(crate) prompt_id: String,
@@ -412,6 +423,34 @@ impl SessionActor {
                 .await;
             tracing::debug!("prompt promotion lost race with user cancellation");
         }
+    }
+
+    /// Schedule an idle drain behind [`NOTIFICATION_DRAIN_SETTLE`].
+    ///
+    /// Used by the `InjectNotification` idle path: the first arrival arms one
+    /// delayed drain, and every arrival inside the window joins the same
+    /// batch. Without this, a burst of pushes — one per subscribed lane —
+    /// becomes one model turn per arrival. Turn-end, cancel, and explicit
+    /// drains keep calling [`Self::maybe_drain_notifications`] directly.
+    pub(super) async fn schedule_notification_drain(
+        self: Arc<Self>,
+        completion_tx: mpsc::UnboundedSender<(String, PromptTurnResult)>,
+    ) {
+        {
+            let mut state = self.state.lock().await;
+            if state.drain_settle_pending {
+                return;
+            }
+            state.drain_settle_pending = true;
+        }
+        tokio::task::spawn_local(async move {
+            tokio::time::sleep(NOTIFICATION_DRAIN_SETTLE).await;
+            {
+                let mut state = self.state.lock().await;
+                state.drain_settle_pending = false;
+            }
+            Self::maybe_drain_notifications(self.clone(), completion_tx).await;
+        });
     }
 
     /// Drain pending notifications into a single batched turn, if idle and not suppressed.

@@ -392,6 +392,11 @@ pub(crate) struct State {
     /// switching models is a deliberate user action that resets
     /// expectations.
     pub(crate) nudges_used_this_session: u32,
+    /// A settle-window notification drain is scheduled (see
+    /// `schedule_notification_drain`). Dedupes the delayed drain so a burst
+    /// of arrivals — one push per subscribed lane — schedules exactly one
+    /// batched turn instead of one turn per arrival.
+    pub(crate) drain_settle_pending: bool,
 }
 impl State {
     pub(crate) fn clear_pending_notifications(&mut self) {

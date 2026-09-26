@@ -1609,7 +1609,10 @@ pub(super) async fn run_session(
                                         },
                                     );
                                 }
-                                SessionActor::maybe_drain_notifications(session.clone(), completion_tx.clone()).await;
+                                // Settle-window drain: sibling lanes pushing
+                                // within the window join one batched turn
+                                // instead of waking the model once each.
+                                SessionActor::schedule_notification_drain(session.clone(), completion_tx.clone()).await;
                             }
                         }
                         SessionCommand::RecordGoalTurnTaskIds { task_ids } => {

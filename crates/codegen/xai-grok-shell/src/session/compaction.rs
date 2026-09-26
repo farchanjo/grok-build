@@ -2857,6 +2857,7 @@ mod inline_auto_compact_flow_tests {
             notifications_suppressed: false,
             rewindable: false,
             nudges_used_this_session: 0,
+            drain_settle_pending: false,
         });
         let (chat_event_tx, _chat_event_rx) = tokio::sync::mpsc::unbounded_channel();
         let (event_tx, _event_rx) =
