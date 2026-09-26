@@ -800,13 +800,42 @@ fn plain_tool_trail_enabled() -> bool {
     )
 }
 
-/// Thoughts are opt-in in `plain`: reasoning models emit far more thought than
-/// prose, and a text-only consumer has no separate pane for them.
+/// Reasoning stays opt-in for a script consumer: reasoning models emit far
+/// more thought than prose, and a pipe has no separate pane for them.
+///
+/// A chat host is the exception, and gets them by default. Such a host folds
+/// every stdout byte into one live transcript, so with reasoning hidden the
+/// transcript stays empty until the first tool call or the final answer —
+/// measured at 10-17s of dead air on a 13-25s turn, which reads as a hang
+/// rather than as work. `GROK_HEADLESS_THOUGHTS`, set to anything, wins over
+/// host detection so a caller can always pin the behaviour.
 fn plain_thoughts_enabled() -> bool {
-    matches!(
-        std::env::var("GROK_HEADLESS_THOUGHTS").as_deref(),
-        Ok("1") | Ok("true") | Ok("on")
-    )
+    static RESOLVED: OnceLock<bool> = OnceLock::new();
+    *RESOLVED.get_or_init(|| {
+        resolve_plain_thoughts(
+            std::env::var("GROK_HEADLESS_THOUGHTS").ok().as_deref(),
+            agent_host_detected(),
+        )
+    })
+}
+
+/// `explicit` wins whenever the variable is set at all; with it absent, a
+/// detected agent host turns reasoning on and a plain pipe leaves it off.
+fn resolve_plain_thoughts(explicit: Option<&str>, agent_host: bool) -> bool {
+    match explicit {
+        Some(value) => matches!(value.trim(), "1" | "true" | "on"),
+        None => agent_host,
+    }
+}
+
+/// Whether the parent process is a known chat host that streams stdout into a
+/// transcript as it arrives. Detected by the marker such a host leaves in the
+/// child environment — OpenDesign stamps both of these on every agent it
+/// spawns, and neither is set by a plain shell pipeline.
+fn agent_host_detected() -> bool {
+    ["OD_SIDECAR_CLIENT_ENDPOINT", "OD_DATA_DIR"]
+        .iter()
+        .any(|key| std::env::var(key).is_ok_and(|value| !value.trim().is_empty()))
 }
 
 fn tool_status_wire(status: &acp::ToolCallStatus) -> &'static str {
@@ -2333,6 +2362,66 @@ mod tests {
             !msg.contains('\n'),
             "non-interactive copy stays one line: {msg}"
         );
+    }
+
+    #[test]
+    fn explicit_thoughts_variable_always_beats_host_detection() {
+        // A caller that pinned the variable gets exactly what it asked for,
+        // whichever way the host detection would have gone.
+        for (value, host, expected) in [
+            ("1", true, true),
+            ("1", false, true),
+            ("true", false, true),
+            ("on", false, true),
+            ("0", true, false),
+            ("false", true, false),
+            ("off", true, false),
+            ("garbage", true, false),
+            ("  1  ", false, true),
+        ] {
+            assert_eq!(
+                super::resolve_plain_thoughts(Some(value), host),
+                expected,
+                "GROK_HEADLESS_THOUGHTS={value:?} host={host}"
+            );
+        }
+    }
+
+    #[test]
+    fn thoughts_default_follows_the_host_only_when_unset() {
+        assert!(
+            super::resolve_plain_thoughts(None, true),
+            "chat host streams reasoning"
+        );
+        assert!(
+            !super::resolve_plain_thoughts(None, false),
+            "a plain pipe stays quiet"
+        );
+    }
+
+    #[test]
+    fn host_marker_in_the_environment_is_detected() {
+        // Distinctive enough that no other test in this binary sets it, and the
+        // marker is what OpenDesign stamps on every agent it spawns.
+        let key = "OD_SIDECAR_CLIENT_ENDPOINT";
+        let previous = std::env::var(key).ok();
+
+        // SAFETY: single-threaded mutation of one variable, restored below.
+        unsafe { std::env::set_var(key, "/tmp/od-sidecar-test.sock") };
+        assert!(
+            super::agent_host_detected(),
+            "non-empty marker means a host"
+        );
+
+        unsafe { std::env::set_var(key, "   ") };
+        assert!(!super::agent_host_detected(), "blank marker is not a host");
+
+        unsafe {
+            match previous {
+                Some(value) => std::env::set_var(key, value),
+                None => std::env::remove_var(key),
+            }
+        }
     }
 
     #[test]

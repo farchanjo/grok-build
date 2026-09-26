@@ -40,8 +40,17 @@ for line-oriented consumers, so an idle watchdog (OpenDesign fails a run after
 | Variable | Default | Effect |
 | -------- | ------- | ------ |
 | `GROK_HEADLESS_TOOL_TRAIL` | on | `0` / `false` / `off` drops the tool trail |
-| `GROK_HEADLESS_THOUGHTS` | off | `1` / `true` / `on` prints a `· ` thought block |
+| `GROK_HEADLESS_THOUGHTS` | off, on for a detected chat host | `1` / `true` / `on` prints a `· ` thought block; any other value suppresses it |
 | `GROK_HEADLESS_KEEPALIVE_MS` | `20000` | Idle gap before a keepalive space; `0` disables |
+
+Reasoning is off by default because a pipe consumer has no separate pane for it
+and reasoning models emit more thought than prose. A *chat host* — one that
+folds every stdout byte into a live transcript — is the exception: with
+reasoning hidden its transcript stays empty until the first tool call or the
+final answer, which reads as a hang rather than as work. Such a host is detected
+by the marker it leaves in the child environment (`OD_SIDECAR_CLIENT_ENDPOINT`
+or `OD_DATA_DIR`, both stamped by OpenDesign); setting
+`GROK_HEADLESS_THOUGHTS` explicitly always wins over that detection.
 
 ---
 
