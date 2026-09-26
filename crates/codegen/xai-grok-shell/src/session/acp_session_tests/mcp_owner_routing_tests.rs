@@ -525,3 +525,150 @@ async fn sheet_filters_rows_owned_by_another_session() {
         })
         .await;
 }
+
+/// Stub server whose resource read grows with the test: `resources/read`
+/// returns the current accumulated stream text at request time.
+struct GrowingStubServer {
+    text: Arc<std::sync::Mutex<String>>,
+}
+
+#[async_trait::async_trait]
+impl xai_grok_mcp::acp_transport::AcpReverseInvoker for GrowingStubServer {
+    async fn invoke(
+        &self,
+        _server_id: &str,
+        message: Value,
+        _timeout: Duration,
+    ) -> Result<Value, String> {
+        let id = message.get("id").cloned().unwrap_or(Value::Null);
+        let method = message.get("method").and_then(|m| m.as_str()).unwrap_or("");
+        let result = match method {
+            "initialize" => json!({
+                "protocolVersion": "2025-06-18",
+                "capabilities": { "resources": { "subscribe": true, "listChanged": true } },
+                "serverInfo": { "name": "stub", "version": "0.0.1" },
+            }),
+            "resources/list" => json!({ "resources": [{ "uri": URI, "name": "stub stream" }] }),
+            "resources/read" => {
+                let text = self.text.lock().unwrap().clone();
+                json!({ "contents": [{ "uri": URI, "text": text }] })
+            }
+            _ => json!({}),
+        };
+        Ok(json!({ "jsonrpc": "2.0", "id": id, "result": result }))
+    }
+}
+
+/// Actor + pump wired against the growing stub, with the stream owned by a
+/// registered child session whose command queue the test can read.
+async fn setup_growing(
+    text: Arc<std::sync::Mutex<String>>,
+) -> (
+    Arc<crate::session::acp_session::SessionActor>,
+    Arc<McpClient>,
+    tokio::sync::mpsc::UnboundedSender<McpClientEvent>,
+    ChildQueue,
+) {
+    let (gateway_tx, _gateway_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (persistence_tx, _persistence_rx) = mpsc::unbounded_channel();
+    let (actor, _ev) = create_test_actor_ex(0, 256_000, 85, gateway_tx, persistence_tx).await;
+    let actor = Arc::new(actor);
+
+    let client = Arc::new(McpClient::new_acp(
+        SERVER.to_string(),
+        "stub-server".to_string(),
+        Arc::new(GrowingStubServer { text }),
+        None,
+        None,
+    ));
+    {
+        let mut state = actor.mcp_state.lock().await;
+        state
+            .configs
+            .push(acp::McpServer::Http(acp::McpServerHttp::new(
+                SERVER.to_string(),
+                "http://127.0.0.1:9/mcp".to_string(),
+            )));
+        state
+            .owned_clients
+            .insert(SERVER.to_string(), Arc::clone(&client));
+    }
+    let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel::<McpClientEvent>();
+    crate::session::acp_session::spawn_mcp_resource_pump(actor.clone(), event_rx);
+    let (child_rx, _target) = register_child("child-session");
+    (actor, client, event_tx, child_rx)
+}
+
+/// Extract the injected body of an `InjectNotification` command.
+fn injected_body(command: crate::session::commands::SessionCommand) -> String {
+    match command {
+        crate::session::commands::SessionCommand::InjectNotification { prompt_blocks, .. } => {
+            prompt_blocks
+                .iter()
+                .filter_map(|block| match block {
+                    acp::ContentBlock::Text(text) => Some(text.text.clone()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        }
+        other => panic!("expected InjectNotification, got a different SessionCommand"),
+    }
+}
+
+/// A stream that pushes on every append must wake the session with only the
+/// new content: the first push delivers the full text, a grown read delivers
+/// just the suffix, and an unchanged read injects nothing — no replay turns.
+#[tokio::test(flavor = "current_thread")]
+async fn repeated_pushes_inject_only_deltas() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let text = Arc::new(std::sync::Mutex::new("line-1\n".to_string()));
+            let (_actor, client, event_tx, mut child_rx) = setup_growing(Arc::clone(&text)).await;
+            client
+                .subscribe_all_resources(Some("child-session"))
+                .await
+                .expect("stub handshake + subscribe must succeed");
+
+            let push = |event_tx: &tokio::sync::mpsc::UnboundedSender<McpClientEvent>| {
+                event_tx
+                    .send(McpClientEvent::ResourceUpdated {
+                        server: SERVER.to_string(),
+                        uri: URI.to_string(),
+                    })
+                    .expect("send push");
+            };
+
+            // First push: the stream baseline is empty, so the full text goes.
+            push(&event_tx);
+            let first = injected_body(wait_for_command(&mut child_rx).await);
+            assert!(
+                first.contains("line-1\n"),
+                "the first delivery must carry the stream content: {first}"
+            );
+
+            // Second push after growth: only the new line may arrive.
+            *text.lock().unwrap() = "line-1\nline-2\n".to_string();
+            push(&event_tx);
+            let second = injected_body(wait_for_command(&mut child_rx).await);
+            assert!(
+                second.contains("line-2\n"),
+                "the growth must be delivered: {second}"
+            );
+            assert!(
+                !second.contains("line-1"),
+                "already-delivered content must not be replayed: {second}"
+            );
+
+            // Third push with no growth: nothing is injected. Wait out the
+            // quiet window (plus margin) before the negative check.
+            push(&event_tx);
+            tokio::time::sleep(Duration::from_millis(2_500)).await;
+            match child_rx.try_recv() {
+                Err(tokio::sync::mpsc::error::TryRecvError::Empty) => {}
+                Ok(_) => panic!("an unchanged push must not wake the session"),
+                Err(error) => panic!("the owner channel closed: {error:?}"),
+            }
+        })
+        .await;
+}

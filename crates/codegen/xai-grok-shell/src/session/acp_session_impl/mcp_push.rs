@@ -15,6 +15,13 @@
 //! notification drain then delivers it to the model as a synthetic
 //! `NotificationDrain` turn — the "result arrives in async mode" contract:
 //! after `sub_open` the model simply stops, and the output shows up on its own.
+//!
+//! Reads carry a per-stream delivery baseline: the resource is re-read in full
+//! (the MCP `resources/read` shape has no incremental cursor), but only the
+//! delta against what this session already delivered is injected. A chatty
+//! server pushing `updated` on every log line therefore wakes the session once
+//! per burst with just the new lines — and a push whose content did not change
+//! injects nothing, instead of replaying the whole resource every time.
 
 use super::*;
 use xai_grok_mcp::servers::McpClientEvent;
@@ -36,6 +43,65 @@ const MAX_WINDOW: std::time::Duration = std::time::Duration::from_secs(10);
 /// Per-pending accumulated text cap. Beyond this, further text is dropped and
 /// a truncation marker is recorded.
 const MAX_PENDING_BYTES: usize = 16 * 1024;
+
+/// Bytes of the last delivered text kept per stream as the overlap proof for
+/// delta computation. Growth beyond this size is still detected (the full
+/// delivered length is stored alongside); the tail only has to cover the
+/// boundary between the delivered text and the new read.
+const BASELINE_TAIL_BYTES: usize = 8 * 1024;
+
+/// What this session last delivered for one subscribed stream.
+///
+/// `resources/read` always returns the full resource text, so a naive
+/// "read on every push" pump re-delivers the entire stream on every burst and
+/// the model sees replays of content it already processed. This baseline is
+/// the delivery memory: a new read is compared against it and only the
+/// not-yet-delivered suffix is injected.
+#[derive(Default)]
+struct DeliveredBaseline {
+    /// Suffix of the delivered text, capped at [`BASELINE_TAIL_BYTES`].
+    tail: String,
+    /// Byte length of the full delivered text.
+    full_len: usize,
+}
+
+/// The not-yet-delivered part of `text` relative to `baseline`.
+///
+/// A read counts as an extension of the delivered text only when the
+/// baseline tail appears at the offset it occupied in the delivered text;
+/// otherwise the stream was rewritten, reset, or shrunk, and the whole new
+/// text is delivered. An unchanged read yields an empty delta, which the
+/// pump turns into "no injection, no wake".
+fn delta_since_delivered(text: &str, baseline: &DeliveredBaseline) -> String {
+    // Growth: the tail proof must sit where it did inside the delivered text.
+    // `text.get` returns `None` on a non-boundary slice, which falls through
+    // to full delivery instead of panicking on a mid-rune offset.
+    if text.len() > baseline.full_len
+        && text.get(baseline.full_len.saturating_sub(baseline.tail.len())..baseline.full_len)
+            == Some(baseline.tail.as_str())
+    {
+        // The proof slice ended at `full_len`, so that offset is a char
+        // boundary shared with the delivered text.
+        return text[baseline.full_len..].to_owned();
+    }
+    // Unchanged: same length and the tail still matches. With an uncapped
+    // tail the suffix proof is the whole text, so this is exact equality; a
+    // same-length rewrite under a capped tail is the one blind spot — the
+    // tail match alone cannot distinguish it from a no-op.
+    if text.len() == baseline.full_len && text.ends_with(&baseline.tail) {
+        return String::new();
+    }
+    // Rewritten, reset, or shrunk: everything is news.
+    text.to_owned()
+}
+
+/// Record a delivered read on the stream's baseline.
+fn advance_delivered(baseline: &mut DeliveredBaseline, text: &str) {
+    baseline.full_len = text.len();
+    let keep = BASELINE_TAIL_BYTES.min(text.len());
+    let cut = floor_char_boundary(text, text.len() - keep);
+    baseline.tail = text[cut..].to_owned();
+}
 
 /// One accumulating burst for a `(server, uri)` pair.
 struct PendingUpdate {
@@ -201,6 +267,10 @@ pub(crate) fn spawn_mcp_resource_pump(
     tokio::task::spawn_local(async move {
         let mut pending: std::collections::HashMap<(String, String), PendingUpdate> =
             std::collections::HashMap::new();
+        // Delivery memory per stream: what this pump already injected, so a
+        // read only yields the delta (see [`DeliveredBaseline`]).
+        let mut delivered: std::collections::HashMap<(String, String), DeliveredBaseline> =
+            std::collections::HashMap::new();
         loop {
             let now = std::time::Instant::now();
             let wait = pending
@@ -236,6 +306,27 @@ pub(crate) fn spawn_mcp_resource_pump(
                                 // there instead of in the transport holder.
                                 let target = resolve_push_target(&session, &server, &uri).await;
                                 record_push(&session, target.as_ref(), &key);
+                                // Only the not-yet-delivered suffix moves
+                                // into the burst: the read is full, the
+                                // injection is incremental. An empty delta
+                                // (unchanged content) injects nothing —
+                                // a push without news never wakes the model.
+                                let delta = {
+                                    let baseline = delivered.entry(key.clone()).or_default();
+                                    delta_since_delivered(&text, baseline)
+                                };
+                                advance_delivered(
+                                    delivered.get_mut(&key).expect("baseline just inserted"),
+                                    &text,
+                                );
+                                if delta.is_empty() {
+                                    tracing::debug!(
+                                        server = %server,
+                                        uri = %uri,
+                                        "mcp push carried no new content; skipping injection"
+                                    );
+                                    continue;
+                                }
                                 let entry = pending.entry(key).or_insert_with(|| PendingUpdate {
                                     text: String::new(),
                                     truncated: false,
@@ -243,7 +334,7 @@ pub(crate) fn spawn_mcp_resource_pump(
                                     last_at: now,
                                     target: target.clone(),
                                 });
-                                entry.append(&text);
+                                entry.append(&delta);
                                 entry.last_at = now;
                             }
                             Err(error) => {
@@ -806,5 +897,86 @@ mod tests {
         assert_eq!(floor_char_boundary(&s, 5), 4);
         assert_eq!(floor_char_boundary(&s, 99), 8, "clamps to len");
         assert_eq!(floor_char_boundary("abc", 2), 2, "ascii cuts stay");
+    }
+
+    fn baseline() -> DeliveredBaseline {
+        DeliveredBaseline::default()
+    }
+
+    fn delivered(text: &str) -> DeliveredBaseline {
+        let mut baseline = baseline();
+        advance_delivered(&mut baseline, text);
+        baseline
+    }
+
+    #[test]
+    fn first_read_of_a_stream_delivers_everything() {
+        let b = baseline();
+        assert_eq!(
+            delta_since_delivered("boot: starting\n", &b),
+            "boot: starting\n"
+        );
+    }
+
+    #[test]
+    fn grown_read_delivers_only_the_new_suffix() {
+        let b = delivered("line-1\n");
+        assert_eq!(delta_since_delivered("line-1\nline-2\n", &b), "line-2\n");
+    }
+
+    #[test]
+    fn unchanged_read_delivers_nothing() {
+        let b = delivered("line-1\n");
+        assert_eq!(delta_since_delivered("line-1\n", &b), "");
+        assert_eq!(delta_since_delivered("", &baseline()), "");
+    }
+
+    #[test]
+    fn shrunk_or_rewritten_read_delivers_everything_again() {
+        let b = delivered("line-1\nline-2\nline-3\n");
+        // Log reset (service restart with a fresh file).
+        assert_eq!(delta_since_delivered("boot-2\n", &b), "boot-2\n");
+        // Same-length rewrite: tail proof fails, so it is delivered.
+        let b2 = delivered("AAAA\n");
+        assert_eq!(delta_since_delivered("BBBB\n", &b2), "BBBB\n");
+    }
+
+    #[test]
+    fn growth_beyond_the_tail_cap_still_yields_the_exact_suffix() {
+        // Stream much larger than the kept tail: the proof is the tail at its
+        // recorded offset, the suffix comes from the stored full length.
+        let head = "a".repeat(BASELINE_TAIL_BYTES * 3);
+        let full = format!("{head}tail-marker\n");
+        let b = delivered(&full);
+        assert_eq!(b.tail.len(), BASELINE_TAIL_BYTES);
+        assert_eq!(
+            delta_since_delivered(&format!("{full}new-line\n"), &b),
+            "new-line\n"
+        );
+    }
+
+    #[test]
+    fn mid_rune_offsets_fall_back_to_full_delivery_instead_of_panicking() {
+        // A rewrite that shifts rune boundaries: the proof slice is invalid,
+        // which must mean "deliver everything", never a panic.
+        let b = delivered("café\n");
+        assert_eq!(delta_since_delivered("☕☕☕☕\n", &b), "☕☕☕☕\n");
+    }
+
+    #[test]
+    fn multibyte_growth_delivers_clean_suffixes() {
+        let b = delivered("café aberto\n");
+        assert_eq!(
+            delta_since_delivered("café aberto\nação ☕\n", &b),
+            "ação ☕\n"
+        );
+    }
+
+    #[test]
+    fn advance_keeps_only_the_capped_tail() {
+        let mut b = baseline();
+        advance_delivered(&mut b, &"x".repeat(BASELINE_TAIL_BYTES + 10));
+        assert_eq!(b.tail.len(), BASELINE_TAIL_BYTES);
+        assert_eq!(b.full_len, BASELINE_TAIL_BYTES + 10);
     }
 }
