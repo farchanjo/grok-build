@@ -451,6 +451,79 @@ struct DrainState {
     shutdown_tx: oneshot::Sender<()>,
     worker_handle: tokio::task::JoinHandle<()>,
 }
+/// Drains one queue's worker without holding the queue.
+///
+/// Cheap to clone and free of the item sender, so a process owner can keep one
+/// per session without pinning the queue — and therefore the worker — alive.
+/// Contract is [`UploadQueue::drain`].
+#[derive(Clone)]
+pub struct DrainHandle {
+    drain_state: Arc<Mutex<Option<DrainState>>>,
+    stats: Arc<UploadQueueStats>,
+}
+impl DrainHandle {
+    /// Drain remaining items with a deadline. Called on graceful shutdown.
+    ///
+    /// Signals the worker to stop accepting new items, process all remaining
+    /// channel items, and wait for in-flight uploads to complete.
+    /// Returns 0 on success, or the pending count if the deadline was exceeded.
+    /// On timeout the worker task is aborted, which also aborts any still-running
+    /// upload tasks (they live in the worker's `JoinSet`); their artifacts stay
+    /// on disk for next-session orphan recovery.
+    /// Double drain is a no-op (returns 0).
+    ///
+    /// Awaiting the worker's own handle is what makes this event-driven: the
+    /// caller is released when the worker finishes, not when a timer guesses
+    /// that it has.
+    pub async fn drain(&self, deadline: Duration) -> usize {
+        let span = tracing::info_span!(
+            "upload_queue.drain",
+            deadline_secs = deadline.as_secs(),
+            remaining = tracing::field::Empty,
+            outcome = tracing::field::Empty,
+        );
+        async {
+            let current_span = tracing::Span::current();
+            let state = self
+                .drain_state
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .take();
+            let Some(state) = state else {
+                current_span.record("outcome", "noop");
+                current_span.record("remaining", 0usize);
+                return 0;
+            };
+            let _ = state.shutdown_tx.send(());
+            let handle = state.worker_handle;
+            tokio::pin!(handle);
+            match tokio::time::timeout(deadline, &mut handle).await {
+                Ok(Ok(())) => {
+                    current_span.record("outcome", "completed");
+                    current_span.record("remaining", 0usize);
+                    0
+                }
+                Ok(Err(e)) => {
+                    let remaining = self.stats.pending.load(Ordering::Relaxed) as usize;
+                    current_span.record("outcome", "panicked");
+                    current_span.record("remaining", remaining);
+                    tracing::warn!(error = %e, "Upload queue worker panicked during drain");
+                    remaining
+                }
+                Err(_) => {
+                    let remaining = self.stats.pending.load(Ordering::Relaxed) as usize;
+                    current_span.record("outcome", "timed_out");
+                    current_span.record("remaining", remaining);
+                    tracing::debug!("Upload queue drain timed out");
+                    handle.abort();
+                    remaining
+                }
+            }
+        }
+        .instrument(span)
+        .await
+    }
+}
 /// Handle for submitting artifacts to the background upload queue.
 ///
 /// Clone-able — share across the agent struct and upload call sites.
@@ -1343,52 +1416,18 @@ impl UploadQueue {
     /// on disk for next-session orphan recovery.
     /// Double drain is a no-op (returns 0).
     pub async fn drain(&self, deadline: Duration) -> usize {
-        let span = tracing::info_span!(
-            "upload_queue.drain",
-            deadline_secs = deadline.as_secs(),
-            remaining = tracing::field::Empty,
-            outcome = tracing::field::Empty,
-        );
-        async {
-            let current_span = tracing::Span::current();
-            let state = self
-                .drain_state
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .take();
-            let Some(state) = state else {
-                current_span.record("outcome", "noop");
-                current_span.record("remaining", 0usize);
-                return 0;
-            };
-            let _ = state.shutdown_tx.send(());
-            let handle = state.worker_handle;
-            tokio::pin!(handle);
-            match tokio::time::timeout(deadline, &mut handle).await {
-                Ok(Ok(())) => {
-                    current_span.record("outcome", "completed");
-                    current_span.record("remaining", 0usize);
-                    0
-                }
-                Ok(Err(e)) => {
-                    let remaining = self.stats.pending.load(Ordering::Relaxed) as usize;
-                    current_span.record("outcome", "panicked");
-                    current_span.record("remaining", remaining);
-                    tracing::warn!(error = %e, "Upload queue worker panicked during drain");
-                    remaining
-                }
-                Err(_) => {
-                    let remaining = self.stats.pending.load(Ordering::Relaxed) as usize;
-                    current_span.record("outcome", "timed_out");
-                    current_span.record("remaining", remaining);
-                    tracing::debug!("Upload queue drain timed out");
-                    handle.abort();
-                    remaining
-                }
-            }
+        self.drain_handle().drain(deadline).await
+    }
+    /// A cloneable handle that drains this worker from outside the queue.
+    ///
+    /// Unlike a queue clone it holds neither the item sender nor the resolver,
+    /// so registering it in a process-wide list does not keep a finished
+    /// session's worker alive.
+    pub fn drain_handle(&self) -> DrainHandle {
+        DrainHandle {
+            drain_state: self.drain_state.clone(),
+            stats: self.stats.clone(),
         }
-        .instrument(span)
-        .await
     }
     /// Current queue statistics.
     pub fn stats(&self) -> &UploadQueueStats {

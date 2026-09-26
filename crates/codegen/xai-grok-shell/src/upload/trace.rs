@@ -7,7 +7,9 @@ use std::path::Path;
 use std::sync::Arc;
 use tokio::sync::oneshot;
 use url::Url;
-use xai_file_utils::queue::{EnqueueOutcome, TraceExportSource, UploadQueue, UploadRetryPolicy};
+use xai_file_utils::queue::{
+    DrainHandle, EnqueueOutcome, TraceExportSource, UploadQueue, UploadRetryPolicy,
+};
 use xai_grok_workspace::permission::PermissionEvent;
 /// Upload the canonical tool definitions trace and wait for completion.
 ///
@@ -1323,11 +1325,51 @@ pub(crate) fn spawn_upload_queue(
         base_config: gcs_config.clone(),
     });
     let queue = UploadQueue::spawn(grok_home, resolver, UploadRetryPolicy::default());
+    register_drain_handle(queue.drain_handle());
     if let Some(ver) = client_version {
         queue.with_client_version(ver)
     } else {
         queue
     }
+}
+/// Drain handles for every queue this process spawned.
+///
+/// The worker is started deep inside a session, so the run loop that owns the
+/// process has no handle on it. Registering the handle here lets teardown drain
+/// what it actually started instead of sleeping long enough to hope the workers
+/// finished: a client that owns one process per turn closes stdin and SIGTERMs
+/// 500 ms later, and the old flat 2 s wait put every finished turn past it.
+static DRAIN_HANDLES: std::sync::OnceLock<std::sync::Mutex<Vec<DrainHandle>>> =
+    std::sync::OnceLock::new();
+
+fn register_drain_handle(handle: DrainHandle) {
+    drain_handles()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .push(handle);
+}
+
+fn drain_handles() -> &'static std::sync::Mutex<Vec<DrainHandle>> {
+    DRAIN_HANDLES.get_or_init(|| std::sync::Mutex::new(Vec::new()))
+}
+
+/// Drain every registered upload worker under one shared deadline.
+///
+/// Returns the number of artifacts still pending once the deadline is spent.
+/// A worker with nothing queued finishes immediately, which is what keeps a
+/// no-upload turn's teardown in the low milliseconds.
+pub(crate) async fn drain_registered_upload_queues(deadline: std::time::Duration) -> usize {
+    let handles: Vec<DrainHandle> = drain_handles()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone();
+    let deadline_at = tokio::time::Instant::now() + deadline;
+    let mut remaining = 0;
+    for handle in handles {
+        let budget = deadline_at.saturating_duration_since(tokio::time::Instant::now());
+        remaining += handle.drain(budget).await;
+    }
+    remaining
 }
 /// Only these accept shapes are durably owned by the queue (temp + recovery
 /// sidecar on disk, flushed by the turn-end wait or recovered next run).

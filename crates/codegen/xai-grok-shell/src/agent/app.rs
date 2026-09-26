@@ -446,14 +446,24 @@ pub async fn run_stdio_agent(
     // Kill PTY child processes so they don't outlive the agent.
     crate::terminal::pty_session::close_all().await;
 
-    // Brief grace period for the upload queue worker to finish in-flight uploads.
+    // Grace period for the upload queue worker to finish in-flight uploads.
     // The worker runs on the tokio runtime (not the LocalSet), so it continues
-    // after the LocalSet drops. The channel closes when all senders drop (agent
-    // exit), and the worker drains remaining items before exiting.
-    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+    // after the LocalSet drops. Drain it rather than sleep on it: a client that
+    // owns one process per turn closes stdin and SIGTERMs 500 ms later
+    // (OpenDesign, `acp/session.ts`), so a flat 2 s wait put every *finished*
+    // turn past the window — exit 143, `exit_nonzero`, and the run surfaced as
+    // "task interrupted" while its artifacts were already written. A worker
+    // with nothing queued now finishes immediately.
+    crate::upload::trace::drain_registered_upload_queues(UPLOAD_DRAIN_GRACE).await;
 
     result
 }
+
+/// Budget for letting queued uploads finish before the process exits.
+///
+/// It only binds when there is real work: the drain returns as soon as the
+/// workers do, and a no-upload turn is done in the low milliseconds.
+const UPLOAD_DRAIN_GRACE: std::time::Duration = std::time::Duration::from_secs(2);
 
 /// Whether this run holds a credential that does not depend on a grok.com
 /// session: a bearer in `GROK_API_KEY` / `XAI_API_KEY` with no external auth
@@ -762,11 +772,11 @@ async fn run_headless_inner(
         })
         .await?;
 
-    // Brief grace period for the upload queue worker to finish in-flight uploads.
-    // The worker runs on the tokio runtime (not the LocalSet), so it continues
-    // after the LocalSet drops. The channel closes when all senders drop,
-    // and the worker drains remaining items before exiting.
-    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+    // Let the upload queue workers finish in-flight uploads before the
+    // process exits. The workers run on the tokio runtime (not the LocalSet),
+    // so they continue after the LocalSet drops; the drain returns as soon as
+    // they are done instead of holding the process for a fixed window.
+    crate::upload::trace::drain_registered_upload_queues(UPLOAD_DRAIN_GRACE).await;
 
     Ok(())
 }
@@ -1844,8 +1854,9 @@ pub async fn run_leader(
         })
         .await?;
 
-    // Brief grace period for the upload queue worker to finish in-flight uploads.
-    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+    // Let the upload queue workers finish in-flight uploads; the drain returns
+    // as soon as they are done.
+    crate::upload::trace::drain_registered_upload_queues(UPLOAD_DRAIN_GRACE).await;
 
     Ok(())
 }
