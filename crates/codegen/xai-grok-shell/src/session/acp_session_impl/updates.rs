@@ -317,11 +317,39 @@ impl SessionActor {
             .notifications
             .gateway_enabled
             .load(std::sync::atomic::Ordering::Relaxed)
+            && !Self::broadcast_suppressed(&notification.update)
         {
             self.notifications
                 .gateway
                 .forward_fire_and_forget(notification);
         }
+    }
+    /// Whether the connected host asked not to receive this update live.
+    ///
+    /// A client that renders only part of the update vocabulary shows the rest
+    /// as a raw kind name — OpenDesign turns every unmapped `sessionUpdate` into
+    /// a visible `status` line labelled with the kind itself, so `plan` (emitted
+    /// once per todo mutation) and `user_message_chunk` (the client's own prompt
+    /// echoed back) surface as stray words. The host declares what it cannot
+    /// render through `GROK_ACP_SUPPRESS_UPDATES`, which keeps grok agnostic
+    /// about one client's gaps.
+    ///
+    /// Persistence is untouched, so rewind, fork and session replay still see
+    /// the suppressed updates.
+    fn broadcast_suppressed(update: &acp::SessionUpdate) -> bool {
+        let suppressed = suppressed_updates();
+        if suppressed.is_empty() {
+            return false;
+        }
+        serde_json::to_value(update)
+            .ok()
+            .and_then(|value| {
+                value
+                    .get("sessionUpdate")
+                    .and_then(|kind| kind.as_str())
+                    .map(str::to_owned)
+            })
+            .is_some_and(|kind| suppressed.contains(&kind))
     }
     /// Send a notification to the live client **without persisting** it.
     ///
@@ -740,6 +768,57 @@ impl SessionActor {
         }
     }
 }
+
+/// `sessionUpdate` kinds the connected host asked not to receive live, from
+/// `GROK_ACP_SUPPRESS_UPDATES` (comma-separated, matched against the ACP wire
+/// tag — `plan`, `user_message_chunk`, …).
+///
+/// Resolved once: the variable is a property of the host that spawned this
+/// process, not of a turn.
+fn suppressed_updates() -> &'static std::collections::HashSet<String> {
+    static SUPPRESSED: std::sync::OnceLock<std::collections::HashSet<String>> =
+        std::sync::OnceLock::new();
+    SUPPRESSED.get_or_init(|| {
+        std::env::var("GROK_ACP_SUPPRESS_UPDATES")
+            .map(|raw| {
+                raw.split(',')
+                    .map(str::trim)
+                    .filter(|kind| !kind.is_empty())
+                    .map(str::to_owned)
+                    .collect()
+            })
+            .unwrap_or_default()
+    })
+}
+
+#[cfg(test)]
+mod broadcast_suppression_tests {
+    use super::*;
+
+    #[test]
+    fn host_declared_kinds_are_not_broadcast_and_the_rest_are() {
+        // nextest gives each test its own process, so the once-resolved list
+        // sees this value.
+        unsafe { std::env::set_var("GROK_ACP_SUPPRESS_UPDATES", "plan, user_message_chunk") };
+
+        let suppressed = |update: acp::SessionUpdate| SessionActor::broadcast_suppressed(&update);
+
+        assert!(suppressed(acp::SessionUpdate::Plan(acp::Plan::new(
+            Vec::new()
+        ))));
+        assert!(suppressed(acp::SessionUpdate::UserMessageChunk(
+            acp::ContentChunk::new(acp::ContentBlock::Text(acp::TextContent::new("hi")))
+        )));
+        // The payload kinds every host renders stay on the wire.
+        assert!(!suppressed(acp::SessionUpdate::AgentMessageChunk(
+            acp::ContentChunk::new(acp::ContentBlock::Text(acp::TextContent::new("hi")))
+        )));
+        assert!(!suppressed(acp::SessionUpdate::ToolCallUpdate(
+            acp::ToolCallUpdate::new(acp::ToolCallId::new("t"), acp::ToolCallUpdateFields::new())
+        )));
+    }
+}
+
 #[cfg(test)]
 mod xai_event_id_stamping_tests {
     use super::support::create_test_actor;
