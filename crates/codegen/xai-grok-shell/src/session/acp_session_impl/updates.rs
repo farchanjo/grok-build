@@ -1115,3 +1115,37 @@ mod xai_event_id_stamping_tests {
             .await;
     }
 }
+
+#[cfg(test)]
+mod suppressed_tool_call_tests {
+    use super::*;
+
+    #[test]
+    fn suppressing_tool_call_update_must_not_suppress_the_merged_tool_call() {
+        // The replay coalesces tool_call + tool_call_update into a single
+        // ToolCall before the filter sees it, so a host that suppresses only
+        // the *updates* must still receive the row.
+        unsafe { std::env::set_var("GROK_ACP_SUPPRESS_UPDATES", "tool_call_update") };
+
+        let call = acp::SessionUpdate::ToolCall(acp::ToolCall::new(
+            acp::ToolCallId::new("call_1"),
+            "run_terminal_command",
+        ));
+        let update = acp::SessionUpdate::ToolCallUpdate(acp::ToolCallUpdate::new(
+            acp::ToolCallId::new("call_1"),
+            acp::ToolCallUpdateFields::new(),
+        ));
+
+        let call_tag = serde_json::to_value(&call).unwrap()["sessionUpdate"].clone();
+        let update_tag = serde_json::to_value(&update).unwrap()["sessionUpdate"].clone();
+        println!("tags: call={call_tag} update={update_tag}");
+        assert_eq!(call_tag, "tool_call");
+        assert_eq!(update_tag, "tool_call_update");
+
+        assert!(
+            !suppressed_update(&call),
+            "a linha merged não pode ser suprimida"
+        );
+        assert!(suppressed_update(&update));
+    }
+}

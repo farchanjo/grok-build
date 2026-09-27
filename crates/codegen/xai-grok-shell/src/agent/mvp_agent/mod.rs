@@ -1383,12 +1383,6 @@ impl MvpAgent {
                 tracing::debug!("replay: skipping ACP update with unparseable params");
                 return;
             };
-            // The replay forwards straight from the persisted JSONL, so it needs
-            // the same host filter as the live path: otherwise resuming a
-            // session re-introduces the kinds the host already suppressed.
-            if crate::session::acp_session::updates::suppressed_update(&notification.update) {
-                return;
-            }
             match &mut notification.update {
                 acp::SessionUpdate::ToolCall(tc) => {
                     let is_pre_completed = matches!(
@@ -1423,6 +1417,18 @@ impl MvpAgent {
                     }
                 }
                 _ => {}
+            }
+            // The replay forwards straight from the persisted JSONL, so it needs
+            // the same host filter as the live path: otherwise resuming a
+            // session re-introduces the kinds the host already suppressed.
+            //
+            // Filter *after* the coalescer, which is a state machine: a held
+            // `ToolCall` lives in `pending_tool_calls` until its update
+            // completes it, and skipping it earlier would strand that state and
+            // lose the row. Coming after, the pair always runs to completion and
+            // the merged `ToolCall` is what the filter sees.
+            if crate::session::acp_session::updates::suppressed_update(&notification.update) {
+                return;
             }
             if mark_replay {
                 mark_as_replay(&mut notification.meta, persist_data);
