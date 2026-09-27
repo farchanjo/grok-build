@@ -1661,7 +1661,7 @@ impl acp::Agent for MvpAgent {
                 registry_title_sync,
             )
             .await
-            .map_err(|e| crate::session::persistence::io_error_to_acp(&e))?;
+            .map_err(|e| resume_failed_acp(&e, &session_id))?;
         drop(persistence_timer);
         let crate::session::persistence::PersistedInfoLight {
             summary,
@@ -4621,6 +4621,59 @@ impl acp::Agent for MvpAgent {
         Ok(())
     }
 }
+
+/// Map a failed session restore onto an error the host can recognise.
+///
+/// A host that resumes a session the agent no longer has must fall back to
+/// reseeding the transcript: a resume turn deliberately skips sending it, so
+/// failing quietly would leave the model with no context at all. Tag the
+/// `NotFound` case with `kind: "resume_failed"` — the convention resume-capable
+/// adapters already use — so the host matches a structured marker instead of
+/// string-matching a generic I/O message.
+fn resume_failed_acp(e: &std::io::Error, session_id: &acp::SessionId) -> acp::Error {
+    let mut err = crate::session::persistence::io_error_to_acp(e);
+    if e.kind() != std::io::ErrorKind::NotFound {
+        return err;
+    }
+    let mut data = err
+        .data
+        .clone()
+        .unwrap_or_else(|| serde_json::json!({}));
+    if let Some(fields) = data.as_object_mut() {
+        fields.insert("kind".into(), serde_json::json!("resume_failed"));
+        fields.insert("sessionId".into(), serde_json::json!(session_id.0));
+    }
+    err.data = Some(data);
+    err
+}
+
+#[cfg(test)]
+mod resume_failed_acp_tests {
+    use super::*;
+
+    fn session_id() -> acp::SessionId {
+        acp::SessionId::new("01a0e3fc-2b1e-7491-96ba-ca94f065ec59")
+    }
+
+    #[test]
+    fn missing_session_is_tagged_for_the_host_fallback() {
+        let err = resume_failed_acp(&std::io::Error::from(std::io::ErrorKind::NotFound), &session_id());
+        let data = err.data.expect("data");
+        assert_eq!(data["kind"], "resume_failed");
+        assert_eq!(data["sessionId"], "01a0e3fc-2b1e-7491-96ba-ca94f065ec59");
+        // The host matches the structured marker, not the prose.
+        assert_eq!(data["code"], "FS_NOT_FOUND");
+    }
+
+    #[test]
+    fn other_io_failures_keep_their_code_and_gain_no_kind() {
+        let err = resume_failed_acp(&std::io::Error::from(std::io::ErrorKind::PermissionDenied), &session_id());
+        let data = err.data.expect("data");
+        assert_eq!(data["code"], "FS_PERMISSION_DENIED");
+        assert!(data.get("kind").is_none());
+    }
+}
+
 #[cfg(test)]
 mod tool_overrides_capability_tests {
     use super::tool_overrides_capability;
