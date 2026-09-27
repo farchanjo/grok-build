@@ -270,7 +270,7 @@ mod session_setup;
 #[path = "acp_session_impl/turn_end.rs"]
 mod turn_end;
 #[path = "acp_session_impl/updates.rs"]
-mod updates;
+pub(crate) mod updates;
 use run_loop::*;
 #[path = "acp_session_impl/spawn.rs"]
 mod spawn;

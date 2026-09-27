@@ -1383,6 +1383,12 @@ impl MvpAgent {
                 tracing::debug!("replay: skipping ACP update with unparseable params");
                 return;
             };
+            // The replay forwards straight from the persisted JSONL, so it needs
+            // the same host filter as the live path: otherwise resuming a
+            // session re-introduces the kinds the host already suppressed.
+            if crate::session::acp_session::updates::suppressed_update(&notification.update) {
+                return;
+            }
             match &mut notification.update {
                 acp::SessionUpdate::ToolCall(tc) => {
                     let is_pre_completed = matches!(

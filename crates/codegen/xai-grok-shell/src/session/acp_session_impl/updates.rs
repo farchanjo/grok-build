@@ -337,19 +337,7 @@ impl SessionActor {
     /// Persistence is untouched, so rewind, fork and session replay still see
     /// the suppressed updates.
     fn broadcast_suppressed(update: &acp::SessionUpdate) -> bool {
-        let suppressed = suppressed_updates();
-        if suppressed.is_empty() {
-            return false;
-        }
-        serde_json::to_value(update)
-            .ok()
-            .and_then(|value| {
-                value
-                    .get("sessionUpdate")
-                    .and_then(|kind| kind.as_str())
-                    .map(str::to_owned)
-            })
-            .is_some_and(|kind| suppressed.contains(&kind))
+        suppressed_update(update)
     }
     /// Send a notification to the live client **without persisting** it.
     ///
@@ -767,6 +755,28 @@ impl SessionActor {
                 .await;
         }
     }
+}
+
+/// Whether this update belongs to a kind the host asked not to receive.
+///
+/// Shared by the live path ([`SessionActor::emit_notification_direct`]) and the
+/// `session/load` replay, which forwards straight from the persisted JSONL and
+/// would otherwise re-introduce exactly the kinds a resumed session is being
+/// resumed *from*.
+pub(crate) fn suppressed_update(update: &acp::SessionUpdate) -> bool {
+    let suppressed = suppressed_updates();
+    if suppressed.is_empty() {
+        return false;
+    }
+    serde_json::to_value(update)
+        .ok()
+        .and_then(|value| {
+            value
+                .get("sessionUpdate")
+                .and_then(|kind| kind.as_str())
+                .map(str::to_owned)
+        })
+        .is_some_and(|kind| suppressed.contains(&kind))
 }
 
 /// `sessionUpdate` kinds the connected host asked not to receive live, from
