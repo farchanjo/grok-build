@@ -6,6 +6,15 @@ async-openai = { git = "https://github.com/our-forks/async-openai.git", rev = "9
 # mouse/CPR parsers (crossterm-rs/crossterm#835); the fix landed upstream as
 # d4e9929f9a. Drop this pin once the fix ships on crates.io.
 crossterm = { git = "https://github.com/crossterm-rs/crossterm", rev = "d4e9929f9a1c4adf91505d54f8527c817ae504cd" }
+# ACP responses are serialized from the schema crate's structs, which carry no
+# catch-all field: without this patch an agent cannot add a top-level key to a
+# `session/new` / `session/load` result, and the OpenDesign daemon (which reads
+# `openCodeSessionId` and a load-time `sessionId`) never persists its resume
+# handle. Vendored with the `extra` patch; see third_party/.../Cargo.toml.
+agent-client-protocol-schema = { path = "third_party/agent-client-protocol-schema" }
+# Its companion SDK crate, patched only to follow the boxed
+# `RequestPermissionRequest` variant (see its VENDORING NOTES).
+agent-client-protocol = { path = "third_party/agent-client-protocol" }
 
 [workspace]
 resolver = "2"
@@ -87,6 +96,8 @@ members = [
     "crates/common/xai-tool-types",
     "crates/common/xai-tracing",
     "prod/mc/cli-chat-proxy-types",
+    "third_party/agent-client-protocol",
+    "third_party/agent-client-protocol-schema",
     "third_party/dagre_rust",
     "third_party/graphlib_rust",
     "third_party/mermaid-to-svg",
@@ -96,6 +107,13 @@ members = [
 [workspace.package]
 edition = "2024"
 license = "Apache-2.0"
+# Shared package metadata. Members opt in with `<field>.workspace = true`;
+# clippy::cargo_common_metadata (enabled by the vendored ACP schema crate)
+# audits every member, so the fields live here once instead of per crate.
+repository = "https://github.com/farchanjo/grok-build"
+readme = "README.md"
+keywords = ["grok", "cli", "agent"]
+categories = ["development-tools", "command-line-utilities"]
 
 [workspace.dependencies]
 archanjo = { path = "crates/codegen/archanjo" }

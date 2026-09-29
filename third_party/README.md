@@ -6,10 +6,25 @@ This directory holds **upstream source** vendored into the repository. It is
 ## Why vendor
 
 These crates sit on the path that renders **untrusted model output** (diagram
-source → SVG). Vendoring gives a full audit surface, pins exact source, and
-avoids crates.io yanks. Local patches and upgrade checklists live in each
-crate’s `Cargo.toml` header comments — treat those as the source of truth when
-re-vendoring.
+source → SVG) or on the **wire contract** with hosts (ACP). Vendoring gives a
+full audit surface, pins exact source, and avoids crates.io yanks. Local
+patches and upgrade checklists live in each crate’s `Cargo.toml` header
+comments — treat those as the source of truth when re-vendoring.
+
+## ACP protocol stack
+
+| Crate | Version | License | Upstream | Full license text |
+|-------|---------|---------|----------|-------------------|
+| [`agent-client-protocol`](./agent-client-protocol/) | 0.10.4 | Apache-2.0 | [agentclientprotocol/agent-client-protocol](https://github.com/agentclientprotocol/agent-client-protocol) | [`LICENSE`](./agent-client-protocol/LICENSE) |
+| [`agent-client-protocol-schema`](./agent-client-protocol-schema/) | 0.11.4 | Apache-2.0 | [agentclientprotocol/agent-client-protocol](https://github.com/agentclientprotocol/agent-client-protocol) | [`LICENSE`](./agent-client-protocol-schema/LICENSE) |
+
+Patched, not pristine. The schema's response structs gain a
+`#[serde(flatten)] extra` catch-all so an agent can emit top-level keys the
+spec has no field for — hosts read `openCodeSessionId` (resume handle) and a
+load-time `sessionId` — and its widest enum variants are boxed; the SDK crate
+follows that one boxed variant. Both are pinned by `[patch.crates-io]` in the
+workspace root; the SDK pins the schema with `=`, so the two versions move
+together.
 
 ## Mermaid layout stack
 

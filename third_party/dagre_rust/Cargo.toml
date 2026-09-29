@@ -40,6 +40,10 @@ license = "Apache-2.0"
 repository = "https://github.com/r3alst/dagre-rust"
 publish = false
 
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
 [lib]
 name = "dagre_rust"
 path = "src/lib.rs"

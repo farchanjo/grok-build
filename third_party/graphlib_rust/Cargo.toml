@@ -28,6 +28,10 @@ license = "Apache-2.0"
 repository = "https://github.com/r3alst/graphlib-rust"
 publish = false
 
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
 [lib]
 name = "graphlib_rust"
 path = "src/lib.rs"

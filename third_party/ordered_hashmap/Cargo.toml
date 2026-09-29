@@ -33,6 +33,10 @@ license = "Apache-2.0"
 repository = "https://github.com/r3alst/ordered-hashmap"
 publish = false
 
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
 [lib]
 name = "ordered_hashmap"
 path = "src/lib.rs"
