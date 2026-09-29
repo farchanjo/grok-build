@@ -1,9 +1,14 @@
 [package]
 license = "Apache-2.0"
 name = "xai-grok-version"
-version = "1.6.11"
+version = "1.6.12"
 edition.workspace = true
 description = "Lockstepped grok CLI version."
+
+repository.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
 
 [dependencies]
 semver = { workspace = true }

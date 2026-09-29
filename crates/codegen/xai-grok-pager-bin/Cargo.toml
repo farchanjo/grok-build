@@ -1,6 +1,7 @@
 [package]
 name = "xai-grok-pager-bin"
-version = "1.6.11"
+version = "1.6.12"
+description = "Executable composition root: CLI parsing, sandbox init, and mode dispatch for the released binary."
 edition.workspace = true
 license = "Apache-2.0"
 authors = ["xAI"]
@@ -11,6 +12,11 @@ default-run = "xai-grok-pager"
 # library and the optional `xai-grok-pager-minimal` render mode: `minimal`
 # depends on `xai-grok-pager`, so the pager library cannot depend back on it
 # (cargo cycle). The binary installs the minimal-mode IoC hooks at startup.
+repository.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
 [[bin]]
 name = "xai-grok-pager"
 path = "src/main.rs"
