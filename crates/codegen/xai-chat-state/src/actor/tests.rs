@@ -973,7 +973,7 @@ async fn restore_snapshot_preserves_frozen_estimate_for_overhead() {
     // Rewind-style restore: trim the conversation, keep token fields.
     let mut snap = h.handle.snapshot().await.unwrap();
     assert_eq!(snap.estimate_at_last_response, frozen);
-    snap.conversation.truncate(0);
+    snap.conversation.clear();
     h.handle.restore_snapshot(snap);
 
     let compacted = vec![ConversationItem::user("z".repeat(400))];
@@ -3731,6 +3731,18 @@ async fn forked_subagent_bootstrap_replaces_parent_system_message() {
 /// conversation grows to a predictable length. The assistant declares the
 /// call its tool result answers — otherwise the integrity guard treats the
 /// result as orphaned and strips it before pruning runs.
+/// Assistant reply carrying the tool call `call_{n}` that the next pushed
+/// tool result answers. Without a matching call the result is orphaned and
+/// `ensure_conversation_integrity` strips it on the following push.
+fn assistant_with_call(n: usize) -> ConversationItem {
+    use xai_grok_inference_types::ToolCall;
+    ConversationItem::assistant_tool_calls(vec![ToolCall {
+        id: format!("call_{n}").into(),
+        name: "read_file".to_string(),
+        arguments: "{}".into(),
+    }])
+}
+
 async fn push_turns(handle: &crate::handle::ChatStateHandle, turns: usize, content_len: usize) {
     use xai_grok_inference_types::ToolCall;
 
@@ -4019,11 +4031,14 @@ async fn prune_retained_rewind_still_correct() {
 /// warnings) must NOT cause old tool results to be cleared earlier than
 /// `hard_clear_age_turns` real turns.
 ///
-/// Scenario: 3 real turns with tool results, then 2 synthetic User items
+/// Scenario: 3 real turns with tool results, then 2 mid-turn reminders
 /// injected without incrementing `prompt_index`, then a 4th real turn.
 /// With `hard_clear_age_turns = 5`, none of the 4 tool results should be
 /// cleared yet (the oldest is only 4 real turns old after the 4th real turn
-/// starts, since prompt_index is 4 at prune time).
+/// starts).
+///
+/// The reminders are tagged `SystemReminder` — the shape production pushes
+/// (`push_system_reminder`), and the shape the turn-age walk keys on.
 #[tokio::test]
 async fn prune_retained_synthetic_user_does_not_advance_age() {
     use crate::actor::ChatStateActor;
@@ -4047,21 +4062,22 @@ async fn prune_retained_synthetic_user_does_not_advance_age() {
         token,
     );
 
-    // Three real turns, each with a large tool result.
+    // Three real turns, each with a large tool result. The assistant carries the
+    // matching call so integrity repair does not strip the result as orphaned.
     for i in 0..3usize {
         handle.push_user_message(ConversationItem::user(format!("real q{i}")));
         handle.increment_prompt_index(); // prompt_index = i+1
-        handle.push_assistant_response(ConversationItem::assistant(format!("a{i}")));
+        handle.push_assistant_response(assistant_with_call(i));
         handle.push_tool_result(ConversationItem::tool_result(
             format!("call_{i}"),
             "x".repeat(10_000),
         ));
     }
 
-    // Two synthetic User items injected mid-turn (e.g. doom-loop warnings).
-    // These do NOT call increment_prompt_index — prompt_index stays at 3.
-    handle.push_user_message(ConversationItem::user("⚠️ doom-loop warning 1"));
-    handle.push_user_message(ConversationItem::user("⚠️ doom-loop warning 2"));
+    // Two mid-turn reminders injected between turns. These do NOT call
+    // increment_prompt_index — prompt_index stays at 3.
+    handle.push_user_message(ConversationItem::system_reminder("⚠️ doom-loop warning 1"));
+    handle.push_user_message(ConversationItem::system_reminder("⚠️ doom-loop warning 2"));
 
     // Fourth real turn starts: prompt_index → 4, pruning fires inside push_user_message.
     handle.push_user_message(ConversationItem::user("real q3"));
@@ -4072,15 +4088,89 @@ async fn prune_retained_synthetic_user_does_not_advance_age() {
 
     // None of the 3 original tool results should be cleared:
     // oldest real age = 3 turns (turn 0 is 3 real turns ago), threshold = 5.
-    // Without the synthetic-count compensation, the 2 synthetic User items
-    // would make turn 0's TR appear age 5, causing premature clearing.
+    // Counting the 2 reminders as turn boundaries would make turn 0's TR
+    // age 5 and clear it prematurely.
     for item in &conv {
         if let ConversationItem::ToolResult(tr) = item {
             assert_ne!(
                 tr.content.as_ref(),
                 "[Tool result omitted — too old]",
                 "tool result must NOT be cleared: oldest is only 3 real turns old \
-                 (threshold is 5), synthetic user injections must not advance age"
+                 (threshold is 5), mid-turn reminders must not advance age"
+            );
+        }
+    }
+}
+
+/// The retained hard-clear and the request-copy prune must agree on an item's
+/// age: a mid-turn reminder delays both equally, so the request copy never
+/// trims content the retained pass just kept.
+#[tokio::test]
+async fn retained_and_request_pruning_agree_on_turn_age() {
+    use crate::actor::ChatStateActor;
+    use crate::actor::request_builder::{HARD_CLEAR_PLACEHOLDER, prune_conversation};
+    use crate::persistence::MockChatPersistence;
+    use crate::types::PruningConfig;
+
+    let (mock, _rx) = MockChatPersistence::new();
+    let (event_tx, _) = tokio::sync::mpsc::unbounded_channel();
+    let token = tokio_util::sync::CancellationToken::new();
+    let config = PruningConfig {
+        hard_clear_age_turns: 3,
+        keep_last_n_turns: 2,
+        ..Default::default()
+    };
+    let handle = ChatStateActor::spawn_with_pruning(
+        vec![],
+        test_config(),
+        config.clone(),
+        Box::new(mock),
+        event_tx,
+        token,
+    );
+
+    // Five real turns, each followed by a mid-turn reminder (the per-turn
+    // language reminder shape).
+    for i in 0..5usize {
+        handle.push_user_message(ConversationItem::user(format!("q{i}")));
+        handle.increment_prompt_index();
+        handle.push_assistant_response(assistant_with_call(i));
+        handle.push_tool_result(ConversationItem::tool_result(
+            format!("call_{i}"),
+            "x".repeat(10_000),
+        ));
+        handle.push_user_message(ConversationItem::system_reminder("language policy"));
+    }
+
+    let retained = handle.get_conversation().await;
+    let cleared_in_retained: Vec<String> = retained
+        .iter()
+        .filter_map(|item| match item {
+            ConversationItem::ToolResult(tr) if tr.content.as_ref() == HARD_CLEAR_PLACEHOLDER => {
+                Some(tr.tool_call_id.clone())
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        cleared_in_retained,
+        vec!["call_0".to_string(), "call_1".to_string()],
+        "only the results at or past hard_clear_age_turns=3 real turns are cleared; \
+         the five mid-turn reminders must not age them further"
+    );
+
+    // The request copy sees the same ages: it clears nothing the retained pass
+    // kept, and does not re-clear what it already cleared.
+    let mut request_copy = retained.clone();
+    prune_conversation(&mut request_copy, &config);
+    for item in &request_copy {
+        if let ConversationItem::ToolResult(tr) = item
+            && tr.content.as_ref() == HARD_CLEAR_PLACEHOLDER
+        {
+            assert!(
+                cleared_in_retained.contains(&tr.tool_call_id),
+                "request copy cleared {} at a younger age than the retained pass",
+                tr.tool_call_id
             );
         }
     }

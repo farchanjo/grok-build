@@ -1,7 +1,8 @@
 //! ConversationRequest assembly — image compaction, pruning, repair, memory injection.
 
 use xai_grok_inference_types::{
-    ContentPart, ConversationItem, ConversationRequest, ToolSpec, TraceContext,
+    ContentPart, ConversationItem, ConversationRequest, SyntheticReason, ToolResultItem, ToolSpec,
+    TraceContext,
 };
 
 use super::ChatStateActor;
@@ -170,42 +171,74 @@ pub(crate) fn should_prune(total_tokens: u64, context_window: std::num::NonZeroU
     total_tokens > context_window.get() / 2
 }
 
+/// Whether `item` opens a new prompt turn, i.e. counts as a turn boundary when
+/// ageing tool results for pruning.
+///
+/// Only real turns count. A tagged synthetic counts only when the turn pipeline
+/// pushed it while consuming a `prompt_index` slot — an auto-wake, a scheduled
+/// fire, a notification drain — which is what
+/// [`SyntheticReason::starts_prompt_turn`] encodes. A *mid-turn injection*
+/// (`SystemReminder`, `Interjection`, `CompactionMeta`, …) does not.
+///
+/// Counting injections as turns makes old tool results look older than they
+/// are, so `keep_last_n_turns` / `hard_clear_age_turns` would silently mean
+/// *injection* ages and would drift with how many reminders a turn happens to
+/// push (a language policy alone pushes one `<system-reminder>` per turn).
+pub(super) fn opens_prompt_turn(item: &ConversationItem) -> bool {
+    match item {
+        ConversationItem::User(u) => match u.synthetic_reason.as_ref() {
+            // Untagged user items are real input in every writer that predates
+            // `synthetic_reason` (and the `<user_info>` preamble): count them.
+            None => true,
+            Some(reason) => SyntheticReason::starts_prompt_turn(reason),
+        },
+        _ => false,
+    }
+}
+
+/// Hand every `ToolResult` in `conversation` to `visit` together with its age in
+/// prompt turns (0 = the turn currently being built), walking tail → head.
+///
+/// Age advances only on a real turn boundary ([`opens_prompt_turn`]), so the
+/// ages stay stable across the mid-turn reminders the shell injects. Both the
+/// retained hard-clear and the request-copy soft-trim go through here, so the
+/// two paths can never disagree on an item's age.
+pub(super) fn for_each_tool_result_by_turn_age(
+    conversation: &mut [ConversationItem],
+    mut visit: impl FnMut(&mut ToolResultItem, usize),
+) {
+    let mut turn_age: usize = 0;
+    for item in conversation.iter_mut().rev() {
+        if opens_prompt_turn(item) {
+            turn_age += 1;
+            continue;
+        }
+        if let ConversationItem::ToolResult(tool_result) = item {
+            visit(tool_result, turn_age);
+        }
+    }
+}
+
 /// Prune old, large tool results from the conversation in place.
 ///
-/// Turn age is estimated by walking backward through the conversation and
-/// counting `User` items to determine which "turn" each tool result belongs to.
+/// Turn age counts real turns only ([`for_each_tool_result_by_turn_age`]).
 pub(crate) fn prune_conversation(conversation: &mut [ConversationItem], config: &PruningConfig) {
     if !config.enabled {
         return;
     }
 
-    let mut turn_from_end: usize = 0;
-    let mut seen_first_user = false;
-
-    for i in (0..conversation.len()).rev() {
-        if matches!(&conversation[i], ConversationItem::User(_)) {
-            if seen_first_user {
-                turn_from_end += 1;
-            }
-            seen_first_user = true;
-            continue;
-        }
-
-        let ConversationItem::ToolResult(tool_result) = &mut conversation[i] else {
-            continue;
-        };
-
+    for_each_tool_result_by_turn_age(conversation, |tool_result, turn_age| {
         // Never prune recent turns.
-        if turn_from_end < config.keep_last_n_turns {
-            continue;
+        if turn_age < config.keep_last_n_turns {
+            return;
         }
 
         // Hard clear: very old tool results → replace entirely.
-        if turn_from_end >= config.hard_clear_age_turns {
+        if turn_age >= config.hard_clear_age_turns {
             if tool_result.content.as_ref() != HARD_CLEAR_PLACEHOLDER {
                 tool_result.content = std::sync::Arc::<str>::from(HARD_CLEAR_PLACEHOLDER);
             }
-            continue;
+            return;
         }
 
         // Soft trim: large tool results → keep head + tail.
@@ -216,7 +249,7 @@ pub(crate) fn prune_conversation(conversation: &mut [ConversationItem], config: 
             tool_result.content =
                 std::sync::Arc::<str>::from(format!("{head}{SOFT_TRIM_SEPARATOR}{tail}"));
         }
-    }
+    });
 }
 
 // ============================================================================
@@ -671,6 +704,118 @@ mod tests {
         if let ConversationItem::ToolResult(ref tr) = conv[0] {
             assert_eq!(tr.content.len(), 10_000);
         }
+    }
+
+    // -- turn-age tests --
+
+    /// Content of the tool result with `id`.
+    fn tool_content(conv: &[ConversationItem], id: &str) -> String {
+        conv.iter()
+            .find_map(|item| match item {
+                ConversationItem::ToolResult(tr) if tr.tool_call_id == id => {
+                    Some(tr.content.to_string())
+                }
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("no tool result with id {id}"))
+    }
+
+    /// Append one turn: user prompt, assistant reply, large tool result.
+    fn push_turn(conv: &mut Vec<ConversationItem>, n: usize) {
+        conv.push(ConversationItem::user(format!("q{n}")));
+        conv.push(ConversationItem::assistant(format!("a{n}")));
+        conv.push(ConversationItem::tool_result(
+            format!("c{n}"),
+            "x".repeat(10_000),
+        ));
+    }
+
+    /// A mid-turn `<system-reminder>` is a `User` item but not a turn, so it
+    /// must not age tool results: with `keep_last_n_turns = 3` the result two
+    /// real turns back survives. Counting reminders as boundaries would put it
+    /// at age 4 and soft-trim it.
+    #[test]
+    fn prune_turn_age_ignores_mid_turn_reminders() {
+        let mut conv = vec![ConversationItem::system("sys")];
+        for n in 0..3 {
+            push_turn(&mut conv, n);
+            // The shell pushes one language-policy reminder per turn.
+            conv.push(ConversationItem::system_reminder("language policy"));
+        }
+        let config = PruningConfig {
+            keep_last_n_turns: 3,
+            hard_clear_age_turns: 10,
+            ..Default::default()
+        };
+
+        prune_conversation(&mut conv, &config);
+
+        assert_eq!(tool_content(&conv, "c0").chars().count(), 10_000);
+        assert_eq!(tool_content(&conv, "c1").chars().count(), 10_000);
+    }
+
+    /// Soft-trim at the configured age, hard-clear one turn later, untouched
+    /// inside `keep_last_n_turns`.
+    #[test]
+    fn prune_acts_at_configured_real_age() {
+        let mut conv = vec![ConversationItem::system("sys")];
+        for n in 0..3 {
+            push_turn(&mut conv, n);
+        }
+        let config = PruningConfig {
+            keep_last_n_turns: 1,
+            hard_clear_age_turns: 2,
+            ..Default::default()
+        };
+
+        prune_conversation(&mut conv, &config);
+
+        assert_eq!(tool_content(&conv, "c0"), HARD_CLEAR_PLACEHOLDER);
+        assert!(tool_content(&conv, "c1").contains(SOFT_TRIM_SEPARATOR));
+        assert_eq!(tool_content(&conv, "c2").chars().count(), 10_000);
+    }
+
+    /// An auto-wake turn is synthetic but consumed a `prompt_index` slot, so it
+    /// is a turn: it ages the tool results behind it.
+    #[test]
+    fn prune_turn_age_advances_on_turn_starting_synthetics() {
+        let mut conv = vec![ConversationItem::system("sys")];
+        push_turn(&mut conv, 0);
+        conv.push(ConversationItem::task_completed("background task done"));
+        conv.push(ConversationItem::assistant("a1"));
+        conv.push(ConversationItem::tool_result("c1", "x".repeat(10_000)));
+        let config = PruningConfig {
+            keep_last_n_turns: 1,
+            hard_clear_age_turns: 1,
+            ..Default::default()
+        };
+
+        prune_conversation(&mut conv, &config);
+
+        assert_eq!(tool_content(&conv, "c0"), HARD_CLEAR_PLACEHOLDER);
+        assert_eq!(tool_content(&conv, "c1").chars().count(), 10_000);
+    }
+
+    /// The walk hands out ages tail-first, starting at 0 for the turn in flight.
+    #[test]
+    fn turn_age_walks_from_the_tail() {
+        let mut conv = vec![ConversationItem::system("sys")];
+        for n in 0..3 {
+            push_turn(&mut conv, n);
+        }
+        let mut ages = Vec::new();
+        for_each_tool_result_by_turn_age(&mut conv, |tr, age| {
+            ages.push((tr.tool_call_id.clone(), age));
+        });
+
+        assert_eq!(
+            ages,
+            vec![
+                ("c2".to_string(), 0),
+                ("c1".to_string(), 1),
+                ("c0".to_string(), 2)
+            ]
+        );
     }
 
     #[test]

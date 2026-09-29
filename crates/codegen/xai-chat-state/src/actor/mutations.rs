@@ -6,7 +6,7 @@ use xai_grok_inference_types::{
 };
 
 use super::ChatStateActor;
-use super::request_builder::HARD_CLEAR_PLACEHOLDER;
+use super::request_builder::{HARD_CLEAR_PLACEHOLDER, for_each_tool_result_by_turn_age};
 use crate::events::ChatStateEvent;
 use crate::types::{ChatStateSnapshot, fingerprint_conversation_items};
 
@@ -314,16 +314,12 @@ impl ChatStateActor {
     ///
     /// # Synthetic User items and turn-age accuracy
     ///
-    /// The shell can inject synthetic `User` items mid-turn (e.g. system
-    /// corrective warnings) without calling `increment_prompt_index`.  These
-    /// do not represent real user turns.  The backward scan here counts every
-    /// `User` item as a turn boundary, so synthetic items would normally cause
-    /// old tool results to appear older than they really are.
-    ///
-    /// This is compensated by raising the effective clearing threshold by the
-    /// number of synthetic User items (`total_user_items - prompt_index`).
-    /// The result: a tool result is never cleared before `hard_clear_age_turns`
-    /// REAL turns have elapsed, even in sessions with many synthetic messages.
+    /// Ages come from [`for_each_tool_result_by_turn_age`], which counts *real*
+    /// prompt turns: a mid-turn injection (system reminder, interjection,
+    /// compaction meta) does not advance the age even though it is a `User`
+    /// item. So a tool result is cleared exactly `hard_clear_age_turns` real
+    /// turns after its own turn, regardless of how many reminders the shell
+    /// pushed in between.
     ///
     /// # Replay / rewind correctness
     ///
@@ -340,56 +336,18 @@ impl ChatStateActor {
             return 0;
         }
 
-        // Compute how many synthetic User items exist (system reminders, etc.).
-        // Synthetic User items are NOT real user turns — they are injected by the
-        // shell mid-turn and do not increment `prompt_index`.  The naive backward
-        // scan counts every User item as a turn boundary, so synthetic items make
-        // old tool results appear older than they really are and can cause
-        // premature hard-clears.
-        //
-        // Fix: raise the effective clearing threshold by the number of synthetic
-        // User items.  This guarantees a tool result is never cleared before
-        // `hard_clear_age_turns` REAL turns have elapsed, regardless of how many
-        // synthetic messages the session contains.
-        let total_user_items = self
-            .state
-            .conversation
-            .iter()
-            .filter(|i| matches!(i, ConversationItem::User(_)))
-            .count();
-        let synthetic_count = total_user_items.saturating_sub(self.state.prompt_index);
-        let effective_threshold = self
-            .pruning_config
-            .hard_clear_age_turns
-            .saturating_add(synthetic_count);
-
+        let config = self.pruning_config.clone();
         let before_bytes = self.conversation_content_bytes();
         let mut cleared = 0usize;
-        let mut turn_from_end: usize = 0;
-        let mut seen_first_user = false;
-
-        for i in (0..self.state.conversation.len()).rev() {
-            if matches!(&self.state.conversation[i], ConversationItem::User(_)) {
-                if seen_first_user {
-                    turn_from_end += 1;
-                }
-                seen_first_user = true;
-                continue;
+        for_each_tool_result_by_turn_age(&mut self.state.conversation, |tool_result, turn_age| {
+            if turn_age < config.hard_clear_age_turns {
+                return;
             }
-
-            let ConversationItem::ToolResult(tr) = &mut self.state.conversation[i] else {
-                continue;
-            };
-
-            if turn_from_end < effective_threshold {
-                continue;
-            }
-
-            if tr.content.as_ref() != HARD_CLEAR_PLACEHOLDER {
-                tr.content = std::sync::Arc::<str>::from(HARD_CLEAR_PLACEHOLDER);
+            if tool_result.content.as_ref() != HARD_CLEAR_PLACEHOLDER {
+                tool_result.content = std::sync::Arc::<str>::from(HARD_CLEAR_PLACEHOLDER);
                 cleared += 1;
             }
-        }
+        });
 
         if cleared > 0 {
             let after_bytes = self.conversation_content_bytes();

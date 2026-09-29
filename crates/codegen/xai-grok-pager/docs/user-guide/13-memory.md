@@ -560,6 +560,15 @@ You configure pruning under `[compaction]`, not `[memory]`, because it is a comp
 | `soft_trim_tail` | `1500` | Characters kept from the end of a soft-trimmed result |
 | `hard_clear_age_turns` | `10` | Turn age after which tool results are replaced with a placeholder |
 
+Ages count **real prompt turns**. Mid-turn injections (`<system-reminder>`, interjections,
+compaction metadata) do not advance them, so these keys mean what they say no matter how
+many reminders a turn pushes.
+
+Pruning rewrites the middle of the prompt, and a rewrite invalidates the cached KV prefix
+from the first pruned item onward — every turn that prunes re-prefills everything after it.
+That depth is `hard_clear_age_turns` turns, so on long agentic sessions keep it small (2–3)
+to bound the re-prefill, and raise it only when the model needs older tool results intact.
+
 ---
 
 ## Memory Staleness
