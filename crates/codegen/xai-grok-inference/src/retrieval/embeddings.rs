@@ -169,13 +169,13 @@ fn parse_embedding_response(
                 values.len()
             )));
         }
-        if let Some(dims) = expected_dims {
-            if values.len() != dims as usize {
-                return Err(RetrievalError::MalformedResponse(format!(
-                    "embedding[{idx}] dimensions {} != configured {dims}",
-                    values.len()
-                )));
-            }
+        if let Some(dims) = expected_dims
+            && values.len() != dims as usize
+        {
+            return Err(RetrievalError::MalformedResponse(format!(
+                "embedding[{idx}] dimensions {} != configured {dims}",
+                values.len()
+            )));
         }
         if values.iter().any(|f| !f.is_finite()) {
             return Err(RetrievalError::MalformedResponse(format!(
@@ -193,14 +193,14 @@ fn parse_embedding_response(
         })?;
         // Ragged dimensions across the batch are rejected when configured dims
         // are absent: all vectors must share the first vector's length.
-        if let Some(first) = vectors.first() {
-            if first.values.len() != values.len() {
-                return Err(RetrievalError::MalformedResponse(format!(
-                    "ragged embedding dimensions at index {index}: {} != {}",
-                    values.len(),
-                    first.values.len()
-                )));
-            }
+        if let Some(first) = vectors.first()
+            && first.values.len() != values.len()
+        {
+            return Err(RetrievalError::MalformedResponse(format!(
+                "ragged embedding dimensions at index {index}: {} != {}",
+                values.len(),
+                first.values.len()
+            )));
         }
         vectors.push(EmbeddingVector { index, values });
     }

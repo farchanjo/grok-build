@@ -1,6 +1,10 @@
 //! Sampler-specific helpers for the shared-HTTP-client integration binaries:
 //! config + request drivers for real `InferenceClient`s. The generic
 //! connection-counting server lives in `xai_grok_test_support`.
+//!
+//! Each integration binary compiles its own copy of this module and uses a
+//! subset of it, so per-target `dead_code` is expected rather than a smell.
+#![allow(dead_code)]
 
 use std::sync::Arc;
 

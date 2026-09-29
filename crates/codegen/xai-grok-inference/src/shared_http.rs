@@ -515,7 +515,7 @@ fn build_provider_client(
         "building persistent per-provider HTTP pool"
     );
     let built = configure(builder).build();
-    if let Ok(_) = &built {
+    if built.is_ok() {
         emit_http_client_built(HttpClientBuiltFields {
             pool_max_idle,
             idle_timeout_secs,
@@ -578,7 +578,7 @@ fn build_http_client() -> Result<reqwest::Client, reqwest::Error> {
     }
 
     let built = builder.build();
-    if let Ok(_) = &built {
+    if built.is_ok() {
         emit_http_client_built(HttpClientBuiltFields {
             pool_max_idle,
             idle_timeout_secs: pool_idle_timeout_secs,
@@ -820,7 +820,7 @@ mod tests {
         assert_eq!(super::http2_initial_stream_window(), None);
         drop(window_bad);
 
-        let window_absent = EnvVarGuard::unset("GROK_HTTP2_INITIAL_STREAM_WINDOW_SIZE");
+        let _window_absent = EnvVarGuard::unset("GROK_HTTP2_INITIAL_STREAM_WINDOW_SIZE");
         assert_eq!(super::http2_initial_stream_window(), None);
     }
 

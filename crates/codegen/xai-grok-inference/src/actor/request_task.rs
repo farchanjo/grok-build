@@ -19,7 +19,7 @@ use tracing::Instrument;
 
 use xai_grok_inference_types::{
     ApiErrorCode, ConversationRequest, ConversationResponse, EmptyResponseContext, InferenceError,
-    error::Result as InferenceResult, extract_max_tokens_limit,
+    error::Result as InferenceResult, extract_max_tokens_limit, output_budget_overflow,
 };
 
 use crate::client::{ApiBackend, InferenceClient};
@@ -73,8 +73,11 @@ const MAX_TOKENS_RECOVERY_UNKNOWN_BUDGET: u32 = 8192;
 /// When the provider rejected the attempt because the completion-token budget
 /// exceeds the model cap (a never-retryable 400/422-family error), compute the
 /// reduced budget for ONE re-issue:
-/// - an allowed maximum parsed from the error message wins (the request budget
-///   is clamped to it);
+/// - an overflow of `prompt + max_tokens` states the room itself
+///   (`window - text input`) and wins outright — the input alone fits, so the
+///   re-issue can spend whatever the window leaves;
+/// - otherwise an allowed maximum parsed from the error message wins (the
+///   request budget is clamped to it);
 /// - otherwise the effective budget is halved (never below 1), using a fixed
 ///   conservative fallback when neither the request nor the config set one.
 ///
@@ -96,6 +99,12 @@ fn plan_max_tokens_recovery(
         InferenceError::Api { message, .. } => message.as_str(),
         _ => return None,
     };
+    // A window overflow the budget caused states the room directly
+    // (`window - text input`), which beats any cap phrased in the message.
+    if let Some((window, input)) = output_budget_overflow(message) {
+        let room = u32::try_from(window.saturating_sub(input)).unwrap_or(u32::MAX);
+        return Some(requested.map_or(room, |n| n.min(room)).max(1));
+    }
     if let Some(limit) = extract_max_tokens_limit(message) {
         Some(requested.map_or(limit, |n| n.min(limit)))
     } else {
@@ -1003,7 +1012,7 @@ fn synthesize_from_info(info: &InferenceErrorInfo) -> InferenceError {
         InferenceErrorKind::EmptyResponse => {
             if let Some(ctx) = &info.empty_response_context {
                 InferenceError::EmptyResponse {
-                    context: ctx.clone(),
+                    context: (**ctx).clone(),
                 }
             } else {
                 InferenceError::EventStreamError(info.message.clone())
@@ -1093,7 +1102,7 @@ fn emit_retrying(
         doom_loop_triggers: info.doom_loop_triggers,
         doom_loop_aborted_at_chunk: info.doom_loop_aborted_at_chunk,
         backoff_ms,
-        diagnostics: info.diagnostics,
+        diagnostics: info.diagnostics.as_deref().cloned(),
     });
 }
 
@@ -1354,8 +1363,10 @@ mod tests {
         );
         // An explicit per-request budget below the cap stays as-is (can't be
         // the failing value; re-issue with the same budget is the bounded retry).
-        let mut request = ConversationRequest::default();
-        request.max_output_tokens = Some(64_000);
+        let request = ConversationRequest {
+            max_output_tokens: Some(64_000),
+            ..Default::default()
+        };
         assert_eq!(
             plan_max_tokens_recovery(&err, &request, &config_with_budget(None), false),
             Some(64_000)
@@ -1372,8 +1383,10 @@ mod tests {
             Some(64_000)
         );
         // Per-request budget wins over config, and halving never drops to 0.
-        let mut request = ConversationRequest::default();
-        request.max_output_tokens = Some(1);
+        let request = ConversationRequest {
+            max_output_tokens: Some(1),
+            ..Default::default()
+        };
         assert_eq!(
             plan_max_tokens_recovery(&err, &request, &config_with_budget(Some(128_000)), false),
             Some(1)

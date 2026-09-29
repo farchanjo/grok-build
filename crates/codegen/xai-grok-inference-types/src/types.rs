@@ -1339,10 +1339,10 @@ impl ReasoningEffortSelection {
                     }
                 }
                 // Check by canonical value
-                if let Ok(parsed) = token.parse::<ReasoningEffort>() {
-                    if options.iter().any(|o| o.value == parsed) {
-                        return Ok(parsed);
-                    }
+                if let Ok(parsed) = token.parse::<ReasoningEffort>()
+                    && options.iter().any(|o| o.value == parsed)
+                {
+                    return Ok(parsed);
                 }
                 let offered: Vec<_> = options.iter().map(|o| o.id.as_str()).collect();
                 Err(format!(
@@ -1612,16 +1612,16 @@ pub fn parse_reasoning_effort_selection_meta(
     reasoning_efforts: &[ReasoningEffortOption],
 ) -> ReasoningEffortSelection {
     // If the key is present, parse it directly
-    if let Some(raw) = meta.and_then(|m| m.get(REASONING_EFFORT_SELECTION_META_KEY)) {
-        if let Some(s) = raw.as_str() {
-            return match s.parse() {
-                Ok(sel) => sel,
-                Err(_) => {
-                    tracing::warn!(value = %s, "meta.reasoningEffortSelection: unknown value, falling back");
-                    ReasoningEffortSelection::default()
-                }
-            };
-        }
+    if let Some(raw) = meta.and_then(|m| m.get(REASONING_EFFORT_SELECTION_META_KEY))
+        && let Some(s) = raw.as_str()
+    {
+        return match s.parse() {
+            Ok(sel) => sel,
+            Err(_) => {
+                tracing::warn!(value = %s, "meta.reasoningEffortSelection: unknown value, falling back");
+                ReasoningEffortSelection::default()
+            }
+        };
     }
     // Project from legacy fields when the normalized key is absent.
     let supports = meta

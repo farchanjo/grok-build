@@ -7136,7 +7136,7 @@ impl Default for OrAnthropicWebFetchBlockTypeEnum {
 #[serde(untagged)]
 pub enum OrAnthropicWebFetchContent {
     Variant0(OrAnthropicWebFetchToolResultError),
-    Variant1(OrAnthropicWebFetchBlock),
+    Variant1(Box<OrAnthropicWebFetchBlock>),
     Unknown(serde_json::Value),
 }
 impl Default for OrAnthropicWebFetchContent {
@@ -8763,7 +8763,7 @@ pub enum OrChatFunctionTool {
     Variant8(OrSubagentServerToolOpenRouter),
     Variant9(OrWebFetchServerTool),
     Variant10(OrOpenRouterWebSearchServerTool),
-    Variant11(OrChatWebSearchShorthand),
+    Variant11(Box<OrChatWebSearchShorthand>),
     Unknown(serde_json::Value),
 }
 impl Default for OrChatFunctionTool {
@@ -8793,7 +8793,7 @@ pub enum OrChatMessages {
     Variant0(OrChatSystemMessage),
     Variant1(OrChatUserMessage),
     Variant2(OrChatDeveloperMessage),
-    Variant3(OrChatAssistantMessage),
+    Variant3(Box<OrChatAssistantMessage>),
     Variant4(OrChatToolMessage),
     Unknown(serde_json::Value),
 }
@@ -15997,7 +15997,7 @@ pub enum OrORAnthropicContentBlock {
     Variant3(OrAnthropicRedactedThinkingBlock),
     Variant4(OrORAnthropicServerToolUseBlock),
     Variant5(OrAnthropicWebSearchToolResult),
-    Variant6(OrAnthropicWebFetchToolResult),
+    Variant6(Box<OrAnthropicWebFetchToolResult>),
     Variant7(OrAnthropicCodeExecutionToolResult),
     Variant8(OrAnthropicBashCodeExecutionToolResult),
     Variant9(OrAnthropicTextEditorCodeExecutionToolResult),
@@ -23347,7 +23347,7 @@ impl Default for OrUpsertWorkspaceBudgetResponseDataResetIntervalEnum {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum OrUsage {
-    Variant0(UsageV0),
+    Variant0(Box<UsageV0>),
     Unknown(serde_json::Value),
 }
 impl Default for OrUsage {

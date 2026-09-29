@@ -64,8 +64,9 @@ enum SkipState {
     },
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 enum UnescapeState {
+    #[default]
     Normal,
     Escape,
     Unicode {
@@ -84,12 +85,6 @@ enum AfterHighPhase {
     ExpectBackslash,
     ExpectU,
     Unicode { digits: [u8; 4], filled: u8 },
-}
-
-impl Default for UnescapeState {
-    fn default() -> Self {
-        Self::Normal
-    }
 }
 
 #[derive(Debug)]

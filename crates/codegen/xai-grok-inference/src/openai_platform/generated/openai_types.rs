@@ -5426,7 +5426,7 @@ impl Default for BetaInputImageContentTypeEnum {
 #[serde(untagged)]
 pub enum BetaInputItem {
     Variant0(BetaEasyInputMessage),
-    Variant1(BetaItem),
+    Variant1(Box<BetaItem>),
     Variant2(BetaCompactionTriggerItemParam),
     Variant3(BetaItemReferenceParam),
     Variant4(BetaProgramItemParam),
@@ -14077,7 +14077,7 @@ pub struct CreateEvalResponsesRunDataSourceSamplingParamsText {
 pub enum CreateEvalResponsesRunDataSourceSourceUnion {
     Variant0(EvalJsonlFileContentSource),
     Variant1(EvalJsonlFileIdSource),
-    Variant2(EvalResponsesSource),
+    Variant2(Box<EvalResponsesSource>),
     Unknown(serde_json::Value),
 }
 impl Default for CreateEvalResponsesRunDataSourceSourceUnion {
@@ -27278,7 +27278,7 @@ impl Default for RealtimeCallCreateRequestSessionToolChoiceUnion {
 #[serde(untagged)]
 pub enum RealtimeCallCreateRequestSessionToolsItemUnion {
     Variant0(RealtimeFunctionTool),
-    Variant1(MCPTool),
+    Variant1(Box<MCPTool>),
     Unknown(serde_json::Value),
 }
 impl Default for RealtimeCallCreateRequestSessionToolsItemUnion {
@@ -27399,8 +27399,8 @@ impl Default for RealtimeCreateClientSecretRequestExpiresAfterAnchorEnum {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum RealtimeCreateClientSecretRequestSessionUnion {
-    Variant0(RealtimeSessionCreateRequestGA),
-    Variant1(RealtimeTranscriptionSessionCreateRequestGA),
+    Variant0(Box<RealtimeSessionCreateRequestGA>),
+    Variant1(Box<RealtimeTranscriptionSessionCreateRequestGA>),
     Unknown(serde_json::Value),
 }
 impl Default for RealtimeCreateClientSecretRequestSessionUnion {
@@ -27423,8 +27423,8 @@ pub struct RealtimeCreateClientSecretResponse {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum RealtimeCreateClientSecretResponseSessionUnion {
-    Variant0(RealtimeSessionCreateResponseGA),
-    Variant1(RealtimeTranscriptionSessionCreateResponseGA),
+    Variant0(Box<RealtimeSessionCreateResponseGA>),
+    Variant1(Box<RealtimeTranscriptionSessionCreateResponseGA>),
     Unknown(serde_json::Value),
 }
 impl Default for RealtimeCreateClientSecretResponseSessionUnion {
@@ -27768,7 +27768,7 @@ impl Default for RealtimeSessionCreateRequestGAToolChoiceUnion {
 #[serde(untagged)]
 pub enum RealtimeSessionCreateRequestGAToolsItemUnion {
     Variant0(RealtimeFunctionTool),
-    Variant1(MCPTool),
+    Variant1(Box<MCPTool>),
     Unknown(serde_json::Value),
 }
 impl Default for RealtimeSessionCreateRequestGAToolsItemUnion {
@@ -28296,7 +28296,7 @@ impl Default for RealtimeSessionCreateResponseGAToolChoiceUnion {
 #[serde(untagged)]
 pub enum RealtimeSessionCreateResponseGAToolsItemUnion {
     Variant0(RealtimeFunctionTool),
-    Variant1(MCPTool),
+    Variant1(Box<MCPTool>),
     Unknown(serde_json::Value),
 }
 impl Default for RealtimeSessionCreateResponseGAToolsItemUnion {

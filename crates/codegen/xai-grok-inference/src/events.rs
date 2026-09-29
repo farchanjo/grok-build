@@ -163,7 +163,7 @@ pub struct InferenceErrorInfo {
     pub model_metadata: Option<ResponseModelMetadata>,
     /// Safe router/provider and rate-limit metadata attached to API failures.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub diagnostics: Option<ApiErrorDiagnostics>,
+    pub diagnostics: Option<Box<ApiErrorDiagnostics>>,
     /// The server error envelope's `code` slot (e.g. `invalid_image`).
     /// Serializes as the plain wire string; `None` when absent or from an
     /// older peer.
@@ -173,7 +173,7 @@ pub struct InferenceErrorInfo {
     /// context from the L2 stream so downstream consumers can distinguish
     /// reasoning-only completions from transport failures.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub empty_response_context: Option<EmptyResponseContext>,
+    pub empty_response_context: Option<Box<EmptyResponseContext>>,
     /// Present only when `kind == DoomLoopDetected`. Raw trigger labels
     /// (never generation content) so the retry loop can reconstruct the
     /// rich error from a synthesized L2 failure.
@@ -313,9 +313,9 @@ impl From<&InferenceError> for InferenceErrorInfo {
             is_retryable,
             retry_after_secs,
             model_metadata,
-            diagnostics,
+            diagnostics: diagnostics.clone(),
             error_code,
-            empty_response_context,
+            empty_response_context: empty_response_context.map(Box::new),
             doom_loop_triggers,
             doom_loop_aborted_at_chunk,
             credential,
@@ -421,12 +421,12 @@ mod tests {
             model_metadata: None,
             retry_after_secs: Some(60),
             should_retry: None,
-            diagnostics: Some(ApiErrorDiagnostics {
+            diagnostics: Some(Box::new(ApiErrorDiagnostics {
                 provider_name: Some("OpenRouter".into()),
                 provider_code: Some("rate_limit_exceeded".into()),
                 rate_limit_remaining: Some("0".into()),
                 ..Default::default()
-            }),
+            })),
             error_code: None,
         };
         let info = InferenceErrorInfo::from(&err);

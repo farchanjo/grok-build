@@ -339,7 +339,7 @@ pub struct RequestContext {
 /// Booleans describe whether a family of request-side additions applies;
 /// later phases consume this to actually build headers/body. Phase 1 only
 /// produces the description (and tests assert it).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct RequestExtensions {
     /// First-party `x-grok-*` client identity headers (xAI only).
     pub first_party_headers: bool,
@@ -358,21 +358,6 @@ pub struct RequestExtensions {
     pub chatgpt_oauth_headers: bool,
     /// Allow `messages[].model_id` metadata on the wire.
     pub include_message_model_id: bool,
-}
-
-impl Default for RequestExtensions {
-    fn default() -> Self {
-        Self {
-            first_party_headers: false,
-            openrouter_metadata_header: false,
-            openrouter_body: false,
-            zai_body: false,
-            dashscope_body: false,
-            vllm_body: false,
-            chatgpt_oauth_headers: false,
-            include_message_model_id: false,
-        }
-    }
 }
 
 /// How reasoning is handled on the request side (keys + echo policy).

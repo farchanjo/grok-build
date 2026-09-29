@@ -311,7 +311,13 @@ pub enum InferenceError {
         /// `None` = header absent (old server or non-proxy origin).
         should_retry: Option<bool>,
         /// Router/provider and rate-limit metadata safe for diagnostics.
-        diagnostics: Option<ApiErrorDiagnostics>,
+        ///
+        /// Boxed to keep the whole enum under the workspace's clippy
+        /// `large-error-threshold` (256 bytes): `Result<_, InferenceError>` is
+        /// returned from hundreds of call sites, and this is by far the widest
+        /// field of the widest variant. See
+        /// `inference_error_stays_under_the_large_error_threshold`.
+        diagnostics: Option<Box<ApiErrorDiagnostics>>,
         /// The error envelope's `code` slot, parsed via [`ApiErrorCode`].
         /// Dedicated code slots — nested envelopes, Responses-stream error
         /// events — pass through verbatim; the flat envelope's overloaded
@@ -529,6 +535,12 @@ impl InferenceError {
                     return true;
                 }
                 let lower = message.to_ascii_lowercase();
+                // A window overflow that the *output budget* caused is still a
+                // budget error: the input alone fits, so re-issuing with the
+                // room the input leaves succeeds.
+                if output_budget_overflow(message).is_some() {
+                    return true;
+                }
                 if is_context_length_error(message) || lower.contains("context window") {
                     return false;
                 }
@@ -600,7 +612,7 @@ impl InferenceError {
     pub fn rate_limit_reset_secs(&self) -> Option<u64> {
         match self {
             InferenceError::Api { diagnostics, .. } => {
-                diagnostics.as_ref().and_then(|d| d.parsed_reset_secs())
+                diagnostics.as_deref().and_then(|d| d.parsed_reset_secs())
             }
             _ => None,
         }
@@ -617,7 +629,7 @@ impl InferenceError {
     /// Structured router/provider diagnostics from an API error response.
     pub fn diagnostics(&self) -> Option<&ApiErrorDiagnostics> {
         match self {
-            InferenceError::Api { diagnostics, .. } => diagnostics.as_ref(),
+            InferenceError::Api { diagnostics, .. } => diagnostics.as_deref(),
             _ => None,
         }
     }
@@ -1035,6 +1047,57 @@ pub fn is_context_length_error(message: &str) -> bool {
         || m.contains("maximum prompt length")
         || m.contains("maximum context length")
         || m.contains("context_length_exceeded")
+}
+
+/// Split of a provider rejection that says the *pair* `prompt + max_tokens`
+/// overflowed the window, as `(window, text_input)`.
+///
+/// OpenRouter states both halves explicitly:
+///
+/// ```text
+/// This endpoint's maximum context length is 1048576 tokens. However, you
+/// requested about 1178681 tokens (234963 of text input, 943718 in the output).
+/// ```
+///
+/// The input alone fits, so the recoverable budget is `window - text_input`
+/// rather than the window. Returns `None` for any other message, including a
+/// plain "prompt is too long" (there the budget is not what overflowed).
+pub fn output_budget_overflow(message: &str) -> Option<(u64, u64)> {
+    let lower = message.to_ascii_lowercase();
+    if !lower.contains("of text input") {
+        return None;
+    }
+    // "…maximum context length is 1048576 tokens… (234963 of text input…)"
+    // states the window after its marker and the input before its own.
+    let window = first_number_after_marker(&lower, "maximum context length")?;
+    let input = last_number_before_marker(&lower, "of text input")?;
+    (window > input).then_some((window, input))
+}
+
+/// First number at or after `marker`, commas stripped.
+fn first_number_after_marker(haystack: &str, marker: &str) -> Option<u64> {
+    let rest = haystack.get(haystack.find(marker)? + marker.len()..)?;
+    let start = rest.find(|c: char| c.is_ascii_digit())?;
+    let digits: String = rest[start..]
+        .chars()
+        .take_while(|c| c.is_ascii_digit() || *c == ',')
+        .filter(|c| c.is_ascii_digit())
+        .collect();
+    digits.parse().ok()
+}
+
+/// Last number before `marker`, commas stripped.
+fn last_number_before_marker(haystack: &str, marker: &str) -> Option<u64> {
+    let head = haystack.get(..haystack.find(marker)?)?;
+    let end = head.rfind(|c: char| c.is_ascii_digit())? + 1;
+    let start = head[..end]
+        .rfind(|c: char| !c.is_ascii_digit() && c != ',')
+        .map_or(0, |i| i + 1);
+    let digits: String = head[start..end]
+        .chars()
+        .filter(|c| c.is_ascii_digit())
+        .collect();
+    digits.parse().ok()
 }
 
 /// Maximum completion-token budget the provider allows for this request, as
@@ -2039,10 +2102,10 @@ mod tests {
             model_metadata: None,
             retry_after_secs: None,
             should_retry: None,
-            diagnostics: Some(ApiErrorDiagnostics {
+            diagnostics: Some(Box::new(ApiErrorDiagnostics {
                 rate_limit_reset_secs: Some(42),
                 ..Default::default()
-            }),
+            })),
             error_code: None,
         };
         assert_eq!(err.rate_limit_reset_secs(), Some(42));
@@ -2213,11 +2276,11 @@ mod tests {
             model_metadata: None,
             retry_after_secs: None,
             should_retry: None,
-            diagnostics: Some(ApiErrorDiagnostics {
+            diagnostics: Some(Box::new(ApiErrorDiagnostics {
                 provider_code: Some("429".into()),
                 provider_name: Some("OpenRouter".into()),
                 ..Default::default()
-            }),
+            })),
             error_code: None,
         };
         assert!(!err.is_image_processing_error());
@@ -2231,5 +2294,65 @@ mod tests {
             ),
             None
         );
+    }
+}
+
+#[cfg(test)]
+mod size_contract_tests {
+    use super::*;
+    /// The exact OpenRouter rejection a catalog-sized output budget produces once
+    /// the prompt is large: the pair overflowed, the input alone fits.
+    const OPENROUTER_PAIR_OVERFLOW: &str = "This endpoint's maximum context length is 1048576 tokens. However, you requested about 1178681 tokens (234963 of text input, 943718 in the output). Please reduce the length of either one, or use the context-compression plugin to compress your prompt automatically.";
+
+    /// `Result<_, InferenceError>` is the return type of hundreds of call
+    /// sites, and the workspace clippy `large-error-threshold` is 256 bytes
+    /// (`clippy.toml`): every function returning this error would trip
+    /// `clippy::result_large_err` past that. The `Api` variant's `diagnostics`
+    /// is boxed to stay under it — widen a variant and this test fails before
+    /// the lint noise returns.
+    #[test]
+    fn inference_error_stays_under_the_large_error_threshold() {
+        let size = std::mem::size_of::<InferenceError>();
+        assert!(
+            size <= 256,
+            "InferenceError is {size} bytes; box a wide field instead of raising the threshold"
+        );
+    }
+    #[test]
+    fn output_budget_overflow_splits_window_and_input() {
+        assert_eq!(
+            output_budget_overflow(OPENROUTER_PAIR_OVERFLOW),
+            Some((1_048_576, 234_963))
+        );
+    }
+
+    #[test]
+    fn output_budget_overflow_ignores_plain_context_errors() {
+        assert_eq!(
+            output_budget_overflow("prompt is too long: 300000 tokens"),
+            None
+        );
+        assert_eq!(
+            output_budget_overflow("maximum context length is 8192 tokens"),
+            None
+        );
+    }
+
+    #[test]
+    fn pair_overflow_is_a_recoverable_budget_error() {
+        // A window overflow the budget caused stays recoverable: re-issuing with
+        // the room the input leaves succeeds, so it must not be filed as a plain
+        // context-length error.
+        let err = InferenceError::Api {
+            status: reqwest::StatusCode::BAD_REQUEST,
+            message: OPENROUTER_PAIR_OVERFLOW.to_string(),
+            error_code: None,
+            diagnostics: None,
+            model_metadata: None,
+            retry_after_secs: None,
+            should_retry: None,
+        };
+        assert!(err.is_max_tokens_cap_error());
+        assert!(err.is_context_length_error());
     }
 }

@@ -271,7 +271,6 @@ impl MessagesCodec {
                         ContentBlock::ToolUse {
                             id,
                             name,
-                            input: _,
                             ..
                         } => {
                             let tool_index = next_tool_index;

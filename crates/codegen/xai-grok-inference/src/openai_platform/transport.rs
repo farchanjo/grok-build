@@ -310,7 +310,7 @@ impl PlatformTransport {
         .map_err(|e| PlatformError::Transport(e.to_string()))?;
         Ok(Self {
             base,
-            provider_id: provider_id.into(),
+            provider_id,
             provider_display_name: provider_display_name.into(),
             credentials,
             extra_headers,

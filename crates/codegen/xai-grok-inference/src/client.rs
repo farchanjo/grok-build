@@ -455,7 +455,9 @@ fn api_error(
         model_metadata,
         retry_after_secs,
         should_retry,
-        diagnostics,
+        // Boxed on the error to keep `InferenceError` small; see the variant's
+        // doc comment.
+        diagnostics: diagnostics.map(Box::new),
         error_code,
     }
 }
@@ -585,10 +587,51 @@ struct StreamOptions {
 /// (`max_completion_tokens`, 16384 when unset) and are applied before this
 /// clamp via [`crate::config::InferenceConfig::max_completion_tokens`].
 fn clamp_request_max_tokens(requested: Option<u32>, ceiling: Option<u32>) -> Option<u32> {
-    match requested {
-        None => None,
-        Some(n) => Some(ceiling.map_or(n, |cap| n.min(cap))),
+    requested.map(|n| ceiling.map_or(n, |cap| n.min(cap)))
+}
+
+/// Bytes-per-token used by [`prompt_bytes`]. Mirrors
+/// `xai_token_estimation::BYTES_PER_TOKEN`, kept local so this crate does not
+/// gain a dependency for one constant.
+const PROMPT_BYTES_PER_TOKEN: u64 = 4;
+
+/// Serialized size of the prompt half of a request.
+///
+/// One allocation per request, proportional to the prompt — cheap next to the
+/// body serialization the send path does anyway. A serialization failure
+/// (impossible for these types) reads as "unknown" and leaves budgets alone.
+fn prompt_bytes<T: serde::Serialize>(prompt: &T) -> u64 {
+    serde_json::to_string(prompt).map_or(0, |s| s.len() as u64)
+}
+
+/// Shrink `budget` so the provider's `prompt + max_tokens <= context_window`
+/// holds.
+///
+/// Providers enforce the pair, not the output alone: OpenRouter answers 400
+/// `"maximum context length is N tokens. However, you requested about M tokens
+/// (A of text input, B in the output)"` once a catalog-sized budget meets a
+/// large prompt. Clamping here prevents that instead of recovering from it.
+///
+/// Only ever shrinks an already-set budget, and only when the window and the
+/// prompt are both known — an empty prompt or an unknown window is a no-op.
+fn clamp_budget_to_prompt_room(
+    budget: Option<u32>,
+    window: Option<u64>,
+    prompt_bytes: u64,
+) -> Option<u32> {
+    let (Some(budget), Some(window)) = (budget, window) else {
+        return budget;
+    };
+    if window == 0 || prompt_bytes == 0 {
+        return Some(budget);
     }
+    let room = window.saturating_sub(prompt_bytes / PROMPT_BYTES_PER_TOKEN);
+    if room == 0 {
+        // Prompt alone fills the window: keep the caller's budget and let the
+        // provider's own error be the last word.
+        return Some(budget);
+    }
+    Some(budget.min(u32::try_from(room).unwrap_or(u32::MAX)))
 }
 
 /// Add OpenRouter's documented `models` extension to an OpenAI-compatible
@@ -736,6 +779,8 @@ struct ClientDefaults {
     model: String,
     max_completion_tokens: Option<u32>,
     max_output_ceiling: Option<u32>,
+    /// Provider context window, used to keep `prompt + max_tokens` inside it.
+    context_window: Option<u64>,
     temperature: Option<f32>,
     top_p: Option<f32>,
     openrouter_fallback_models: Vec<String>,
@@ -1031,6 +1076,7 @@ impl InferenceClient {
         let defaults = ClientDefaults {
             model: config.model,
             max_completion_tokens: config.max_completion_tokens,
+            context_window: (config.context_window > 0).then_some(config.context_window),
             max_output_ceiling: config.max_output_ceiling,
             temperature: config.temperature,
             top_p: config.top_p,
@@ -1417,9 +1463,13 @@ impl InferenceClient {
             request.model = Some(self.defaults.model.clone());
         }
 
-        request.max_tokens = clamp_request_max_tokens(
-            request.max_tokens.or(self.defaults.max_completion_tokens),
-            self.defaults.max_output_ceiling,
+        request.max_tokens = clamp_budget_to_prompt_room(
+            clamp_request_max_tokens(
+                request.max_tokens.or(self.defaults.max_completion_tokens),
+                self.defaults.max_output_ceiling,
+            ),
+            self.defaults.context_window,
+            prompt_bytes(&request.messages),
         );
 
         if request.temperature.is_none() {
@@ -1542,14 +1592,14 @@ impl InferenceClient {
     /// it (fail-closed; mirrors the OpenRouter extension gate above).
     fn dashscope_enable_thinking(&self) -> Option<&bool> {
         (self.adapter.id() == crate::provider::ProviderKind::DashScope)
-            .then(|| self.defaults.dashscope_enable_thinking.as_ref())
+            .then_some(self.defaults.dashscope_enable_thinking.as_ref())
             .flatten()
     }
 
     /// DashScope Qwen3 thinking budget, gated on the DashScope adapter.
     fn dashscope_thinking_budget(&self) -> Option<&u32> {
         (self.adapter.id() == crate::provider::ProviderKind::DashScope)
-            .then(|| self.defaults.dashscope_thinking_budget.as_ref())
+            .then_some(self.defaults.dashscope_thinking_budget.as_ref())
             .flatten()
     }
 
@@ -2042,12 +2092,17 @@ impl InferenceClient {
 
             // Apply max_output_tokens default if not specified, then clamp to
             // the capability ceiling. A ceiling with no request max is omitted.
-            request.inner.max_output_tokens = clamp_request_max_tokens(
-                request
-                    .inner
-                    .max_output_tokens
-                    .or(self.defaults.max_completion_tokens),
-                self.defaults.max_output_ceiling,
+            let prompt = prompt_bytes(&request.inner);
+            request.inner.max_output_tokens = clamp_budget_to_prompt_room(
+                clamp_request_max_tokens(
+                    request
+                        .inner
+                        .max_output_tokens
+                        .or(self.defaults.max_completion_tokens),
+                    self.defaults.max_output_ceiling,
+                ),
+                self.defaults.context_window,
+                prompt,
             );
 
             // Set store to false if not specified (default is true, but that breaks ZDR compliance)
@@ -2529,11 +2584,16 @@ impl InferenceClient {
             request.inner.model = self.defaults.model.clone();
         }
 
-        request.inner.max_tokens = clamp_request_max_tokens(
-            (request.inner.max_tokens > 0)
-                .then_some(request.inner.max_tokens)
-                .or(self.defaults.max_completion_tokens),
-            self.defaults.max_output_ceiling,
+        let prompt = prompt_bytes(&request.inner.messages);
+        request.inner.max_tokens = clamp_budget_to_prompt_room(
+            clamp_request_max_tokens(
+                (request.inner.max_tokens > 0)
+                    .then_some(request.inner.max_tokens)
+                    .or(self.defaults.max_completion_tokens),
+                self.defaults.max_output_ceiling,
+            ),
+            self.defaults.context_window,
+            prompt,
         )
         .unwrap_or(ANTHROPIC_DEFAULT_MAX_TOKENS);
 
@@ -2903,11 +2963,15 @@ impl InferenceClient {
             request.top_p = self.defaults.top_p;
         }
 
-        request.max_output_tokens = clamp_request_max_tokens(
-            request
-                .max_output_tokens
-                .or(self.defaults.max_completion_tokens),
-            self.defaults.max_output_ceiling,
+        request.max_output_tokens = clamp_budget_to_prompt_room(
+            clamp_request_max_tokens(
+                request
+                    .max_output_tokens
+                    .or(self.defaults.max_completion_tokens),
+                self.defaults.max_output_ceiling,
+            ),
+            self.defaults.context_window,
+            prompt_bytes(&request.items),
         );
 
         // Session identity: fills the per-request id when the caller omitted one,
@@ -3202,7 +3266,7 @@ fn classify_mid_stream_transport_error(rendered: &str) -> InferenceError {
     // Provider messages spell these keywords with spaces ("rate limit",
     // "max tokens"), while codes use underscores ("rate_limit"). Normalize
     // by dropping `_`, `-`, and spaces so one check matches all spellings.
-    let normalized = lower.replace('_', "").replace('-', "").replace(' ', "");
+    let normalized = lower.replace(['_', '-', ' '], "");
     let (error_type, message) = if normalized.contains("ratelimit") {
         ("rate_limit_error", rendered)
     } else if normalized.contains("overloaded") {
@@ -3233,11 +3297,7 @@ fn provider_error_from_captured(captured: &[u8]) -> Option<InferenceError> {
     }
     let text = std::str::from_utf8(captured).ok()?;
     let text = text.strip_prefix('\u{feff}').unwrap_or(text);
-    let normalized = text
-        .to_ascii_lowercase()
-        .replace('_', "")
-        .replace('-', "")
-        .replace(' ', "");
+    let normalized = text.to_ascii_lowercase().replace(['_', '-', ' '], "");
     let looks_like_error = text.contains("\"error\"") || text.contains("\"message\"");
     if !(looks_like_error
         || normalized.contains("ratelimit")
@@ -5564,12 +5624,18 @@ mod tests {
             ..minimal_config()
         };
         let client = InferenceClient::new(cfg).unwrap();
+        // The provider enforces `prompt + max_tokens <= context_window`, and
+        // `minimal_config` declares an 8192-token window, so the ceiling clamp
+        // also loses the room the prompt takes.
+        let room = (8_192
+            - prompt_bytes(&[ChatRequestMessage::user("hello")]) / PROMPT_BYTES_PER_TOKEN)
+            as u32;
         let request = ChatCompletionRequest::new(
             "openai/gpt-oss-120b",
             vec![ChatRequestMessage::user("hello")],
         );
         let payload = client.apply_defaults(request).unwrap();
-        assert_eq!(payload.max_tokens, Some(8_192));
+        assert_eq!(payload.max_tokens, Some(8_192.min(room)));
 
         let mut oversized = ChatCompletionRequest::new(
             "openai/gpt-oss-120b",
@@ -5577,7 +5643,7 @@ mod tests {
         );
         oversized.max_tokens = Some(64_000);
         let payload = client.apply_defaults(oversized).unwrap();
-        assert_eq!(payload.max_tokens, Some(8_192));
+        assert_eq!(payload.max_tokens, Some(8_192.min(room)));
 
         let mut under = ChatCompletionRequest::new(
             "openai/gpt-oss-120b",
@@ -5586,6 +5652,28 @@ mod tests {
         under.max_tokens = Some(1_024);
         let payload = client.apply_defaults(under).unwrap();
         assert_eq!(payload.max_tokens, Some(1_024));
+    }
+
+    #[test]
+    fn prompt_room_clamp_bounds_the_pair_to_the_window() {
+        // A budget that fits the ceiling but not the pair must shrink to the
+        // room: 8_192 window, 1_024-token prompt, ceiling 8_192.
+        let cfg = InferenceConfig {
+            provider_identity: crate::config::ProviderIdentity::OpenRouter,
+            max_completion_tokens: Some(8_192),
+            max_output_ceiling: Some(8_192),
+            context_window: 8_192,
+            ..minimal_config()
+        };
+        let client = InferenceClient::new(cfg).unwrap();
+        // 4_000 bytes of prompt text (plus the JSON envelope) ≈ 1_000 tokens.
+        let messages = vec![ChatRequestMessage::user("x".repeat(4_000))];
+        let room = (8_192 - prompt_bytes(&messages) / PROMPT_BYTES_PER_TOKEN) as u32;
+        assert!(room < 8_192, "the prompt must leave less than the ceiling");
+        let payload = client
+            .apply_defaults(ChatCompletionRequest::new("openai/gpt-oss-120b", messages))
+            .unwrap();
+        assert_eq!(payload.max_tokens, Some(room));
     }
 
     #[test]
@@ -5768,5 +5856,48 @@ mod tests {
         assert!(provider_error_from_captured(b"data: hello").is_none());
         assert!(provider_error_from_captured(b"").is_none());
         assert!(provider_error_from_captured(b"partial \xff\xfe bytes").is_none());
+    }
+    #[test]
+    fn prompt_room_clamp_shrinks_budget_for_large_prompt() {
+        // OpenRouter's shape: window 1_048_576, prompt 234_963 tokens.
+        let window = Some(1_048_576u64);
+        let prompt_bytes = 234_963 * PROMPT_BYTES_PER_TOKEN;
+        assert_eq!(
+            clamp_budget_to_prompt_room(Some(943_718), window, prompt_bytes),
+            Some(813_613)
+        );
+    }
+
+    #[test]
+    fn prompt_room_clamp_is_noop_without_window_or_prompt() {
+        assert_eq!(
+            clamp_budget_to_prompt_room(Some(943_718), None, 10_000),
+            Some(943_718)
+        );
+        assert_eq!(
+            clamp_budget_to_prompt_room(Some(943_718), Some(1_048_576), 0),
+            Some(943_718)
+        );
+        assert_eq!(
+            clamp_budget_to_prompt_room(None, Some(1_048_576), 10_000),
+            None
+        );
+    }
+
+    #[test]
+    fn prompt_room_clamp_never_grows_a_budget() {
+        assert_eq!(
+            clamp_budget_to_prompt_room(Some(16_384), Some(1_048_576), 4_000),
+            Some(16_384)
+        );
+    }
+
+    #[test]
+    fn prompt_room_clamp_keeps_budget_when_prompt_fills_window() {
+        let prompt_bytes = 1_048_576 * PROMPT_BYTES_PER_TOKEN;
+        assert_eq!(
+            clamp_budget_to_prompt_room(Some(943_718), Some(1_048_576), prompt_bytes),
+            Some(943_718)
+        );
     }
 }

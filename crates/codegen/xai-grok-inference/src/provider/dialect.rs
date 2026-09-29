@@ -21,9 +21,11 @@
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
+#[derive(Default)]
 pub enum WireDialect {
     /// The canonical OpenAI-compatible chat wire (legacy default). Reasoning
     /// is carried in `delta.reasoning_content` and echoed verbatim on replay.
+    #[default]
     Standard,
     /// vLLM server. The wire may emit reasoning under the `reasoning` key and
     /// the adapter hoists reasoning out of `content`; replayed assistant
@@ -73,12 +75,6 @@ impl WireDialect {
     /// Whether replayed assistant reasoning should be stripped.
     pub const fn strips_reasoning_echo(self) -> bool {
         self.is_vllm_family()
-    }
-}
-
-impl Default for WireDialect {
-    fn default() -> Self {
-        Self::Standard
     }
 }
 

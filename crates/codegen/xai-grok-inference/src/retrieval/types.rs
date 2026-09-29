@@ -581,12 +581,12 @@ pub fn validate_embedding_request(req: &EmbeddingRequest) -> RetrievalResult<()>
             )));
         }
     }
-    if let Some(dims) = req.dimensions {
-        if dims == 0 || dims as usize > MAX_EMBEDDING_DIMENSIONS {
-            return Err(RetrievalError::InvalidRequest(format!(
-                "embedding dimensions {dims} out of range 1..={MAX_EMBEDDING_DIMENSIONS}"
-            )));
-        }
+    if let Some(dims) = req.dimensions
+        && (dims == 0 || dims as usize > MAX_EMBEDDING_DIMENSIONS)
+    {
+        return Err(RetrievalError::InvalidRequest(format!(
+            "embedding dimensions {dims} out of range 1..={MAX_EMBEDDING_DIMENSIONS}"
+        )));
     }
     validate_relative_endpoint_path(&req.endpoint)?;
     Ok(())
@@ -627,12 +627,12 @@ pub fn validate_rerank_request(req: &RerankRequest) -> RetrievalResult<()> {
             )));
         }
     }
-    if let Some(top_n) = req.top_n {
-        if top_n == 0 || top_n as usize > MAX_RERANK_TOP_N {
-            return Err(RetrievalError::InvalidRequest(format!(
-                "rerank top_n {top_n} out of range 1..={MAX_RERANK_TOP_N}"
-            )));
-        }
+    if let Some(top_n) = req.top_n
+        && (top_n == 0 || top_n as usize > MAX_RERANK_TOP_N)
+    {
+        return Err(RetrievalError::InvalidRequest(format!(
+            "rerank top_n {top_n} out of range 1..={MAX_RERANK_TOP_N}"
+        )));
     }
     validate_relative_endpoint_path(&req.endpoint)?;
     Ok(())
@@ -745,8 +745,7 @@ pub fn redact_error_preview(raw: &str, max_chars: usize) -> String {
                     })
                     .map(|c| c.len_utf8())
                     .sum::<usize>()
-                    .max(8)
-                    .min(64);
+                    .clamp(8, 64);
                 let end = (after_marker + token_len).min(out.len());
                 let cand = (start, end);
                 best = Some(match best {
@@ -821,6 +820,6 @@ mod redact_tests {
         let url = RetrievalError::InvalidUrl("https://embed.example/v1".into());
         assert!(!url.to_string().contains("https://"));
         assert!(!format!("{url:?}").contains("https://"));
-        assert_eq!(err.internal_message().unwrap().contains("sk-secret"), true);
+        assert!(err.internal_message().unwrap().contains("sk-secret"));
     }
 }

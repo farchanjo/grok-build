@@ -44,7 +44,7 @@ pub fn decode_base64_f32(encoded: &str) -> RetrievalResult<Vec<f32>> {
         )));
     }
     let mut out = Vec::with_capacity(n);
-    for chunk in bytes.chunks_exact(4) {
+    for chunk in bytes.as_chunks::<4>().0 {
         let arr = [chunk[0], chunk[1], chunk[2], chunk[3]];
         let f = f32::from_le_bytes(arr);
         if !f.is_finite() {

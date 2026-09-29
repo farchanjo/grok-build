@@ -567,10 +567,10 @@ mod tests {
             model_metadata: None,
             retry_after_secs: None,
             should_retry: None,
-            diagnostics: Some(xai_grok_inference_types::ApiErrorDiagnostics {
+            diagnostics: Some(Box::new(xai_grok_inference_types::ApiErrorDiagnostics {
                 rate_limit_reset_secs: Some(reset_secs),
                 ..Default::default()
-            }),
+            })),
             error_code: None,
         }
     }
@@ -586,10 +586,10 @@ mod tests {
             model_metadata: None,
             retry_after_secs: Some(retry_after),
             should_retry: None,
-            diagnostics: Some(xai_grok_inference_types::ApiErrorDiagnostics {
+            diagnostics: Some(Box::new(xai_grok_inference_types::ApiErrorDiagnostics {
                 rate_limit_reset_secs: Some(reset_secs),
                 ..Default::default()
-            }),
+            })),
             error_code: None,
         }
     }
@@ -1258,10 +1258,10 @@ mod tests {
             model_metadata: None,
             retry_after_secs: None,
             should_retry: None,
-            diagnostics: Some(xai_grok_inference_types::ApiErrorDiagnostics {
+            diagnostics: Some(Box::new(xai_grok_inference_types::ApiErrorDiagnostics {
                 provider_name: Some("OpenRouter".into()),
                 ..Default::default()
-            }),
+            })),
             error_code: None,
         };
         let s = format_inference_error(&err, None);

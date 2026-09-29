@@ -5,6 +5,11 @@ version = "0.1.0"
 edition.workspace = true
 description = "Pure data types for the xAI sampling / chat-completion API layer"
 
+repository.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
 [dependencies]
 async-openai = { workspace = true }
 chrono = { workspace = true }

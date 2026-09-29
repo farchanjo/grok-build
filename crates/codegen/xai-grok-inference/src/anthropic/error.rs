@@ -300,7 +300,7 @@ fn bridge_http_to_inference(
         model_metadata: None,
         retry_after_secs: meta.retry_after_secs,
         should_retry,
-        diagnostics: meta.to_api_diagnostics(),
+        diagnostics: meta.to_api_diagnostics().map(Box::new),
         error_code: None,
     }
 }
@@ -322,7 +322,7 @@ fn bridge_stream_to_inference(
             model_metadata: None,
             retry_after_secs: None,
             should_retry: Some(false),
-            diagnostics: meta.to_api_diagnostics(),
+            diagnostics: meta.to_api_diagnostics().map(Box::new),
             error_code: None,
         },
         ErrorClass::PermanentActionable | ErrorClass::Local | ErrorClass::Decode => {
@@ -332,7 +332,7 @@ fn bridge_stream_to_inference(
                 model_metadata: None,
                 retry_after_secs: None,
                 should_retry: Some(false),
-                diagnostics: meta.to_api_diagnostics(),
+                diagnostics: meta.to_api_diagnostics().map(Box::new),
                 error_code: None,
             }
         }
@@ -342,7 +342,7 @@ fn bridge_stream_to_inference(
             model_metadata: None,
             retry_after_secs: meta.retry_after_secs,
             should_retry: None,
-            diagnostics: meta.to_api_diagnostics(),
+            diagnostics: meta.to_api_diagnostics().map(Box::new),
             error_code: None,
         },
         ErrorClass::RetryableOverload => InferenceError::Api {
@@ -352,7 +352,7 @@ fn bridge_stream_to_inference(
             model_metadata: None,
             retry_after_secs: meta.retry_after_secs,
             should_retry: None,
-            diagnostics: meta.to_api_diagnostics(),
+            diagnostics: meta.to_api_diagnostics().map(Box::new),
             error_code: None,
         },
         ErrorClass::Transient => InferenceError::Api {
@@ -361,7 +361,7 @@ fn bridge_stream_to_inference(
             model_metadata: None,
             retry_after_secs: meta.retry_after_secs,
             should_retry: None,
-            diagnostics: meta.to_api_diagnostics(),
+            diagnostics: meta.to_api_diagnostics().map(Box::new),
             error_code: None,
         },
         // Generic stream errors remain StreamError (retryable transport-class).
