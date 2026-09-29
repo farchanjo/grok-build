@@ -1,5 +1,4 @@
 #![cfg_attr(rustfmt, rustfmt::skip)]
-#![allow(unused_imports)]
 //! [`acp::Agent`] trait implementation for [`MvpAgent`].
 //! Co-located child of `mvp_agent` (`use super::*`).
 use super::*;
@@ -1135,6 +1134,11 @@ impl acp::Agent for MvpAgent {
             .resolve_mcp_servers(arguments.mcp_servers, cwd.as_path())
             .await;
         let mcp_meta_config_map = parse_mcp_meta_config(arguments.meta.as_ref());
+        // `_meta.sessionId` lets a host mint the id itself. NOTE: an id that
+        // already exists is NOT refused (unlike the CLI's `--session-id`) and
+        // is NOT loaded: the turn starts with an empty context and appends to
+        // the existing session directory. A host that wants the persisted
+        // transcript back must call `session/load` (or `session/resume`).
         let client_session_id = arguments
             .meta
             .as_ref()
@@ -1511,9 +1515,13 @@ impl acp::Agent for MvpAgent {
             insert_applied_tool_overrides(obj, applied_tool_overrides.as_ref());
         }
         Ok(
-            acp::NewSessionResponse::new(session_id)
+            acp::NewSessionResponse::new(session_id.clone())
                 .models(Some(models))
-                .meta(meta.as_object().cloned()),
+                .meta(meta.as_object().cloned())
+                // Durable resume handle for hosts that key their own session
+                // store off it (the OpenDesign daemon reads exactly this key,
+                // and a null handle makes every run a cold `session/new`).
+                .extra("openCodeSessionId", session_id.0.to_string()),
         )
     }
     async fn load_session(
@@ -2133,8 +2141,8 @@ impl acp::Agent for MvpAgent {
                 let Some(companion) = route_companion.as_ref() else {
                     return true;
                 };
-                if let Some(canon) = companion.canonical_model.as_deref() {
-                    if key.0.as_ref() != canon && persisted_model.0.as_ref() != canon {
+                if let Some(canon) = companion.canonical_model.as_deref()
+                    && key.0.as_ref() != canon && persisted_model.0.as_ref() != canon {
                         tracing::warn!(
                             session_id = %session_id.0,
                             selected = %key.0,
@@ -2143,7 +2151,6 @@ impl acp::Agent for MvpAgent {
                         );
                         return false;
                     }
-                }
                 let Some(entry) = models.get(key.0.as_ref()) else {
                     return false;
                 };
@@ -2471,7 +2478,13 @@ impl acp::Agent for MvpAgent {
         );
         let response = acp::LoadSessionResponse::new()
             .models(Some(model_state))
-            .meta(response_meta.as_object().cloned());
+            .meta(response_meta.as_object().cloned())
+            // The spec's load response has no session id, and hosts differ:
+            // some keep the id they sent, others require it echoed (the
+            // OpenDesign daemon fails the run without it) and reuse the same
+            // key as the durable resume handle.
+            .extra("sessionId", session_id.0.to_string())
+            .extra("openCodeSessionId", session_id.0.to_string());
         if let Some(handle) = self.sessions.borrow().get(&session_id) {
             let _ = handle.cmd_tx.send(SessionCommand::AdvertiseCommands);
             if restored_awaiting_plan_approval {
@@ -2519,7 +2532,10 @@ impl acp::Agent for MvpAgent {
             .modes(loaded.modes)
             .models(loaded.models)
             .config_options(loaded.config_options)
-            .meta(loaded.meta))
+            .meta(loaded.meta)
+            // Carry the load response's host-facing ids (sessionId /
+            // openCodeSessionId) through the resume alias.
+            .extras(loaded.extra))
     }
     async fn close_session(
         &self,
@@ -4630,11 +4646,19 @@ impl acp::Agent for MvpAgent {
 /// `NotFound` case with `kind: "resume_failed"` — the convention resume-capable
 /// adapters already use — so the host matches a structured marker instead of
 /// string-matching a generic I/O message.
+///
+/// The tag rides the JSON-RPC frame, but a host that only classifies resume
+/// failures by prose reads the child's **stderr** (the OpenDesign daemon does
+/// exactly that for an agent id it does not know). So the same phrase is
+/// echoed to stderr, and the message carries it too: either channel tells the
+/// host to clear the stale session and resend the transcript.
 fn resume_failed_acp(e: &std::io::Error, session_id: &acp::SessionId) -> acp::Error {
     let mut err = crate::session::persistence::io_error_to_acp(e);
     if e.kind() != std::io::ErrorKind::NotFound {
         return err;
     }
+    err.message = format!("No session found for session id {}", session_id.0);
+    eprintln!("{}", err.message);
     let mut data = err
         .data
         .clone()
@@ -4663,6 +4687,12 @@ mod resume_failed_acp_tests {
         assert_eq!(data["sessionId"], "01a0e3fc-2b1e-7491-96ba-ca94f065ec59");
         // The host matches the structured marker, not the prose.
         assert_eq!(data["code"], "FS_NOT_FOUND");
+        // Prose fallback: a host that reads stderr (or the message) matches the
+        // same phrase, so `resume_failed` still triggers its reseed path.
+        assert_eq!(
+            err.message,
+            "No session found for session id 01a0e3fc-2b1e-7491-96ba-ca94f065ec59"
+        );
     }
 
     #[test]
@@ -4671,6 +4701,49 @@ mod resume_failed_acp_tests {
         let data = err.data.expect("data");
         assert_eq!(data["code"], "FS_PERMISSION_DENIED");
         assert!(data.get("kind").is_none());
+        // Only the NotFound case gets the host-facing phrase.
+        assert_eq!(err.message, "Permission denied.");
+    }
+}
+
+#[cfg(test)]
+mod acp_session_response_wire_shape_tests {
+    use agent_client_protocol as acp;
+
+    fn session_id() -> acp::SessionId {
+        acp::SessionId::new("01a0e3fc-2b1e-7491-96ba-ca94f065ec59")
+    }
+
+    /// Hosts key their own session store off the response body: the OpenDesign
+    /// daemon persists `openCodeSessionId` as the resume handle and needs
+    /// `sessionId` echoed on a load. Both ride the vendored schema patch
+    /// (`third_party/agent-client-protocol-schema`), so this pins the keys.
+    #[test]
+    fn acp_session_response_wire_shape_pins_host_fields() {
+        let sid = session_id();
+        let new = acp::NewSessionResponse::new(sid.clone())
+            .extra("openCodeSessionId", sid.0.to_string());
+        let new = serde_json::to_value(&new).expect("serialize");
+        assert_eq!(new["sessionId"], "01a0e3fc-2b1e-7491-96ba-ca94f065ec59");
+        assert_eq!(
+            new["openCodeSessionId"],
+            "01a0e3fc-2b1e-7491-96ba-ca94f065ec59"
+        );
+
+        let load = acp::LoadSessionResponse::new()
+            .extra("sessionId", sid.0.to_string())
+            .extra("openCodeSessionId", sid.0.to_string());
+        let load = serde_json::to_value(&load).expect("serialize");
+        assert_eq!(load["sessionId"], "01a0e3fc-2b1e-7491-96ba-ca94f065ec59");
+        assert_eq!(
+            load["openCodeSessionId"],
+            "01a0e3fc-2b1e-7491-96ba-ca94f065ec59"
+        );
+
+        // A response with no extras must not grow keys: the empty flatten map
+        // serializes as nothing, so strict clients see the spec shape.
+        let bare = serde_json::to_value(acp::LoadSessionResponse::new()).expect("serialize");
+        assert!(bare.as_object().expect("object").is_empty());
     }
 }
 
