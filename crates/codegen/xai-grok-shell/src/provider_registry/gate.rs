@@ -105,6 +105,6 @@ mod tests {
     fn constant_default_is_enabled() {
         // Hold the shared lock so this read cannot race a concurrent mutator.
         let _guard = multi_account_rollout_env_lock();
-        assert!(MULTI_ACCOUNT_ROLLOUT_DEFAULT_ENABLED);
+        const { assert!(MULTI_ACCOUNT_ROLLOUT_DEFAULT_ENABLED) };
     }
 }

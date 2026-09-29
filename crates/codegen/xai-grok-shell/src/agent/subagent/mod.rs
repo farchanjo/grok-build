@@ -10,22 +10,13 @@
 //!   `SubagentSpawnContext` parameter bag — it never borrows `MvpAgent`.
 //! - Child sessions share the parent's hunk tracker, filesystem, terminal, and env
 //!   so that edits, bash commands, and file reads go through the same backends.
-#![allow(unused_imports)]
 use crate::extensions::notification::{SessionNotification, SessionUpdate};
 use crate::session::{
     self, SessionCommand, SessionHandle, SessionThread,
-    commands::{PromptCompletionKind, PromptTurnResult as SubagentPromptTurnResult},
-    fs_watch::FsWatchCapabilities,
-    info::Info as SessionInfo,
+    commands::PromptTurnResult as SubagentPromptTurnResult, info::Info as SessionInfo,
 };
 use crate::terminal::AsyncTerminalRunner;
-use crate::tools::ToolContext;
-use crate::upload::trace::{
-    GCS_SCHEMA_VERSION, PromptMetadata, SubagentSpawnedRef, TurnResultMetadata,
-    local_sandbox_telemetry, upload_metadata, upload_session_state, upload_subagent_metadata,
-    upload_turn_result,
-};
-use crate::upload::turn::{PromptTraceContext, complete_prompt_trace};
+use crate::upload::trace::upload_subagent_metadata;
 use agent_client_protocol as acp;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -45,7 +36,7 @@ mod coordinator_query;
 pub(crate) mod exact_route;
 mod handle_request;
 mod identity_store;
-pub(crate) use handle_request::{handle_assigned_subagent_request, handle_subagent_request};
+pub(crate) use handle_request::handle_assigned_subagent_request;
 
 #[derive(Debug)]
 pub(crate) struct AssignedRoute {
@@ -1071,7 +1062,7 @@ async fn read_parent_inference_config(
             let parent_entry =
                 crate::agent::config::find_model_by_id(&ctx.available_models, model_id.0.as_ref());
 
-            let mut inherited = if let Some(entry) = parent_entry {
+            let inherited = if let Some(entry) = parent_entry {
                 // Build the canonical config through the catalog entry so
                 // provider_identity / openrouter_* / include_message_model_id /
                 // auth_scheme survive for BYOK providers.
@@ -3300,7 +3291,7 @@ fn update_subagent_meta_snapshot_ref(
         let meta_path = dir.join("meta.json");
         match std::fs::read_to_string(&meta_path) {
             Ok(data) => match serde_json::from_str::<SubagentMeta>(&data) {
-                Ok(meta) => meta,
+                Ok(meta) => Box::new(meta),
                 Err(e) => {
                     tracing::warn!(error = %e, "failed to parse subagent meta; snapshot_ref not persisted (resume pointer lost)");
                     return false;
@@ -3339,7 +3330,7 @@ fn persist_subagent_completion(
             Ok(identity_store::Lookup::Assigned {
                 meta,
                 owner: current,
-            }) if current.matches(owner) => Some((meta, true)),
+            }) if current.matches(owner) => Some((*meta, true)),
             Ok(_) => None,
             Err(error) => {
                 tracing::warn!(%error, subagent_id, "assigned completion metadata lookup failed");
@@ -3463,7 +3454,7 @@ fn running_orphan_meta(
     let meta = match identity_store::lookup(session_dir, subagent_id).ok()? {
         identity_store::Lookup::Missing => return None,
         identity_store::Lookup::LegacyUnassigned { meta }
-        | identity_store::Lookup::Assigned { meta, .. } => meta,
+        | identity_store::Lookup::Assigned { meta, .. } => *meta,
     };
     if meta.status != "running" || meta.parent_session_id != parent_session_id {
         return None;
@@ -3549,8 +3540,8 @@ pub(crate) fn reconcile_orphaned_subagents(
                     finalize_orphaned_subagent(
                         session_dir,
                         &subagent_dir,
-                        m,
-                        assigned_meta_owner.as_ref(),
+                        *m,
+                        assigned_meta_owner.as_deref(),
                         gateway,
                         parent_cmd_tx,
                     );

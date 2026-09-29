@@ -10,7 +10,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64};
 /// Memory subsystem state for a session.
 pub struct SessionMemory {
     /// Memory storage handle for writing flush output (None when memory disabled).
-    /// Wrapped in `RefCell` to allow `/memory on|off` toggle from `&Arc<SessionActor>`.
+    /// Wrapped in `RefCell` to allow `/memory on|off` toggle from `&Rc<SessionActor>`.
     pub storage: RefCell<Option<crate::session::memory::MemoryStorage>>,
     /// Whether to write a session summary to memory on session end.
     pub save_on_end: bool,
@@ -39,7 +39,7 @@ pub struct SessionMemory {
     /// Number of failed flushes.
     pub flush_error_count: AtomicU64,
     /// Counts model-initiated `memory_search` tool calls.
-    /// Wrapped in `RefCell` to allow `/memory on|off` toggle from `&Arc<SessionActor>`.
+    /// Wrapped in `RefCell` to allow `/memory on|off` toggle from `&Rc<SessionActor>`.
     pub search_counter: RefCell<Option<Arc<AtomicU64>>>,
     /// Counts first-turn memory context injections.
     pub injection_count: AtomicU64,

@@ -916,7 +916,7 @@ pub(crate) async fn persist_setting(
             };
             // Persisted in the same `[hints]` namespace as the worktree hints;
             // validation lives in TersifyScope::from_config_str (fail-closed).
-            let normalized = xai_grok_shell::util::config::TersifyScope::from_config_str(&s)
+            let normalized = xai_grok_shell::util::config::TersifyScope::from_config_str(s)
                 .as_config_str();
             tokio::task::spawn_blocking(move || {
                 crate::config_toml_edit::set_hint("tersify_scope", normalized)
@@ -929,7 +929,7 @@ pub(crate) async fn persist_setting(
             let SettingValue::Enum(s) = value else {
                 return Err(kind_mismatch("tersify_level", "Enum", &value));
             };
-            let normalized = xai_grok_shell::util::config::TersifyLevel::from_config_str(&s)
+            let normalized = xai_grok_shell::util::config::TersifyLevel::from_config_str(s)
                 .as_config_str();
             tokio::task::spawn_blocking(move || {
                 crate::config_toml_edit::set_hint("tersify_level", normalized)

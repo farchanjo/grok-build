@@ -238,14 +238,13 @@ fn pr22_local_markdown_links_resolve_within_repository() {
                     ));
                 }
                 // Guard against a symlink that escapes the repository.
-                if let Ok(canonical) = resolved.canonicalize() {
-                    if let Ok(root_canon) = root.canonicalize() {
-                        if !is_within(&canonical, &root_canon) {
-                            failures.push(format!(
-                                "source={source} target={target} escapes repository via symlink"
-                            ));
-                        }
-                    }
+                if let Ok(canonical) = dunce::canonicalize(&resolved)
+                    && let Ok(root_canon) = dunce::canonicalize(&root)
+                    && !is_within(&canonical, &root_canon)
+                {
+                    failures.push(format!(
+                        "source={source} target={target} escapes repository via symlink"
+                    ));
                 }
             }
         }

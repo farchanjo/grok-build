@@ -26,6 +26,7 @@ use crate::session::two_pass::{
     note_for_two_pass_pass2, split_conversation_for_two_pass,
 };
 use agent_client_protocol as acp;
+use std::rc::Rc;
 use std::sync::Arc;
 use xai_chat_state::compaction_utils::{
     CompactedHistoryInput, CompactionAttempt, CompactionMediaDescriptors, build_compacted_history,
@@ -318,7 +319,7 @@ impl SessionActor {
             compaction_prefire_note1_chars = tracing::field::Empty,
         )
     )]
-    pub(crate) async fn run_prefire_pass1(self: &Arc<Self>) {
+    pub(crate) async fn run_prefire_pass1(self: &Rc<Self>) {
         let (_cancel, _cancel_scope) = self.compaction.cancel.enter();
         struct InFlightGuard<'a>(&'a crate::session::compaction_config::PrefireState);
         impl Drop for InFlightGuard<'_> {
@@ -343,7 +344,7 @@ impl SessionActor {
             span.record("compaction_prefire_note1_chars", v as i64);
         }
     }
-    async fn run_prefire_pass1_inner(self: &Arc<Self>) -> PrefirePass1Run {
+    async fn run_prefire_pass1_inner(self: &Rc<Self>) -> PrefirePass1Run {
         if !self.two_pass_active() {
             return PrefireOutcome::Disabled.into();
         }
@@ -632,7 +633,7 @@ impl SessionActor {
     /// The counter is incremented before the flush check so the once-per-cycle
     /// guard does not suppress the first eligible flush.
     async fn maybe_pre_compaction_flush(
-        self: &Arc<Self>,
+        self: &Rc<Self>,
         total_tokens: u64,
         context_window: u64,
         trigger: &'static str,
@@ -748,7 +749,7 @@ impl SessionActor {
         )
     )]
     pub(crate) async fn run_compact(
-        self: &Arc<Self>,
+        self: &Rc<Self>,
         user_context: Option<String>,
     ) -> Result<(), acp::Error> {
         if self.execution_backend.get().is_external() {
@@ -1835,31 +1836,24 @@ impl SessionActor {
                 (Vec::<std::path::PathBuf>::new(), vec![], empty_edited, ctx)
             } else {
                 let agents_md: Vec<std::path::PathBuf> = self
-                    .agent
-                    .borrow()
-                    .tool_bridge()
+                    .tool_bridge_owned()
                     .agents_md_reminded_paths()
                     .await
                     .into_iter()
                     .collect();
-                let bridge_for_skills = self.agent.borrow().tool_bridge().clone();
+                let bridge_for_skills = self.tool_bridge_owned();
                 let skills = bridge_for_skills.slash_skills().await;
                 let edited_paths = self.chat_state_handle.get_agent_edited_paths().await;
                 let ctx = {
-                    let bridge_tasks = self
-                        .agent
-                        .borrow()
-                        .tool_bridge()
-                        .list_background_tasks()
-                        .await;
+                    let bridge_tasks = self.tool_bridge_owned().list_background_tasks().await;
                     let pending_tasks: Vec<_> =
                         bridge_tasks.into_iter().filter(|t| !t.completed).collect();
                     let (execute_tool_name, monitor_tool_name, wait_tool_name) =
                         if pending_tasks.is_empty() {
                             (None, None, None)
                         } else {
-                            let agent_ref = self.agent.borrow();
-                            let bridge = agent_ref.tool_bridge();
+                            // Owned bridge: the `agent` borrow must end before the awaits below.
+                            let bridge = self.tool_bridge_owned();
                             let empty = serde_json::json!({});
                             let execute = bridge
                                 .render_prompt("${{ tools.by_kind.execute }}", &empty)
@@ -1945,7 +1939,7 @@ impl SessionActor {
                         };
                         use crate::tools::todo::{TodoState, TodoStatus};
                         use xai_grok_tools::types::resources::State;
-                        let bridge = self.agent.borrow().tool_bridge().clone();
+                        let bridge = self.tool_bridge_owned();
                         bridge
                             .read_resource::<State<TodoState>>()
                             .await
@@ -1985,8 +1979,8 @@ impl SessionActor {
             if use_short_prompt || state_context.running_subagents.is_empty() {
                 None
             } else {
-                let agent_ref = self.agent.borrow();
-                let bridge = agent_ref.tool_bridge();
+                // Owned bridge: the `agent` borrow must end before the awaits below.
+                let bridge = self.tool_bridge_owned();
                 let empty = serde_json::json!({});
                 let poll_name = bridge
                     .render_prompt("${{ tools.by_kind.background_task_action }}", &empty)
@@ -2015,8 +2009,8 @@ impl SessionActor {
             if use_short_prompt || state_context.connected_mcp_servers.is_empty() {
                 None
             } else {
-                let agent_ref = self.agent.borrow();
-                let bridge = agent_ref.tool_bridge();
+                // Owned bridge: the `agent` borrow must end before the awaits below.
+                let bridge = self.tool_bridge_owned();
                 let empty = serde_json::json!({});
                 let search_name = bridge
                     .render_prompt("${{ tools.by_kind.search_tool }}", &empty)
@@ -2323,14 +2317,8 @@ impl SessionActor {
             .send(PersistenceMsg::PlanState(
                 crate::tools::todo::TodoState::default(),
             ));
-        self.agent
-            .borrow()
-            .tool_bridge()
-            .on_agents_md_compaction()
-            .await;
-        self.agent
-            .borrow()
-            .tool_bridge()
+        self.tool_bridge_owned().on_agents_md_compaction().await;
+        self.tool_bridge_owned()
             .on_skill_discovery_compaction()
             .await;
         self.persist_announcement_state().await;
@@ -2568,7 +2556,7 @@ impl SessionActor {
     /// On model change: clear sticky/other suppress and compact if the window shrank.
     /// Leaves credit/auth suppress (a switch can't fix those) and short-circuits.
     /// Auth compact failures abort the turn (same as pre-sampling/preflight).
-    pub(crate) async fn maybe_compact_on_model_switch(self: &Arc<Self>) -> Result<(), acp::Error> {
+    pub(crate) async fn maybe_compact_on_model_switch(self: &Rc<Self>) -> Result<(), acp::Error> {
         self.refresh_token_if_expired().await;
         let Some(prev) = self.compaction.previous_model.take() else {
             return Ok(());
@@ -2636,7 +2624,7 @@ impl SessionActor {
         )
     )]
     pub(crate) async fn run_compact_only(
-        self: &Arc<Self>,
+        self: &Rc<Self>,
         trigger_info: AutoCompactTriggerInfo,
     ) -> Result<(), acp::Error> {
         if self.execution_backend.get().is_external() {
@@ -2756,7 +2744,7 @@ impl SessionActor {
         };
         // Tolerant read: an attributed compaction failure carries
         // `{message, compaction_route}` rather than a bare string.
-        let error_str = error.map(|e| Self::acp_error_message(e));
+        let error_str = error.map(Self::acp_error_message);
         let artifact = CompactionRequestFile {
             schema_version: 2,
             request_id,
@@ -2787,6 +2775,8 @@ impl SessionActor {
 }
 #[cfg(test)]
 mod inline_auto_compact_flow_tests {
+    use std::rc::Rc;
+
     use super::super::support::*;
     use super::super::*;
     use super::{AutoCompactTriggerInfo, SuppressReason};
@@ -3290,7 +3280,7 @@ mod inline_auto_compact_flow_tests {
             .run_until(async {
                 let (gateway_tx, _gateway_rx) = mpsc::unbounded_channel();
                 let (persistence_tx, _persistence_rx) = mpsc::unbounded_channel();
-                let actor = Arc::new(
+                let actor = Rc::new(
                     create_test_actor(50_000, 200_000, 85, gateway_tx, persistence_tx).await,
                 );
                 for reason in [SuppressReason::Size, SuppressReason::Other] {
@@ -3329,7 +3319,7 @@ mod inline_auto_compact_flow_tests {
             .run_until(async {
                 let (gateway_tx, _gateway_rx) = mpsc::unbounded_channel();
                 let (persistence_tx, _persistence_rx) = mpsc::unbounded_channel();
-                let actor = Arc::new(
+                let actor = Rc::new(
                     create_test_actor(214_000, 200_000, 85, gateway_tx, persistence_tx).await,
                 );
                 for (reason, expected) in [
@@ -3897,7 +3887,7 @@ mod inline_auto_compact_flow_tests {
 
                 let (gateway_tx, _gateway_rx) = mpsc::unbounded_channel();
                 let (persistence_tx, mut persistence_rx) = mpsc::unbounded_channel();
-                let actor = Arc::new(
+                let actor = Rc::new(
                     create_test_actor(180_000, 200_000, 85, gateway_tx, persistence_tx).await,
                 );
                 let mut config = actor
@@ -4002,7 +3992,7 @@ mod inline_auto_compact_flow_tests {
 
                 let (gateway_tx, _gateway_rx) = mpsc::unbounded_channel();
                 let (persistence_tx, _persistence_rx) = mpsc::unbounded_channel();
-                let actor = Arc::new(
+                let actor = Rc::new(
                     create_test_actor(180_000, 200_000, 85, gateway_tx, persistence_tx).await,
                 );
                 let mut config = actor
@@ -4078,7 +4068,7 @@ mod inline_auto_compact_flow_tests {
             .run_until(async {
                 let (gateway_tx, _gateway_rx) = mpsc::unbounded_channel();
                 let (persistence_tx, mut persistence_rx) = mpsc::unbounded_channel();
-                let actor = Arc::new(
+                let actor = Rc::new(
                     create_test_actor(180_000, 200_000, 85, gateway_tx, persistence_tx).await,
                 );
                 let base_url = spawn_deterministic_401_server().await;
@@ -4171,7 +4161,7 @@ mod inline_auto_compact_flow_tests {
             .run_until(async {
                 let (gateway_tx, _gateway_rx) = mpsc::unbounded_channel();
                 let (persistence_tx, mut persistence_rx) = mpsc::unbounded_channel();
-                let actor = Arc::new(
+                let actor = Rc::new(
                     create_test_actor(214_000, 200_000, 85, gateway_tx, persistence_tx).await,
                 );
                 let base_url = spawn_deterministic_401_server().await;
@@ -4246,7 +4236,7 @@ mod inline_auto_compact_flow_tests {
             .run_until(async {
                 let (gateway_tx, _gateway_rx) = mpsc::unbounded_channel();
                 let (persistence_tx, _persistence_rx) = mpsc::unbounded_channel();
-                let actor = Arc::new(
+                let actor = Rc::new(
                     create_test_actor(214_000, 200_000, 85, gateway_tx, persistence_tx).await,
                 );
                 let base_url = spawn_deterministic_400_server().await;
@@ -4288,7 +4278,7 @@ mod inline_auto_compact_flow_tests {
             .run_until(async {
                 let (gateway_tx, _gateway_rx) = mpsc::unbounded_channel();
                 let (persistence_tx, _persistence_rx) = mpsc::unbounded_channel();
-                let actor = Arc::new(
+                let actor = Rc::new(
                     create_test_actor(214_000, 200_000, 85, gateway_tx, persistence_tx).await,
                 );
                 actor
@@ -4355,7 +4345,7 @@ mod inline_auto_compact_flow_tests {
             .run_until(async {
                 let (gateway_tx, _gateway_rx) = mpsc::unbounded_channel();
                 let (persistence_tx, _persistence_rx) = mpsc::unbounded_channel();
-                let actor = Arc::new(
+                let actor = Rc::new(
                     create_test_actor(50_000, 200_000, 85, gateway_tx, persistence_tx).await,
                 );
                 let base_url = spawn_deterministic_400_server().await;
@@ -4417,7 +4407,7 @@ mod inline_auto_compact_flow_tests {
                 let prefix_len = conv.len();
                 let mut actor = create_test_actor(0, 40_000, 80, gateway_tx, persistence_tx).await;
                 actor.startup_hints.inherited_prefix_len = Some(prefix_len);
-                let actor = Arc::new(actor);
+                let actor = Rc::new(actor);
                 let server = MockInferenceServer::start().await.unwrap();
                 server.set_response("Summary of prior work. ".repeat(30));
                 let mut cfg = actor
@@ -4496,7 +4486,7 @@ mod inline_auto_compact_flow_tests {
                 let prefix_len = conv.len();
                 let mut actor = create_test_actor(0, 40_000, 80, gateway_tx, persistence_tx).await;
                 actor.startup_hints.inherited_prefix_len = Some(prefix_len);
-                let actor = Arc::new(actor);
+                let actor = Rc::new(actor);
                 let server = MockInferenceServer::start().await.unwrap();
                 server.set_response("Summary. ".repeat(70));
                 let mut cfg = actor

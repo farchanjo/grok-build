@@ -6,6 +6,11 @@ edition.workspace = true
 authors = ["xAI"]
 description = "Streaming markdown renderer for terminal UIs"
 
+repository.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(fuzzing)'] }
 

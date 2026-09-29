@@ -1909,8 +1909,10 @@ mod tests {
     fn sessionless_bearer_needs_env_key_and_no_provider_command() {
         let _key = crate::env::EnvVarGuard::set("GROK_API_KEY", "test-bearer");
 
-        let mut ctx = crate::auth::GrokComConfig::default();
-        ctx.auth_provider_command = None;
+        let mut ctx = crate::auth::GrokComConfig {
+            auth_provider_command: None,
+            ..Default::default()
+        };
         assert!(
             has_sessionless_bearer(&ctx),
             "a bearer env var alone must qualify"

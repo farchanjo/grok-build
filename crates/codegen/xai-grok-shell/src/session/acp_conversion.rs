@@ -957,10 +957,13 @@ mod tests {
         let content = update.fields.content.as_ref().expect("should have content");
         assert_eq!(content.len(), 1);
         match &content[0] {
-            acp::ToolCallContent::Content(acp::Content {
-                content: acp::ContentBlock::Text(tc),
-                ..
-            }) => assert!(tc.text.contains("Found 3 memory result(s)")),
+            acp::ToolCallContent::Content(content) => match &**content {
+                acp::Content {
+                    content: acp::ContentBlock::Text(tc),
+                    ..
+                } => assert!(tc.text.contains("Found 3 memory result(s)")),
+                other => panic!("expected Text content, got {other:?}"),
+            },
             other => panic!("expected Text content, got {other:?}"),
         }
 
@@ -1080,10 +1083,13 @@ mod tests {
         let update = acp_tool_update(&output, "tc-1", None, None).expect("update");
         let content = update.fields.content.expect("content");
         let text = match &content[0] {
-            acp::ToolCallContent::Content(acp::Content {
-                content: acp::ContentBlock::Text(t),
-                ..
-            }) => t.text.clone(),
+            acp::ToolCallContent::Content(content) => match &**content {
+                acp::Content {
+                    content: acp::ContentBlock::Text(t),
+                    ..
+                } => t.text.clone(),
+                other => panic!("expected text content, got {other:?}"),
+            },
             other => panic!("expected text content, got {other:?}"),
         };
         let prompt_json: serde_json::Value = serde_json::from_str(&text).expect("prompt json");
@@ -1343,10 +1349,22 @@ mod tests {
         assert_eq!(content.len(), 2, "should have 2 image blocks");
         for block in content {
             match block {
-                acp::ToolCallContent::Content(acp::Content {
-                    content: acp::ContentBlock::Image(img),
-                    ..
-                }) => {
+                acp::ToolCallContent::Content(content)
+                    if matches!(
+                        &**content,
+                        acp::Content {
+                            content: acp::ContentBlock::Image(_),
+                            ..
+                        }
+                    ) =>
+                {
+                    let acp::Content {
+                        content: acp::ContentBlock::Image(img),
+                        ..
+                    } = &**content
+                    else {
+                        unreachable!("guarded above")
+                    };
                     assert_eq!(img.mime_type, "image/jpeg");
                 }
                 other => panic!("expected Image block, got {other:?}"),

@@ -42,6 +42,7 @@ pub const SESSION_ROUTE_SENTINEL: &str = "@session";
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum AuxiliaryPurpose {
     Compaction,
+    #[allow(dead_code)]
     CompactionRecap,
     MediaDescribe,
     MediaVideo,
@@ -53,6 +54,7 @@ pub enum AuxiliaryPurpose {
     PromptSuggest,
     ShellSuggest,
     GoalEvaluator,
+    #[allow(dead_code)]
     GoalClassifier,
     AutoClassifier,
     /// `/btw` side-question one-shot (inherits frozen session route).
@@ -179,9 +181,11 @@ impl std::error::Error for AuxiliaryRouteError {}
 /// Exact resolved auxiliary route handle.
 #[derive(Clone, Debug)]
 pub struct ResolvedAuxiliaryRoute {
+    #[allow(dead_code)]
     pub purpose: AuxiliaryPurpose,
     pub kind: AuxiliaryRouteKind,
     /// Canonical catalog selection when catalog-backed; absent for pure legacy.
+    #[allow(dead_code)]
     pub canonical_selection_id: Option<String>,
     /// Wire model id — the only model string that reaches requests.
     pub upstream_model_id: String,
@@ -258,6 +262,7 @@ impl ResolvedAuxiliaryRoute {
     }
 
     /// Secret-free purpose/kind snapshot for bounded metadata.
+    #[cfg(test)]
     pub fn disclosure_meta(&self) -> serde_json::Value {
         serde_json::json!({
             "purpose": self.purpose.as_str(),
@@ -745,6 +750,7 @@ pub fn effective_media_vision_pin(
 /// `MediaVideo`, or `MediaPdf`). Callers that want automatic vision fallback
 /// when `@session` is not image-capable should rewrite the pin with
 /// [`effective_media_vision_pin`] first.
+#[allow(dead_code)]
 pub fn resolve_media_describe_route(
     mut inputs: AuxiliaryRouteInputs<'_>,
     purpose: AuxiliaryPurpose,
@@ -781,7 +787,7 @@ pub fn resolve_media_stt_route(
     let pin = audio_model_pin.map(str::trim).filter(|s| !s.is_empty());
     match pin {
         None => {}
-        Some(p) if MEDIA_STT_ROUTE_ALIASES.iter().any(|a| *a == p) => {}
+        Some(p) if MEDIA_STT_ROUTE_ALIASES.contains(&p) => {}
         Some(other) => {
             return Err(AuxiliaryRouteError::ExplicitPinFailed {
                 selection: other.to_owned(),
@@ -817,7 +823,7 @@ pub fn session_title_soft_fallback_route(
 ) -> ResolvedAuxiliaryRoute {
     let route = frozen_session_route
         .with_operation_partition(AuxiliaryPurpose::SessionTitle.operation_partition());
-    let mut inference = frozen_session_inference.clone();
+    let inference = frozen_session_inference.clone();
     // Wire model stays the true primary upstream — never an unresolved slug.
     ResolvedAuxiliaryRoute {
         purpose: AuxiliaryPurpose::SessionTitle,
@@ -844,10 +850,12 @@ impl SessionTitleSamplerPairing {
         Ok(Self { route })
     }
 
+    #[allow(dead_code)]
     pub fn model(&self) -> &str {
         &self.route.upstream_model_id
     }
 
+    #[allow(dead_code)]
     pub fn client(&self) -> Result<xai_grok_inference::InferenceClient, String> {
         self.route.client()
     }
@@ -865,41 +873,6 @@ pub fn sanitize_compaction_inference(cfg: &mut InferenceConfig) {
     cfg.compactions_remaining = None;
     cfg.compaction_at_tokens = None;
     cfg.doom_loop_recovery = None;
-}
-
-/// Convenience builder for session-actor call sites.
-pub fn aux_inputs_from_session<'a>(
-    purpose: AuxiliaryPurpose,
-    requested: &'a str,
-    models_manager: &'a ModelsManager,
-    frozen_session_route: Option<&'a ProviderRouteContext>,
-    frozen_session_inference: &'a InferenceConfig,
-    frozen_session_selection_id: &'a str,
-    grok_home: Option<&'a Path>,
-    session_key: Option<&'a str>,
-    disable_api_key_auth: bool,
-    alpha_test_key: Option<&'a str>,
-    client_version: Option<&'a str>,
-    client_identifier: Option<&'a str>,
-    max_retries: Option<u32>,
-) -> AuxiliaryRouteInputs<'a> {
-    AuxiliaryRouteInputs {
-        purpose,
-        requested,
-        models_manager,
-        frozen_session_route,
-        frozen_session_inference,
-        frozen_session_selection_id,
-        grok_home,
-        session_key,
-        disable_api_key_auth,
-        alpha_test_key,
-        client_version,
-        client_identifier,
-        max_retries,
-        allow_cross_account_fallback: false,
-        explicit_pin_fail_closed: false,
-    }
 }
 
 #[cfg(test)]
@@ -1046,8 +1019,10 @@ mod tests {
         home: &Path,
     ) -> ModelsManager {
         materialize_providers(home, &models, &providers);
-        let mut config = crate::agent::config::Config::default();
-        config.model_providers = providers;
+        let config = crate::agent::config::Config {
+            model_providers: providers,
+            ..Default::default()
+        };
         ModelsManager::new(
             None,
             models,

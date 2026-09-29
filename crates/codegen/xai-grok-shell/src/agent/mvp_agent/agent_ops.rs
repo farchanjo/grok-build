@@ -1,7 +1,7 @@
 #![cfg_attr(rustfmt, rustfmt::skip)]
-#![allow(unused_imports)]
 //! Inherent [`MvpAgent`] helpers (MCP/clients/gateway, settings/models, session ops, spawn).
 //! Co-located child of `mvp_agent` (`use super::*`).
+use std::rc::Rc;
 use super::*;
 /// `preferred` model, else catalog `current`, else first with own credentials.
 fn byok_from_models(

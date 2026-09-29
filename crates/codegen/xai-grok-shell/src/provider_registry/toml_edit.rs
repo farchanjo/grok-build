@@ -220,26 +220,26 @@ fn validate_patch(patch: &ProviderTomlPatch) -> Result<(), ProviderLifecycleErro
     if let Some(url) = &patch.admin_base_url {
         validate_http_base_url(url)?;
     }
-    if let Some(v) = patch.pool_max_idle {
-        if v > 64 {
-            return Err(ProviderLifecycleError::Validation(format!(
-                "pool_max_idle {v} out of range 0-64"
-            )));
-        }
+    if let Some(v) = patch.pool_max_idle
+        && v > 64
+    {
+        return Err(ProviderLifecycleError::Validation(format!(
+            "pool_max_idle {v} out of range 0-64"
+        )));
     }
-    if let Some(v) = patch.pool_idle_timeout_secs {
-        if !(1..=3600).contains(&v) {
-            return Err(ProviderLifecycleError::Validation(format!(
-                "pool_idle_timeout_secs {v} out of range 1-3600"
-            )));
-        }
+    if let Some(v) = patch.pool_idle_timeout_secs
+        && !(1..=3600).contains(&v)
+    {
+        return Err(ProviderLifecycleError::Validation(format!(
+            "pool_idle_timeout_secs {v} out of range 1-3600"
+        )));
     }
-    if let Some(v) = patch.pool_connect_timeout_secs {
-        if !(1..=120).contains(&v) {
-            return Err(ProviderLifecycleError::Validation(format!(
-                "pool_connect_timeout_secs {v} out of range 1-120"
-            )));
-        }
+    if let Some(v) = patch.pool_connect_timeout_secs
+        && !(1..=120).contains(&v)
+    {
+        return Err(ProviderLifecycleError::Validation(format!(
+            "pool_connect_timeout_secs {v} out of range 1-120"
+        )));
     }
     if let Some(headers) = &patch.extra_headers {
         validate_extra_headers(headers)?;

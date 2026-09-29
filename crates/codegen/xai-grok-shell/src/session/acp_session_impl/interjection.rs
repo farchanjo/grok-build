@@ -243,7 +243,7 @@ impl SessionActor {
         if !text.trim_start().starts_with('/') {
             return None;
         }
-        let bridge = self.agent.borrow().tool_bridge().clone();
+        let bridge = self.tool_bridge_owned();
         let slash_skills = bridge.slash_skills().await;
         // Availability without `command_availability()`'s goal-reconciliation
         // side effects — this runs mid-turn inside the drain.

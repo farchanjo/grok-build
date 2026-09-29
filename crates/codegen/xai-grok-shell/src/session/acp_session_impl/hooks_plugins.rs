@@ -1,4 +1,5 @@
 use super::*;
+use std::rc::Rc;
 
 impl SessionActor {
     // ── Shared hook/plugin operation functions ────────────────────────
@@ -47,7 +48,7 @@ impl SessionActor {
         let resolved = crate::util::config::resolve_max_mcp_output_bytes_for_cwd(
             std::path::Path::new(&self.session_info.cwd),
         );
-        let bridge = std::sync::Arc::clone(self.agent.borrow().tool_bridge());
+        let bridge = std::sync::Arc::clone(&self.tool_bridge_owned());
         let toolset = bridge.toolset();
         let mut resources = toolset.resources.lock().await;
         let existing = resources
@@ -86,7 +87,7 @@ impl SessionActor {
 
     /// Handle a hooks management action from the pager modal.
     pub(super) async fn handle_hooks_action(
-        self: &Arc<Self>,
+        self: &Rc<Self>,
         action: xai_hooks_plugins_types::HooksAction,
     ) -> xai_hooks_plugins_types::ActionOutcome {
         use xai_hooks_plugins_types::{ActionOutcome, HooksAction, OutcomeStatus};
@@ -271,7 +272,7 @@ impl SessionActor {
 
     /// Handle a plugins management action from the pager modal.
     pub(super) async fn handle_plugins_action(
-        self: &Arc<Self>,
+        self: &Rc<Self>,
         action: xai_hooks_plugins_types::PluginsAction,
     ) -> xai_hooks_plugins_types::ActionOutcome {
         use xai_hooks_plugins_types::{ActionOutcome, OutcomeStatus, PluginsAction};
@@ -626,7 +627,7 @@ impl SessionActor {
     /// `pub(super)` so the `SessionCommand::ReloadHooks` arm in `run_session`
     /// (the parent module) can invoke it after an interactive folder-trust
     /// grant — same visibility as `apply_plugin_registry_snapshot` below.
-    pub(super) async fn reload_hooks_impl(self: &std::sync::Arc<Self>) -> String {
+    pub(super) async fn reload_hooks_impl(self: &Rc<Self>) -> String {
         let git_root = xai_grok_workspace::session::git::find_git_root_from_path(
             std::path::Path::new(&self.session_info.cwd),
         )
@@ -726,7 +727,7 @@ impl SessionActor {
     /// explicit `/plugins reload` (full local-install re-copy); incidental toggles
     /// pass `false` for the cheap skip-unchanged path.
     pub(super) async fn reload_plugins_impl(
-        self: &Arc<Self>,
+        self: &Rc<Self>,
         handle: &xai_grok_agent::plugins::SharedPluginRegistryHandle,
         force: bool,
     ) -> String {
@@ -835,7 +836,7 @@ impl SessionActor {
     /// eager fan-out to other live sessions when plugins change elsewhere).
     /// Returns `(hooks_reloaded, mcp_changed, skill_count)`.
     pub(super) async fn apply_plugin_registry_snapshot(
-        self: &Arc<Self>,
+        self: &Rc<Self>,
         new_registry_snapshot: Option<std::sync::Arc<xai_grok_agent::plugins::PluginRegistry>>,
     ) -> (usize, bool, usize) {
         let sid = self.session_info.id.0.as_ref();
@@ -948,11 +949,7 @@ impl SessionActor {
                     name,
                     crate::session::mcp_servers::MCP_TOOL_NAME_DELIMITER
                 );
-                let removed_count = self
-                    .agent
-                    .borrow()
-                    .tool_bridge()
-                    .unregister_tools_by_prefix(&prefix);
+                let removed_count = self.tool_bridge_owned().unregister_tools_by_prefix(&prefix);
                 tracing::info!(
                     server = name.as_str(),
                     tools_removed = removed_count,

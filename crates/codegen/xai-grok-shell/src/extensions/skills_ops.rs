@@ -10,14 +10,15 @@ use tokio_util::sync::CancellationToken;
 use serde::Deserialize;
 use xai_grok_agent::prompt::skills::{CompatConfig, SkillListing, list_skill_sources_with_plugins};
 use xai_grok_tools::implementations::grok_build::publish_from_fields;
+#[cfg(test)]
+use xai_grok_tools::implementations::skills::strict::EvalArm;
 use xai_grok_tools::implementations::skills::strict::{
-    EvalArm, EvalRunReport, LocalSkillEvidence, PublishScope, SKILLS_API_VERSION,
-    SkillHealthStatus, SkillIdentity, SkillRegressionSummary, SkillsListV1Response,
-    SkillsPublishResponse, SkillsRegressStatusResponse, SkillsValidateResponse, SkillsVersionError,
-    StrictSkillOutcome, build_managed_rows, dest_parent_for_scope, live_cases_fingerprint,
-    load_eval_report, load_eval_suite_from_dir, persist_eval_report, publish_skill_directory,
-    regression_key_matches, regression_store_key, require_api_version, run_eval_suite,
-    validate_strict_skill_dir,
+    EvalRunReport, LocalSkillEvidence, PublishScope, SKILLS_API_VERSION, SkillHealthStatus,
+    SkillIdentity, SkillRegressionSummary, SkillsListV1Response, SkillsPublishResponse,
+    SkillsRegressStatusResponse, SkillsValidateResponse, SkillsVersionError, StrictSkillOutcome,
+    build_managed_rows, dest_parent_for_scope, live_cases_fingerprint, load_eval_report,
+    load_eval_suite_from_dir, persist_eval_report, publish_skill_directory, regression_key_matches,
+    regression_store_key, require_api_version, run_eval_suite, validate_strict_skill_dir,
 };
 use xai_grok_tools::implementations::skills::types::{SkillInfo, SkillScope};
 use xai_grok_tools::util::grok_home::grok_home;
@@ -33,6 +34,7 @@ fn jobs() -> &'static Mutex<HashMap<String, RegressionJob>> {
 }
 
 struct RegressionJob {
+    #[allow(dead_code)]
     generation: u64,
     run_token: u64,
     cancel: Arc<AtomicBool>,
@@ -158,6 +160,7 @@ fn current_generation() -> u64 {
     INVENTORY_GENERATION.load(Ordering::Relaxed)
 }
 
+#[allow(dead_code)]
 fn bump_generation() -> u64 {
     INVENTORY_GENERATION
         .fetch_add(1, Ordering::Relaxed)
@@ -913,9 +916,11 @@ mod tests {
 
     #[test]
     fn smart_search_uses_prime_skills_consumer_min_score() {
-        let mut skills = xai_grok_config_types::SkillPrimeConfig::default();
-        skills.retrieval_profile = Some("shipped".into());
-        skills.min_score = 0.5;
+        let skills = xai_grok_config_types::SkillPrimeConfig {
+            retrieval_profile: Some("shipped".into()),
+            min_score: 0.5,
+            ..Default::default()
+        };
         let (profile, floor) = smart_search_profile_and_consumer_floor_from_skills(&skills);
         assert_eq!(profile.as_deref(), Some("shipped"));
         assert!(
@@ -967,6 +972,7 @@ mod tests {
     fn cancelled_report_does_not_overwrite_persisted_results() {
         let tmp = tempfile::tempdir().unwrap();
         let identity = SkillIdentity::new("commit", None);
+        #[cfg(test)]
         let keep = EvalRunReport {
             schema_version: 1,
             arm: EvalArm::Offline,

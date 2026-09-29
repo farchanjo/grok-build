@@ -5,6 +5,11 @@ version = "0.1.220-alpha.4"
 edition.workspace = true
 description = "Protobuf API definitions for Grok tools"
 
+repository.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
 [dependencies]
 tonic-prost = { workspace = true }
 # Protobuf runtime

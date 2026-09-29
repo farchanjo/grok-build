@@ -5,6 +5,11 @@ version = "0.1.0"
 edition.workspace = true
 description = "Voice dictation (streaming STT) for Grok Build CLI"
 
+repository.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
 [dependencies]
 anyhow = { workspace = true }
 futures-util = { workspace = true }

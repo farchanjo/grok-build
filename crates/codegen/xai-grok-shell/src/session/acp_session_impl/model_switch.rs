@@ -286,13 +286,13 @@ impl SessionActor {
             &self.session_id_string(),
             self.tool_context.cwd.as_path().to_path_buf(),
             self.tool_context.hunk_tracker_handle.clone(),
-            self.agent.borrow().tool_bridge().toolset(),
+            self.tool_bridge_owned().toolset(),
             None,
         ) {
             tracing::warn!(error = %e, "failed to rebind local session toolset after agent rebuild");
         }
         {
-            let bridge = self.agent.borrow().tool_bridge().clone();
+            let bridge = self.tool_bridge_owned();
             let snapshot = self.tool_metadata_snapshot.clone();
             let tool_index =
                 crate::session::tool_index::Bm25ToolSearchIndex::with_service_dense(snapshot);
@@ -522,7 +522,7 @@ impl SessionActor {
         else {
             return;
         };
-        let definitions = self.agent.borrow().tool_bridge().tool_definitions().await;
+        let definitions = self.tool_bridge_owned().tool_definitions().await;
         let rebuilt = crate::session::pinned_tools::refresh_pinned_tools_block(
             &current,
             &definitions,

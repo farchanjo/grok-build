@@ -36,7 +36,7 @@ pub enum SystemAppearance {
 /// directly) is also controllable from tests.
 #[must_use]
 pub fn detect() -> Option<SystemAppearance> {
-    #[cfg(any(test, feature = "test-support"))]
+    #[cfg(any(test, feature = "test"))]
     if let Some(v) = mock_override() {
         return v;
     }
@@ -56,7 +56,7 @@ pub fn detect() -> Option<SystemAppearance> {
 /// live [`SystemAppearanceWatcher`] uses [`detect`] (without OSC 11).
 #[must_use]
 pub fn detect_with_osc11_fallback() -> Option<SystemAppearance> {
-    #[cfg(any(test, feature = "test-support"))]
+    #[cfg(any(test, feature = "test"))]
     if let Some(v) = mock_override() {
         return v;
     }
@@ -78,7 +78,7 @@ fn detect_without_mock() -> Option<SystemAppearance> {
 ///
 /// Returns `Some(value)` when a mock is active, `None` when real
 /// detection should proceed.
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(any(test, feature = "test"))]
 fn mock_override() -> Option<Option<SystemAppearance>> {
     *MOCK_APPEARANCE.lock().unwrap_or_else(|e| e.into_inner())
 }
@@ -175,25 +175,25 @@ impl Drop for SystemAppearanceWatcher {
 
 // -- Test support ----------------------------------------------------------
 
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(any(test, feature = "test"))]
 use std::sync::Mutex;
 
 /// Mock override for `detect()`. When set to `Some(value)`, `detect()`
 /// returns the mock value instead of calling `dark_light::detect()`.
 /// This ensures the `SystemAppearanceWatcher` polling loop (which calls
 /// `detect()` directly) is also controllable from tests.
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(any(test, feature = "test"))]
 static MOCK_APPEARANCE: Mutex<Option<Option<SystemAppearance>>> = Mutex::new(None);
 
 /// Override `detect()` for tests. Set to `Some(value)` to mock a specific
 /// appearance, or `None` to mock detection failure.
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(any(test, feature = "test"))]
 pub fn set_mock(value: Option<SystemAppearance>) {
     *MOCK_APPEARANCE.lock().unwrap_or_else(|e| e.into_inner()) = Some(value);
 }
 
 /// Clear the mock override, restoring real detection behavior.
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(any(test, feature = "test"))]
 pub fn clear_mock() {
     *MOCK_APPEARANCE.lock().unwrap_or_else(|e| e.into_inner()) = None;
 }

@@ -1,14 +1,9 @@
-#![allow(dead_code)]
 use super::*;
 /// Wrap `id` in a shared auth-method handle for `SessionActor` test literals
 /// (the field is now a shared live handle, not an owned id).
 pub(crate) fn test_auth_method_id(id: &str) -> crate::agent::auth_method::SharedAuthMethodId {
     crate::agent::auth_method::new_shared_auth_method_id(Some(acp::AuthMethodId::new(id)))
 }
-/// Harness contract sentence — both halves ("verifies what's complete" AND
-/// "tells you what's missing").
-pub(crate) const HARNESS_VERIFIES_SENTENCE: &str =
-    "verifies what's complete and tells you what's missing on the next nudge";
 /// Plan-aware seed-todos instruction (`goal_plan_block.md`).
 pub(crate) const PLAN_SEED_TODOS_PHRASE: &str =
     "Seed todos from the plan's acceptance criteria via";
@@ -465,19 +460,12 @@ pub(crate) async fn create_test_actor_ex(
     };
     if let Some(reservations) = actor.tool_context.task_completion_reservations.clone() {
         actor
-            .agent
-            .borrow()
-            .tool_bridge()
+            .tool_bridge_owned()
             .update_resource(reservations)
             .await;
     }
     if let Some(gate) = actor.tool_context.task_wake_suppressed.clone() {
-        actor
-            .agent
-            .borrow()
-            .tool_bridge()
-            .update_resource(gate)
-            .await;
+        actor.tool_bridge_owned().update_resource(gate).await;
     }
     (actor, event_rx)
 }
@@ -592,14 +580,14 @@ pub(crate) fn running_task_stub(prompt_id: &str) -> AgentTask {
 }
 #[cfg(test)]
 pub(crate) async fn build_actor() -> (
-    std::sync::Arc<SessionActor>,
+    std::rc::Rc<SessionActor>,
     tokio::sync::mpsc::UnboundedReceiver<xai_acp_lib::AcpClientMessage>,
 ) {
     let (gateway_tx, gateway_rx) =
         tokio::sync::mpsc::unbounded_channel::<xai_acp_lib::AcpClientMessage>();
     let (persistence_tx, _prx) = tokio::sync::mpsc::unbounded_channel::<PersistenceMsg>();
     let actor =
-        std::sync::Arc::new(create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await);
+        std::rc::Rc::new(create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await);
     (actor, gateway_rx)
 }
 /// A small valid inline PNG content block (survives normalization —
@@ -623,55 +611,4 @@ pub(crate) fn set_goal_harness_for_tests(actor: &SessionActor) {
     actor
         .goal_harness_enabled
         .store(true, std::sync::atomic::Ordering::Relaxed);
-}
-#[cfg(test)]
-pub(crate) fn assert_goal_discipline_in_reminder(reminder: &str, site: &str) {
-    let discipline_idx = reminder
-        .find("<task_completion_discipline>")
-        .unwrap_or_else(|| panic!("{site} must include <task_completion_discipline>:\n{reminder}"));
-    let tracking_idx = reminder
-        .find("TRACKING:")
-        .unwrap_or_else(|| panic!("{site} must include TRACKING:\n{reminder}"));
-    assert!(
-        discipline_idx < tracking_idx,
-        "{site} must place discipline before TRACKING (discipline={discipline_idx} tracking={tracking_idx}):\n{reminder}"
-    );
-    assert!(
-        reminder.contains("</task_completion_discipline>\nTRACKING:"),
-        "{site} must glue discipline directly before TRACKING:\n{reminder}"
-    );
-    for phrase in [
-        "Tool-call first",
-        "Don't ask permission to continue a task in flight",
-        "Track multi-step work with a",
-        "Don't stop with easy work left undone",
-    ] {
-        assert!(
-            reminder.contains(phrase),
-            "{site} must include discipline phrase `{phrase}`:\n{reminder}"
-        );
-    }
-    assert_eq!(
-        reminder.matches("</task_completion_discipline>").count(),
-        1,
-        "{site} must contain exactly one discipline closing tag:\n{reminder}"
-    );
-    assert!(
-        !reminder.contains("{DISCIPLINE_BLOCK}"),
-        "{site} must not leave {{DISCIPLINE_BLOCK}} unsubstituted:\n{reminder}"
-    );
-}
-#[cfg(test)]
-pub(crate) fn assert_resume_recap_discipline_tracking_order(text: &str, recap_marker: &str) {
-    let recap_idx = text.find(recap_marker).unwrap_or_else(|| {
-        panic!("resume reminder must include block recap `{recap_marker}`:\n{text}");
-    });
-    assert_goal_discipline_in_reminder(text, "goal_resume");
-    let discipline_idx = text
-        .find("<task_completion_discipline>")
-        .expect("resume reminder must include discipline block");
-    assert!(
-        recap_idx < discipline_idx,
-        "resume reminder must place recap before discipline (recap={recap_idx} discipline={discipline_idx}):\n{text}"
-    );
 }

@@ -33,11 +33,10 @@ use futures::Stream;
 use tokio::sync::{Notify, mpsc};
 use tokio_util::sync::CancellationToken;
 
-use super::error::AssetError;
 use super::key::AssetKey;
 use super::progress::{PROGRESS_CHUNK_BYTES, ProgressHandle};
 use super::value::{AssetMeta, PutRequest};
-use super::{AssetStore, BackendKind, SharedAssetStore};
+use super::{BackendKind, SharedAssetStore};
 use crate::rate_limiter::TokenBucket;
 
 /// Identifier of one transfer job (a v7 UUID, so ids sort chronologically).
@@ -1100,7 +1099,8 @@ mod tests {
     use crate::assets::mock::MockAssetStore;
     use crate::assets::value::{DeleteOutcome, ListPage, ListQuery, PresignedUrl};
     use crate::assets::{
-        AssetOperation, BackendCapabilities, ContentType, StoreStatus, Visibility,
+        AssetError, AssetOperation, AssetStore, BackendCapabilities, ContentType, StoreStatus,
+        Visibility,
     };
     use bytes::Bytes;
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -1341,6 +1341,7 @@ mod tests {
         }
     }
 
+    #[allow(dead_code)]
     fn store() -> SharedAssetStore {
         Arc::new(MockAssetStore::new())
     }

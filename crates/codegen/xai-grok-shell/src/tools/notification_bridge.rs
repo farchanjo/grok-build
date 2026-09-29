@@ -263,15 +263,6 @@ fn stamp_event_id_for(session_id: &acp::SessionId, meta: &mut Option<acp::Meta>)
     crate::util::event_id::ensure_event_id_meta(&session_id.0, meta);
 }
 
-/// Session a notification's frame must be addressed to.
-///
-/// A subagent inherits the parent's scheduler, so a schedule it created is
-/// announced on the parent's bridge. The owner stamp routes the card to the
-/// creating session while it is alive; a dead owner falls back to this bridge.
-fn frame_session_for(owner: Option<&str>, config: &NotificationBridgeConfig) -> acp::SessionId {
-    route_frame(owner, config).0
-}
-
 /// Resolve the owner of a frame once, for both its session id and its
 /// persistence channel.
 fn route_frame(
@@ -2336,7 +2327,7 @@ mod tests {
             },
         );
         let mut state = BridgeState::default();
-        handle_notification(&config, notification, &mut BridgeState::default()).await;
+        handle_notification(&config, notification, &mut state).await;
         let msg = persistence_rx
             .try_recv()
             .expect("scheduled_task_created must be persisted");
@@ -2383,7 +2374,7 @@ mod tests {
             },
         );
         let mut state = BridgeState::default();
-        handle_notification(&config, notification, &mut BridgeState::default()).await;
+        handle_notification(&config, notification, &mut state).await;
         let persisted_id = match persistence_rx.try_recv().expect("chunk must be persisted") {
             PersistenceMsg::Update(crate::session::storage::SessionUpdate::Acp(notif)) => notif
                 .meta
@@ -2510,7 +2501,7 @@ mod tests {
             },
         );
         let mut state = BridgeState::default();
-        handle_notification(&config, notification, &mut BridgeState::default()).await;
+        handle_notification(&config, notification, &mut state).await;
         match persistence_rx.try_recv().expect("must persist") {
             PersistenceMsg::Update(crate::session::storage::SessionUpdate::Xai(notif)) => {
                 assert!(xai_persisted_event_id(&notif).is_some());
@@ -2590,7 +2581,7 @@ mod tests {
             },
         );
         let mut state = BridgeState::default();
-        handle_notification(&config, notification, &mut BridgeState::default()).await;
+        handle_notification(&config, notification, &mut state).await;
         assert!(
             persistence_rx.try_recv().is_err(),
             "scheduled_task_fired must NOT be persisted (recurring \u{2192} unbounded log growth)"
@@ -2632,8 +2623,9 @@ mod tests {
             subscription_registry: Arc::new(parking_lot::Mutex::new(HashMap::new())),
             task_completion_reservations: Default::default(),
         });
+        let mut state = BridgeState::default();
         let notification = make_monitor_event_notification("mon-foreign", Some("other-session"));
-        handle_notification(&config, notification, &mut BridgeState::default()).await;
+        handle_notification(&config, notification, &mut state).await;
         assert!(
             cmd_rx.try_recv().is_err(),
             "a foreign owner's event must not be injected into this session"
@@ -2658,7 +2650,7 @@ mod tests {
         let (config, mut cmd_rx) = make_test_config();
         let notification = make_monitor_event_notification("mon-own", Some("test-session"));
         let mut state = BridgeState::default();
-        handle_notification(&config, notification, &mut BridgeState::default()).await;
+        handle_notification(&config, notification, &mut state).await;
         match cmd_rx
             .try_recv()
             .expect("own-session monitor event must be injected")
@@ -2677,7 +2669,7 @@ mod tests {
         let (config, mut cmd_rx) = make_test_config();
         let notification = make_monitor_event_notification("mon-legacy", None);
         let mut state = BridgeState::default();
-        handle_notification(&config, notification, &mut BridgeState::default()).await;
+        handle_notification(&config, notification, &mut state).await;
         assert!(
             matches!(
                 cmd_rx
@@ -2698,7 +2690,7 @@ mod tests {
         snapshot.block_waited = true;
         let notification = ToolNotification::TaskCompleted(snapshot);
         let mut state = BridgeState::default();
-        handle_notification(&config, notification, &mut BridgeState::default()).await;
+        handle_notification(&config, notification, &mut state).await;
         match cmd_rx
             .try_recv()
             .expect("expected DispatchNotificationHook for task_complete")
@@ -2734,7 +2726,7 @@ mod tests {
         snapshot.explicitly_killed = true;
         let notification = ToolNotification::TaskCompleted(snapshot);
         let mut state = BridgeState::default();
-        handle_notification(&config, notification, &mut BridgeState::default()).await;
+        handle_notification(&config, notification, &mut state).await;
         match cmd_rx
             .try_recv()
             .expect("expected DispatchNotificationHook for task_complete")
@@ -2774,7 +2766,7 @@ mod tests {
         let snapshot = make_task_snapshot("bg-disabled", TaskKind::Bash);
         let notification = ToolNotification::TaskCompleted(snapshot);
         let mut state = BridgeState::default();
-        handle_notification(&config, notification, &mut BridgeState::default()).await;
+        handle_notification(&config, notification, &mut state).await;
         let cmd = cmd_rx.try_recv().expect("expected InjectNotification");
         match cmd {
             SessionCommand::InjectNotification {
@@ -2914,7 +2906,7 @@ mod tests {
                 plan_file_path: "/tmp/test-session/plan.md".into(),
             });
         let mut state = BridgeState::default();
-        handle_notification(&config, notification, &mut BridgeState::default()).await;
+        handle_notification(&config, notification, &mut state).await;
         let mut gateway_modes = Vec::new();
         while let Ok(msg) = gateway_rx.try_recv() {
             if let xai_acp_lib::AcpClientMessage::SessionNotification(args) = msg
@@ -2964,7 +2956,7 @@ mod tests {
                 plan_file_path: "/tmp/test-session/plan.md".into(),
             });
         let mut state = BridgeState::default();
-        handle_notification(&config, notification, &mut BridgeState::default()).await;
+        handle_notification(&config, notification, &mut state).await;
         assert!(
             !config.plan_mode.lock().has_pending_exit_reminder(),
             "approved exit must not arm the deferred exit reminder"
@@ -3003,7 +2995,7 @@ mod tests {
                 plan_file_path: "/tmp/test-session/plan.md".into(),
             });
         let mut state = BridgeState::default();
-        handle_notification(&config, notification, &mut BridgeState::default()).await;
+        handle_notification(&config, notification, &mut state).await;
         assert!(
             config.plan_mode.lock().has_pending_exit_reminder(),
             "gated approved exit must arm the next-turn exit reminder"
@@ -3033,7 +3025,7 @@ mod tests {
             },
         );
         let mut state = BridgeState::default();
-        handle_notification(&config, notification, &mut BridgeState::default()).await;
+        handle_notification(&config, notification, &mut state).await;
         let mut gateway_modes = Vec::new();
         while let Ok(msg) = gateway_rx.try_recv() {
             if let xai_acp_lib::AcpClientMessage::SessionNotification(args) = msg
@@ -3231,10 +3223,9 @@ mod tests {
         while let Ok(msg) = gateway_rx.try_recv() {
             if let xai_acp_lib::AcpClientMessage::ExtNotification(args) = msg
                 && args.request.method.as_ref() == "x.ai/asset_job_event"
+                && let Ok(value) = serde_json::from_str(args.request.params.get())
             {
-                if let Ok(value) = serde_json::from_str(args.request.params.get()) {
-                    out.push(value);
-                }
+                out.push(value);
             }
         }
         out

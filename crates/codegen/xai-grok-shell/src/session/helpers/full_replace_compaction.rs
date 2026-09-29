@@ -65,6 +65,7 @@ pub(crate) struct CompactionRoute {
     pub(crate) client: OaiCompatClient,
     pub(crate) inference_config: InferenceConfig,
     /// Exact provider route retained for pacing/attribution provenance.
+    #[allow(dead_code)]
     pub(crate) route: xai_grok_inference::ProviderRouteContext,
     /// The `[compaction].models` reference this route was built from, e.g.
     /// `zdr:z-ai/glm-5.3-flash`. Failure attribution reports this rather than
@@ -239,7 +240,7 @@ impl ShellCompactionSampler {
     /// one shared resolution instead of deriving it from its own chunk. Rolling
     /// compaction resolves the whole cold source once, then feeds the folded
     /// context to every chunk and merge round.
-    pub(crate) fn with_resolved_lookups(mut self, items: Vec<ConversationItem>) -> Self {
+    pub(crate) fn with_resolved_lookups(self, items: Vec<ConversationItem>) -> Self {
         self.resolved_lookups.store(Some(Arc::new(items)));
         self
     }
@@ -799,7 +800,7 @@ impl FullReplaceObserver for ShellFullReplaceObserver {
 #[cfg(test)]
 mod compaction_route_tests {
     use super::*;
-    use crate::inference::{ApiBackend, Client, InferenceConfig, ToolChoice};
+    use crate::inference::{ApiBackend, Client, InferenceConfig};
     use axum::response::{
         IntoResponse,
         sse::{Event, KeepAlive, Sse},

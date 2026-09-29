@@ -5,6 +5,11 @@ version = "0.1.0"
 edition.workspace = true
 description = "Local-filesystem event source: single causal stream of semantic FsEvents"
 
+repository.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
 [dependencies]
 dunce = { workspace = true }
 notify = "8"

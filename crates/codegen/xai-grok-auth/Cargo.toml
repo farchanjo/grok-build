@@ -6,6 +6,11 @@ edition.workspace = true
 description = "Auth dependency-inversion seam: HttpAuth + AuthCredentialProvider traits"
 authors = ["xAI"]
 
+repository.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
 [features]
 middleware = ["dep:reqwest-middleware", "dep:http"]
 

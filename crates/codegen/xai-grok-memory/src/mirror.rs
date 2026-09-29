@@ -695,7 +695,9 @@ pub trait MirrorResyncSource: Send {
 
 /// Decode little-endian f32 bytes (the SQLite vec BLOB encoding).
 pub(crate) fn decode_f32_le(blob: &[u8]) -> Vec<f32> {
-    blob.chunks_exact(4)
+    blob.as_chunks::<4>()
+        .0
+        .iter()
         .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
         .collect()
 }
@@ -1000,13 +1002,12 @@ impl VectorMirror for InMemoryVectorMirror {
         fingerprint_hash: &str,
     ) -> Result<(), MirrorError> {
         let mut lock = self.collections.lock().unwrap();
-        if let Some(col) = lock.get_mut(name) {
-            if col.dims == dims
-                && col.fingerprint_hash == fingerprint_hash
-                && col.schema_version == 1
-            {
-                return Ok(());
-            }
+        if let Some(col) = lock.get_mut(name)
+            && col.dims == dims
+            && col.fingerprint_hash == fingerprint_hash
+            && col.schema_version == 1
+        {
+            return Ok(());
         }
         lock.insert(
             name.to_owned(),
@@ -1111,13 +1112,12 @@ impl VectorMirror for InMemoryVectorMirror {
         fingerprint_hash: &str,
     ) -> Result<(), MirrorError> {
         let mut lock = self.collections.lock().unwrap();
-        if let Some(col) = lock.get_mut(name) {
-            if col.dims == dims
-                && col.fingerprint_hash == fingerprint_hash
-                && col.schema_version == MEMORY_SCHEMA_VERSION_V2
-            {
-                return Ok(());
-            }
+        if let Some(col) = lock.get_mut(name)
+            && col.dims == dims
+            && col.fingerprint_hash == fingerprint_hash
+            && col.schema_version == MEMORY_SCHEMA_VERSION_V2
+        {
+            return Ok(());
         }
         lock.insert(
             name.to_owned(),

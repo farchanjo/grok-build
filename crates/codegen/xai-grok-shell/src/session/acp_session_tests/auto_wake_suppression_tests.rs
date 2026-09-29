@@ -348,13 +348,7 @@ async fn cancel_barrier_rejects_task_completion_wake_without_reporting_it() {
                 .clone()
                 .expect("task-wake gate");
             gate.set(true);
-            let resources = actor
-                .agent
-                .borrow()
-                .tool_bridge()
-                .clone()
-                .shared_resources()
-                .await;
+            let resources = actor.tool_bridge_owned().shared_resources().await;
             {
                 let mut resources = resources.lock().await;
                 resources.insert(reservations.clone());
@@ -490,7 +484,7 @@ async fn task_completion_wake_is_admitted_without_cancel_barrier() {
             let (persistence_tx, _) = tokio::sync::mpsc::unbounded_channel::<
                 PersistenceMsg,
             >();
-            let actor = std::sync::Arc::new(
+            let actor = std::rc::Rc::new(
                 create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await,
             );
             let origin = crate::session::PromptOrigin::TaskCompleted {
@@ -541,11 +535,7 @@ async fn task_completion_wake_is_admitted_without_cancel_barrier() {
                 Some(crate::session::PromptOrigin::TaskCompleted { task_id }) if task_id == "bg-normal"
             ));
             drop(state);
-            let resources = actor
-                .agent
-                .borrow()
-                .tool_bridge()
-                .clone()
+            let resources = actor.tool_bridge_owned()
                 .shared_resources()
                 .await;
             assert!(
@@ -613,7 +603,7 @@ async fn genuine_user_start_consumes_deferred_completions_without_notification_t
             let (gateway_tx, _) =
                 tokio::sync::mpsc::unbounded_channel::<xai_acp_lib::AcpClientMessage>();
             let (persistence_tx, _) = tokio::sync::mpsc::unbounded_channel::<PersistenceMsg>();
-            let actor = std::sync::Arc::new(
+            let actor = std::rc::Rc::new(
                 create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await,
             );
             let body = xai_grok_tools::reminders::task_completion::format_monitor_completion(
@@ -743,7 +733,7 @@ async fn accepted_reservation_survives_user_start() {
             let (gateway_tx, _) =
                 tokio::sync::mpsc::unbounded_channel::<xai_acp_lib::AcpClientMessage>();
             let (persistence_tx, _) = tokio::sync::mpsc::unbounded_channel::<PersistenceMsg>();
-            let actor = std::sync::Arc::new(
+            let actor = std::rc::Rc::new(
                 create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await,
             );
             let reservations = actor
@@ -1461,7 +1451,7 @@ async fn handle_bridge_tool_success_runs_consumed_completion_sweep() {
 async fn already_reported(actor: &SessionActor, task_id: &str) -> bool {
     use xai_grok_tools::reminders::task_completion::ReportedTaskCompletions;
     use xai_grok_tools::types::resources::State;
-    let bridge = actor.agent.borrow().tool_bridge().clone();
+    let bridge = actor.tool_bridge_owned();
     let resources = bridge.shared_resources().await;
     let mut res = resources.lock().await;
     let reported = res.get_or_default::<State<ReportedTaskCompletions>>();
@@ -1531,7 +1521,7 @@ async fn drain_drops_goal_turn_origin_when_status_none_and_marks_reported() {
             let (gateway_tx, _) =
                 tokio::sync::mpsc::unbounded_channel::<xai_acp_lib::AcpClientMessage>();
             let (persistence_tx, _) = tokio::sync::mpsc::unbounded_channel::<PersistenceMsg>();
-            let actor = std::sync::Arc::new(
+            let actor = std::rc::Rc::new(
                 create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await,
             );
             set_goal_harness_for_tests(&actor);
@@ -1547,7 +1537,7 @@ async fn drain_drops_goal_turn_origin_when_status_none_and_marks_reported() {
             }
             let (completion_tx, _completion_rx) =
                 tokio::sync::mpsc::unbounded_channel::<(String, PromptTurnResult)>();
-            std::sync::Arc::clone(&actor)
+            std::rc::Rc::clone(&actor)
                 .maybe_drain_notifications(completion_tx)
                 .await;
             {
@@ -1582,7 +1572,7 @@ async fn reparented_harness_subagent_task_suppressed_when_status_not_active() {
             let (gateway_tx, _) =
                 tokio::sync::mpsc::unbounded_channel::<xai_acp_lib::AcpClientMessage>();
             let (persistence_tx, _) = tokio::sync::mpsc::unbounded_channel::<PersistenceMsg>();
-            let actor = std::sync::Arc::new(
+            let actor = std::rc::Rc::new(
                 create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await,
             );
             set_goal_harness_for_tests(&actor);
@@ -1600,7 +1590,7 @@ async fn reparented_harness_subagent_task_suppressed_when_status_not_active() {
             }
             let (completion_tx, _completion_rx) =
                 tokio::sync::mpsc::unbounded_channel::<(String, PromptTurnResult)>();
-            std::sync::Arc::clone(&actor)
+            std::rc::Rc::clone(&actor)
                 .maybe_drain_notifications(completion_tx)
                 .await;
             let state = actor.state.lock().await;
@@ -1751,6 +1741,7 @@ async fn set_goal_loop_active_resource_mirrors_into_gate() {
 /// the between-turn drain (`drain_between_turn_bash_completions` → `list_tasks`)
 /// can be exercised without running a real background command.
 #[derive(Debug)]
+#[allow(dead_code)]
 struct OneTaskTerminal {
     tasks: Vec<xai_grok_tools::computer::types::TaskSnapshot>,
 }
@@ -1789,26 +1780,6 @@ impl xai_grok_tools::computer::types::TerminalBackend for OneTaskTerminal {
     }
     async fn list_tasks(&self) -> Vec<xai_grok_tools::computer::types::TaskSnapshot> {
         self.tasks.clone()
-    }
-}
-fn completed_bash_task(id: &str) -> xai_grok_tools::computer::types::TaskSnapshot {
-    xai_grok_tools::computer::types::TaskSnapshot {
-        task_id: id.into(),
-        command: "echo done".into(),
-        display_command: None,
-        cwd: String::new(),
-        start_time: std::time::SystemTime::now(),
-        end_time: Some(std::time::SystemTime::now()),
-        output: String::new(),
-        output_file: std::path::PathBuf::new(),
-        truncated: false,
-        exit_code: Some(0),
-        signal: None,
-        completed: true,
-        kind: Default::default(),
-        block_waited: false,
-        explicitly_killed: false,
-        owner_session_id: None,
     }
 }
 /// Real-actor coverage for the `SessionCommand::IsBusy` predicate
@@ -2012,7 +1983,7 @@ async fn settle_window_batches_arrivals_into_one_drain_turn() {
             let (gateway_tx, _) =
                 tokio::sync::mpsc::unbounded_channel::<xai_acp_lib::AcpClientMessage>();
             let (persistence_tx, _) = tokio::sync::mpsc::unbounded_channel::<PersistenceMsg>();
-            let actor = std::sync::Arc::new(
+            let actor = std::rc::Rc::new(
                 create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await,
             );
             let (completion_tx, _completion_rx) =

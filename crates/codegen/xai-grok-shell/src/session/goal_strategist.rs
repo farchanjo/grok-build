@@ -107,6 +107,7 @@ pub(crate) fn strategist_should_fire(consecutive: u32, last_fired: u32, every: u
 // Production spawner
 
 pub(crate) struct ChannelSpawner {
+    #[allow(dead_code)]
     pub(crate) event_tx: tokio::sync::mpsc::UnboundedSender<
         xai_grok_tools::implementations::grok_build::task::types::SubagentEvent,
     >,
@@ -185,8 +186,11 @@ impl ChannelSpawner {
         model: Option<String>,
         harness_agent_type: Option<String>,
     ) -> Result<String, SpawnError> {
+        // `SubagentEvent` is only built on the legacy cfg(test) arm below.
+        #[cfg(test)]
+        use xai_grok_tools::implementations::grok_build::task::types::SubagentEvent;
         use xai_grok_tools::implementations::grok_build::task::types::{
-            SubagentEvent, SubagentRequest, SubagentRuntimeOverrides,
+            SubagentRequest, SubagentRuntimeOverrides,
         };
         let (result_tx, result_rx) = tokio::sync::oneshot::channel();
         let request = SubagentRequest {

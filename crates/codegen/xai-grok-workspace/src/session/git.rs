@@ -1,5 +1,4 @@
 //! Git operations: CLI for simple actions (stage, commit, push); git2 for structured data (status, diffs).
-#![allow(dead_code)]
 use anyhow::Result;
 use git2::{DiffOptions, Repository, StatusOptions};
 use serde::{Deserialize, Serialize};

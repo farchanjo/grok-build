@@ -13,7 +13,7 @@
 //! Callers must not search raw `accounts` for user-facing selection.
 
 use super::project::is_built_in_compatibility_instance;
-use super::types::{CatalogFetchSource, DiscoveredModel, InstanceCatalogResult};
+use super::types::{DiscoveredModel, InstanceCatalogResult};
 use crate::agent::config::{ModelEntry, ModelInfo};
 use crate::agent::model_providers::{ModelProviderKind, ResolvedModelProvider};
 use crate::provider_registry::{ProviderKind, multi_account_rollout_enabled};
@@ -69,6 +69,7 @@ pub struct CatalogSnapshot {
     pub registry_generation: u64,
     /// All complete account results retained for this generation (pre-gate).
     /// Prefer [`Self::gated_projection`] for any user-facing surface.
+    #[allow(dead_code)]
     accounts_raw: IndexMap<String, InstanceCatalogResult>,
     projection: GatedCatalogProjection,
 }
@@ -441,6 +442,7 @@ pub enum AccountRefreshOutcome {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agent::provider_catalog::CatalogFetchSource;
     use crate::agent::provider_catalog::types::CatalogTruncationReason;
     use crate::provider_registry::{ApiSurface, CredentialRoute, ProviderKind};
 

@@ -1993,15 +1993,9 @@ impl AgentView {
                 }
                 InputOutcome::Changed
             }
-            ButtonAction::PrimeIndexBackfill => {
-                return self.prime_index_action("backfill", false);
-            }
-            ButtonAction::PrimeIndexRebuild => {
-                return self.prime_index_action("rebuild", false);
-            }
-            ButtonAction::PrimeIndexCancel => {
-                return InputOutcome::Action(Action::PrimeIndexCancel);
-            }
+            ButtonAction::PrimeIndexBackfill => self.prime_index_action("backfill", false),
+            ButtonAction::PrimeIndexRebuild => self.prime_index_action("rebuild", false),
+            ButtonAction::PrimeIndexCancel => InputOutcome::Action(Action::PrimeIndexCancel),
             ButtonAction::CancelSelectedSkillRegress => {
                 if self.extensions_modal.as_ref().is_some_and(|state| {
                     state

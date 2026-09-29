@@ -398,16 +398,16 @@ pub async fn reconcile_milvus_mode(
         }
     }
 
-    if !vanished_ids.is_empty() {
-        if let Err(e) = handle.delete_ids(&vanished_ids).await {
-            handle.mark_unavailable();
-            tracing::warn!(
-                target: xai_grok_telemetry::memory_log::TARGET,
-                error = %e,
-                "milvus reconciliation failed: delete vanished ids failed"
-            );
-            return Err(e);
-        }
+    if !vanished_ids.is_empty()
+        && let Err(e) = handle.delete_ids(&vanished_ids).await
+    {
+        handle.mark_unavailable();
+        tracing::warn!(
+            target: xai_grok_telemetry::memory_log::TARGET,
+            error = %e,
+            "milvus reconciliation failed: delete vanished ids failed"
+        );
+        return Err(e);
     }
 
     // 5. Embed and upsert new or modified chunks in batches of 32
@@ -446,7 +446,7 @@ pub async fn reconcile_milvus_mode(
 
         let rows: Vec<MemoryRow> = batch
             .iter()
-            .zip(embeddings.into_iter())
+            .zip(embeddings)
             .map(|(chunk, vector)| MemoryRow {
                 id: chunk.id.clone(),
                 text: chunk.text.clone(),

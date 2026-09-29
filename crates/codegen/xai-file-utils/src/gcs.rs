@@ -491,6 +491,16 @@ pub(crate) async fn build_gcs_client(
 ) -> anyhow::Result<gcloud_storage::client::Client> {
     use gcloud_storage::client::{Client as GcsClient, ClientConfig as GcsClientConfig};
 
+    // `gcloud-storage` enables jsonwebtoken's `aws_lc_rs` provider while the
+    // shell enables `rust_crypto`; under workspace-wide feature unification a
+    // single binary carries both and jsonwebtoken's auto-detection panics.
+    // Pin one provider here so building a GCS client never depends on which
+    // other crates happen to be in the build.
+    jsonwebtoken::crypto::CryptoProvider::install_default(
+        &jsonwebtoken::crypto::rust_crypto::DEFAULT_PROVIDER,
+    )
+    .ok();
+
     let gcs_config = if let Some(key_json) = service_account_key {
         GcsClientConfig::default()
             .with_credentials(

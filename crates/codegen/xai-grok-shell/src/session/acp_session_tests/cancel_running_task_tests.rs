@@ -3,6 +3,7 @@ use super::*;
 use crate::session::storage::StorageAdapter;
 use crate::terminal::AsyncTerminalRunner;
 use crate::terminal::runner::{TerminalError, TerminalRunRequest, TerminalRunResult};
+use std::rc::Rc;
 use xai_grok_paths::AbsPathBuf;
 #[derive(Debug)]
 struct DummyTerminal;
@@ -131,7 +132,7 @@ async fn persist_ack_waits_for_disk_flush_before_success() {
                 chat_event_tx,
                 tokio_util::sync::CancellationToken::new(),
             );
-            let actor = Arc::new(SessionActor {
+            let actor = Rc::new(SessionActor {
                 mcp_push_stats: Default::default(),
                 mcp_subscription_registry: Default::default(),
                 session_cmd_tx: dummy_session_cmd_tx(),
@@ -695,7 +696,7 @@ async fn first_turn_memory_injection_disabled_does_not_persist_to_chat_history()
                 mode: xai_grok_config_types::MemoryMode::Local,
             };
             let (event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel::<SessionEvent>();
-            let actor = Arc::new(SessionActor {
+            let actor = Rc::new(SessionActor {
                 mcp_push_stats: Default::default(),
                 mcp_subscription_registry: Default::default(),
                 session_cmd_tx: dummy_session_cmd_tx(),
@@ -1287,7 +1288,7 @@ async fn cancel_running_task_teardown_clears_running_and_pending_work() {
                 trace_config_template: std::cell::RefCell::new(None),
             };
             let (tx, rx) = tokio::sync::oneshot::channel();
-            let bridge = actor.agent.borrow().tool_bridge().clone();
+            let bridge = actor.tool_bridge_owned();
             {
                 let mut state = actor.state.lock().await;
                 state.running_task = Some(AgentTask {
@@ -1588,12 +1589,12 @@ async fn maybe_inject_interrupt_reminder_injects_once() {
         })
         .await;
 }
-/// Build an `Arc<SessionActor>` whose persistence channel answers the
+/// Build an `Rc<SessionActor>` whose persistence channel answers the
 /// `FlushAndAck` barrier, so a `handle_prompt` turn driven with a `persist_ack`
 /// resolves deterministically (the bare `build_actor` drops the persistence
 /// receiver, so its flush barrier never completes). Returns the actor; the
 /// gateway/persistence drains run on the `LocalSet` for the test's lifetime.
-async fn actor_with_persistence_drain() -> std::sync::Arc<SessionActor> {
+async fn actor_with_persistence_drain() -> std::rc::Rc<SessionActor> {
     let (gateway_tx, mut gateway_rx) =
         tokio::sync::mpsc::unbounded_channel::<xai_acp_lib::AcpClientMessage>();
     tokio::task::spawn_local(async move { while gateway_rx.recv().await.is_some() {} });
@@ -1606,7 +1607,7 @@ async fn actor_with_persistence_drain() -> std::sync::Arc<SessionActor> {
             }
         }
     });
-    std::sync::Arc::new(create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await)
+    std::rc::Rc::new(create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await)
 }
 /// Integration (production wiring + ordering): with the one-shot armed, a real
 /// user turn driven through `handle_prompt` injects the interrupt
@@ -1923,7 +1924,7 @@ async fn interactive_cancel_drops_queued_task_wakes_and_promotes_user() {
                 .clone()
                 .expect("completion reservations");
             reservations.reserve("bg-queued".to_string());
-            let actor = Arc::new(actor);
+            let actor = Rc::new(actor);
             let (running_item, mut running_rx) =
                 input_with_origin_rx("user-running", crate::session::PromptOrigin::User);
             let (mut wake_item, mut wake_rx) = input_with_origin_rx(

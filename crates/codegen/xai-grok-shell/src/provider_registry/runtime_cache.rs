@@ -17,6 +17,7 @@ use std::time::{Duration, Instant};
 const MAX_AGE: Duration = Duration::from_secs(2);
 
 struct CachedRuntime {
+    #[allow(dead_code)]
     home: PathBuf,
     /// generation file raw content fingerprint (generation + config sha).
     gen_fingerprint: String,

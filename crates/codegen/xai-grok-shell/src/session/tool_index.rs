@@ -2930,8 +2930,11 @@ mod tests {
 
     /// Embedder stub: vectors come from a caller-supplied function, calls are
     /// recorded, and the space is fixed so a mismatch is testable.
+    /// Caller-supplied text -> vector mapping.
+    type VectorFor = Box<dyn Fn(&str) -> Vec<f32> + Send + Sync>;
+
     struct FakeEmbedder {
-        vector_for: Box<dyn Fn(&str) -> Vec<f32> + Send + Sync>,
+        vector_for: VectorFor,
         calls: std::sync::Mutex<Vec<Vec<String>>>,
         space: std::sync::Mutex<String>,
         failing: std::sync::atomic::AtomicBool,

@@ -105,7 +105,9 @@ impl SessionActor {
         // captured during the first real user prompt.
         let (trace_gcs_config, artifact_tracker) =
             if origin.is_synthetic() && trace_gcs_config.is_none() {
-                if let Some(template) = self.trace_config_template.borrow().clone() {
+                // Hoisted so the `RefCell` borrow ends before the awaits below.
+                let trace_template = self.trace_config_template.borrow().clone();
+                if let Some(template) = trace_template {
                     let cfg = crate::session::repo_changes::TraceExportConfig {
                         bucket_url: template.bucket_url,
                         service_account_key: None,

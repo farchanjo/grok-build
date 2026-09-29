@@ -5,6 +5,11 @@ version = "0.1.0"
 edition.workspace = true
 description = "Lightweight typed client for hub-proxied workspace.* RPCs (shared by xai-grok-shell proxy mode and other consumers)"
 
+repository.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
 [dependencies]
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }

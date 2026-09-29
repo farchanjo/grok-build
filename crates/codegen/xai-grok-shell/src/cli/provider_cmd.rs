@@ -1,6 +1,5 @@
 //! `grok provider ...` lifecycle and credential commands.
 
-use crate::agent::providers::{ProviderId as BuiltInProviderId, ProviderManager};
 use crate::provider_registry::id::{ProviderId, ProviderRef};
 use crate::provider_registry::instance::ProviderKind;
 use crate::provider_registry::remove_all_provider_caches;
@@ -146,6 +145,7 @@ pub enum ProviderLifecycleCommand {
     },
 }
 
+#[allow(dead_code)]
 fn config_path(explicit: Option<PathBuf>) -> PathBuf {
     explicit.unwrap_or_else(|| xai_grok_config::grok_home().join("config.toml"))
 }
@@ -372,7 +372,7 @@ async fn run_inner(args: ProviderLifecycleArgs) -> Result<i32, String> {
             } else {
                 // Normal remove: impact + generation gated; no tombstone.
                 // Secrets/caches are not cleared implicitly on clean remove.
-                let mut result = svc.remove_metadata(&id, expected, true);
+                let result = svc.remove_metadata(&id, expected, true);
                 if result.ok && (remove_secrets || remove_caches) {
                     // Only after successful metadata remove (same as force path ordering).
                     if let Ok(pid) = ProviderId::new(&id) {
@@ -565,7 +565,7 @@ fn set_secret(
             .set_api_key(backend, secret.trim())
             .map_err(|e| e.to_string())?;
         let scope = built_in_application_scope(built_in)
-            .unwrap_or_else(|| match built_in {
+            .unwrap_or(match built_in {
                 BuiltInProviderId::Xai => "xai::api_key",
                 _ => "unknown",
             })
@@ -614,7 +614,7 @@ fn capability_report(id: &str) -> serde_json::Value {
         "provider_id": id,
         "openai_compatibility": {
             "chat_completions": if zai || dashscope { "supported" } else { "unknown" },
-            "responses": if openrouter { "supported" } else if zai || dashscope { "unknown" } else { "unknown" },
+            "responses": if openrouter { "supported" } else { "unknown" },
             "embeddings": "unknown",
             "note": "Per-provider capability is distinct from client completeness"
         },

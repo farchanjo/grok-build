@@ -7,7 +7,6 @@
 
 // Illustrative mock structs whose fields exist to model memory layout; not all
 // are read back, which is expected for a microbenchmark.
-#![allow(dead_code)]
 
 use std::sync::Arc;
 use std::time::Instant;
@@ -32,6 +31,7 @@ struct SubagentInfoArc {
     subagent_id: Arc<str>,
     child_session_id: Arc<str>,
     description: Arc<str>,
+    #[allow(dead_code)]
     subagent_type: Arc<str>,
     persona: Option<Arc<str>>,
     role: Option<Arc<str>>,

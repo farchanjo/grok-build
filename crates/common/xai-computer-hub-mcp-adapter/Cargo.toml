@@ -5,6 +5,11 @@ version = "0.1.0"
 edition.workspace = true
 description = "Bridge between MCP servers and the xAI Computer Hub, registering MCP-discovered tools as native hub tools."
 
+repository.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
 [features]
 metrics = ["dep:prometheus"]
 

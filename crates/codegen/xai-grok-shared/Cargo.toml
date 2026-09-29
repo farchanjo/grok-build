@@ -1,7 +1,13 @@
 [package]
 license = "Apache-2.0"
 name = "xai-grok-shared"
+description = "Utilities shared by xai-grok-shell and its downstream clients; never depends on the shell."
 edition.workspace = true
+
+repository.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
 
 [dependencies]
 agent-client-protocol = { workspace = true }

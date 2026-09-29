@@ -1088,10 +1088,9 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             use crate::views::extensions_modal::ModalMessage;
             if let Some(agent) = app.agents.get_mut(&agent_id)
                 && let Some(ref mut modal) = agent.extensions_modal
+                && let Err(e) = result
             {
-                if let Err(e) = result {
-                    modal.modal_message = Some(ModalMessage::Error(e));
-                }
+                modal.modal_message = Some(ModalMessage::Error(e));
             }
             vec![]
         }
@@ -1555,7 +1554,7 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
                 (_, None) => format!("{key} override cleared"),
             };
             if let Some(agent) = app.agents.get_mut(&agent_id) {
-                agent.scrollback.push_block(RenderBlock::system(&format!(
+                agent.scrollback.push_block(RenderBlock::system(format!(
                     "Model override saved: {model_id} {shown}. config.toml hot-reload \
                      applies it to subsequent turns."
                 )));
@@ -1660,6 +1659,7 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
                             state.management_error = None;
                         }
                         ProviderManagementResult::Detail(detail) => {
+                            let detail = *detail;
                             // If editor already open for same id, reload in place (Issue 3).
                             if let Some(ed) = state.editor_mut() {
                                 if ed.detail.id == detail.id {
@@ -1712,9 +1712,11 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
                                     follow_up.push(
                                         crate::app::actions::Effect::ProviderOperation {
                                             agent_id,
-                                            operation: crate::app::actions::ProviderOperation::LoadEditorDetail {
-                                                provider_id: result.id.clone(),
-                                            },
+                                            operation: Box::new(
+                                                crate::app::actions::ProviderOperation::LoadEditorDetail {
+                                                    provider_id: result.id.clone(),
+                                                },
+                                            ),
                                             repair: None,
                                         },
                                     );
@@ -1724,8 +1726,9 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
                                 }
                                 follow_up.push(crate::app::actions::Effect::ProviderOperation {
                                     agent_id,
-                                    operation:
+                                    operation: Box::new(
                                         crate::app::actions::ProviderOperation::LoadListSnapshot,
+                                    ),
                                     repair: None,
                                 });
                             } else {
@@ -1740,17 +1743,15 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
                                     format!("{msg} — {guidance}")
                                 };
                                 state.management_error = Some(full.clone());
-                                if editor_matches {
-                                    if let Some(ed) = state.editor_mut() {
+                                if editor_matches
+                                    && let Some(ed) = state.editor_mut() {
                                         ed.error = Some(full);
                                         ed.pending_operation_id = None;
-                                        if let Some(conflict) = result.conflict.clone() {
-                                            if conflict.provider_id == ed.detail.id {
+                                        if let Some(conflict) = result.conflict.clone()
+                                            && conflict.provider_id == ed.detail.id {
                                                 ed.enter_conflict(conflict);
                                             }
-                                        }
                                     }
-                                }
                                 if list_matches {
                                     state.pending_list_operation_id = None;
                                 }
@@ -1758,8 +1759,8 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
                         }
                         // Issue 5: ignore late results for wrong provider / older generation.
                         ProviderManagementResult::Status(snap) => {
-                            if let Some(ed) = state.editor_mut() {
-                                if management_result_is_fresh(
+                            if let Some(ed) = state.editor_mut()
+                                && management_result_is_fresh(
                                     &ed.detail.id,
                                     ed.detail.generation.get(),
                                     &snap.provider_id,
@@ -1769,11 +1770,10 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
                                     ed.message = Some(snap.label.clone());
                                     ed.error = snap.error.clone();
                                 }
-                            }
                         }
                         ProviderManagementResult::Catalog(snap) => {
-                            if let Some(ed) = state.editor_mut() {
-                                if management_result_is_fresh(
+                            if let Some(ed) = state.editor_mut()
+                                && management_result_is_fresh(
                                     &ed.detail.id,
                                     ed.detail.generation.get(),
                                     &snap.provider_id,
@@ -1783,11 +1783,10 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
                                     ed.message = Some("Catalog updated".into());
                                     ed.error = snap.error.clone();
                                 }
-                            }
                         }
                         ProviderManagementResult::Capabilities(snap) => {
-                            if let Some(ed) = state.editor_mut() {
-                                if management_result_is_fresh(
+                            if let Some(ed) = state.editor_mut()
+                                && management_result_is_fresh(
                                     &ed.detail.id,
                                     ed.detail.generation.get(),
                                     &snap.provider_id,
@@ -1797,11 +1796,10 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
                                     ed.message = Some("Capabilities updated".into());
                                     ed.error = snap.error.clone();
                                 }
-                            }
                         }
                         ProviderManagementResult::Credits(snap) => {
-                            if let Some(ed) = state.editor_mut() {
-                                if management_result_is_fresh(
+                            if let Some(ed) = state.editor_mut()
+                                && management_result_is_fresh(
                                     &ed.detail.id,
                                     ed.detail.generation.get(),
                                     &snap.provider_id,
@@ -1811,11 +1809,10 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
                                     ed.message = snap.summary.clone();
                                     ed.error = snap.error.clone();
                                 }
-                            }
                         }
                         ProviderManagementResult::References(snap) => {
-                            if let Some(ed) = state.editor_mut() {
-                                if management_result_is_fresh(
+                            if let Some(ed) = state.editor_mut()
+                                && management_result_is_fresh(
                                     &ed.detail.id,
                                     ed.detail.generation.get(),
                                     &snap.provider_id,
@@ -1823,7 +1820,6 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
                                 ) {
                                     ed.references = Some(snap);
                                 }
-                            }
                         }
                         ProviderManagementResult::Error(err) => {
                             state.management_error = Some(err.clone());
@@ -1901,9 +1897,10 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             };
             match result {
                 RetrievalManagementResult::Snapshot(snap) => {
-                    state.apply_snapshot(snap);
+                    state.apply_snapshot(*snap);
                 }
                 RetrievalManagementResult::Mutation(m) => {
+                    let m = *m;
                     let need_reload = m.ok && m.snapshot.is_none();
                     state.apply_mutation_result(m);
                     if need_reload {
@@ -2063,13 +2060,12 @@ fn apply_prime_index_job(
                 if job.is_terminal() && !confirm {
                     fetch = Some((job.generation, job.fingerprint_short.clone()));
                 }
-                if let Some(ref mut modal) = agent.extensions_modal {
-                    if let Some(ref mut status) = modal.prime_index
-                        && prime_job_matches_displayed(status.job.as_ref(), &job)
-                    {
-                        status.job = Some(job.clone());
-                        status.generation = job.generation;
-                    }
+                if let Some(ref mut modal) = agent.extensions_modal
+                    && let Some(ref mut status) = modal.prime_index
+                    && prime_job_matches_displayed(status.job.as_ref(), &job)
+                {
+                    status.job = Some(job.clone());
+                    status.generation = job.generation;
                 }
                 if let Some(ref mut agents_modal) = agent.agents_modal
                     && let Some(ref mut status) = agents_modal.prime_index

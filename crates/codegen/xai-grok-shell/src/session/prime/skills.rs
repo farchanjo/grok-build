@@ -30,7 +30,6 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use tokio_util::sync::CancellationToken;
-use xai_grok_config_types::SkillPrimeConfig;
 use xai_grok_tools::implementations::skills::skill::{
     extract_skill_body, format_skill_name, resolve_skill_internal_links,
 };
@@ -507,7 +506,7 @@ pub async fn semantic_fill(
     .await
     {
         Ok(()) => outcome,
-        Err(e) if matches!(e, OrchestratorError::Cancelled { .. }) => {
+        Err(OrchestratorError::Cancelled { .. }) => {
             outcome.cancelled = true;
             outcome.order = ranked.to_vec();
             outcome
@@ -1442,7 +1441,7 @@ mod tests {
     use xai_grok_config_types::{
         EmbeddingEncoding, EmbeddingModelConfig, EmbeddingProtocol, PrimeConfig,
         RerankerModelConfig, RetrievalFallbackStrategy, RetrievalGraphConfig,
-        RetrievalProfileConfig,
+        RetrievalProfileConfig, SkillPrimeConfig,
     };
     use xai_grok_inference::{
         EmbeddingResult, EmbeddingVector, RerankHit, RerankResult, RetrievalError, RetrievalResult,
@@ -1816,10 +1815,10 @@ mod tests {
                     return Err(RetrievalError::Cancelled);
                 }
             }
-            if let Some(d) = pins.total_deadline {
-                if d.is_zero() {
-                    return Err(RetrievalError::DeadlineExceeded);
-                }
+            if let Some(d) = pins.total_deadline
+                && d.is_zero()
+            {
+                return Err(RetrievalError::DeadlineExceeded);
             }
             let dims = config.dimensions.unwrap_or(4) as usize;
             let values = self
@@ -1858,10 +1857,10 @@ mod tests {
             if cancel.is_cancelled() {
                 return Err(RetrievalError::Cancelled);
             }
-            if let Some(d) = pins.total_deadline {
-                if d.is_zero() {
-                    return Err(RetrievalError::DeadlineExceeded);
-                }
+            if let Some(d) = pins.total_deadline
+                && d.is_zero()
+            {
+                return Err(RetrievalError::DeadlineExceeded);
             }
             if *self.fail_rerank.lock().unwrap() {
                 return Err(RetrievalError::Timeout);
@@ -1890,11 +1889,13 @@ mod tests {
     }
 
     fn test_snapshot() -> RetrievalSnapshot {
-        let mut cfg = RetrievalProfileConfig::default();
-        cfg.embedding_models = vec!["emb-1".into()];
-        cfg.reranker_models = vec!["rr-1".into()];
-        cfg.max_attempts = 4;
-        cfg.deadline_ms = 2_000;
+        let cfg = RetrievalProfileConfig {
+            embedding_models: vec!["emb-1".into()],
+            reranker_models: vec!["rr-1".into()],
+            max_attempts: 4,
+            deadline_ms: 2_000,
+            ..Default::default()
+        };
         let budgets = ProfileBudgetLimits::from_profile(&cfg, 8);
 
         let mut emb = indexmap::IndexMap::new();
@@ -2014,7 +2015,7 @@ mod tests {
         let ex = Arc::new(RecordingExecutor::new());
         ex.set_reverse(true);
         let service = service_with(ex.clone());
-        let mut mk = |n: &str, body: &str| SkillInfo {
+        let mk = |n: &str, body: &str| SkillInfo {
             body: Some(body.into()),
             description: format!("DERIVED-DESC-{n}"),
             has_user_specified_description: false,
@@ -3702,22 +3703,19 @@ mod tests {
         ];
         let refresh = refresher(skills.clone());
         let cancel = CancellationToken::new();
-        let batch =
-            load_and_revalidate(&skills, &[0, 1, 2], 3, &refresh, &[root.clone()], &cancel).await;
+        let batch = load_and_revalidate(
+            &skills,
+            &[0, 1, 2],
+            3,
+            &refresh,
+            std::slice::from_ref(&root),
+            &cancel,
+        )
+        .await;
 
         assert_eq!(batch.drop_reasons.len(), 2);
-        assert!(
-            batch
-                .drop_reasons
-                .iter()
-                .any(|r| *r == PrimeDropReason::Unreadable)
-        );
-        assert!(
-            batch
-                .drop_reasons
-                .iter()
-                .any(|r| *r == PrimeDropReason::NotContained)
-        );
+        assert!(batch.drop_reasons.contains(&PrimeDropReason::Unreadable));
+        assert!(batch.drop_reasons.contains(&PrimeDropReason::NotContained));
         assert_eq!(batch.loaded.len(), 1);
         let body = &batch.loaded[0].body;
         assert!(body.contains("Load this file."));
@@ -3747,7 +3745,15 @@ mod tests {
         }];
         let refresh = refresher(skills.clone());
         let cancel = CancellationToken::new();
-        let batch = load_and_revalidate(&skills, &[0], 1, &refresh, &[root.clone()], &cancel).await;
+        let batch = load_and_revalidate(
+            &skills,
+            &[0],
+            1,
+            &refresh,
+            std::slice::from_ref(&root),
+            &cancel,
+        )
+        .await;
         assert_eq!(batch.drop_reasons, vec![PrimeDropReason::NotContained]);
         assert!(batch.loaded.is_empty());
     }
@@ -3771,7 +3777,15 @@ mod tests {
         }];
         let refresh = refresher(skills.clone());
         let cancel = CancellationToken::new();
-        let batch = load_and_revalidate(&skills, &[0], 1, &refresh, &[root.clone()], &cancel).await;
+        let batch = load_and_revalidate(
+            &skills,
+            &[0],
+            1,
+            &refresh,
+            std::slice::from_ref(&root),
+            &cancel,
+        )
+        .await;
         assert_eq!(batch.drop_reasons, vec![PrimeDropReason::Quarantined]);
         assert!(batch.loaded.is_empty());
         let dump = format!("{:?}", batch.drop_reasons);
@@ -3801,8 +3815,15 @@ mod tests {
         }];
         let refresh = refresher(disabled);
         let cancel = CancellationToken::new();
-        let batch =
-            load_and_revalidate(&initial, &[0], 1, &refresh, &[root.clone()], &cancel).await;
+        let batch = load_and_revalidate(
+            &initial,
+            &[0],
+            1,
+            &refresh,
+            std::slice::from_ref(&root),
+            &cancel,
+        )
+        .await;
         assert_eq!(batch.drop_reasons, vec![PrimeDropReason::ChangedOrGone]);
         assert!(batch.loaded.is_empty());
     }
@@ -3845,12 +3866,7 @@ mod tests {
             batch.loaded[0].name, "good",
             "backfill promoted the next candidate"
         );
-        assert!(
-            batch
-                .drop_reasons
-                .iter()
-                .any(|r| *r == PrimeDropReason::ChangedOrGone)
-        );
+        assert!(batch.drop_reasons.contains(&PrimeDropReason::ChangedOrGone));
     }
 
     #[tokio::test]
@@ -3923,7 +3939,15 @@ mod tests {
         }];
         let refresh = refresher(skills.clone());
         let cancel = CancellationToken::new();
-        let batch = load_and_revalidate(&skills, &[0], 1, &refresh, &[root.clone()], &cancel).await;
+        let batch = load_and_revalidate(
+            &skills,
+            &[0],
+            1,
+            &refresh,
+            std::slice::from_ref(&root),
+            &cancel,
+        )
+        .await;
         // The canonical path resolves outside the trusted root → refused.
         assert_eq!(batch.drop_reasons, vec![PrimeDropReason::NotContained]);
         assert!(batch.loaded.is_empty());
@@ -3966,7 +3990,15 @@ mod tests {
         });
         let refresh = refresher(skills.clone());
         let cancel = CancellationToken::new();
-        let batch = load_and_revalidate(&skills, &[0], 1, &refresh, &[root.clone()], &cancel).await;
+        let batch = load_and_revalidate(
+            &skills,
+            &[0],
+            1,
+            &refresh,
+            std::slice::from_ref(&root),
+            &cancel,
+        )
+        .await;
         assert!(
             batch.loaded.is_empty(),
             "symlinked in-root body must not be primed"
@@ -4020,7 +4052,15 @@ mod tests {
         });
         let refresh = refresher(skills.clone());
         let cancel = CancellationToken::new();
-        let batch = load_and_revalidate(&skills, &[0], 1, &refresh, &[root.clone()], &cancel).await;
+        let batch = load_and_revalidate(
+            &skills,
+            &[0],
+            1,
+            &refresh,
+            std::slice::from_ref(&root),
+            &cancel,
+        )
+        .await;
         assert!(
             batch.loaded.is_empty(),
             "post-read unofficial overwrite must not be primed"
@@ -4113,9 +4153,11 @@ mod tests {
         let ex = Arc::new(RecordingExecutor::new());
         ex.set_reverse(true); // rerank would displace unpinned rows
         let service = service_with(ex.clone());
-        let mut cfg = SkillPrimeConfig::default();
-        cfg.enabled = true;
-        cfg.max_results = 5;
+        let cfg = SkillPrimeConfig {
+            enabled: true,
+            max_results: 5,
+            ..Default::default()
+        };
         let snapshot = skills.clone();
         let refresh = move || {
             let s = snapshot.clone();
@@ -4125,7 +4167,7 @@ mod tests {
             eligible_skills: &skills,
             refresh_skills: &refresh,
             workspace_root: &root,
-            trusted_roots: &[root.clone()],
+            trusted_roots: std::slice::from_ref(&root),
             prompt: "deploy the release",
             explicit_skill: Some("local:deploy"),
             config: cfg,
@@ -4167,9 +4209,11 @@ mod tests {
         let ex = Arc::new(RecordingExecutor::new());
         ex.set_fail_embed(true);
         let service = service_with(ex.clone());
-        let mut cfg = SkillPrimeConfig::default();
-        cfg.enabled = true;
-        cfg.degrade_on_error = false;
+        let cfg = SkillPrimeConfig {
+            enabled: true,
+            degrade_on_error: false,
+            ..Default::default()
+        };
         let snapshot = skills.clone();
         let refresh = move || {
             let s = snapshot.clone();
@@ -4179,7 +4223,7 @@ mod tests {
             eligible_skills: &skills,
             refresh_skills: &refresh,
             workspace_root: &root,
-            trusted_roots: &[root.clone()],
+            trusted_roots: std::slice::from_ref(&root),
             prompt: "deploy the release",
             explicit_skill: None,
             config: cfg,
@@ -4218,9 +4262,11 @@ mod tests {
         let ex = Arc::new(RecordingExecutor::new());
         ex.set_slow_ms(400); // semantic fill would block past the deadline
         let service = service_with(ex.clone());
-        let mut cfg = SkillPrimeConfig::default();
-        cfg.enabled = true;
-        cfg.deadline_ms = 80;
+        let cfg = SkillPrimeConfig {
+            enabled: true,
+            deadline_ms: 80,
+            ..Default::default()
+        };
         let snapshot = skills.clone();
         let refresh = move || {
             let s = snapshot.clone();
@@ -4232,7 +4278,7 @@ mod tests {
             eligible_skills: &skills,
             refresh_skills: &refresh,
             workspace_root: &root,
-            trusted_roots: &[root.clone()],
+            trusted_roots: std::slice::from_ref(&root),
             prompt: "deploy the release",
             explicit_skill: None,
             config: cfg,

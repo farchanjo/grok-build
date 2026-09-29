@@ -6,6 +6,11 @@ edition.workspace = true
 description = "MCP integration crate. Quarantines rmcp + reqwest 0.13 (rmcp 2.1 requires reqwest >= 0.13.2 while the rest of the workspace uses reqwest 0.12) and owns the MCP credential store and OAuth flow orchestrator."
 authors = ["xAI"]
 
+repository.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
 [dependencies]
 rmcp = { version = "2.1", features = [
     "auth",

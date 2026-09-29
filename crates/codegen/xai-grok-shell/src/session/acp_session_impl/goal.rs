@@ -818,7 +818,7 @@ impl SessionActor {
 
     pub(super) async fn resolve_goal_tool_names(&self) -> GoalToolNames {
         use xai_grok_tools::types::tool::ToolKind;
-        let bridge = self.agent.borrow().tool_bridge().clone();
+        let bridge = self.tool_bridge_owned();
         GoalToolNames {
             goal: bridge
                 .tool_for_kind(ToolKind::GoalUpdate)
@@ -839,7 +839,7 @@ impl SessionActor {
         &self,
     ) -> crate::session::goal_role_tools::RoleToolNames {
         use xai_grok_tools::types::tool::ToolKind;
-        let bridge = self.agent.borrow().tool_bridge().clone();
+        let bridge = self.tool_bridge_owned();
         crate::session::goal_role_tools::RoleToolNames::from_parent(
             bridge.tool_for_kind(ToolKind::Read).await,
             bridge.tool_for_kind(ToolKind::ListDir).await,

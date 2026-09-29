@@ -22,6 +22,12 @@ use crate::system_reminder::ReminderPolicy;
 /// Arc<ToolBridge> — mutations to tool state (MCP registration,
 /// completion tracking, retry config) go through ToolBridge's
 /// internal locks.
+///
+/// `Clone` is cheap-ish and semantically free: the agent is effectively
+/// immutable after construction, and the `ToolBridge` behind it is shared.
+/// It exists so a caller can end a `RefCell<Agent>` borrow before awaiting
+/// an `&self` async method (`await_holding_refcell_ref`).
+#[derive(Clone)]
 pub struct Agent {
     /// The definition this agent was built from.
     definition: AgentDefinition,

@@ -5,6 +5,11 @@ version = "0.1.0"
 edition.workspace = true
 description = "Canonical tool-description types for the xAI platform"
 
+repository.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
 [features]
 # Enables `BuiltinSubagent::render_prompt` (MiniJinja rendering of the
 # built-in subagent prompt bodies).

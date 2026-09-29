@@ -732,9 +732,9 @@ fn render_table(table: &GuideTable, width: usize) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     for row in all_rows.iter() {
         let mut rendered: Vec<Vec<String>> = Vec::with_capacity(cols);
-        for col in 0..cols {
+        for (col, width) in widths.iter().enumerate().take(cols) {
             let cell = row.get(col).copied().unwrap_or("");
-            rendered.push(wrap_text(cell, widths[col]));
+            rendered.push(wrap_text(cell, *width));
         }
         let height = rendered.iter().map(|c| c.len()).max().unwrap_or(1).max(1);
         for line_idx in 0..height {
@@ -1013,13 +1013,13 @@ pub fn all_titles() -> impl Iterator<Item = &'static str> {
 /// (`ShowReleaseNotes` before the first layout pass) still gets real text.
 #[must_use]
 pub fn doc_content(doc: &Doc) -> &'static str {
-    if doc.content.is_empty() {
-        if let Some(g) = find_structured(doc.title) {
-            if let Some(GuideBlock::Text(first)) = g.blocks.first() {
-                return first;
-            }
-            return g.summary;
+    if doc.content.is_empty()
+        && let Some(g) = find_structured(doc.title)
+    {
+        if let Some(GuideBlock::Text(first)) = g.blocks.first() {
+            return first;
         }
+        return g.summary;
     }
     doc.content
 }
@@ -1103,8 +1103,8 @@ pub fn plain_text_content(doc: &Doc) -> String {
             out.push('\n');
             continue;
         }
-        if trimmed.starts_with("> ") {
-            out.push_str(trimmed[2..].trim());
+        if let Some(rest) = trimmed.strip_prefix("> ") {
+            out.push_str(rest.trim());
             out.push('\n');
             continue;
         }

@@ -3,6 +3,9 @@
 //! `mod otlp_collector;` and uses these.
 //!
 //! The collector runs on its own thread with its own current-thread runtime.
+// Every integration binary that includes this module compiles its own copy
+// and exercises a subset of the helpers, so per-target `dead_code` is
+// structural here rather than a smell.
 #![allow(dead_code)]
 
 use std::collections::HashMap;

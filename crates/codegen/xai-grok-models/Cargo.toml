@@ -5,6 +5,11 @@ version = "0.1.0"
 edition.workspace = true
 description = "Default model IDs for the grok CLI, loaded from the embedded default_models.json."
 
+repository.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
 [dependencies]
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }

@@ -4,6 +4,7 @@
 //! (and the `SetAutoMode` handler body it implements), not only a standalone
 //! `PermissionHandle` stub.
 
+use std::rc::Rc;
 use std::sync::Arc;
 
 use agent_client_protocol as acp;
@@ -60,7 +61,7 @@ async fn set_auto_mode_path_wires_live_side_query_via_session_actor() {
                 "before wire: no live side-query"
             );
 
-            let session = Arc::new(actor);
+            let session = Rc::new(actor);
             // SHIPPED function — not a test reimplementation of the channel.
             session.wire_permission_auto_llm_classifier().await;
 
@@ -127,7 +128,7 @@ async fn spawn_auto_seed_wires_classifier_when_is_auto_mode() {
                 xai_grok_workspace::permission::ClassifierTurn::UserText("please run tests".into()),
             ]);
 
-            let session = Arc::new(actor);
+            let session = Rc::new(actor);
             if session.permissions.is_auto_mode() {
                 session.wire_permission_auto_llm_classifier().await;
             }
@@ -148,7 +149,7 @@ async fn set_auto_mode_off_clears_side_query_flag() {
             let mut actor = create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await;
             install_real_permissions(&mut actor);
             actor.permissions.set_auto_mode(true);
-            let session = Arc::new(actor);
+            let session = Rc::new(actor);
             session.wire_permission_auto_llm_classifier().await;
             assert!(session.permissions.has_llm_side_query());
 

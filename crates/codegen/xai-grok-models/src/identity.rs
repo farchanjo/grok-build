@@ -437,9 +437,7 @@ impl TryFrom<String> for UpstreamModelId {
 
 /// Built-in provider prefixes that cannot be stolen by additional accounts.
 pub fn is_builtin_provider_prefix(prefix: &str) -> bool {
-    BUILTIN_PROVIDER_PREFIXES
-        .iter()
-        .any(|candidate| *candidate == prefix)
+    BUILTIN_PROVIDER_PREFIXES.contains(&prefix)
 }
 
 /// Split on the first colon. The remainder is returned verbatim.

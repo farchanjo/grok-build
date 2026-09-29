@@ -1802,9 +1802,10 @@ mod tests {
         assert_eq!(first["noul"], serde_json::json!(0.83));
 
         let (tx, rx) = mpsc::unbounded_channel::<WorkflowHostMessage>();
-        let host = spawn_mock_host(rx, |req| match req {
-            WorkflowHostRequest::Decide { .. } => panic!("replay must not call decide again"),
-            _ => {}
+        let host = spawn_mock_host(rx, |req| {
+            if let WorkflowHostRequest::Decide { .. } = req {
+                panic!("replay must not call decide again")
+            }
         });
         let second = run_workflow(params(script, Journal::load(journal_path).unwrap(), tx));
         drop(host);

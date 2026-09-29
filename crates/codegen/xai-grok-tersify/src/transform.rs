@@ -271,10 +271,7 @@ mod tests {
     #[test]
     fn error_results_are_never_compressed() {
         let t = Tersify::open(&unique_home("errors"), Mode::Compress);
-        let transform = Tersify::transform_fn(&{
-            let arc = std::sync::Arc::new(t);
-            arc
-        });
+        let transform = Tersify::transform_fn(&{ std::sync::Arc::new(t) });
         let big_error = "ERROR line\n".repeat(600);
         let item = xai_grok_inference_types::ConversationItem::ToolResult(
             xai_grok_inference_types::ToolResultItem {

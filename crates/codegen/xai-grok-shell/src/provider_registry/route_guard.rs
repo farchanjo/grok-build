@@ -20,9 +20,7 @@
 
 use super::id::ProviderId;
 use super::instance::ProviderIncarnation;
-use super::lifecycle_state::{
-    ProviderLifecycleState, load_lifecycle_state, provenance_matches_lifecycle,
-};
+use super::lifecycle_state::{load_lifecycle_state, provenance_matches_lifecycle};
 use super::service::ProviderService;
 use std::path::Path;
 
@@ -220,14 +218,16 @@ fn assert_route_usable_inner(
     // do not fail here (see module docs). Retrieval applies a strict precheck.
     if let Some(expected_gen) = req.session_registry_generation {
         let live = service.generation();
-        if live != 0 && expected_gen != 0 && live != expected_gen {
-            if req.is_retry || req.provenance_incarnation.is_some() {
-                return Err(RouteGuardError::GenerationReplaced {
-                    id: id.to_owned(),
-                    expected: expected_gen,
-                    live,
-                });
-            }
+        if live != 0
+            && expected_gen != 0
+            && live != expected_gen
+            && (req.is_retry || req.provenance_incarnation.is_some())
+        {
+            return Err(RouteGuardError::GenerationReplaced {
+                id: id.to_owned(),
+                expected: expected_gen,
+                live,
+            });
         }
     }
 

@@ -45,7 +45,6 @@ use agent_client_protocol as acp;
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex as TokioMutex;
 use tokio::sync::mpsc::UnboundedReceiver;
-use xai_acp_lib::AcpAgentGatewaySender;
 use xai_grok_mcp::servers::{
     McpClientEvent, McpClientEventKind, McpServerName, McpState, mcp_server_name, mcp_transport_str,
 };
@@ -1951,7 +1950,7 @@ mod tests {
                 }
 
                 let mut uris = Vec::new();
-                while let Some(push) = gw_rx.try_recv().ok() {
+                while let Ok(push) = gw_rx.try_recv() {
                     assert_eq!(push.method_name(), "ext_notification");
                     match &push {
                         AcpClientMessageGeneric::ExtNotification(ext) => {

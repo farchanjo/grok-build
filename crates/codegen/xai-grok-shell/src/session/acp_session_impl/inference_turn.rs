@@ -2,6 +2,7 @@
 //! facts/gates and retry, sampler config reconstruction, sampling-failure
 //! recovery, and per-response usage recording.
 use super::*;
+use std::rc::Rc;
 /// Auth-failure detector for tool errors. Matches strictly on HTTP 401
 /// when the error carries a structured status code, mirroring
 /// `InferenceError::is_auth_error` in xai-grok-inference-types: 403 is
@@ -171,6 +172,17 @@ impl SessionActor {
     pub(super) async fn prepare_tool_definitions(&self) -> Vec<ToolDefinition> {
         self.prepare_tool_definitions_timed().await.0
     }
+    /// The session's tool bridge as an owned handle.
+    ///
+    /// `self.agent` is a `RefCell`, so `self.tool_bridge_owned()`
+    /// keeps the borrow alive for the whole enclosing statement — including any
+    /// `.await` inside it, which panics if the agent is borrowed mutably while
+    /// the future is suspended. Going through this helper ends the borrow
+    /// before returning, so callers may await freely on the bridge.
+    pub(crate) fn tool_bridge_owned(&self) -> std::sync::Arc<xai_grok_tools::bridge::ToolBridge> {
+        self.agent.borrow().tool_bridge().clone()
+    }
+
     /// The exact tool specs a turn sends, BEFORE the turn-specific
     /// structured-output append. Single source of truth shared by the turn
     /// (`acp_session_impl/turn.rs`) and the `SnapshotToolDefinitions` handler, so
@@ -267,7 +279,7 @@ impl SessionActor {
             .store((!effective.is_empty()).then(|| std::sync::Arc::new(effective)));
     }
     pub(super) async fn prepare_tool_definitions_inner(&self) -> Vec<ToolDefinition> {
-        let bridge = self.agent.borrow().tool_bridge().clone();
+        let bridge = self.tool_bridge_owned();
         let defs = bridge.tool_definitions_builtins_only().await;
         let plan_active = self.plan_mode.lock().is_active();
         filter_cursor_tools_by_plan_mode(defs, plan_active)
@@ -871,7 +883,7 @@ impl SessionActor {
     /// `conversation_collect` on a LocalSet task; channel bridges the
     /// `Send` permission actor). Heuristic runs only when the side-query
     /// errors or returns unparseable text.
-    pub(crate) async fn wire_permission_auto_llm_classifier(self: &Arc<Self>) {
+    pub(crate) async fn wire_permission_auto_llm_classifier(self: &Rc<Self>) {
         if !self.permissions.is_auto_mode() {
             return;
         }
@@ -906,7 +918,7 @@ impl SessionActor {
                 Result<String, xai_grok_workspace::permission::ClassifierFailure>,
             >,
         )>();
-        let session = Arc::clone(self);
+        let session = Rc::clone(self);
         tokio::task::spawn_local(async move {
             while let Some((messages, respond_to)) = rx.recv().await {
                 let result = async {
@@ -1139,7 +1151,7 @@ impl SessionActor {
         ),
         crate::session::media_stt::AudioSttError,
     > {
-        crate::session::media_stt::validate_audio_stt_route(audio_model_pin).map_err(|e| e)?;
+        crate::session::media_stt::validate_audio_stt_route(audio_model_pin)?;
         let active = self.reconstruct_full_config().await.map_err(|e| {
             crate::session::media_stt::AudioSttError::UnsupportedRoute(e.to_string())
         })?;
@@ -1411,10 +1423,12 @@ impl SessionActor {
         );
         *self.route_context.borrow_mut() = None;
         // Empty API key + empty base URL: inference fails closed on credentials.
-        let mut blocked = xai_grok_inference::InferenceConfig::default();
-        blocked.api_key = None;
-        blocked.base_url = String::new();
-        blocked.model = String::new();
+        let blocked = xai_grok_inference::InferenceConfig {
+            api_key: None,
+            base_url: String::new(),
+            model: String::new(),
+            ..Default::default()
+        };
         self.sampler_handle.update_config_with_route_context(
             blocked,
             xai_grok_inference::RouteContextUpdate::DeriveLegacy,
@@ -1767,12 +1781,11 @@ impl SessionActor {
 
         // Reconstruct only when catalog miss — prefer catalog identity.
         // Route-guard failure: leave identity as Custom (fail closed for remint).
-        if entry.is_none() {
-            if let Ok(cfg) = self.reconstruct_full_config().await
-                && !matches!(cfg.provider_identity, ProviderIdentity::Custom)
-            {
-                identity = cfg.provider_identity;
-            }
+        if entry.is_none()
+            && let Ok(cfg) = self.reconstruct_full_config().await
+            && !matches!(cfg.provider_identity, ProviderIdentity::Custom)
+        {
+            identity = cfg.provider_identity;
         }
 
         let settings = self.chat_state_handle.get_inference_settings().await;
@@ -1883,8 +1896,9 @@ impl SessionActor {
             backend,
         )
     }
+    #[allow(dead_code)]
     pub(crate) async fn handle_sampling_failure(
-        self: &Arc<Self>,
+        self: &Rc<Self>,
         error: xai_grok_inference::InferenceErrorInfo,
     ) -> Result<InferenceFailureRecovery, acp::Error> {
         self.handle_sampling_failure_with_context_compaction(error, true)
@@ -1892,7 +1906,7 @@ impl SessionActor {
     }
 
     async fn handle_sampling_failure_with_context_compaction(
-        self: &Arc<Self>,
+        self: &Rc<Self>,
         error: xai_grok_inference::InferenceErrorInfo,
         allow_context_compaction: bool,
     ) -> Result<InferenceFailureRecovery, acp::Error> {
@@ -2030,7 +2044,7 @@ impl SessionActor {
                     &failed_model_id,
                     error.status_code,
                     crate::extensions::notification::PROVIDER_CREDENTIAL_ERROR_TYPE,
-                    error.diagnostics.as_ref(),
+                    error.diagnostics.as_deref(),
                 )
                 .await;
             if let Some(provider_ctx) = provider_failure {
@@ -2038,15 +2052,14 @@ impl SessionActor {
                 // routes) may remint *their own* credential only — never xAI.
                 if let Some(auth_provider) = self.model_auth_provider(&failed_model_id)
                     && self.try_provider_401_recovery(&auth_provider).await
+                    && self.prepare_sampler_for_turn(true).await.is_ok()
                 {
-                    if self.prepare_sampler_for_turn(true).await.is_ok() {
-                        return Ok(InferenceFailureRecovery::RefreshAuthAndResubmit {
-                            credential,
-                            store: RecoveredStore::AuthProvider,
-                        });
-                    }
-                    // Route blocked after remint — fall through to surface failure.
+                    return Ok(InferenceFailureRecovery::RefreshAuthAndResubmit {
+                        credential,
+                        store: RecoveredStore::AuthProvider,
+                    });
                 }
+                // Route blocked after remint — fall through to surface failure.
                 return self
                     .surface_provider_credential_failure(
                         provider_ctx,
@@ -2167,15 +2180,14 @@ impl SessionActor {
         }
         if let Some(ref provider) = auth_provider
             && self.try_provider_401_recovery(provider).await
+            && self.prepare_sampler_for_turn(true).await.is_ok()
         {
-            if self.prepare_sampler_for_turn(true).await.is_ok() {
-                return Ok(InferenceFailureRecovery::RefreshAuthAndResubmit {
-                    credential,
-                    store: RecoveredStore::AuthProvider,
-                });
-            }
-            // Route blocked after remint — fall through to surface failure.
+            return Ok(InferenceFailureRecovery::RefreshAuthAndResubmit {
+                credential,
+                store: RecoveredStore::AuthProvider,
+            });
         }
+        // Route blocked after remint — fall through to surface failure.
         if matches!(error.kind, InferenceErrorKind::IdleTimeout) {
             self.signals_handle().record_idle_timeout();
         }
@@ -2286,7 +2298,7 @@ impl SessionActor {
                     &failed_model_id,
                     error.status_code,
                     crate::extensions::notification::PROVIDER_CREDENTIAL_ERROR_TYPE,
-                    error.diagnostics.as_ref(),
+                    error.diagnostics.as_deref(),
                 )
                 .await
             {
@@ -2309,7 +2321,7 @@ impl SessionActor {
                 &failed_model_id,
                 &failed_base_url,
                 error.status_code,
-                error.diagnostics.as_ref(),
+                error.diagnostics.as_deref(),
                 backend,
             );
             return self
@@ -2349,7 +2361,7 @@ impl SessionActor {
     /// * `Err(acp::Error)` - terminal failure already reported via
     ///    `send_xai_notification(RetryState::Failed)`.
     pub(crate) async fn run_turn_via_sampler(
-        self: &Arc<Self>,
+        self: &Rc<Self>,
         request: ConversationRequest,
         allow_context_compaction: bool,
     ) -> Result<InferenceTurnOutcome, acp::Error> {

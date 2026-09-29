@@ -7,6 +7,7 @@
 //! the parent module's private helpers.
 use super::*;
 use futures::StreamExt;
+use std::rc::Rc;
 /// Whether a tool name is an MCP `create_pull_request` (qualified
 /// `server__create_pull_request` or bare).
 fn is_mcp_create_pull_request(tool_name: &str) -> bool {
@@ -280,7 +281,7 @@ impl SessionActor {
         wire_name: &str,
         parsed: Option<&ToolInput>,
     ) -> Option<acp::Meta> {
-        let toolset = self.agent.borrow().tool_bridge().toolset();
+        let toolset = self.tool_bridge_owned().toolset();
         xai_grok_tools::normalization::merge_tool_meta(
             &toolset,
             existing.map(serde_json::Value::Object),
@@ -621,7 +622,7 @@ impl SessionActor {
                 }
             };
             {
-                let bridge = self.agent.borrow().tool_bridge().clone();
+                let bridge = self.tool_bridge_owned();
                 if let Some(effects) = bridge.apply_pending_skill_update().await {
                     if let Some(item) = self.wrap_skill_reminder(&effects) {
                         deferred_followups.push(item);
@@ -900,7 +901,7 @@ impl SessionActor {
                         let best_match = objects[0].clone();
                         let mut selected_index = 0;
                         let mut matched_tool = false;
-                        let bridge = self.agent.borrow().tool_bridge().clone();
+                        let bridge = self.tool_bridge_owned();
                         for (idx, obj) in objects.iter().enumerate() {
                             if bridge
                                 .try_parse(&call.function.name, obj.clone())
@@ -936,9 +937,7 @@ impl SessionActor {
             }
         };
         let mut tool_input = match self
-            .agent
-            .borrow()
-            .tool_bridge()
+            .tool_bridge_owned()
             .try_parse(&call.function.name, raw_input.clone())
             .await
         {
@@ -1438,9 +1437,7 @@ impl SessionActor {
             );
         }
         let is_read_only = self
-            .agent
-            .borrow()
-            .tool_bridge()
+            .tool_bridge_owned()
             .tool_kind(&resolved_tool_name)
             .map(xai_grok_tools::types::tool::ToolKind::is_read_only)
             .unwrap_or(false);
@@ -1545,7 +1542,7 @@ impl SessionActor {
     /// implement turn; request-changes: stay in plan mode + feed the comments
     /// back as a turn; abandon: leave plan mode and wait for the user.
     pub(super) async fn resume_plan_approval(
-        self: Arc<Self>,
+        self: Rc<Self>,
         completion_tx: mpsc::UnboundedSender<(String, PromptTurnResult)>,
     ) {
         if !self.plan_mode.lock().is_awaiting_plan_approval() {
@@ -1608,7 +1605,7 @@ impl SessionActor {
     /// Inject a synthetic user turn after a resumed plan decision and kick the
     /// scheduler (no in-flight turn exists on resume to continue).
     async fn start_resume_turn(
-        self: Arc<Self>,
+        self: Rc<Self>,
         text: String,
         mode: PromptMode,
         completion_tx: mpsc::UnboundedSender<(String, PromptTurnResult)>,
@@ -2114,10 +2111,11 @@ impl SessionActor {
                 let plan_path = self.plan_mode.lock().plan_file_path().display().to_string();
                 if let Some(ref mut content) = tool_update.fields.content {
                     for item in content.iter_mut() {
-                        if let acp::ToolCallContent::Content(acp::Content {
-                            content: acp::ContentBlock::Text(t),
-                            ..
-                        }) = item
+                        if let acp::ToolCallContent::Content(content) = item
+                            && let acp::Content {
+                                content: acp::ContentBlock::Text(t),
+                                ..
+                            } = &mut **content
                         {
                             t.text = format!("Plan file: {}", plan_path);
                         }
@@ -2641,7 +2639,7 @@ impl SessionActor {
     /// and may need to call back into `sampler_handle.update_config`
     /// or resubmit.
     pub(crate) async fn handle_sampling_event(
-        self: &Arc<Self>,
+        self: &Rc<Self>,
         event: xai_grok_inference::InferenceEvent,
     ) {
         use xai_grok_inference::{InferenceChannel, InferenceEvent};
@@ -2878,7 +2876,7 @@ impl SessionActor {
                 if let Some(tx) = self.turn_stream_drained.lock().take() {
                     let _ = tx.send(());
                 }
-                let session = Arc::clone(self);
+                let session = Rc::clone(self);
                 tokio::task::spawn_local(async move {
                     session.apply_pending_image_strip(&request_id).await;
                 });

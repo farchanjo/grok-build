@@ -26,6 +26,7 @@ const MAX_DESCRIPTION_CHARS: usize = 400;
 /// merged config. Deduplicated, order-preserving, empty-string entries
 /// dropped. Never fails — malformed shapes read as "no pins".
 #[must_use]
+#[allow(dead_code)]
 pub fn pinned_tools_from_disk() -> Vec<String> {
     pinned_tools_from_disk_opt().unwrap_or_default()
 }

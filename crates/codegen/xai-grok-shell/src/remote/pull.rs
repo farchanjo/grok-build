@@ -55,7 +55,7 @@ pub(crate) mod hydrate {
     use crate::remote::client::{BackendError, LoadDataResponse, LoadedMessage, SessionInfo};
     use crate::session::info::Info;
     use crate::session::persistence::{CHAT_FORMAT_VERSION, Summary, default_model_id};
-    use crate::session::storage::{SUMMARY_FILE, UPDATES_FILE};
+    use crate::session::storage::UPDATES_FILE;
 
     fn io_err(path: &Path, source: std::io::Error) -> BackendError {
         BackendError::Hydration {
@@ -233,6 +233,7 @@ pub(crate) mod hydrate {
             .unwrap_or_else(chrono::Utc::now)
     }
 
+    #[allow(dead_code)]
     fn write_file(path: &Path, data: &[u8]) -> Result<(), BackendError> {
         std::fs::write(path, data).map_err(|e| io_err(path, e))
     }

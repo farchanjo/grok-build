@@ -476,7 +476,7 @@ fn small_screen_trigger_waits_for_stable_agent_measure_then_fires_once() {
 /// permission ask, modal, open dropdown) defers WITHOUT consuming — the show
 /// gate would refuse it, and spending the one-shot invisibly would kill the
 /// hint for the run. Once the occluder clears, the next draw shows it.
-
+///
 /// An out-of-band first measure consumes the one-shot without showing, so a
 /// later resize INTO the band can never bring the tip back.
 #[test]

@@ -2,6 +2,7 @@
 //! `run_task`, turn guards) and the cancel paths.
 
 use super::*;
+use std::rc::Rc;
 
 pub(super) struct TurnSubagentScopeGuard {
     current_prompt_id: std::sync::Arc<std::sync::Mutex<Option<String>>>,
@@ -60,7 +61,7 @@ pub(crate) struct AgentTask {
 
 impl AgentTask {
     pub(super) fn new_prompt(
-        session: Arc<SessionActor>,
+        session: Rc<SessionActor>,
         prompt_id: String,
         origin: super::super::PromptOrigin,
         input: Vec<ContentBlock>,
@@ -145,7 +146,7 @@ impl<T> TaskSlot<T> {
 }
 
 async fn run_task(
-    session: Arc<SessionActor>,
+    session: Rc<SessionActor>,
     origin: super::super::PromptOrigin,
     input: Vec<ContentBlock>,
     prompt_mode: PromptMode,
@@ -329,17 +330,11 @@ impl SessionActor {
         if self.startup_hints.is_subagent {
             // Subagent: only kill foreground processes owned by this session,
             // not the parent's or sibling's on the shared backend.
-            self.agent
-                .borrow()
-                .tool_bridge()
+            self.tool_bridge_owned()
                 .kill_foreground_commands_by_owner(&self.session_info.id.0)
                 .await;
         } else {
-            self.agent
-                .borrow()
-                .tool_bridge()
-                .kill_foreground_commands()
-                .await;
+            self.tool_bridge_owned().kill_foreground_commands().await;
         }
 
         // Snapshot hook input only for reportable interactive cancellation. This await happens
@@ -354,17 +349,11 @@ impl SessionActor {
             if self.startup_hints.is_subagent {
                 // Subagent teardown: only kill tasks owned by this session,
                 // not the parent's or sibling's tasks on the shared backend.
-                self.agent
-                    .borrow()
-                    .tool_bridge()
+                self.tool_bridge_owned()
                     .kill_all_background_tasks_by_owner(&self.session_info.id.0)
                     .await;
             } else {
-                self.agent
-                    .borrow()
-                    .tool_bridge()
-                    .kill_all_background_tasks()
-                    .await;
+                self.tool_bridge_owned().kill_all_background_tasks().await;
             }
         }
 
@@ -531,9 +520,7 @@ impl SessionActor {
             );
         }
 
-        self.agent
-            .borrow()
-            .tool_bridge()
+        self.tool_bridge_owned()
             .update_resource(
                 xai_grok_tools::implementations::grok_build::task::types::CurrentPromptIdResource(
                     String::new(),

@@ -156,11 +156,7 @@ async fn drain_interjection_expands_skill_slash_reference() {
                 path: path.to_string_lossy().into_owned(),
                 ..Default::default()
             };
-            actor
-                .agent
-                .borrow()
-                .tool_bridge()
-                .clone()
+            actor.tool_bridge_owned()
                 .seed_skill_discovery(
                     Some(std::path::PathBuf::from("/tmp")),
                     None,

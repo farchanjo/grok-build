@@ -189,32 +189,35 @@ pub fn stub_spec(dimensions: usize, model: &str) -> EmbeddingSourceSpec {
     }
 }
 
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(any(test, feature = "test"))]
 use std::sync::Arc;
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(any(test, feature = "test"))]
 use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Deterministic hermetic `MemoryRetrieval` for tests and downstream test
 /// targets. Embeddings = blake3-derived floats (like `MockEmbeddingProvider`);
 /// rerank defaults to `Ok(None)` (no reranker → keep local order). Each field
 /// can be overridden to inject failures, invalid permutations, or assertions.
-#[cfg(any(test, feature = "test-support"))]
+/// Test override for embedding: maps texts to vectors, or fails.
+#[cfg(any(test, feature = "test"))]
+pub type EmbedOverride =
+    Arc<dyn Fn(&[String]) -> Result<Vec<Vec<f32>>, RetrievalError> + Send + Sync>;
+
+/// Test override for reranking: `(query, state, docs) -> ranked indices`.
+#[cfg(any(test, feature = "test"))]
+pub type RerankOverride =
+    Arc<dyn Fn(&str, &str, &[String]) -> Result<Option<Vec<usize>>, RetrievalError> + Send + Sync>;
+
+#[cfg(any(test, feature = "test"))]
 pub struct FakeMemoryRetrieval {
     pub spec: EmbeddingSourceSpec,
-    pub embed_override:
-        Option<Arc<dyn Fn(&[String]) -> Result<Vec<Vec<f32>>, RetrievalError> + Send + Sync>>,
-    pub rerank_override: Option<
-        Arc<
-            dyn Fn(&str, &str, &[String]) -> Result<Option<Vec<usize>>, RetrievalError>
-                + Send
-                + Sync,
-        >,
-    >,
+    pub embed_override: Option<EmbedOverride>,
+    pub rerank_override: Option<RerankOverride>,
     embed_calls: Arc<AtomicU64>,
     rerank_calls: Arc<AtomicU64>,
 }
 
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(any(test, feature = "test"))]
 impl FakeMemoryRetrieval {
     pub fn new(dimensions: usize, model: &str) -> Self {
         Self {
@@ -254,7 +257,7 @@ impl FakeMemoryRetrieval {
     }
 }
 
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(any(test, feature = "test"))]
 fn mock_embed(texts: &[String], dims: usize) -> Result<Vec<Vec<f32>>, RetrievalError> {
     Ok(texts
         .iter()
@@ -266,7 +269,7 @@ fn mock_embed(texts: &[String], dims: usize) -> Result<Vec<Vec<f32>>, RetrievalE
         .collect())
 }
 
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(any(test, feature = "test"))]
 #[async_trait]
 impl MemoryRetrieval for FakeMemoryRetrieval {
     fn source_spec(&self) -> EmbeddingSourceSpec {

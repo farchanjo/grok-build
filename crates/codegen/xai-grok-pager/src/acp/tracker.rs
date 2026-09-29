@@ -2246,10 +2246,13 @@ fn content_text(tc: &acp::ToolCall) -> String {
     tc.content
         .iter()
         .filter_map(|c| match c {
-            acp::ToolCallContent::Content(acp::Content {
-                content: acp::ContentBlock::Text(t),
-                ..
-            }) => Some(t.text.as_str()),
+            acp::ToolCallContent::Content(content) => match &**content {
+                acp::Content {
+                    content: acp::ContentBlock::Text(t),
+                    ..
+                } => Some(t.text.as_str()),
+                _ => None,
+            },
             _ => None,
         })
         .collect::<Vec<_>>()
@@ -3004,17 +3007,6 @@ mod tests {
         acp::SessionUpdate::ToolCallUpdate(acp::ToolCallUpdate::new(
             acp::ToolCallId::new(Arc::from(id)),
             acp::ToolCallUpdateFields::new().status(Some(acp::ToolCallStatus::Completed)),
-        ))
-    }
-    /// A failed tool update carrying `text` as the rejection reason.
-    fn tool_update_failed(id: &str, text: &str) -> acp::SessionUpdate {
-        acp::SessionUpdate::ToolCallUpdate(acp::ToolCallUpdate::new(
-            acp::ToolCallId::new(Arc::from(id)),
-            acp::ToolCallUpdateFields::new()
-                .status(Some(acp::ToolCallStatus::Failed))
-                .content(vec![acp::ToolCallContent::from(acp::ContentBlock::Text(
-                    acp::TextContent::new(text.to_string()),
-                ))]),
         ))
     }
     /// An intermediate `task` update: refined title + args, no terminal status.
@@ -4305,11 +4297,11 @@ mod tests {
             acp::ToolCallId::new(tc_id.clone()),
             acp::ToolCallUpdateFields::new()
                 .status(Some(acp::ToolCallStatus::Completed))
-                .content(Some(vec![acp::ToolCallContent::Content(
+                .content(Some(vec![acp::ToolCallContent::Content(Box::new(
                     acp::Content::new(acp::ContentBlock::Text(acp::TextContent::new(
                         "found 1 matches".to_string(),
                     ))),
-                )]))
+                ))]))
                 .raw_output(serde_json::to_value(ToolOutput::GrepSearch(grep_output)).ok()),
         ));
         tracker.handle_update(completed, &meta(), &mut scrollback);
@@ -7151,8 +7143,8 @@ mod tests {
         )
         .kind(acp::ToolKind::Other)
         .status(acp::ToolCallStatus::Completed)
-        .content(vec![acp::ToolCallContent::Content(acp::Content::new(
-            acp::ContentBlock::Text(acp::TextContent::new(upsell)),
+        .content(vec![acp::ToolCallContent::Content(Box::new(
+            acp::Content::new(acp::ContentBlock::Text(acp::TextContent::new(upsell))),
         ))])
         .raw_input(Some(serde_json::json!({ "variant": "ImageGen" })))
         .raw_output(serde_json::to_value(output).ok())

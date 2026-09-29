@@ -323,7 +323,7 @@ pub fn ingest_skill_sources(
                     &discovered,
                     path_str.into_owned(),
                 ));
-                valid.push(discovered);
+                valid.push(*discovered);
             }
             StrictSkillOutcome::Quarantined(row) => quarantined.push(row),
         }
@@ -469,7 +469,7 @@ pub fn revalidate_skill_file_at_load(
                 return Err(SkillLoadError::IdentityChanged);
             }
             Ok(RevalidatedSkillFile {
-                discovered,
+                discovered: *discovered,
                 content,
             })
         }
@@ -552,10 +552,10 @@ fn plan_nofollow_walk(
     plugin_root: Option<&Path>,
     collection_root: Option<&Path>,
 ) -> Result<(PathBuf, Vec<OsString>), SkillLoadError> {
-    if let Some(plugin_root) = plugin_root {
-        if let Some(plan) = try_plan_from_root(path, plugin_root)? {
-            return Ok(plan);
-        }
+    if let Some(plugin_root) = plugin_root
+        && let Some(plan) = try_plan_from_root(path, plugin_root)?
+    {
+        return Ok(plan);
     }
     if let Some(collection_root) = collection_root {
         return try_plan_from_root(path, collection_root)?.ok_or(SkillLoadError::Unreadable);
@@ -755,12 +755,11 @@ fn openat_directory_nofollow(
     match openat(dir, name, flags, mode) {
         Ok(fd) => Ok(fd),
         Err(err) => {
-            if err == nix::errno::Errno::ELOOP || err == nix::errno::Errno::ENOTDIR {
-                if let Ok(stat) = fstatat(dir, name, AtFlags::AT_SYMLINK_NOFOLLOW) {
-                    if SFlag::from_bits_truncate(stat.st_mode) & SFlag::S_IFMT == SFlag::S_IFLNK {
-                        return Err(SkillLoadError::Symlink);
-                    }
-                }
+            if (err == nix::errno::Errno::ELOOP || err == nix::errno::Errno::ENOTDIR)
+                && let Ok(stat) = fstatat(dir, name, AtFlags::AT_SYMLINK_NOFOLLOW)
+                && SFlag::from_bits_truncate(stat.st_mode) & SFlag::S_IFMT == SFlag::S_IFLNK
+            {
+                return Err(SkillLoadError::Symlink);
             }
             Err(map_open_errno(err))
         }
@@ -944,7 +943,7 @@ mod tests {
 
     #[test]
     fn runtime_flag_is_enabled() {
-        assert!(STRICT_VALIDATOR_RUNTIME_ENABLED);
+        const { assert!(STRICT_VALIDATOR_RUNTIME_ENABLED) };
     }
 
     #[test]

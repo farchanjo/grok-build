@@ -465,6 +465,7 @@ mod compact_cancel_await_tests {
 /// short-circuit retries on deterministic failures (4xx schema violations,
 /// auth errors) while still retrying transient ones (5xx,
 /// network blips, rate limits).
+#[allow(dead_code)]
 pub(crate) async fn generate_session_compact(
     chat_history: Vec<ConversationItem>,
     tools: Vec<ToolSpec>,

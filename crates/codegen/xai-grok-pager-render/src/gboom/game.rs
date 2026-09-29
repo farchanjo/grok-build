@@ -404,7 +404,7 @@ impl Game {
 
     /// Whether any movement control is currently held (latched or within
     /// the repeat-bridging window). Used to assert hold-clearing behavior.
-    #[cfg(any(test, feature = "test-support"))]
+    #[cfg(any(test, feature = "test"))]
     pub fn any_held(&self) -> bool {
         self.hold.iter().any(|&h| h > 0.0)
     }

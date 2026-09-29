@@ -401,18 +401,19 @@ pub(super) fn dispatch_cancel_login(app: &mut AppView) -> Vec<Effect> {
     // Exact bound repair only: clear its in-flight token so a delayed
     // AuthComplete cannot resume. Drop the matching stash and strip CTA only
     // when the stash is for this same repair scope. Sibling stashes/CTAs stay.
-    if let Some((agent_id, scope)) = app.active_auth_repair.take() {
-        if let Some(agent) = app.agents.get_mut(&agent_id) {
-            let bound = agent.in_flight_repair.as_ref().is_some_and(|f| f == &scope);
-            if bound {
-                agent.in_flight_repair = None;
-                let drop_stash = agent.reauth_stashed_prompt.as_ref().is_some_and(|s| {
-                    s.matches_repair(&scope.provider_id, scope.credential_generation)
-                });
-                if drop_stash {
-                    agent.reauth_stashed_prompt = None;
-                    strip_trailing_auth_error_blocks(agent);
-                }
+    if let Some((agent_id, scope)) = app.active_auth_repair.take()
+        && let Some(agent) = app.agents.get_mut(&agent_id)
+    {
+        let bound = agent.in_flight_repair.as_ref().is_some_and(|f| f == &scope);
+        if bound {
+            agent.in_flight_repair = None;
+            let drop_stash = agent
+                .reauth_stashed_prompt
+                .as_ref()
+                .is_some_and(|s| s.matches_repair(&scope.provider_id, scope.credential_generation));
+            if drop_stash {
+                agent.reauth_stashed_prompt = None;
+                strip_trailing_auth_error_blocks(agent);
             }
         }
     }

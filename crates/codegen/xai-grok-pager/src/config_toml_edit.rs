@@ -170,18 +170,15 @@ pub(crate) const CHATGPT_AUTO_COMPACT_THRESHOLD_MAX: u8 = 100;
 
 /// Returns true when `model_id` is a safe `chatgpt-*` catalog id.
 pub(crate) fn is_chatgpt_model_id(model_id: &str) -> bool {
-    match model_id.strip_prefix("chatgpt-") {
+    matches!(
+        model_id.strip_prefix("chatgpt-"),
         Some(rest)
             if !rest.is_empty()
                 && model_id.len() <= 128
                 && model_id.bytes().all(|byte| {
                     byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_')
-                }) =>
-        {
-            true
-        }
-        _ => false,
-    }
+                })
+    )
 }
 
 /// TOML table path for a ChatGPT model override, such as

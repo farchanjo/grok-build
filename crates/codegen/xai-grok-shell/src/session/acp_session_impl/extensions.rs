@@ -1,7 +1,7 @@
 //! Composition root for the session's extensions: each lives in its own submodule and installs itself here.
 
 use std::rc::Rc;
-use std::sync::Weak;
+use std::rc::Weak;
 
 use xai_agent_lifecycle::LocalExtensionRegistry;
 use xai_agent_lifecycle::LocalExtensionRegistryBuilder;

@@ -5,6 +5,11 @@ name = "xai-hooks-plugins-types"
 version = "0.1.0"
 description = "Shared DTO types for hooks/plugins ACP extensions (wire format only)"
 
+repository.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
 [dependencies]
 serde = { workspace = true, features = ["derive"] }
 

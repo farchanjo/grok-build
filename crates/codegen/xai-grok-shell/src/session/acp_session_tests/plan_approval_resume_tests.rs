@@ -20,14 +20,14 @@ fn ext_response(outcome: &str) -> Arc<serde_json::value::RawValue> {
 /// Actor with both gateway and persistence receivers retained (the shared
 /// `build_actor` drops persistence).
 async fn actor_with_channels() -> (
-    std::sync::Arc<SessionActor>,
+    std::rc::Rc<SessionActor>,
     tokio::sync::mpsc::UnboundedReceiver<xai_acp_lib::AcpClientMessage>,
     tokio::sync::mpsc::UnboundedReceiver<PersistenceMsg>,
 ) {
     let (gateway_tx, gateway_rx) = tokio::sync::mpsc::unbounded_channel();
     let (persistence_tx, persistence_rx) = tokio::sync::mpsc::unbounded_channel();
     let (actor, _ev) = create_test_actor_ex(0, 256_000, 85, gateway_tx, persistence_tx).await;
-    (std::sync::Arc::new(actor), gateway_rx, persistence_rx)
+    (std::rc::Rc::new(actor), gateway_rx, persistence_rx)
 }
 
 /// Latest persisted `awaiting_plan_approval` value, or `None` if plan-mode state

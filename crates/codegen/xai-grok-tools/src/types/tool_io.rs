@@ -74,7 +74,7 @@ pub enum ToolInput {
     TaskOutput(TaskOutputToolInput),
     WaitTasks(WaitTasksToolInput),
     KillTask(KillTaskToolInput),
-    Task(TaskToolInput),
+    Task(Box<TaskToolInput>),
     WebSearch(WebSearchInput),
     ImageGen(ImageGenInput),
     ImageEdit(ImageEditInput),
@@ -114,6 +114,14 @@ pub enum ToolInput {
     AssetJobSubscribe(AssetJobSubscribeInput),
     /// Dynamic input for runtime-registered tools (MCP, etc.)
     Dynamic(serde_json::Value),
+}
+
+// `Task` is boxed to keep the enum small (`clippy::large_enum_variant`); the
+// registry and call sites keep using the ergonomic unboxed conversion.
+impl From<TaskToolInput> for ToolInput {
+    fn from(value: TaskToolInput) -> Self {
+        Self::Task(Box::new(value))
+    }
 }
 impl ToolInput {
     /// The real target tool for *meta-dispatch* tools whose wire `function.name`

@@ -1,6 +1,7 @@
 //! Laziness / stop-detector concern for `SessionActor`.
 
 use super::*;
+use std::rc::Rc;
 
 /// Per-fire metadata captured at the top of `maybe_fire_laziness_check`
 /// when `--laziness-debug-log` is set. Threaded through the
@@ -344,7 +345,7 @@ impl SessionActor {
     /// `LazinessClassifierAborted`) flow through the same code path
     /// in both modes — debug mode adds logging, it does not bypass
     /// the production decision logic.
-    pub(crate) async fn maybe_fire_laziness_check(self: Arc<Self>) {
+    pub(crate) async fn maybe_fire_laziness_check(self: Rc<Self>) {
         // Single in-flight slot, the same `try_begin`/`finish` discipline as
         // `PrefireState`. Two ways in: the turn-end spawn and the re-kick the
         // compaction completion issues when it releases the safe point. The
@@ -371,7 +372,7 @@ impl SessionActor {
     }
 
     /// The classifier body. Called only under the `laziness_in_flight` guard.
-    async fn run_laziness_check(self: Arc<Self>) {
+    async fn run_laziness_check(self: Rc<Self>) {
         let model_id_acp = self.models_manager.current_model_id();
         let model_id = model_id_acp.0.to_string();
         let cfg = self.models_manager.laziness_detector_for(&model_id);

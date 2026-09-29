@@ -243,17 +243,16 @@ impl ModelState {
         // The models/update broadcast carries each model's static default effort,
         // not this session's choice; only re-derive when the model changed so a
         // catalog refresh can't clobber a user-set effort.
-        if self.current != previous_current_model {
-            if let Some(id) = &self.current {
-                if let Some(info) = self.available.get(id) {
-                    let options = parse_reasoning_efforts_meta(info.meta.as_ref());
-                    self.reasoning_effort_selection = parse_reasoning_effort_selection_meta(
-                        info.meta.as_ref(),
-                        &options.unwrap_or_default(),
-                    );
-                    self.reasoning_effort = parse_reasoning_effort_meta(info.meta.as_ref());
-                }
-            }
+        if self.current != previous_current_model
+            && let Some(id) = &self.current
+            && let Some(info) = self.available.get(id)
+        {
+            let options = parse_reasoning_efforts_meta(info.meta.as_ref());
+            self.reasoning_effort_selection = parse_reasoning_effort_selection_meta(
+                info.meta.as_ref(),
+                &options.unwrap_or_default(),
+            );
+            self.reasoning_effort = parse_reasoning_effort_meta(info.meta.as_ref());
         }
         true
     }

@@ -6,6 +6,10 @@
 //! same reset between tests.
 //!
 //! Mirrors the GROK_HOME isolation pattern used in other integration tests.
+// Every integration binary that includes this module compiles its own copy
+// and exercises a subset of the helpers, so per-target `dead_code` is
+// structural here rather than a smell.
+#![allow(dead_code)]
 //!
 //! ## Usage
 //!
@@ -21,8 +25,6 @@
 //!     // ...
 //! }
 //! ```
-
-#![allow(dead_code)] // each test binary uses a different subset
 
 #[cfg(unix)]
 pub mod artifact_server;

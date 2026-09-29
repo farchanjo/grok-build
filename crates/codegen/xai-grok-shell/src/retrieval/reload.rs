@@ -19,15 +19,16 @@ use std::path::Path;
 use std::sync::Arc;
 
 use indexmap::IndexMap;
-use xai_grok_config_types::{
-    EmbeddingModelConfig, RerankerModelConfig, RetrievalGraphConfig, RetrievalProfileConfig,
-};
+use xai_grok_config_types::RetrievalGraphConfig;
 
 use super::bounds::ProfileBudgetLimits;
 use super::graph::{
     EmbeddingRouteDescriptor, RerankerRouteDescriptor, RetrievalSnapshot, SnapshotProfile,
     embedding_space_for, origin_host_from_base_url, snapshot_fingerprint,
 };
+#[cfg(test)]
+use xai_grok_config_types::{EmbeddingModelConfig, RerankerModelConfig, RetrievalProfileConfig};
+
 use crate::provider_registry::ProviderService;
 use crate::provider_registry::runtime_cache::load_runtime;
 use crate::retrieval_config::management::RetrievalManagementService;
@@ -225,17 +226,15 @@ pub fn build_snapshot(
     }))
 }
 
+/// `(generation, capability views, meta pins)` as read from a home directory.
+pub type ProviderContext = (
+    u64,
+    Vec<ProviderCapabilityView>,
+    IndexMap<String, ProviderMetaPin>,
+);
+
 /// Load provider capability views + meta pins from a home directory.
-pub fn load_provider_context(
-    home: &Path,
-) -> Result<
-    (
-        u64,
-        Vec<ProviderCapabilityView>,
-        IndexMap<String, ProviderMetaPin>,
-    ),
-    String,
-> {
+pub fn load_provider_context(home: &Path) -> Result<ProviderContext, String> {
     let (service, lifecycle, generation) = load_runtime(home)?;
     let mut views = Vec::new();
     let mut meta = IndexMap::new();

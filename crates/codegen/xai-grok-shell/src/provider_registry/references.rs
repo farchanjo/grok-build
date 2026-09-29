@@ -161,10 +161,10 @@ pub fn build_reference_impact(
 }
 
 fn push_err(errors: &mut Vec<String>, err: Option<String>) {
-    if let Some(e) = err {
-        if errors.len() < MAX_SCAN_ERRORS {
-            errors.push(truncate_label(&e));
-        }
+    if let Some(e) = err
+        && errors.len() < MAX_SCAN_ERRORS
+    {
+        errors.push(truncate_label(&e));
     }
 }
 
@@ -330,10 +330,10 @@ fn model_entry_references_provider(
         return ModelRefHit::Yes;
     }
     // Explicit wrong provider → no.
-    if let Some(mp) = entry.get("model_provider").and_then(|v| v.as_str()) {
-        if mp != provider_id {
-            return ModelRefHit::No;
-        }
+    if let Some(mp) = entry.get("model_provider").and_then(|v| v.as_str())
+        && mp != provider_id
+    {
+        return ModelRefHit::No;
     }
     resolve_model_id_to_provider(model_id, provider_id, catalog)
 }
@@ -664,14 +664,14 @@ fn scan_auxiliary_config_routes(
         "recap",
     ];
     for key in keys {
-        if let Some(table) = val.get(key) {
-            if table_mentions_provider(table, provider_id) {
-                push_ref(
-                    &mut refs,
-                    ImpactGroupKind::AuxiliaryRoutes,
-                    format!("config.{key}"),
-                );
-            }
+        if let Some(table) = val.get(key)
+            && table_mentions_provider(table, provider_id)
+        {
+            push_ref(
+                &mut refs,
+                ImpactGroupKind::AuxiliaryRoutes,
+                format!("config.{key}"),
+            );
         }
     }
     (refs, false, None)
@@ -819,16 +819,15 @@ fn scan_memory_refs(
         if table_mentions_provider(mem, provider_id) {
             push_ref(&mut refs, ImpactGroupKind::Memory, "config.memory");
         }
-        if let Some(emb) = mem.get("embedding") {
-            if emb.get("provider").and_then(|v| v.as_str()) == Some(provider_id)
-                || table_mentions_provider(emb, provider_id)
-            {
-                push_ref(
-                    &mut refs,
-                    ImpactGroupKind::Memory,
-                    "config.memory.embedding",
-                );
-            }
+        if let Some(emb) = mem.get("embedding")
+            && (emb.get("provider").and_then(|v| v.as_str()) == Some(provider_id)
+                || table_mentions_provider(emb, provider_id))
+        {
+            push_ref(
+                &mut refs,
+                ImpactGroupKind::Memory,
+                "config.memory.embedding",
+            );
         }
     }
     (refs, false, None)
@@ -886,6 +885,36 @@ fn read_bounded(path: &Path) -> Result<Vec<u8>, String> {
         return Ok(buf);
     }
     fs::read(path).map_err(|e| format!("{}: {e}", path.display()))
+}
+
+// Fix scan_workflows_and_goals to properly propagate errors.
+// The earlier version used `?` incorrectly on a non-Result path.
+// Rewrite cleanly below via a private helper used from build.
+
+/// Scan workflows/goals directories with proper error propagation.
+pub fn scan_workflows_and_goals_v2(
+    home: &Path,
+    provider_id: &str,
+) -> (Vec<ImpactReference>, bool, Option<String>) {
+    let mut refs = Vec::new();
+    let mut truncated = false;
+    for rel in ["workflows", "goals", "state/workflows", "state/goals"] {
+        let dir = home.join(rel);
+        if !dir.is_dir() {
+            continue;
+        }
+        if let Err(e) = scan_dir_for_provider(
+            &dir,
+            provider_id,
+            ImpactGroupKind::WorkflowsAndGoals,
+            &mut refs,
+            &mut truncated,
+            rel,
+        ) {
+            return (refs, truncated, Some(e));
+        }
+    }
+    (refs, truncated, None)
 }
 
 #[cfg(test)]
@@ -1091,34 +1120,4 @@ model = "shared"
             "ambiguous bare session model must fail closed: {err:?}"
         );
     }
-}
-
-// Fix scan_workflows_and_goals to properly propagate errors.
-// The earlier version used `?` incorrectly on a non-Result path.
-// Rewrite cleanly below via a private helper used from build.
-
-/// Scan workflows/goals directories with proper error propagation.
-pub fn scan_workflows_and_goals_v2(
-    home: &Path,
-    provider_id: &str,
-) -> (Vec<ImpactReference>, bool, Option<String>) {
-    let mut refs = Vec::new();
-    let mut truncated = false;
-    for rel in ["workflows", "goals", "state/workflows", "state/goals"] {
-        let dir = home.join(rel);
-        if !dir.is_dir() {
-            continue;
-        }
-        if let Err(e) = scan_dir_for_provider(
-            &dir,
-            provider_id,
-            ImpactGroupKind::WorkflowsAndGoals,
-            &mut refs,
-            &mut truncated,
-            rel,
-        ) {
-            return (refs, truncated, Some(e));
-        }
-    }
-    (refs, truncated, None)
 }

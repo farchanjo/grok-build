@@ -685,7 +685,7 @@ impl SessionActor {
         }
         use xai_grok_tools::reminders::task_completion::ReportedTaskCompletions;
         use xai_grok_tools::types::resources::State;
-        let bridge = self.agent.borrow().tool_bridge().clone();
+        let bridge = self.tool_bridge_owned();
         let resources = bridge.shared_resources().await;
         let mut res = resources.lock().await;
         let reported = res.get_or_default::<State<ReportedTaskCompletions>>();
@@ -695,7 +695,7 @@ impl SessionActor {
     }
     pub(super) async fn drain_between_turn_completions(&self) {
         let goal_loop_active = self.goal_loop_active();
-        let bridge = self.agent.borrow().tool_bridge().clone();
+        let bridge = self.tool_bridge_owned();
         let reserved = self
             .tool_context
             .task_completion_reservations
@@ -838,12 +838,7 @@ impl SessionActor {
     /// so a resumed session can inform the model about processes that were
     /// still alive when the session ended.
     pub(super) async fn persist_background_task_manifest(&self) {
-        let tasks = self
-            .agent
-            .borrow()
-            .tool_bridge()
-            .list_background_tasks()
-            .await;
+        let tasks = self.tool_bridge_owned().list_background_tasks().await;
         let entries: Vec<crate::terminal::BackgroundTaskManifestEntry> = tasks
             .into_iter()
             .filter(|t| !t.completed)

@@ -1,8 +1,14 @@
 [package]
 name = "xai-grok-pager-render"
 version = "0.1.0"
+description = "Shared render engine for the pager: appearance, glyphs, and widget primitives."
 edition.workspace = true
 license = "Apache-2.0"
+
+repository.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
 
 [dependencies]
 # TTY safety
@@ -104,10 +110,10 @@ tempfile = { workspace = true }
 [features]
 # Exposes `#[cfg(test)]` test-only helpers (mock setters, test guards,
 # deterministic pinning) to downstream crates' test builds. Enabled by
-test-support = []
+test = []
 # CI builds a single shared rlib variant per crate, so the pager's CI
 # test target links the same render lib as production. Enabling the test-only
 # helpers in the CI default set keeps them present for the pager test while
 # leaving cargo's `default` (and thus cargo production builds) without them.
 # The helpers are inert unless their mock setters are called.
-default-bazel = ["test-support"]
+default-bazel = ["test"]

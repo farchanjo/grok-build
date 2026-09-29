@@ -18,8 +18,6 @@ use xai_grok_config_types::VectorStoresConfig;
 use xai_grok_memory::mirror::{MirrorHandle, mirror_timeout};
 use xai_grok_memory::workspace_identity::workspace_identity_hash16;
 
-use super::memory::MemoryBackendParams;
-
 /// Process-level registry of resolved mirrors keyed by collection name.
 static RESOLVED_MIRRORS: OnceLock<parking_lot::RwLock<HashMap<String, Arc<MirrorHandle>>>> =
     OnceLock::new();

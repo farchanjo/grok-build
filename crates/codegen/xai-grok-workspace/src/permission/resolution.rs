@@ -1157,12 +1157,10 @@ impl McpServerAllowlist {
             agent_client_protocol::McpServer::Stdio(agent_client_protocol::McpServerStdio {
                 command,
                 ..
-            }) => {
-                if !self.commands.is_empty() {
-                    restricted = true;
-                    let command = command.to_string_lossy();
-                    matched |= self.commands.iter().any(|c| *c == command);
-                }
+            }) if !self.commands.is_empty() => {
+                restricted = true;
+                let command = command.to_string_lossy();
+                matched |= self.commands.iter().any(|c| *c == command);
             }
             // TODO(acp-0.10): `McpServer` is #[non_exhaustive].
             _ => {}

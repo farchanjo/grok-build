@@ -171,7 +171,7 @@ impl SkipReason {
 /// ## Threading contract
 ///
 /// `?Send` matches the session actor's LocalSet: the production impl
-/// holds `Arc<SessionActor>` (!Send) and the dispatcher's
+/// holds `Rc<SessionActor>` (!Send) and the dispatcher's
 /// `AcpAgentGatewaySender` (!Send via `acp::AgentSideConnection`).
 /// Both [`maybe_schedule_restart`] and [`auto_restart_stdio`] call
 /// `tokio::task::spawn_local` directly, which **panics** at runtime

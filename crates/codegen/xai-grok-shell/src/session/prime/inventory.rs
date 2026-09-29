@@ -21,7 +21,6 @@
 //! PR19 (`/clear`, touched paths) is not wired here — this exposes a
 //! race-free session-cache/invalidation seam ([`InventoryCache`]).
 
-use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
@@ -419,16 +418,13 @@ mod tests {
 
         let inv = build_default(&root);
         let paths = inv.paths();
-        assert!(paths.iter().any(|p| *p == "src/a.rs"));
-        assert!(paths.iter().any(|p| *p == "docs/readme.md"));
+        assert!(paths.contains(&"src/a.rs"));
+        assert!(paths.contains(&"docs/readme.md"));
         assert!(
             paths.iter().any(|p| p.starts_with(".grok/skills/deploy")),
             "dot-dir missed"
         );
-        assert!(
-            !paths.iter().any(|p| *p == "ignored.md"),
-            "gitignored leaked"
-        );
+        assert!(!paths.contains(&"ignored.md"), "gitignored leaked");
         assert!(
             !paths.iter().any(|p| p.starts_with("node_modules")),
             "gitignored dir leaked"
@@ -552,7 +548,7 @@ mod tests {
             paths.iter().any(|p| p.starts_with(".grok")),
             "`.grok` must be retained: {paths:?}"
         );
-        assert!(paths.iter().any(|p| *p == "src/main.rs"));
+        assert!(paths.contains(&"src/main.rs"));
     }
 
     #[test]
@@ -561,10 +557,9 @@ mod tests {
         let root = dunce::canonicalize(tmp.path()).unwrap();
         let file = root.join("a.rs");
         std::fs::write(&file, "x").unwrap();
-        match (device_of(&root), device_of(&file)) {
-            (Some(a), Some(b)) => assert_eq!(a, b, "siblings must share a device"),
-            // Non-Unix: detection disabled (documented).
-            _ => {}
+        // Non-Unix leaves detection disabled (documented), hence the `if let`.
+        if let (Some(a), Some(b)) = (device_of(&root), device_of(&file)) {
+            assert_eq!(a, b, "siblings must share a device");
         }
     }
 
@@ -617,14 +612,14 @@ mod tests {
         let limits = InventoryLimits::default();
 
         let inv1 = cache.get_or_build(&root, limits);
-        assert!(inv1.paths().iter().any(|p| *p == "a.rs"), "initial build");
+        assert!(inv1.paths().contains(&"a.rs"), "initial build");
 
         // No changes, no dirty marks: the cache is reused (a stale on-disk
         // change is NOT picked up — correctness relies on mark_touched.
         std::fs::write(root.join("b.rs"), "new").unwrap();
         let inv2 = cache.get_or_build(&root, limits);
         assert!(
-            !inv2.paths().iter().any(|p| *p == "b.rs"),
+            !inv2.paths().contains(&"b.rs"),
             "must reuse cached inventory when nothing was marked touched"
         );
 
@@ -632,7 +627,7 @@ mod tests {
         cache.mark_touched(&root.join("b.rs"));
         let inv3 = cache.get_or_build(&root, limits);
         assert!(
-            inv3.paths().iter().any(|p| *p == "b.rs"),
+            inv3.paths().contains(&"b.rs"),
             "mark_touched must force a rebuild that sees the new file"
         );
     }
@@ -650,7 +645,7 @@ mod tests {
         std::fs::write(root.join("b.rs"), "new").unwrap();
         let second = cache.get_or_build(&root, limits);
         assert!(
-            !second.paths().iter().any(|p| *p == "b.rs"),
+            !second.paths().contains(&"b.rs"),
             "reused cached inventory before invalidate"
         );
 
@@ -659,7 +654,7 @@ mod tests {
         cache.invalidate();
         let third = cache.get_or_build(&root, limits);
         assert!(
-            third.paths().iter().any(|p| *p == "b.rs"),
+            third.paths().contains(&"b.rs"),
             "invalidate must force a rebuild that sees the new file"
         );
         // The cache epoch advanced past the pre-invalidate value.
@@ -678,23 +673,23 @@ mod tests {
         let limits = InventoryLimits::default();
 
         let inv_a = cache.get_or_build(&root_a, limits);
-        assert!(inv_a.paths().iter().any(|p| *p == "a.rs"));
+        assert!(inv_a.paths().contains(&"a.rs"));
 
         // A different root must NOT reuse root_a's cached inventory: the cwd
         // change forces a rebuild rooted at root_b.
         let inv_b = cache.get_or_build(&root_b, limits);
         assert!(
-            inv_b.paths().iter().any(|p| *p == "b.rs"),
+            inv_b.paths().contains(&"b.rs"),
             "root change must rebuild with the new root's files"
         );
         assert!(
-            !inv_b.paths().iter().any(|p| *p == "a.rs"),
+            !inv_b.paths().contains(&"a.rs"),
             "root change must never reuse another root's inventory"
         );
 
         // Root_a's inventory is still cached and reused unchanged.
         let inv_a2 = cache.get_or_build(&root_a, limits);
-        assert!(inv_a2.paths().iter().any(|p| *p == "a.rs"));
+        assert!(inv_a2.paths().contains(&"a.rs"));
     }
 
     #[cfg(unix)]
@@ -710,11 +705,11 @@ mod tests {
         let limits = InventoryLimits::default();
 
         let via_real = cache.get_or_build(&real, limits);
-        assert!(via_real.paths().iter().any(|p| *p == "a.rs"));
+        assert!(via_real.paths().contains(&"a.rs"));
         // The symlinked path canonicalizes to the same root, so it reuses the
         // cached inventory (no spurious rebuild, no duplicate walk).
         let via_link = cache.get_or_build(&link, limits);
-        assert!(via_link.paths().iter().any(|p| *p == "a.rs"));
+        assert!(via_link.paths().contains(&"a.rs"));
         // Same canonical root => cache hit (identical entry list, no dup).
         assert_eq!(via_link.paths(), via_real.paths());
     }

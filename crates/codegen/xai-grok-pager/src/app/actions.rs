@@ -1578,7 +1578,7 @@ pub enum ProviderOperation {
     SaveEditor {
         id: String,
         expected_generation: u64,
-        patch: xai_grok_shell::provider_registry::management::dto::ProviderSavePatch,
+        patch: Box<xai_grok_shell::provider_registry::management::dto::ProviderSavePatch>,
         credential_update: xai_grok_shell::provider_registry::management::dto::CredentialSlotUpdate,
         application_key: Option<ProviderApiKey>,
         admin_key: Option<ProviderApiKey>,
@@ -1644,8 +1644,8 @@ pub enum RetrievalOperation {
 /// Secret-free retrieval management result for the reducer.
 #[derive(Debug, Clone)]
 pub enum RetrievalManagementResult {
-    Snapshot(xai_grok_shell::retrieval_config::dto::RetrievalGraphSnapshot),
-    Mutation(xai_grok_shell::retrieval_config::dto::RetrievalMutationResult),
+    Snapshot(Box<xai_grok_shell::retrieval_config::dto::RetrievalGraphSnapshot>),
+    Mutation(Box<xai_grok_shell::retrieval_config::dto::RetrievalMutationResult>),
     Preview(xai_grok_shell::retrieval_config::dto::RetrievalPreviewResult),
     Error(String),
 }
@@ -1696,7 +1696,7 @@ pub enum Effect {
     /// provider transport through ACP.
     ProviderOperation {
         agent_id: AgentId,
-        operation: ProviderOperation,
+        operation: Box<ProviderOperation>,
         /// When set, this op was launched as a credential repair; completion
         /// must echo the same scope to resume a stashed prompt.
         repair: Option<crate::app::agent::CredentialRepairScope>,
@@ -3406,7 +3406,7 @@ pub enum TaskResult {
 #[derive(Debug, Clone)]
 pub enum ProviderManagementResult {
     List(xai_grok_shell::provider_registry::management::dto::ProviderListSnapshot),
-    Detail(xai_grok_shell::provider_registry::management::dto::ProviderDetailDto),
+    Detail(Box<xai_grok_shell::provider_registry::management::dto::ProviderDetailDto>),
     Mutation(xai_grok_shell::provider_registry::management::dto::ProviderMutationResult),
     Status(xai_grok_shell::provider_registry::management::dto::ProviderStatusSnapshot),
     Catalog(xai_grok_shell::provider_registry::management::dto::CatalogStatusSnapshot),

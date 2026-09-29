@@ -8,7 +8,6 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
-use tokio::process::Command;
 
 use super::model_providers::ModelProviderKind;
 
@@ -1761,7 +1760,7 @@ fn inject_configured_instance_catalogs(
         else {
             continue;
         };
-        let api_backend = cfg.api_backend.clone().or_else(|| match cfg.kind {
+        let api_backend = cfg.api_backend.clone().or(match cfg.kind {
             ModelProviderKind::Anthropic => Some(ApiBackend::Messages),
             ModelProviderKind::OpenAi => Some(ApiBackend::Responses),
             _ => Some(ApiBackend::ChatCompletions),
@@ -2357,6 +2356,7 @@ pub(crate) fn stored_api_key(
 pub(crate) struct StoredOpenAiCredentials {
     pub bearer: String,
     pub base_url: Option<String>,
+    #[allow(dead_code)]
     pub account_id: Option<String>,
 }
 
@@ -2786,7 +2786,6 @@ struct OpenRouterCatalogCache {
 }
 
 fn parse_openrouter_catalog(body: &[u8]) -> Result<Vec<ProviderModelPreset>, ()> {
-    use xai_grok_inference_types::ReasoningEffortSelection;
     let response: OpenRouterModelsResponse = serde_json::from_slice(body).map_err(|_| ())?;
     let mut models = response
         .data
@@ -3262,6 +3261,7 @@ fn maybe_spawn_openrouter_background_refresh(grok_home: &Path) {
             }
         };
         runtime.block_on(async move {
+            #[allow(unused_mut)]
             let mut manager = ProviderManager::new(&home);
             #[cfg(test)]
             if let Some(url) = catalog_url_override {

@@ -1,10 +1,3 @@
-#![allow(
-    unused_imports,
-    unused_variables,
-    unused_mut,
-    unreachable_code,
-    dead_code
-)]
 #[cfg(all(feature = "jemalloc", unix))]
 #[global_allocator]
 static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
@@ -27,7 +20,6 @@ mod jemalloc_malloc_conf {
 }
 use anyhow::Result;
 use std::env;
-use std::net::SocketAddr;
 use tokio_util::sync::CancellationToken;
 use xai_grok_pager::app::{
     AgentCmd, Command, HeadlessArgs, LeaderMgmtArgs, LeaderMgmtCommand, LeaderTargetArgs,
@@ -37,7 +29,7 @@ use xai_grok_pager::app::{
 };
 use xai_grok_pager::app::{WorkspaceMgmtArgs, WorkspaceMgmtCommand, WorkspaceStartArgs};
 use xai_grok_pager::client_identity::PAGER_CLIENT_VERSION;
-use xai_grok_shell::agent::app::{run_headless, run_leader, run_stdio_agent};
+use xai_grok_shell::agent::app::{run_headless, run_leader};
 use xai_grok_shell::agent::config::Config as AgentConfig;
 use xai_grok_shell::leader::{
     ClientCapabilities, ClientMode, ControlCommand, LeaderCapabilities, LeaderDescriptor,
@@ -86,20 +78,6 @@ fn resolve_agent_profile_path(path: &std::path::Path) -> std::path::PathBuf {
             std::process::exit(1);
         }
     }
-}
-/// Print startup information for the serve command.
-fn print_serve_startup_info(bind_addr: SocketAddr, secret: &str) {
-    eprintln!();
-    eprintln!("   Grok agent server starting...");
-    eprintln!();
-    eprintln!("   Address:  {}:{}", bind_addr.ip(), bind_addr.port());
-    eprintln!("   Secret:   {}", secret);
-    eprintln!();
-    eprintln!(
-        "   WebSocket URL: ws://{}/ws?server-key={}",
-        bind_addr, secret
-    );
-    eprintln!();
 }
 /// Entrypoint tag for `grok -p`; keys the quiet stderr default in `init_tracing_simple`.
 const HEADLESS_ENTRYPOINT: &str = "headless";

@@ -1,6 +1,6 @@
 //! In-memory [`AssetStore`] for downstream tests.
 //!
-//! Gated behind `cfg(test)` or the `test-support` feature so tool and TUI test
+//! Gated behind `cfg(test)` or the `test` feature so tool and TUI test
 //! suites get a deterministic seam without a filesystem or a network.
 //!
 //! The mock is deliberately *not* a stub: it stores bytes, enforces the
@@ -16,22 +16,13 @@ use std::time::Duration;
 use bytes::Bytes;
 
 use super::error::{AssetError, AssetOperation};
-use super::key::{AssetKey, AssetPrefix, ContentType};
+use super::key::{AssetKey, ContentType};
 use super::progress::ProgressHandle;
 use super::value::{
     AssetMeta, DeleteOutcome, ListCursor, ListPage, ListQuery, PresignMethod, PresignedUrl,
     PutRequest, PutSource, Visibility,
 };
 use super::{AssetStore, BackendCapabilities, BackendKind, StoreStatus, validate_ttl};
-
-/// The mock buffers, so it reports the whole payload in one step — with the
-/// total known, so a snapshot still shows an exact percentage.
-fn report_progress(progress: &Option<ProgressHandle>, bytes: u64) {
-    if let Some(progress) = progress {
-        progress.set_total(bytes);
-        progress.add(bytes);
-    }
-}
 
 #[derive(Debug, Default)]
 struct State {
@@ -503,6 +494,7 @@ impl AssetStore for MockAssetStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::assets::{AssetError, AssetPrefix};
 
     fn key(s: &str) -> AssetKey {
         AssetKey::parse(s).unwrap()

@@ -1,5 +1,3 @@
-#![allow(clippy::new_without_default)]
-
 pub mod editor;
 pub mod render;
 pub mod textarea;

@@ -30,9 +30,7 @@ const RELEASE_DIST_MANIFESTS: &[&str] = &[
 
 fn workspace_root() -> std::path::PathBuf {
     // Crate dir is crates/codegen/xai-grok-shell → three parents to repo root.
-    std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../..")
-        .canonicalize()
+    dunce::canonicalize(std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../.."))
         .expect("workspace root")
 }
 
@@ -205,7 +203,7 @@ default = [
 default-bazel = [
     "jemalloc",
     "sandbox-enforce",
-    "test-support",
+    "test",
 ]
 release-dist = ["xai-grok-pager/release-dist"]
 claude-cli-runtime = [
@@ -231,7 +229,7 @@ fn default_build_feature_flag_matches_cfg() {
     if !cfg!(feature = "claude-cli-runtime") {
         assert!(!gates::claude_cli_feature_compiled());
         assert!(!gates::claude_cli_both_gates_open());
-        assert!(!capability_matrix::CLAUDE_CLI_MODEL_SELECTABLE);
+        const { assert!(!capability_matrix::CLAUDE_CLI_MODEL_SELECTABLE) };
         assert!(!capability_matrix::claude_cli_selectable());
     }
 }

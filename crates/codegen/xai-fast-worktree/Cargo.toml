@@ -5,6 +5,11 @@ version = "0.1.0"
 edition.workspace = true
 description = "High-performance git worktree creation using CoW cloning"
 
+repository.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
 [[bin]]
 name = "fast-worktree"
 path = "src/bin/cli.rs"

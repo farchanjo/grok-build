@@ -1514,7 +1514,7 @@ impl WorkspaceOps {
         }
     }
 }
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(any(test, feature = "test"))]
 impl WorkspaceOps {
     /// Test variant backed by a temp dir.
     ///

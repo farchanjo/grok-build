@@ -5,6 +5,11 @@ version = "0.1.0"
 edition.workspace = true
 description = "Shared config loading for Grok — grok_home, effective config (requirements > user > managed), TOML merge"
 
+repository.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
 [dependencies]
 base64 = { workspace = true }
 blake3 = { workspace = true }

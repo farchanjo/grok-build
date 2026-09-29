@@ -1,5 +1,3 @@
-#![allow(dead_code)] // Phase 1 internal helpers
-
 use crate::permission::types::EditPolicy;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
@@ -155,16 +153,6 @@ where
     tokio::task::spawn_blocking(move || writer(&path, &contents))
         .await
         .map_err(std::io::Error::other)?
-}
-
-async fn persist_state_to_path(
-    path: &std::path::Path,
-    state: &PermissionState,
-) -> std::io::Result<()> {
-    persist_state_to_path_with_writer(path, state, |path, contents| {
-        xai_grok_config::fs_atomic::write_atomically(path, contents, None)
-    })
-    .await
 }
 
 async fn persist_state_to_dir(

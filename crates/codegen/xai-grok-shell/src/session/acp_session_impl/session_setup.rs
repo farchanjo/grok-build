@@ -33,7 +33,7 @@ impl SessionActor {
     }
     /// Set up `[system, skill_reminder?]` — prefix is deferred to background.
     pub(super) async fn initialize(&self, system_prompt: String) {
-        let bridge = self.agent.borrow().tool_bridge().clone();
+        let bridge = self.tool_bridge_owned();
         bridge.on_skill_discovery_clear().await;
         save_system_prompt(&self.session_info, &system_prompt);
         let system_message = ConversationItem::system(system_prompt);
@@ -72,7 +72,7 @@ impl SessionActor {
         &self,
         conversation: &mut Vec<ConversationItem>,
     ) -> Option<xai_grok_tools::types::skill_discovery_tracker::SkillUpdateEffects> {
-        let bridge = self.agent.borrow().tool_bridge().clone();
+        let bridge = self.tool_bridge_owned();
         let is_cursor = self.is_cursor_harness();
         if is_cursor {
             bridge.set_skill_listing_xml_format(true).await;
@@ -205,7 +205,7 @@ impl SessionActor {
             skill_count,
             "Reloaded skills from disk",
         );
-        let bridge = self.agent.borrow().tool_bridge().clone();
+        let bridge = self.tool_bridge_owned();
         bridge
             .update_skill_sources(listing.skills, listing.inventory, listing.commands)
             .await;
@@ -220,7 +220,7 @@ impl SessionActor {
     /// Reads the current slash-command skill list from the tools layer
     /// (`SkillManager`), NOT from `PromptContext`.
     pub(super) async fn send_available_commands_update(&self) {
-        let bridge = self.agent.borrow().tool_bridge().clone();
+        let bridge = self.tool_bridge_owned();
         let skills = bridge.slash_skills().await;
         let definitions = bridge.tool_definitions().await;
         let tool_names: Vec<String> = definitions
@@ -382,7 +382,7 @@ impl SessionActor {
             threshold_secs = Self::IDLE_REFRESH_THRESHOLD_SECS,
             "Session resumed after idle — refreshing model metadata from cli-chat-proxy"
         );
-        let creds = self.chat_state_handle.get_credentials().await;
+        let _creds = self.chat_state_handle.get_credentials().await;
         let Some(ref am) = self.auth_manager else {
             tracing::debug!("No auth manager available for model metadata refresh");
             return;
@@ -549,9 +549,7 @@ impl SessionActor {
         if self.deny_read_globs.is_empty() {
             return;
         }
-        self.agent
-            .borrow()
-            .tool_bridge()
+        self.tool_bridge_owned()
             .update_resource(xai_grok_tools::types::resources::DenyReadGlobs(
                 self.deny_read_globs.clone(),
             ))

@@ -1,7 +1,8 @@
 #![cfg_attr(rustfmt, rustfmt::skip)]
+use crate::upload::trace::SubagentSpawnedRef;
 use super::*;
 use crate::test_support::lsp_runtime::{
-    DummyLspDispatch, ctx_with_toggle, make_request, test_gateway,
+    ctx_with_toggle, test_gateway,
 };
 #[test]
 fn normalize_forked_context_strips_project_layout() {

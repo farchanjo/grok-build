@@ -94,8 +94,10 @@ fn manager(
     current: &str,
     home: &std::path::Path,
 ) -> ModelsManager {
-    let mut config = crate::agent::config::Config::default();
-    config.model_providers = providers;
+    let config = crate::agent::config::Config {
+        model_providers: providers,
+        ..Default::default()
+    };
     ModelsManager::new(
         None,
         models,

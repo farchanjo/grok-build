@@ -6,6 +6,11 @@ edition.workspace = true
 description = "CLI for ptyctl headless PTY controller"
 publish = false
 
+repository.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
 [[bin]]
 name = "ptyctl"
 path = "src/main.rs"

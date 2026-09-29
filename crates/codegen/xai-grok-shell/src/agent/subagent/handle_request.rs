@@ -1,30 +1,24 @@
 #![cfg_attr(rustfmt, rustfmt::skip)]
-#![allow(unused_imports)]
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use agent_client_protocol as acp;
-use tokio::sync::{Notify, mpsc, oneshot};
-use tokio_util::sync::CancellationToken;
-use crate::extensions::notification::{SessionNotification, SessionUpdate};
+use tokio::sync::oneshot;
+use crate::extensions::notification::SessionUpdate;
 use crate::session::{
-    self, SessionCommand, SessionHandle, SessionThread,
-    commands::{PromptCompletionKind, PromptTurnResult as SubagentPromptTurnResult},
+    self, SessionCommand,
+    commands::PromptCompletionKind,
     fs_watch::FsWatchCapabilities, info::Info as SessionInfo,
 };
-use crate::terminal::AsyncTerminalRunner;
 use crate::tools::ToolContext;
 use crate::upload::trace::{
-    GCS_SCHEMA_VERSION, PromptMetadata, SubagentSpawnedRef, TurnResultMetadata,
+    GCS_SCHEMA_VERSION, PromptMetadata, TurnResultMetadata,
     local_sandbox_telemetry, upload_metadata, upload_session_state,
     upload_subagent_metadata, upload_turn_result,
 };
 use crate::upload::turn::{PromptTraceContext, complete_prompt_trace};
 use xai_acp_lib::AcpAgentGatewaySender as GatewaySender;
-use xai_grok_tools::implementations::grok_build::task::types::*;
 use xai_grok_tools::implementations::skills::types::SkillInfo;
 use xai_grok_workspace::file_system::AsyncFileSystem;
-use xai_hunk_tracker::HunkTrackerHandle;
 use super::*;
 use super::exact_route::ExactRoute;
 /// Remove the task tool (and orphaned background-task actions) from a child
@@ -287,7 +281,7 @@ pub(super) fn resolve_final_exact_route(
         model_id.0.as_ref(),
         Some(ctx.auth_manager.grok_home()),
     )?;
-    Ok(xai_grok_models::CanonicalModelId::new(model_id.0.to_string())
+    Ok(xai_grok_models::CanonicalModelId::new(&model_id.0)
         .ok()
         .and_then(|canonical| {
             xai_grok_models::UpstreamModelId::new(inference_config.model.clone())
@@ -310,6 +304,7 @@ pub(super) fn resolve_final_exact_route(
         subagent_type = %request.subagent_type,
     )
 )]
+#[allow(dead_code)]
 pub(crate) async fn handle_subagent_request(
     request: SubagentRequest,
     ctx: SubagentSpawnContext,
@@ -693,7 +688,7 @@ pub(crate) async fn handle_assigned_subagent_request(
         );
         let blocking_claim = creation_claim.clone();
         match tokio::task::spawn_blocking(move || {
-                let result = (|| {
+                let result = {
                     let mut builder = xai_fast_worktree::WorktreeBuilder::new(
                             &source_clone,
                             &creation_dest,
@@ -708,7 +703,7 @@ pub(crate) async fn handle_assigned_subagent_request(
                         builder = builder.btrfs_delegate(delegate);
                     }
                     builder.create()
-                })();
+                };
                 drop(blocking_claim);
                 result
             })
@@ -1121,7 +1116,7 @@ pub(crate) async fn handle_assigned_subagent_request(
         )
         .to_string_lossy()
         .into_owned();
-    let effective_provider = crate::agent::config::find_model_by_id(
+    let _effective_provider = crate::agent::config::find_model_by_id(
         &ctx.available_models,
         effective_model_id.0.as_ref(),
     )
@@ -2603,7 +2598,7 @@ pub(crate) async fn handle_assigned_subagent_request(
                 Some(total_tokens),
             )
         }
-        Err(()) => (None, true, None, None),
+        Err(_) => (None, true, None, None),
     };
     result.total_tokens_used = total_tokens_used.unwrap_or(0);
     if let Some((task_spent, task_incomplete)) = task_budget_usage {

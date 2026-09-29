@@ -6,6 +6,11 @@ edition.workspace = true
 description = "Shared test-support for grok-build crates: mock inference server, SSE generators, ACP stdio client, headless runner, env sandbox"
 publish = false
 
+repository.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
 [dependencies]
 agent-client-protocol = { workspace = true }
 anyhow = { workspace = true }

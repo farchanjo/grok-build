@@ -26,7 +26,7 @@ use tokio::io::AsyncWriteExt;
 
 use super::error::{AssetError, AssetOperation};
 use super::factory::AssetStoreSource;
-use super::key::{AssetKey, AssetPrefix, ContentType, RESERVED_META_SEGMENT};
+use super::key::{AssetKey, ContentType, RESERVED_META_SEGMENT};
 use super::progress::{ProgressHandle, copy_with_progress};
 use super::value::{
     AssetMeta, DeleteOutcome, ListCursor, ListPage, ListQuery, PresignMethod, PresignedUrl,
@@ -612,7 +612,7 @@ impl AssetStore for LocalAssetStore {
 
     async fn presign_put(
         &self,
-        key: &AssetKey,
+        _key: &AssetKey,
         _content_type: &ContentType,
         _ttl: Duration,
     ) -> Result<PresignedUrl, AssetError> {
@@ -685,7 +685,7 @@ impl LocalAssetStore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::assets::AssetKey;
+    use crate::assets::{AssetError, AssetKey, AssetPrefix};
 
     fn key(s: &str) -> AssetKey {
         AssetKey::parse(s).unwrap()

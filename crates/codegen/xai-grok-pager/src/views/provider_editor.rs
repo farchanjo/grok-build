@@ -880,7 +880,6 @@ fn activate_field(state: &mut ProviderEditorState) -> EditorOutcome {
             let cur = state
                 .draft
                 .openrouter_require_parameters
-                .clone()
                 .flatten()
                 .unwrap_or(false);
             state.draft.openrouter_require_parameters = Some(Some(!cur));
@@ -890,19 +889,13 @@ fn activate_field(state: &mut ProviderEditorState) -> EditorOutcome {
             let cur = state
                 .draft
                 .openrouter_allow_fallbacks
-                .clone()
                 .flatten()
                 .unwrap_or(false);
             state.draft.openrouter_allow_fallbacks = Some(Some(!cur));
             EditorOutcome::Changed
         }
         EditorField::OrZdr => {
-            let cur = state
-                .draft
-                .openrouter_zdr
-                .clone()
-                .flatten()
-                .unwrap_or(false);
+            let cur = state.draft.openrouter_zdr.flatten().unwrap_or(false);
             state.draft.openrouter_zdr = Some(Some(!cur));
             EditorOutcome::Changed
         }
@@ -1381,12 +1374,12 @@ fn field_value_display(state: &ProviderEditorState, field: EditorField) -> Strin
             .flatten()
             .unwrap_or_else(|| "(unset)".into()),
         EditorField::OrRequireParams => {
-            yn_opt(state.draft.openrouter_require_parameters.clone().flatten())
+            yn_opt(state.draft.openrouter_require_parameters.flatten())
         }
         EditorField::OrAllowFallbacks => {
-            yn_opt(state.draft.openrouter_allow_fallbacks.clone().flatten())
+            yn_opt(state.draft.openrouter_allow_fallbacks.flatten())
         }
-        EditorField::OrZdr => yn_opt(state.draft.openrouter_zdr.clone().flatten()),
+        EditorField::OrZdr => yn_opt(state.draft.openrouter_zdr.flatten()),
         EditorField::OrSort => state
             .draft
             .openrouter_sort
@@ -1581,7 +1574,6 @@ fn draft_from_detail(detail: &ProviderDetailDto) -> ProviderSavePatch {
         pool_max_idle: detail.pool_max_idle,
         pool_idle_timeout_secs: detail.pool_idle_timeout_secs,
         pool_connect_timeout_secs: detail.pool_connect_timeout_secs,
-        ..Default::default()
     }
 }
 

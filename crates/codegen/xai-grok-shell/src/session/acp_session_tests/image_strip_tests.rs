@@ -1,5 +1,6 @@
 //! Durable image-strip lifecycle policy.
 
+use std::rc::Rc;
 use std::sync::Arc;
 
 use super::support::*;
@@ -97,7 +98,7 @@ async fn image_strip_heuristic_is_request_local_after_completed() {
             let (gateway_tx, _) = tokio::sync::mpsc::unbounded_channel();
             let (persistence_tx, _) = tokio::sync::mpsc::unbounded_channel();
             let actor =
-                Arc::new(create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await);
+                Rc::new(create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await);
             seed(&actor, IMAGE).await;
             let request_id = RequestId::from("heuristic");
 
@@ -127,7 +128,7 @@ async fn image_strip_server_rejection_waits_for_matching_completed() {
             let (gateway_tx, _) = tokio::sync::mpsc::unbounded_channel();
             let (persistence_tx, _) = tokio::sync::mpsc::unbounded_channel();
             let actor =
-                Arc::new(create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await);
+                Rc::new(create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await);
             seed(&actor, IMAGE).await;
             let request_id = RequestId::from("server-rejected");
 
@@ -168,7 +169,7 @@ async fn image_strip_failed_clears_pending_state() {
             let (gateway_tx, _) = tokio::sync::mpsc::unbounded_channel();
             let (persistence_tx, _) = tokio::sync::mpsc::unbounded_channel();
             let actor =
-                Arc::new(create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await);
+                Rc::new(create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await);
             seed(&actor, IMAGE).await;
             let request_id = RequestId::from("failed");
 
@@ -195,7 +196,7 @@ async fn image_strip_requires_one_unique_url() {
             let (gateway_tx, _) = tokio::sync::mpsc::unbounded_channel();
             let (persistence_tx, _) = tokio::sync::mpsc::unbounded_channel();
             let actor =
-                Arc::new(create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await);
+                Rc::new(create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await);
             let second = "data:image/png;base64,SECOND";
             seed(&actor, IMAGE).await;
             seed(&actor, second).await;

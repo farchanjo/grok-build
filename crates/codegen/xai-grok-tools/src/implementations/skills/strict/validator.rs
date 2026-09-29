@@ -38,7 +38,7 @@ pub struct StrictSkillInput<'a> {
 /// Outcome of strict validation. Invalid skills are quarantined, never repaired.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StrictSkillOutcome {
-    Valid(DiscoveredSkill),
+    Valid(Box<DiscoveredSkill>),
     Quarantined(QuarantinedSkill),
 }
 
@@ -193,7 +193,7 @@ pub fn validate_strict_skill(input: StrictSkillInput<'_>) -> StrictSkillOutcome 
         &positions,
     );
 
-    StrictSkillOutcome::Valid(DiscoveredSkill {
+    StrictSkillOutcome::Valid(Box::new(DiscoveredSkill {
         identity,
         manifest: StrictSkillManifest {
             name,
@@ -205,7 +205,7 @@ pub fn validate_strict_skill(input: StrictSkillInput<'_>) -> StrictSkillOutcome 
             grok,
         },
         warnings,
-    })
+    }))
 }
 
 /// Validate a skill directory. Diagnostics never include the absolute path.
@@ -1427,11 +1427,7 @@ fn require_paths(
                     diagnostics.push(invalid_extension(field, pos));
                     return None;
                 };
-                let Some(path) =
-                    require_nonempty_len(raw, field, MAX_GROK_PATH_CHARS, pos, diagnostics)
-                else {
-                    return None;
-                };
+                let path = require_nonempty_len(raw, field, MAX_GROK_PATH_CHARS, pos, diagnostics)?;
                 paths.push(path);
             }
             Some(paths)
@@ -1551,7 +1547,7 @@ mod tests {
 
     fn valid(parent: &str, content: &str) -> DiscoveredSkill {
         match validate(parent, content) {
-            StrictSkillOutcome::Valid(skill) => skill,
+            StrictSkillOutcome::Valid(skill) => *skill,
             StrictSkillOutcome::Quarantined(row) => {
                 panic!(
                     "expected valid skill, got {:?}",
@@ -1576,7 +1572,7 @@ mod tests {
                 .chars()
                 .all(|c| c.is_ascii_hexdigit())
         );
-        assert!(STRICT_VALIDATOR_RUNTIME_ENABLED);
+        const { assert!(STRICT_VALIDATOR_RUNTIME_ENABLED) };
     }
 
     #[test]
@@ -2221,7 +2217,7 @@ mod tests {
 
     #[test]
     fn legacy_tolerant_parser_still_accepts_unofficial_frontmatter() {
-        assert!(STRICT_VALIDATOR_RUNTIME_ENABLED);
+        const { assert!(STRICT_VALIDATOR_RUNTIME_ENABLED) };
         let parsed = parse_skill_frontmatter(
             "---\nname: My Cool Skill\ndescription: lorem ipsum: dolor\nwhen-to-use: trig\nallowed-tools:\n  - bash\n  - read_file\n---\nBody\n",
             Some("my-cool-skill"),

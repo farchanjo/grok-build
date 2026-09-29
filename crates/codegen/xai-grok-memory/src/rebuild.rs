@@ -1055,13 +1055,11 @@ pub async fn ensure_vectors_ready(
             storage.clone(),
             index_config.clone(),
             spec.dimensions,
-        ) {
-            if idx.installed_vector_fingerprint_hash().as_deref() == Some(fp.hash.as_str())
-                && idx.embedding_dimensions() == spec.dimensions
-            {
-                clear_completed_target(&idx, Some(&pending.id), fp.hash.as_str());
-                return compatible_readiness(&idx);
-            }
+        ) && idx.installed_vector_fingerprint_hash().as_deref() == Some(fp.hash.as_str())
+            && idx.embedding_dimensions() == spec.dimensions
+        {
+            clear_completed_target(&idx, Some(&pending.id), fp.hash.as_str());
+            return compatible_readiness(&idx);
         }
         return VectorReadiness::Pending { owned: false };
     }
@@ -1111,10 +1109,8 @@ pub async fn ensure_vectors_ready(
         if needed.is_empty() {
             let complete = staging_complete(&idx, &pending.id).unwrap_or(false);
             if complete {
-                let ok = match install_vectors(&idx, &pending, &fp, &payload, spec.dimensions) {
-                    Ok(v) => v,
-                    Err(_) => false,
-                };
+                let ok = install_vectors(&idx, &pending, &fp, &payload, spec.dimensions)
+                    .unwrap_or_default();
                 if ok {
                     return VectorReadiness::Ready;
                 }
@@ -2484,7 +2480,6 @@ mod tests {
         let cfg_custom = xai_grok_config_types::MemoryIndexConfig {
             max_chunk_chars: 400,
             chunk_overlap_chars: 40,
-            ..Default::default()
         };
         let cfg_default = xai_grok_config_types::MemoryIndexConfig::default();
         let spec = stub_spec(dims, "m");

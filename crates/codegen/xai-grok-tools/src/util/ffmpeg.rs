@@ -163,7 +163,7 @@ impl ProcessRunner for SystemProcessRunner {
 }
 
 /// Probed container / stream metadata. Fields are best-effort.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub struct MediaProbe {
     pub duration_secs: Option<f64>,
     pub width: Option<u32>,
@@ -174,22 +174,6 @@ pub struct MediaProbe {
     pub audio_codec: Option<String>,
     pub sample_rate: Option<u32>,
     pub channels: Option<u32>,
-}
-
-impl Default for MediaProbe {
-    fn default() -> Self {
-        Self {
-            duration_secs: None,
-            width: None,
-            height: None,
-            has_video: false,
-            has_audio: false,
-            video_codec: None,
-            audio_codec: None,
-            sample_rate: None,
-            channels: None,
-        }
-    }
 }
 
 /// Probe media metadata via `ffprobe` JSON.

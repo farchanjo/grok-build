@@ -1326,14 +1326,6 @@ pub(crate) mod tests {
         .unwrap()
     }
 
-    /// Static credentials matching [`make_raw_test_client`].
-    pub(crate) fn test_static_credentials() -> S3StaticCredentials {
-        S3StaticCredentials {
-            access_key_id: "test".to_owned(),
-            secret_access_key: "test".to_owned(),
-        }
-    }
-
     async fn make_test_client(endpoint_url: &str) -> S3StorageClient {
         S3StorageClient::new(
             "test-bucket".to_string(),

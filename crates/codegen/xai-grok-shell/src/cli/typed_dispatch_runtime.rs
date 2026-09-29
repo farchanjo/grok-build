@@ -129,86 +129,6 @@ fn note_live_dispatch_credential_phase() {
     LIVE_CREDENTIAL_PHASE_COUNT.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::agent::model_providers::{ModelProviderConfig, ModelProviderKind};
-    use crate::cli::generated_ops::find_cli_operation;
-    use crate::cli::instance_dispatch::{
-        OPENAI_COMPATIBLE_SUBSET_OPERATION_IDS, override_provider_service,
-    };
-    use crate::provider_registry::ProviderService;
-    use indexmap::IndexMap;
-    use std::sync::atomic::Ordering;
-
-    #[tokio::test]
-    async fn dry_run_never_enters_live_credential_phase_and_shows_instance() {
-        let op = find_cli_operation("openai", "listModels").expect("listModels");
-        let before = LIVE_CREDENTIAL_PHASE_COUNT.load(Ordering::SeqCst);
-        let code = dispatch_runtime("openai", op, &[], &[], None, true, false, None, &[])
-            .await
-            .expect("dry_run");
-        assert_eq!(code, ExitCode::Success);
-        assert_eq!(
-            LIVE_CREDENTIAL_PHASE_COUNT.load(Ordering::SeqCst),
-            before,
-            "dry-run must not enter live credential phase"
-        );
-    }
-
-    #[tokio::test]
-    async fn surface_gate_rejects_non_allowlisted_on_custom_before_credentials() {
-        let mut m = IndexMap::new();
-        m.insert(
-            "proxy".to_owned(),
-            ModelProviderConfig {
-                kind: ModelProviderKind::OpenAiCompatible,
-                base_url: Some("https://proxy.example/v1".into()),
-                display_name: Some("Proxy".into()),
-                ..Default::default()
-            },
-        );
-        let svc = ProviderService::from_model_providers(&m).unwrap();
-        let _guard = override_provider_service(svc);
-        let op = find_cli_operation("openai", "deleteModel").expect("deleteModel");
-        let before = LIVE_CREDENTIAL_PHASE_COUNT.load(Ordering::SeqCst);
-        let err = dispatch_runtime("proxy", op, &[], &[], None, false, false, None, &[])
-            .await
-            .unwrap_err();
-        assert!(err.contains("allowlist") || err.contains("subset"), "{err}");
-        assert_eq!(
-            LIVE_CREDENTIAL_PHASE_COUNT.load(Ordering::SeqCst),
-            before,
-            "surface gate must run before credential phase"
-        );
-    }
-
-    #[tokio::test]
-    async fn unknown_instance_fails_without_builtin_fallback() {
-        let op = find_cli_operation("openai", "listModels").expect("listModels");
-        let err = dispatch_runtime(
-            "not-a-real-provider-id",
-            op,
-            &[],
-            &[],
-            None,
-            true,
-            false,
-            None,
-            &[],
-        )
-        .await
-        .unwrap_err();
-        assert!(err.contains("not configured"), "{err}");
-    }
-
-    #[test]
-    fn subset_allowlist_constant_is_non_empty() {
-        assert!(OPENAI_COMPATIBLE_SUBSET_OPERATION_IDS.len() >= 6);
-        assert!(OPENAI_COMPATIBLE_SUBSET_OPERATION_IDS.contains(&"createResponse_stream"));
-    }
-}
-
 async fn dispatch_openai(
     client: OpenAiClient,
     op: &CliOperation,
@@ -2775,8 +2695,8 @@ async fn dispatch_openai_admin(
     op: &CliOperation,
     merged: Value,
     stream: bool,
-    output: Option<&Path>,
-    multipart_files: &[(String, PathBuf)],
+    _output: Option<&Path>,
+    _multipart_files: &[(String, PathBuf)],
 ) -> Result<ExitCode, String> {
     match op.operation_id {
         "admin-api-keys-list" => {
@@ -5576,5 +5496,85 @@ async fn dispatch_openrouter(
         }
 
         other => Err(format!("no typed dispatch arm for {other}")),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::agent::model_providers::{ModelProviderConfig, ModelProviderKind};
+    use crate::cli::generated_ops::find_cli_operation;
+    use crate::cli::instance_dispatch::{
+        OPENAI_COMPATIBLE_SUBSET_OPERATION_IDS, override_provider_service,
+    };
+    use crate::provider_registry::ProviderService;
+    use indexmap::IndexMap;
+    use std::sync::atomic::Ordering;
+
+    #[tokio::test]
+    async fn dry_run_never_enters_live_credential_phase_and_shows_instance() {
+        let op = find_cli_operation("openai", "listModels").expect("listModels");
+        let before = LIVE_CREDENTIAL_PHASE_COUNT.load(Ordering::SeqCst);
+        let code = dispatch_runtime("openai", op, &[], &[], None, true, false, None, &[])
+            .await
+            .expect("dry_run");
+        assert_eq!(code, ExitCode::Success);
+        assert_eq!(
+            LIVE_CREDENTIAL_PHASE_COUNT.load(Ordering::SeqCst),
+            before,
+            "dry-run must not enter live credential phase"
+        );
+    }
+
+    #[tokio::test]
+    async fn surface_gate_rejects_non_allowlisted_on_custom_before_credentials() {
+        let mut m = IndexMap::new();
+        m.insert(
+            "proxy".to_owned(),
+            ModelProviderConfig {
+                kind: ModelProviderKind::OpenAiCompatible,
+                base_url: Some("https://proxy.example/v1".into()),
+                display_name: Some("Proxy".into()),
+                ..Default::default()
+            },
+        );
+        let svc = ProviderService::from_model_providers(&m).unwrap();
+        let _guard = override_provider_service(svc);
+        let op = find_cli_operation("openai", "deleteModel").expect("deleteModel");
+        let before = LIVE_CREDENTIAL_PHASE_COUNT.load(Ordering::SeqCst);
+        let err = dispatch_runtime("proxy", op, &[], &[], None, false, false, None, &[])
+            .await
+            .unwrap_err();
+        assert!(err.contains("allowlist") || err.contains("subset"), "{err}");
+        assert_eq!(
+            LIVE_CREDENTIAL_PHASE_COUNT.load(Ordering::SeqCst),
+            before,
+            "surface gate must run before credential phase"
+        );
+    }
+
+    #[tokio::test]
+    async fn unknown_instance_fails_without_builtin_fallback() {
+        let op = find_cli_operation("openai", "listModels").expect("listModels");
+        let err = dispatch_runtime(
+            "not-a-real-provider-id",
+            op,
+            &[],
+            &[],
+            None,
+            true,
+            false,
+            None,
+            &[],
+        )
+        .await
+        .unwrap_err();
+        assert!(err.contains("not configured"), "{err}");
+    }
+
+    #[test]
+    fn subset_allowlist_constant_is_non_empty() {
+        assert!(OPENAI_COMPATIBLE_SUBSET_OPERATION_IDS.len() >= 6);
+        assert!(OPENAI_COMPATIBLE_SUBSET_OPERATION_IDS.contains(&"createResponse_stream"));
     }
 }

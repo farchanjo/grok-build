@@ -18,6 +18,22 @@ use crate::types::{
 };
 
 /// Handle to communicate with ChatStateActor.
+/// The chat-state actor did not answer (its channel is closed or the actor is
+/// gone).
+///
+/// Distinct from a successful read that found no ledger: an unreadable bill
+/// must never be mistaken for a free prompt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ChatStateUnavailable;
+
+impl std::fmt::Display for ChatStateUnavailable {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("chat-state actor unavailable")
+    }
+}
+
+impl std::error::Error for ChatStateUnavailable {}
+
 /// This is cheap to clone and can be shared across tasks.
 #[derive(Clone)]
 pub struct ChatStateHandle {
@@ -485,24 +501,30 @@ impl ChatStateHandle {
     }
 
     /// Fail-closed prompt bill read.
-    /// `Ok(None)` means the actor answered "no ledger"; `Err(())` means it did
-    /// not answer at all. Never collapse `Err` to `None`: an unreadable bill
-    /// must not be mistaken for a free prompt.
-    pub async fn try_get_prompt_usage(&self) -> Result<Option<crate::usage::UsageLedger>, ()> {
+    /// `Ok(None)` means the actor answered "no ledger";
+    /// [`ChatStateUnavailable`] means it did not answer at all. Never collapse
+    /// the error to `None`: an unreadable bill must not be mistaken for a free
+    /// prompt.
+    pub async fn try_get_prompt_usage(
+        &self,
+    ) -> Result<Option<crate::usage::UsageLedger>, ChatStateUnavailable> {
         self.query("GetPromptUsage", |reply| ChatStateCommand::GetPromptUsage {
             reply,
         })
         .await
-        .ok_or(())
+        .ok_or(ChatStateUnavailable)
     }
 
-    /// Fail-closed session bill read. `Err(())` if the actor is dead.
-    pub async fn try_get_session_usage(&self) -> Result<crate::usage::UsageLedger, ()> {
+    /// Fail-closed session bill read. [`ChatStateUnavailable`] if the actor is
+    /// dead.
+    pub async fn try_get_session_usage(
+        &self,
+    ) -> Result<crate::usage::UsageLedger, ChatStateUnavailable> {
         self.query("GetSessionUsage", |reply| {
             ChatStateCommand::GetSessionUsage { reply }
         })
         .await
-        .ok_or(())
+        .ok_or(ChatStateUnavailable)
     }
 
     /// `total_tokens` plus bytes/4 estimate of tool results pushed since the

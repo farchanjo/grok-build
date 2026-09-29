@@ -172,8 +172,10 @@ fn memory_config_mode_parses_and_defaults_local() {
 
 #[test]
 fn validated_for_runtime_milvus_requires_store() {
-    let mut mem = MemoryConfig::default();
-    mem.enabled = true;
+    let mut mem = MemoryConfig {
+        enabled: true,
+        ..Default::default()
+    };
     // `local` mode needs no store.
     assert!(mem.clone().validated_for_runtime().is_some());
     // `milvus` without a store is a hard configuration error: memory off.
@@ -183,9 +185,11 @@ fn validated_for_runtime_milvus_requires_store() {
     mem.vector_store = Some("vm".into());
     assert!(mem.validated_for_runtime().is_some());
     // Disabled memory stays off regardless of mode.
-    let mut off = MemoryConfig::default();
-    off.enabled = false;
-    off.mode = MemoryMode::Milvus;
+    let off = MemoryConfig {
+        enabled: false,
+        mode: MemoryMode::Milvus,
+        ..Default::default()
+    };
     assert!(off.validated_for_runtime().is_none());
 }
 #[test]

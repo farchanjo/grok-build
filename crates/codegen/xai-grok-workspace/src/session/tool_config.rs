@@ -593,7 +593,7 @@ fn build_web_fetch_config() -> xai_grok_tools::implementations::grok_build::web_
 fn default_web_search_model() -> String {
     std::env::var("GROK_WEB_SEARCH_MODEL").unwrap_or_else(|_| "grok-4.20-multi-agent".to_string())
 }
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(any(test, feature = "test"))]
 pub mod test_support {
     use crate::config::SessionContextFactory;
     use std::collections::HashMap;

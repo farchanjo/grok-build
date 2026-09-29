@@ -36,9 +36,11 @@ pub struct ExternalRuntimeError {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_kind: Option<ExternalAgentKind>,
     /// Best-effort partial envelope on cancel (session pointer / version / caps).
-    /// Not serialized into ACP error data (no raw NDJSON).
+    /// Not serialized into ACP error data (no raw NDJSON). Boxed: this is the
+    /// widest field, and the error rides `Result` across the whole runtime
+    /// surface (workspace `large-error-threshold`).
     #[serde(skip)]
-    pub partial_envelope: Option<crate::agent::external_runtime::ExternalRuntimeEnvelope>,
+    pub partial_envelope: Option<Box<crate::agent::external_runtime::ExternalRuntimeEnvelope>>,
     /// Partial normalized events observed before cancel (display only).
     #[serde(skip)]
     pub partial_events: Vec<ExternalRuntimeTurnEvent>,
@@ -68,7 +70,7 @@ impl ExternalRuntimeError {
             kind: ExternalRuntimeErrorKind::Cancelled,
             message: message.into(),
             agent_kind: Some(agent_kind),
-            partial_envelope,
+            partial_envelope: partial_envelope.map(Box::new),
             partial_events,
         }
     }

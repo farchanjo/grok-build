@@ -9,7 +9,7 @@ use xai_grok_inference::RetrievalError;
 
 use super::clients::{FakeEmbedScript, FakeRerankScript, FakeRetrievalExecutor, RetrievalExecutor};
 use super::clock::MockClock;
-use super::error::{DegradationKind, LimitKind, OrchestratorError, RouteFailureClass};
+use super::error::{DegradationKind, OrchestratorError, RouteFailureClass};
 use super::pipeline::{CandidateRow, PipelineOptions};
 use super::registry::RetrievalRegistry;
 use super::reload::{

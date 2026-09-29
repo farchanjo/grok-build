@@ -428,6 +428,7 @@ impl MvpAgent {
     /// Descriptors come from the same `callable_agent_snapshot` discovery lane
     /// the descriptor layer exposes; the validation context is the same
     /// `build_subagent_validation_context` used by the real `ValidateType` arm.
+    #[allow(dead_code)]
     pub(super) fn build_callable_agent_authority(
         &self,
         parent_session_id: &str,

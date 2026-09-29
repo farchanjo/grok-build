@@ -5,6 +5,11 @@ edition.workspace = true
 license = "Apache-2.0"
 description = "Cross-platform system sleep/wake (suspend) notifications — used to defer work across a suspend boundary"
 
+repository.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
 [dependencies]
 
 [target.'cfg(target_os = "linux")'.dependencies]

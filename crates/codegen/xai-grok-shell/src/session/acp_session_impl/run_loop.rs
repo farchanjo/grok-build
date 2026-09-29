@@ -1,8 +1,8 @@
 //! The session actor's main loop (`run_session`): command dispatch, idle
 //! arms, and the free helpers only the loop consumes.
-#![allow(clippy::items_after_test_module)]
 use super::*;
 use crate::session::compaction_config::{CompactionGuard, CompactionKind};
+use std::rc::Rc;
 /// The `YoloToggled` event to emit after `set_yolo_mode(requested)`, given the
 /// previous state and the post-call ACTUAL state (read back via
 /// `is_yolo_mode()`). Returns `Some(actual)` only on a real change.
@@ -49,7 +49,7 @@ impl SessionActor {
     /// from. For a rolling job that means: admission here, release by the
     /// completion arm taking it back out of [`CompactionConfig::rolling_guard`].
     pub(super) fn enter_rolling_compaction(
-        self: &Arc<Self>,
+        self: &Rc<Self>,
         completion_tx: mpsc::UnboundedSender<(String, PromptTurnResult)>,
     ) -> Option<CompactionGuard> {
         self.compaction.enter(
@@ -64,7 +64,7 @@ impl SessionActor {
     /// running turn must also rule out a promotion slipping in before the job's
     /// first poll.
     pub(super) fn enter_manual_compaction(
-        self: &Arc<Self>,
+        self: &Rc<Self>,
         completion_tx: mpsc::UnboundedSender<(String, PromptTurnResult)>,
     ) -> Option<CompactionGuard> {
         self.compaction.enter(
@@ -80,10 +80,10 @@ impl SessionActor {
     /// awaits.
     fn wake_hook(
         kind: CompactionKind,
-        actor: &Arc<Self>,
+        actor: &Rc<Self>,
         completion_tx: mpsc::UnboundedSender<(String, PromptTurnResult)>,
     ) -> impl FnOnce() + 'static {
-        let weak = Arc::downgrade(actor);
+        let weak = Rc::downgrade(actor);
         move || {
             let Some(actor) = weak.upgrade() else {
                 return;
@@ -118,7 +118,7 @@ impl SessionActor {
     /// ([`McpState::set_client_event_tx`] never touches `shared_clients`), so
     /// nothing is delivered twice and the parent stays the single owner of the
     /// shared transports' status flow.
-    pub(crate) async fn wire_mcp_client_event_lane(self: &Arc<Self>) {
+    pub(crate) async fn wire_mcp_client_event_lane(self: &Rc<Self>) {
         let (event_tx, event_rx) =
             tokio::sync::mpsc::unbounded_channel::<xai_grok_mcp::servers::McpClientEvent>();
         // Tee: clients emit into one channel; every event fans out to the
@@ -159,7 +159,7 @@ impl SessionActor {
         let restart_actions: Option<std::rc::Rc<dyn crate::session::mcp_restart::RestartActions>> =
             if auto_restart_enabled {
                 Some(std::rc::Rc::new(SessionRestartActions::new(
-                    Arc::clone(self),
+                    Rc::clone(self),
                     Arc::clone(&shutdown_state),
                 )))
             } else {
@@ -177,7 +177,7 @@ impl SessionActor {
             )
             .await;
         });
-        crate::session::acp_session::spawn_mcp_resource_pump(Arc::clone(self), actor_event_rx);
+        crate::session::acp_session::spawn_mcp_resource_pump(Rc::clone(self), actor_event_rx);
     }
 
     /// Canonical selection plus frozen wire model for ACP prompt setup.
@@ -255,7 +255,7 @@ impl SessionActor {
             // reservation for the same reason.
             Self::push_task_wake_fallback(&mut state, fallback);
             if let Some(reservations) = &self.tool_context.task_completion_reservations {
-                reservations.release(&task_id);
+                reservations.release(task_id);
             }
             drop(state);
             xai_grok_telemetry::unified_log::info(
@@ -352,7 +352,7 @@ async fn apply_todo_statuses(
     use xai_grok_tools::implementations::grok_build::todo::TodoState;
     use xai_grok_tools::types::resources::State;
 
-    let bridge = session.agent.borrow().tool_bridge().clone();
+    let bridge = session.tool_bridge_owned();
     let resources = bridge.shared_resources().await;
     let (applied, items) = {
         let mut res = resources.lock().await;
@@ -434,10 +434,12 @@ mod execution_mode_image_budget_tests {
                     .restore_execution_mode_and_image_budget(backend, Some(envelope.clone()))
                     .await
                     .expect("persisted external mode must restore");
-                let mut config = xai_grok_inference::InferenceConfig::default();
-                config.model = "catalog-native-resume-model".into();
-                config.base_url = "http://localhost".into();
-                config.context_window = 128_000;
+                let config = xai_grok_inference::InferenceConfig {
+                    model: "catalog-native-resume-model".into(),
+                    base_url: "http://localhost".into(),
+                    context_window: 128_000,
+                    ..Default::default()
+                };
                 actor
                     .handle_set_session_model(
                         acp::ModelId::new(config.model.clone()),
@@ -568,7 +570,7 @@ mod execution_mode_image_budget_tests {
 }
 
 async fn maybe_schedule_rolling_compaction(
-    session: &Arc<SessionActor>,
+    session: &Rc<SessionActor>,
     rolling_job_tx: &mpsc::Sender<crate::session::rolling_compaction::RollingCompactionJob>,
     completion_tx: &mpsc::UnboundedSender<(String, PromptTurnResult)>,
 ) {
@@ -665,7 +667,7 @@ async fn maybe_schedule_rolling_compaction(
 /// admitted at turn end skips past. The classifier is spawned so its idle wait
 /// never blocks the actor loop.
 async fn resume_after_compaction(
-    session: &Arc<SessionActor>,
+    session: &Rc<SessionActor>,
     completion_tx: &mpsc::UnboundedSender<(String, PromptTurnResult)>,
 ) {
     SessionActor::maybe_start_running_task(session.clone(), completion_tx.clone()).await;
@@ -729,7 +731,7 @@ async fn shutdown_workflows(session: &SessionActor) {
     }
 }
 pub(super) async fn run_session(
-    session: Arc<SessionActor>,
+    session: Rc<SessionActor>,
     mut cmd_rx: mpsc::UnboundedReceiver<SessionCommand>,
     mut chat_state_event_rx: mpsc::UnboundedReceiver<xai_chat_state::ChatStateEvent>,
     chat_state_cancellation: tokio_util::sync::CancellationToken,
@@ -1102,7 +1104,8 @@ pub(super) async fn run_session(
                                 tool_call_count: None,
                             },
                         );
-                        if let Some(registry) = session.hook_registry.borrow().clone() {
+                        let hook_registry = session.hook_registry.borrow().clone();
+                        if let Some(registry) = hook_registry {
                             let ctx = session.hook_run_ctx();
                             let results = xai_grok_hooks::dispatcher::dispatch_non_blocking(
                                 &registry,
@@ -1330,7 +1333,7 @@ pub(super) async fn run_session(
                             let _ = responds_to.send(());
                         }
                         SessionCommand::SetSessionModel { selection_model_id, inference_config, use_concise, apply_prompt_override, skip_prompt_rewrite, auto_compact_threshold_percent, execution_backend, responds_to } => {
-                            let updated_model_id = session.handle_set_session_model(selection_model_id, inference_config, use_concise, apply_prompt_override, skip_prompt_rewrite, auto_compact_threshold_percent, execution_backend).await;
+                            let updated_model_id = session.handle_set_session_model(selection_model_id, *inference_config, use_concise, apply_prompt_override, skip_prompt_rewrite, auto_compact_threshold_percent, execution_backend).await;
                             let _ = responds_to.send(updated_model_id);
                         }
                         SessionCommand::GetExecutionBackend { responds_to } => {
@@ -1422,36 +1425,33 @@ pub(super) async fn run_session(
                             let _ = responds_to.send(applied);
                         }
                         SessionCommand::BackgroundForegroundCommand { tool_call_id, respond_to } => {
-                            let result = session.agent.borrow().tool_bridge()
+                            let result = session.tool_bridge_owned()
                                 .background_foreground_command(&tool_call_id)
                                 .await;
                             let _ = respond_to.send(result);
                         }
                         SessionCommand::KillBackgroundTask { task_id, respond_to } => {
-                            let result = session.agent.borrow().tool_bridge()
+                            let result = session.tool_bridge_owned()
                                 .kill_background_task(&task_id)
                                 .await
                                 .map_err(|e| e.to_string());
                             let _ = respond_to.send(result);
                         }
                         SessionCommand::DeleteScheduledTask { task_id, respond_to } => {
-                            let result = session.agent.borrow().tool_bridge()
+                            let result = session.tool_bridge_owned()
                                 .delete_scheduled_task(&task_id)
                                 .await
                                 .map_err(|e| e.to_string());
                             let _ = respond_to.send(result);
                         }
                         SessionCommand::ListTasks { respond_to } => {
-                            let result = session.agent.borrow().tool_bridge()
+                            let result = session.tool_bridge_owned()
                                 .list_tasks()
                                 .await;
                             let _ = respond_to.send(result);
                         }
                         SessionCommand::CancelAssetJob { job_id, respond_to } => {
-                            let outcome = session
-                                .agent
-                                .borrow()
-                                .tool_bridge()
+                            let outcome = session.tool_bridge_owned()
                                 .cancel_asset_job(&job_id)
                                 .await;
                             let _ = respond_to.send(outcome);
@@ -1803,7 +1803,7 @@ pub(super) async fn run_session(
                                 )
                                 .await;
                                 tracing::info!(skills = new_skills.len(), "refreshed skill baseline after bundle sync");
-                                let bridge = s.agent.borrow().tool_bridge().clone();
+                                let bridge = s.tool_bridge_owned();
                                 bridge.update_skill_baseline(new_skills).await;
                                 if let Some(effects) = bridge.apply_pending_skill_update().await {
                                     s.apply_skill_update_effects(effects).await;
@@ -1968,7 +1968,7 @@ pub(super) async fn run_session(
                                                 false,
                                             )
                                         }
-                                        Err(()) => {
+                                        Err(_) => {
                                             crate::extensions::notification::PromptUsage::for_error_path(
                                                 None, true,
                                             )
@@ -2102,10 +2102,7 @@ pub(super) async fn run_session(
                                     name,
                                     crate::session::mcp_servers::MCP_TOOL_NAME_DELIMITER
                                 );
-                                let removed_count = session
-                                    .agent
-                                    .borrow()
-                                    .tool_bridge()
+                                let removed_count = session.tool_bridge_owned()
                                     .unregister_tools_by_prefix(&prefix);
                                 tracing::info!(
                                     server = name.as_str(),
@@ -2190,10 +2187,7 @@ pub(super) async fn run_session(
                                     name,
                                     crate::session::mcp_servers::MCP_TOOL_NAME_DELIMITER
                                 );
-                                let removed_count = session
-                                    .agent
-                                    .borrow()
-                                    .tool_bridge()
+                                let removed_count = session.tool_bridge_owned()
                                     .unregister_tools_by_prefix(&prefix);
                                 tracing::info!(
                                     server = name.as_str(),
@@ -2314,7 +2308,7 @@ pub(super) async fn run_session(
                                 if let Some(reg) = mcp_state.disabled_tool_registrations.remove(&qualified)
                                     && reg.model_visible
                                 {
-                                    let bridge = session.agent.borrow().tool_bridge().clone();
+                                    let bridge = session.tool_bridge_owned();
                                     if let Err(e) = bridge
                                         .register_mcp_tools(reg.name, reg.tool, Some(reg.input_schema))
                                         .await
@@ -2329,7 +2323,7 @@ pub(super) async fn run_session(
                             } else {
                                 // Disable: stash a registration so the tool can be
                                 // re-enabled without a full re-init, then unregister.
-                                let bridge = session.agent.borrow().tool_bridge().clone();
+                                let bridge = session.tool_bridge_owned();
                                 let tool_def = bridge
                                     .tool_definitions()
                                     .await
@@ -2438,7 +2432,7 @@ pub(super) async fn run_session(
                         }
                         SessionCommand::GetMcpStatus { respond_to } => {
                             let mcp_state = session.mcp_state.clone();
-                            let tool_bridge = session.agent.borrow().tool_bridge().clone();
+                            let tool_bridge = session.tool_bridge_owned();
                             let writer = session.events.writer();
                             tokio::task::spawn_local(async move {
                                 let snapshot = crate::extensions::mcp::build_mcp_status(
@@ -2536,7 +2530,7 @@ pub(super) async fn run_session(
                                 .send((availability.workflows, availability.workflow_management));
                         }
                         SessionCommand::ListAvailableCommands { respond_to } => {
-                            let bridge = session.agent.borrow().tool_bridge().clone();
+                            let bridge = session.tool_bridge_owned();
                             let skills = bridge.slash_skills().await;
                             let tool_names = session.registered_tool_names().await;
                             let has_runs = !session.workflow_tracker().await.lock().list().is_empty();
@@ -2569,7 +2563,8 @@ pub(super) async fn run_session(
                                     agent_type: None,
                                 },
                             );
-                            if let Some(registry) = session.hook_registry.borrow().clone() {
+                            let hook_registry = session.hook_registry.borrow().clone();
+                        if let Some(registry) = hook_registry {
                                 let ctx = session.hook_run_ctx();
                                 let results = xai_grok_hooks::dispatcher::dispatch_non_blocking(
                                     &registry,
@@ -2891,7 +2886,8 @@ pub(super) async fn run_session(
                                     tool_call_count: None,
                                 },
                             );
-                            if let Some(registry) = session.hook_registry.borrow().clone() {
+                            let hook_registry = session.hook_registry.borrow().clone();
+                        if let Some(registry) = hook_registry {
                                 let ctx = session.hook_run_ctx();
                                 let results = xai_grok_hooks::dispatcher::dispatch_non_blocking(
                                     &registry,
@@ -3004,8 +3000,7 @@ pub(super) async fn run_session(
                                 );
                             } else if let Some(mut cfg) =
                                 session.chat_state_handle.get_inference_settings().await
-                            {
-                                if cfg.context_window != context_window {
+                                && cfg.context_window != context_window {
                                     tracing::info!(
                                         session_id = %session.session_info.id.0,
                                         old_context_window = cfg.context_window.get(),
@@ -3015,7 +3010,6 @@ pub(super) async fn run_session(
                                     cfg.context_window = context_window;
                                     session.chat_state_handle.update_inference_settings(cfg);
                                 }
-                            }
                         }
                     }
             }

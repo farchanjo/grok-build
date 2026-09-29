@@ -19,7 +19,7 @@ pub(super) const LOCK_FILE: &str = "provider_cache.lock";
 pub(super) const TXN_FILE: &str = "provider_cache.txn";
 
 pub(super) const MAX_CATALOG_BYTES: u64 = 8 * 1024 * 1024;
-pub(super) const MAX_CAPABILITIES_BYTES: u64 = 1 * 1024 * 1024;
+pub(super) const MAX_CAPABILITIES_BYTES: u64 = 1024 * 1024;
 pub(super) const MAX_STATE_BYTES: u64 = 64 * 1024;
 pub(super) const MAX_TXN_BYTES: u64 = 16 * 1024;
 pub(super) const MAX_TEMP_NAME_BYTES: usize = 96;
@@ -129,7 +129,6 @@ fn open_directory_nofollow(path: &Path) -> io::Result<File> {
 #[cfg(unix)]
 fn openat_directory(parent: &File, name: &str) -> io::Result<File> {
     use std::os::fd::{AsRawFd, FromRawFd};
-    use std::os::unix::ffi::OsStrExt;
     validate_single_component_name(name)?;
     let cname = std::ffi::CString::new(name.as_bytes())
         .map_err(|_| invalid_input("path component contains NUL"))?;
@@ -178,7 +177,6 @@ fn openat_or_mkdir_directory(parent: &File, name: &str) -> io::Result<File> {
 #[cfg(unix)]
 fn mkdirat_0700(parent: &File, name: &str) -> io::Result<()> {
     use std::os::fd::AsRawFd;
-    use std::os::unix::ffi::OsStrExt;
     validate_single_component_name(name)?;
     let cname = std::ffi::CString::new(name.as_bytes())
         .map_err(|_| invalid_input("path component contains NUL"))?;
@@ -300,7 +298,6 @@ impl Drop for InstanceLock {
 #[cfg(unix)]
 fn open_lock_relative(instance: &TrustedInstanceDir, name: &str) -> io::Result<File> {
     use std::os::fd::{AsRawFd, FromRawFd};
-    use std::os::unix::ffi::OsStrExt;
     match fstatat_relative(instance, name) {
         Ok(meta) => {
             if meta.is_symlink {
@@ -363,7 +360,6 @@ struct StatMeta {
 #[cfg(unix)]
 fn fstatat_relative(instance: &TrustedInstanceDir, name: &str) -> io::Result<StatMeta> {
     use std::os::fd::AsRawFd;
-    use std::os::unix::ffi::OsStrExt;
     validate_single_component_name(name)?;
     let cname =
         std::ffi::CString::new(name.as_bytes()).map_err(|_| invalid_input("name contains NUL"))?;
@@ -391,7 +387,6 @@ fn fstatat_relative(instance: &TrustedInstanceDir, name: &str) -> io::Result<Sta
 #[cfg(unix)]
 fn open_existing_regular_relative(instance: &TrustedInstanceDir, name: &str) -> io::Result<File> {
     use std::os::fd::{AsRawFd, FromRawFd};
-    use std::os::unix::ffi::OsStrExt;
     let meta = fstatat_relative(instance, name)?;
     if meta.is_symlink {
         return Err(invalid_input("refusing symlink"));
@@ -440,7 +435,7 @@ pub(super) fn read_optional_regular_relative(
                 }
             }
         }
-        let mut file = open_existing_regular_relative(instance, name)?;
+        let file = open_existing_regular_relative(instance, name)?;
         let opened = file.metadata()?;
         if !opened.is_file() || opened.len() > max_bytes {
             return Err(invalid_data("cache file size invalid or exceeds bound"));
@@ -494,7 +489,6 @@ pub(super) fn stage_bytes_relative(
     #[cfg(unix)]
     {
         use std::os::fd::{AsRawFd, FromRawFd};
-        use std::os::unix::ffi::OsStrExt;
         let cname = std::ffi::CString::new(tmp_name.as_bytes())
             .map_err(|_| invalid_input("tmp name contains NUL"))?;
         let fd = unsafe {
@@ -549,7 +543,6 @@ pub(super) fn rename_relative(
     #[cfg(unix)]
     {
         use std::os::fd::AsRawFd;
-        use std::os::unix::ffi::OsStrExt;
         match fstatat_relative(instance, to) {
             Err(e) if e.kind() == io::ErrorKind::NotFound => {}
             Err(e) => return Err(e),
@@ -590,7 +583,6 @@ pub(super) fn unlink_relative(instance: &TrustedInstanceDir, name: &str) -> io::
     #[cfg(unix)]
     {
         use std::os::fd::AsRawFd;
-        use std::os::unix::ffi::OsStrExt;
         match fstatat_relative(instance, name) {
             Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
             Err(e) => return Err(e),
@@ -622,26 +614,6 @@ pub(super) fn unlink_relative(instance: &TrustedInstanceDir, name: &str) -> io::
             Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
             Err(e) => Err(e),
         }
-    }
-}
-
-pub(super) fn regular_exists_relative(
-    instance: &TrustedInstanceDir,
-    name: &str,
-) -> io::Result<bool> {
-    validate_single_component_name(name)?;
-    #[cfg(unix)]
-    {
-        match fstatat_relative(instance, name) {
-            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(false),
-            Err(e) => Err(e),
-            Ok(meta) if meta.is_symlink => Err(invalid_input("refusing symlink existence check")),
-            Ok(meta) => Ok(meta.is_file),
-        }
-    }
-    #[cfg(not(unix))]
-    {
-        Ok(instance.path.join(name).is_file())
     }
 }
 
@@ -743,7 +715,6 @@ fn rmdirat_instance(inst: &TrustedInstanceDir, instance_component: &str) -> io::
     #[cfg(unix)]
     {
         use std::os::fd::AsRawFd;
-        use std::os::unix::ffi::OsStrExt;
         let cname = std::ffi::CString::new(instance_component.as_bytes())
             .map_err(|_| invalid_input("instance name contains NUL"))?;
         let rc =
@@ -798,7 +769,7 @@ pub(super) fn read_home_regular_nofollow(
         options
             .read(true)
             .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
-        let mut file = options.open(&path)?;
+        let file = options.open(&path)?;
         let opened = file.metadata()?;
         if !opened.is_file() || opened.len() > max_bytes {
             return Err(invalid_data("legacy cache changed during open"));

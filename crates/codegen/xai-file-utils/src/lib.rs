@@ -1,10 +1,3 @@
-#![allow(
-    unused_imports,
-    unused_variables,
-    unused_mut,
-    unreachable_code,
-    dead_code
-)]
 //! Local data collection: per-turn event tracking, upload queueing, and
 //! S3-compatible blob storage.
 pub(crate) mod circuit_breaker_observer;

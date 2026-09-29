@@ -1,9 +1,9 @@
 //! Session bring-up concern for `acp_session`: `spawn_session_actor`, the
 //! per-session OS thread (`SessionThread` / `spawn_session_on_thread`), and
 //! the MCP auto-restart wiring (`SessionRestartActions`).
-#![allow(clippy::items_after_test_module)]
 use super::*;
 use crate::remote::DEFAULT_CONTEXT_WINDOW;
+use std::rc::Rc;
 /// Partition CLI `--allow` rules under the pin: blanket catch-all allows
 /// (`Allow(Any)` `*` / `**`, plus bare/match-all Bash/MCP/WebFetch grants — see
 /// `resolution::is_catchall_allow`) substitute for the blocked `--yolo`, so drop them when
@@ -1876,7 +1876,7 @@ pub(crate) async fn spawn_session_actor(
     let subagent_model_meta: std::sync::Arc<parking_lot::Mutex<Option<String>>> =
         std::sync::Arc::new(parking_lot::Mutex::new(None));
     let compaction_cancel = super::compaction_config::CompactCancelGate::default();
-    let session = Arc::new_cyclic(|weak: &std::sync::Weak<SessionActor>| SessionActor {
+    let session = Rc::new_cyclic(|weak: &std::rc::Weak<SessionActor>| SessionActor {
         session_info: session_info.clone(),
         auth_method_id,
         model_auth_memo: std::cell::RefCell::new(None),
@@ -2223,9 +2223,7 @@ pub(crate) async fn spawn_session_actor(
         let tool_index =
             crate::session::tool_index::Bm25ToolSearchIndex::with_service_dense(snapshot);
         session
-            .agent
-            .borrow()
-            .tool_bridge()
+            .tool_bridge_owned()
             .update_resource(xai_grok_tools::types::tool_index::ToolIndex(
                 std::sync::Arc::new(tool_index),
             ))
@@ -2235,19 +2233,12 @@ pub(crate) async fn spawn_session_actor(
     // `refresh_workflow_tool_catalog`).
     session.refresh_workflow_tool_catalog();
     if let Some(client) = managed_gateway_tool_client.clone() {
-        session
-            .agent
-            .borrow()
-            .tool_bridge()
-            .update_resource(client)
-            .await;
+        session.tool_bridge_owned().update_resource(client).await;
     }
     {
         let plan_path = session.plan_mode.lock().plan_file_path().to_path_buf();
         session
-            .agent
-            .borrow()
-            .tool_bridge()
+            .tool_bridge_owned()
             .update_resource(xai_grok_tools::types::resources::PlanFilePath(plan_path))
             .await;
     }
@@ -2256,9 +2247,7 @@ pub(crate) async fn spawn_session_actor(
         session.wire_permission_auto_llm_classifier().await;
     }
     session
-        .agent
-        .borrow()
-        .tool_bridge()
+        .tool_bridge_owned()
         .update_resource(
             xai_grok_tools::implementations::grok_build::workflow::WorkflowLaunchHandle(
                 session.workflow_launch_tx.clone(),
@@ -2267,9 +2256,7 @@ pub(crate) async fn spawn_session_actor(
         .await;
     if !background_workflows_enabled {
         session
-            .agent
-            .borrow()
-            .tool_bridge()
+            .tool_bridge_owned()
             .update_resource(
                 xai_grok_tools::implementations::grok_build::update_goal::GoalUpdateHandle(
                     session.goal_update_tx.clone(),
@@ -2279,9 +2266,7 @@ pub(crate) async fn spawn_session_actor(
     }
     if let Some(ref display_cwd) = prompt_display_cwd {
         session
-            .agent
-            .borrow()
-            .tool_bridge()
+            .tool_bridge_owned()
             .set_display_cwd(std::path::PathBuf::from(display_cwd))
             .await;
     }
@@ -2945,7 +2930,7 @@ pub(crate) async fn spawn_session_on_thread(
 /// Production [`crate::session::mcp_restart::RestartActions`] impl.
 ///
 /// Captured by the dispatcher task at session startup when
-/// `mcp.auto_restart=true`. Holds an `Arc<SessionActor>` plus the
+/// `mcp.auto_restart=true`. Holds an `Rc<SessionActor>` plus the
 /// dispatcher's `SharedShutdownState` so:
 ///
 /// - `is_stdio_server_configured` resolves against
@@ -2957,12 +2942,12 @@ pub(crate) async fn spawn_session_on_thread(
 ///   handshake, liveness arm, owned_clients swap).
 /// - `push_status` forwards directly via the session's gateway.
 pub(crate) struct SessionRestartActions {
-    session: Arc<SessionActor>,
+    session: Rc<SessionActor>,
     shutdown: crate::session::mcp_dispatcher::SharedShutdownState,
 }
 impl SessionRestartActions {
     pub(crate) fn new(
-        session: Arc<SessionActor>,
+        session: Rc<SessionActor>,
         shutdown: crate::session::mcp_dispatcher::SharedShutdownState,
     ) -> Self {
         Self { session, shutdown }

@@ -6,6 +6,11 @@ edition.workspace = true
 description = "Telemetry engine: product events + Mixpanel emission + Sentry error reporting for Grok Build sessions"
 authors = ["xAI"]
 
+repository.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
 [features]
 default = []
 default-bazel = []

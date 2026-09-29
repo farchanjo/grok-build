@@ -261,7 +261,7 @@ pub(crate) fn subscription_state(
 /// when `rx` closes (session teardown); later `InjectNotification` sends fail
 /// harmlessly against the closed command channel.
 pub(crate) fn spawn_mcp_resource_pump(
-    session: std::sync::Arc<SessionActor>,
+    session: std::rc::Rc<SessionActor>,
     mut rx: tokio::sync::mpsc::UnboundedReceiver<McpClientEvent>,
 ) {
     tokio::task::spawn_local(async move {

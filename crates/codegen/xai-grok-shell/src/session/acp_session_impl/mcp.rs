@@ -407,9 +407,7 @@ impl SessionActor {
         }
         if reg.model_visible {
             if let Err(e) = self
-                .agent
-                .borrow()
-                .tool_bridge()
+                .tool_bridge_owned()
                 .register_mcp_tools(reg.name, reg.tool, Some(reg.input_schema))
                 .await
             {
@@ -734,7 +732,7 @@ impl SessionActor {
     ) {
         let mcp_initialized = self.mcp_state.lock().await.is_initialized();
         refresh_mcp_snapshot_and_schedule_reminder_with(
-            self.agent.borrow().tool_bridge().clone(),
+            self.tool_bridge_owned(),
             Arc::clone(&self.mcp_state),
             self.managed_mcp_handle.clone(),
             self.tool_metadata_snapshot.clone(),
@@ -993,11 +991,7 @@ impl SessionActor {
             server,
             crate::session::mcp_servers::MCP_TOOL_NAME_DELIMITER
         );
-        let removed = self
-            .agent
-            .borrow()
-            .tool_bridge()
-            .unregister_tools_by_prefix(&prefix);
+        let removed = self.tool_bridge_owned().unregister_tools_by_prefix(&prefix);
         if removed > 0 {
             tracing::info!(
                 server = %server,
@@ -1485,7 +1479,7 @@ impl SessionActor {
         };
         let mcp_state_bg = std::sync::Arc::clone(&self.mcp_state);
         let mcp_subscription_registry_bg = std::sync::Arc::clone(&self.mcp_subscription_registry);
-        let tool_bridge = self.agent.borrow().tool_bridge().clone();
+        let tool_bridge = self.tool_bridge_owned();
         let gateway = self.notifications.gateway.clone();
         let tool_snapshot = self.tool_metadata_snapshot.clone();
         let managed_mcp_handle = self.managed_mcp_handle.clone();
@@ -1591,7 +1585,7 @@ impl SessionActor {
                                 super::mcp_push::sync_mcp_subscription_registry_into(
                                     &subscription_registry,
                                     &server_name,
-                                    &client,
+                                    client,
                                 );
                             }
                             Ok((server_name, handles, server_start.elapsed(), timeout_sec))

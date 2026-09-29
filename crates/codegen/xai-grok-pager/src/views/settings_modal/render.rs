@@ -3210,9 +3210,9 @@ pub(super) fn build_shortcuts(state: &SettingsModalState) -> Vec<Shortcut<'stati
         SettingsMode::Browse => {
             let enter_label = match state.focused_setting() {
                 Some((_, meta)) if matches!(meta.kind, SettingKind::Bool { .. }) => "Enter toggle",
-                Some((key, _)) if key == "open_retrieval_settings" => "Enter open",
-                Some((key, _)) if key == "open_tools" => "Enter open",
-                Some((key, _)) if key == "open_subscriptions" => "Enter open",
+                Some(("open_retrieval_settings", _)) => "Enter open",
+                Some(("open_tools", _)) => "Enter open",
+                Some(("open_subscriptions", _)) => "Enter open",
                 Some((_, meta)) if matches!(meta.kind, SettingKind::Status) => "Enter",
                 _ => "Enter edit",
             };

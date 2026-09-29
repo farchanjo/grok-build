@@ -142,10 +142,7 @@ pub fn reset_poll_state_for_tests() {
 /// (proves release-before-callback fanout when called from a forwarder body).
 #[cfg(test)]
 pub fn gateway_mutex_try_lock_ok_for_test() -> bool {
-    match gateways().try_lock() {
-        Ok(_) => true,
-        Err(_) => false,
-    }
+    gateways().try_lock().is_ok()
 }
 
 #[cfg(test)]

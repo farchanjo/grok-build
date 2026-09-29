@@ -63,7 +63,7 @@ crates/codegen/xai-file-utils/src/assets/
   gcs_store.rs  — GcsAssetStore
   local_store.rs— LocalAssetStore
   proxy_store.rs— ProxyAssetStore
-  mock.rs       — MockAssetStore (cfg(test) or feature test-support)
+  mock.rs       — MockAssetStore (cfg(test) or feature `test`)
 ```
 
 Manifest delta on `xai-file-utils`: add `async-trait`, `bytes`, `xai-grok-config-types` (all already in the workspace graph).

@@ -164,7 +164,7 @@ impl SlashMru {
             return;
         }
         let mut entries: Vec<(String, u64)> = self.by_command.drain().collect();
-        entries.sort_by(|a, b| b.1.cmp(&a.1));
+        entries.sort_by_key(|e| std::cmp::Reverse(e.1));
         entries.truncate(MAX_ENTRIES);
         self.by_command = entries.into_iter().collect();
     }

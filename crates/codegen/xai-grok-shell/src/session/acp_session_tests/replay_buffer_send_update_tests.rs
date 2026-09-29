@@ -3,6 +3,7 @@ use super::*;
 use crate::session::replay_events::SessionEvent;
 use crate::terminal::AsyncTerminalRunner;
 use crate::terminal::runner::{TerminalError, TerminalRunRequest, TerminalRunResult};
+use std::rc::Rc;
 use tokio::sync::mpsc;
 use xai_grok_paths::AbsPathBuf;
 use xai_grok_workspace::file_system::MockFs;
@@ -548,7 +549,7 @@ async fn channel_tokens_accumulate_into_streaming_capture() {
     local
         .run_until(async {
             let fixture = make_replay_send_update_fixture().await;
-            let actor = Arc::new(fixture.actor);
+            let actor = Rc::new(fixture.actor);
             *actor
                 .current_prompt_id
                 .lock()
@@ -622,7 +623,7 @@ async fn same_prompt_restart_accumulates_segments_via_handler() {
     local
         .run_until(async {
             let fixture = make_replay_send_update_fixture().await;
-            let actor = Arc::new(fixture.actor);
+            let actor = Rc::new(fixture.actor);
             *actor
                 .current_prompt_id
                 .lock()
@@ -686,7 +687,7 @@ async fn completed_event_clears_slot_keeps_prior_uncommitted_segments() {
     local
         .run_until(async {
             let fixture = make_replay_send_update_fixture().await;
-            let actor = Arc::new(fixture.actor);
+            let actor = Rc::new(fixture.actor);
             *actor
                 .current_prompt_id
                 .lock()
@@ -770,7 +771,7 @@ async fn completed_event_releases_stream_drain_barrier() {
     local
         .run_until(async {
             let fixture = make_replay_send_update_fixture().await;
-            let actor = Arc::new(fixture.actor);
+            let actor = Rc::new(fixture.actor);
             *actor
                 .current_prompt_id
                 .lock()
@@ -837,7 +838,7 @@ async fn failed_event_preserves_streaming_capture_for_takeout() {
     local
         .run_until(async {
             let fixture = make_replay_send_update_fixture().await;
-            let actor = Arc::new(fixture.actor);
+            let actor = Rc::new(fixture.actor);
             *actor
                 .current_prompt_id
                 .lock()
@@ -911,7 +912,7 @@ async fn observe_only_confident_completion_stays_warn_only() {
                     max_threshold: 8,
                     max_retries: 0,
                 });
-            let actor = Arc::new(fixture.actor);
+            let actor = Rc::new(fixture.actor);
             *actor
                 .current_prompt_id
                 .lock()
@@ -989,7 +990,7 @@ async fn doom_loop_recovery_stamps_capture_segments_and_counters() {
             let mut fixture = make_replay_send_update_fixture().await;
             fixture.actor.doom_loop_recovery =
                 Some(xai_grok_inference_types::DoomLoopRecoveryPolicy::default());
-            let actor = Arc::new(fixture.actor);
+            let actor = Rc::new(fixture.actor);
             *actor
                 .current_prompt_id
                 .lock()
@@ -1111,7 +1112,7 @@ async fn tool_call_delta_marks_streaming_capture_phase() {
     local
         .run_until(async {
             let fixture = make_replay_send_update_fixture().await;
-            let actor = Arc::new(fixture.actor);
+            let actor = Rc::new(fixture.actor);
             *actor
                 .current_prompt_id
                 .lock()
@@ -1164,7 +1165,7 @@ async fn tool_call_delta_on_idle_slot_leaves_phase_pending() {
     local
         .run_until(async {
             let fixture = make_replay_send_update_fixture().await;
-            let actor = Arc::new(fixture.actor);
+            let actor = Rc::new(fixture.actor);
             actor
                 .handle_sampling_event(InferenceEvent::ToolCallDelta {
                     request_id: RequestId::random(),
@@ -1189,7 +1190,7 @@ async fn tool_call_delta_announces_acp_pending_card() {
     local
         .run_until(async {
             let mut fixture = make_replay_send_update_fixture().await;
-            let actor = Arc::new(fixture.actor);
+            let actor = Rc::new(fixture.actor);
             actor
                 .handle_sampling_event(InferenceEvent::ToolCallDelta {
                     request_id: RequestId::random(),
@@ -1250,7 +1251,7 @@ async fn stream_started_fails_unprepared_streaming_tool_cards() {
     local
         .run_until(async {
             let mut fixture = make_replay_send_update_fixture().await;
-            let actor = Arc::new(fixture.actor);
+            let actor = Rc::new(fixture.actor);
             actor
                 .handle_sampling_event(InferenceEvent::ToolCallDelta {
                     request_id: RequestId::random(),
@@ -1363,7 +1364,7 @@ async fn reasoning_only_doomloop_turn_captures_every_generation_as_segments() {
                 sent: _sent,
                 persistence_rx: _persistence_rx,
             } = make_replay_send_update_fixture().await;
-            let actor = Arc::new(actor);
+            let actor = Rc::new(actor);
             *actor
                 .current_prompt_id
                 .lock()
@@ -1406,7 +1407,7 @@ async fn reasoning_only_doomloop_turn_captures_every_generation_as_segments() {
                 model_metadata: None,
                 diagnostics: None,
                 error_code: None,
-                empty_response_context: Some(EmptyResponseContext {
+                empty_response_context: Some(Box::new(EmptyResponseContext {
                     reason: EmptyReason::ReasoningOnly,
                     had_reasoning: true,
                     content_len: 0,
@@ -1417,7 +1418,7 @@ async fn reasoning_only_doomloop_turn_captures_every_generation_as_segments() {
                     prompt_tokens: Some(128),
                     model: "grok-test".to_string(),
                     first_choice_seen: true,
-                }),
+                })),
                 doom_loop_triggers: None,
                 doom_loop_aborted_at_chunk: None,
                 credential: xai_grok_inference_types::SentCredential::Unknown,

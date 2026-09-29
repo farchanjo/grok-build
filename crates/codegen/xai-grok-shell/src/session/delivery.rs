@@ -31,7 +31,6 @@ use tokio::sync::mpsc::UnboundedSender;
 use crate::session::acp_session::{McpPushStats, McpSubscriptionRecord};
 use crate::session::commands::SessionCommand;
 use crate::session::mcp_servers::{McpClient, McpState};
-use crate::session::persistence::PersistenceMsg;
 use xai_grok_tools::reminders::task_completion::TaskCompletionReservations;
 
 /// Live handle to another session's push-facing state.

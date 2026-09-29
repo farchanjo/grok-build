@@ -996,7 +996,7 @@ fn build_cache_capability(
     // and never serialized.
     let (identity, state_error) = match ProviderCacheStore::load_state(home, &pid) {
         Ok(Some(state)) => {
-            let current_route = desc.primary_route().filter(|route| desc.routes.len() == 1);
+            let current_route = desc.primary_route().filter(|_route| desc.routes.len() == 1);
             let identity = match (desc.incarnation.clone(), current_route) {
                 (Some(incarnation), Some(route)) => ProviderCacheIdentity::new(
                     pid.clone(),

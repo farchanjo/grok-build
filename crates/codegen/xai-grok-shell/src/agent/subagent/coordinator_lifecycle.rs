@@ -1,29 +1,10 @@
 #![cfg_attr(rustfmt, rustfmt::skip)]
-#![allow(unused_imports)]
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
-use agent_client_protocol as acp;
-use tokio::sync::{Notify, mpsc, oneshot};
-use tokio_util::sync::CancellationToken;
-use crate::extensions::notification::{SessionNotification, SessionUpdate};
-use crate::session::{
-    self, SessionCommand, SessionHandle, SessionThread,
-    commands::{PromptCompletionKind, PromptTurnResult as SubagentPromptTurnResult},
-    fs_watch::FsWatchCapabilities, info::Info as SessionInfo,
-};
-use crate::terminal::AsyncTerminalRunner;
-use crate::tools::ToolContext;
-use crate::upload::trace::{
-    GCS_SCHEMA_VERSION, PromptMetadata, SubagentSpawnedRef, TurnResultMetadata,
-    local_sandbox_telemetry, upload_metadata, upload_session_state,
-    upload_subagent_metadata, upload_turn_result,
-};
-use crate::upload::turn::{PromptTraceContext, complete_prompt_trace};
-use xai_acp_lib::AcpAgentGatewaySender as GatewaySender;
-use xai_grok_tools::implementations::grok_build::task::types::*;
-use xai_grok_workspace::file_system::AsyncFileSystem;
-use xai_hunk_tracker::HunkTrackerHandle;
+use tokio::sync::Notify;
+use crate::session::SessionCommand;
+use crate::upload::trace::SubagentSpawnedRef;
 use super::*;
 impl SubagentCoordinator {
     pub fn new() -> Self {
@@ -280,6 +261,7 @@ impl SubagentCoordinator {
     pub fn remove_pending(&mut self, id: &str) {
         self.remove_pending_owned(id, None);
     }
+    #[allow(dead_code)]
     pub(crate) fn remove_pending_owned(
         &mut self,
         id: &str,
@@ -329,6 +311,7 @@ impl SubagentCoordinator {
     }
     /// Move a pending subagent to `completed` as a failure so it stays queryable
     /// via `get_task_output`.
+    #[cfg(test)]
     pub fn move_pending_to_failed(&mut self, id: &str, error: &str) {
         let _ = self.move_pending_to_failed_owned(id, error, None);
     }
@@ -342,6 +325,7 @@ impl SubagentCoordinator {
     }
     /// Like [`Self::move_pending_to_failed`] but stamps `"cancelled"` — a pending
     /// subagent killed while initializing.
+    #[cfg(test)]
     pub fn move_pending_to_cancelled(&mut self, id: &str, error: &str) {
         let _ = self.move_pending_to_cancelled_owned(id, error, None);
     }
@@ -358,6 +342,7 @@ impl SubagentCoordinator {
     ///
     /// It remains in `pending` while the external agent runs so the existing
     /// query/cancellation paths work without a second coordinator.
+    #[cfg(test)]
     pub fn complete_pending_external(
         &mut self,
         id: &str,
@@ -534,7 +519,7 @@ impl SubagentCoordinator {
         self.insert_owned(tracker, expected_owner.as_ref())
             .unwrap_or_else(|error| panic!("failed to promote subagent {id}: {error}"));
     }
-    #[must_use]
+    
     pub(crate) fn insert_owned(
         &mut self,
         tracker: SubagentTracker,
@@ -559,6 +544,7 @@ impl SubagentCoordinator {
     }
     /// Move a finished subagent from `active` to `completed`.
     /// Returns the tracker if it was active.
+    #[cfg(test)]
     pub fn move_to_completed(
         &mut self,
         id: &str,
@@ -710,6 +696,7 @@ impl SubagentCoordinator {
     /// Record the durable worktree snapshot ref on a completed subagent so
     /// in-memory `resume_from` resolution can rehydrate the disposed worktree.
     /// No-op if the entry was already evicted (the on-disk meta.json still has it).
+    #[cfg(test)]
     pub fn set_completed_snapshot_ref(&mut self, id: &str, snapshot_ref: String) {
         self.set_completed_snapshot_ref_owned(id, None, snapshot_ref);
     }

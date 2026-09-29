@@ -1693,7 +1693,7 @@ pub fn render_modal(buf: &mut Buffer, area: Rect, state: &mut ProviderModalState
         let status_text = format!(" [{:>18}]", status.label());
         let x = content.content.x;
         buf.set_string(x, y, prefix, title);
-        buf.set_string(x + 2, y, &provider.label(), title);
+        buf.set_string(x + 2, y, provider.label(), title);
         let sx =
             (content.content.x + content.content.width).saturating_sub(status_text.len() as u16);
         buf.set_string(sx, y, &status_text, status_style);

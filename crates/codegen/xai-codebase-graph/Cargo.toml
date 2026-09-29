@@ -5,6 +5,11 @@ version = "0.1.0"
 edition.workspace = true
 description = "High-performance code graph generation using tree-sitter queries"
 
+repository.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
 [features]
 default = []
 

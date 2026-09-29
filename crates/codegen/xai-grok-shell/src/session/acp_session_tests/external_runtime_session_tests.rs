@@ -15,6 +15,7 @@ use crate::agent::external_runtime::{
     RetainedExternalAgentRuntime,
 };
 use async_trait::async_trait;
+use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -149,7 +150,7 @@ impl ExternalAgentRuntime for RecordingExternalRuntime {
                 Some(self.kind),
             );
             err.partial_events = partial;
-            err.partial_envelope = Some(envelope.clone());
+            err.partial_envelope = Some(Box::new(envelope.clone()));
             return Err(err);
         }
         let mut env = envelope.clone();
@@ -371,7 +372,7 @@ async fn external_assistant_text_lands_in_chat_state_without_tool_calls() {
             let (gateway_tx, _gateway_rx) = tokio::sync::mpsc::unbounded_channel();
             let (persistence_tx, _persistence_rx) = tokio::sync::mpsc::unbounded_channel();
             let actor =
-                Arc::new(create_test_actor(0, 200_000, 80, gateway_tx, persistence_tx).await);
+                Rc::new(create_test_actor(0, 200_000, 80, gateway_tx, persistence_tx).await);
             actor.execution_backend.set(ExecutionBackend::ExternalAgent(
                 ExternalAgentKind::ClaudeCli,
             ));
@@ -423,7 +424,7 @@ async fn invalid_outcome_envelope_retains_prior_valid_envelope() {
             let (gateway_tx, _gateway_rx) = tokio::sync::mpsc::unbounded_channel();
             let (persistence_tx, mut persistence_rx) = tokio::sync::mpsc::unbounded_channel();
             let actor =
-                Arc::new(create_test_actor(0, 200_000, 80, gateway_tx, persistence_tx).await);
+                Rc::new(create_test_actor(0, 200_000, 80, gateway_tx, persistence_tx).await);
             actor.execution_backend.set(ExecutionBackend::ExternalAgent(
                 ExternalAgentKind::ClaudeCli,
             ));
@@ -472,7 +473,7 @@ async fn invalid_outcome_envelope_without_prior_valid_envelope_fails_safely() {
             let (gateway_tx, _gateway_rx) = tokio::sync::mpsc::unbounded_channel();
             let (persistence_tx, mut persistence_rx) = tokio::sync::mpsc::unbounded_channel();
             let actor =
-                Arc::new(create_test_actor(0, 200_000, 80, gateway_tx, persistence_tx).await);
+                Rc::new(create_test_actor(0, 200_000, 80, gateway_tx, persistence_tx).await);
             actor.execution_backend.set(ExecutionBackend::ExternalAgent(
                 ExternalAgentKind::ClaudeCli,
             ));
@@ -512,7 +513,7 @@ async fn partial_text_delta_persisted_on_non_cancelled_failure() {
             let (gateway_tx, _gateway_rx) = tokio::sync::mpsc::unbounded_channel();
             let (persistence_tx, _persistence_rx) = tokio::sync::mpsc::unbounded_channel();
             let actor =
-                Arc::new(create_test_actor(0, 200_000, 80, gateway_tx, persistence_tx).await);
+                Rc::new(create_test_actor(0, 200_000, 80, gateway_tx, persistence_tx).await);
             actor.execution_backend.set(ExecutionBackend::ExternalAgent(
                 ExternalAgentKind::ClaudeCli,
             ));
@@ -596,10 +597,12 @@ async fn switching_to_native_shuts_down_external_runtime() {
                 fake.clone() as Arc<dyn ExternalAgentRuntime>,
             ));
 
-            let mut cfg = xai_grok_inference::InferenceConfig::default();
-            cfg.model = "test-model".into();
-            cfg.base_url = "http://localhost".into();
-            cfg.context_window = 128_000;
+            let cfg = xai_grok_inference::InferenceConfig {
+                model: "test-model".into(),
+                base_url: "http://localhost".into(),
+                context_window: 128_000,
+                ..Default::default()
+            };
             let _ = actor
                 .handle_set_session_model(
                     acp::ModelId::new(cfg.model.clone()),
@@ -630,7 +633,7 @@ async fn compact_deeper_entry_refuses_external_without_side_effects() {
             let (gateway_tx, _gateway_rx) = tokio::sync::mpsc::unbounded_channel();
             let (persistence_tx, _persistence_rx) = tokio::sync::mpsc::unbounded_channel();
             let actor =
-                Arc::new(create_test_actor(0, 200_000, 80, gateway_tx, persistence_tx).await);
+                Rc::new(create_test_actor(0, 200_000, 80, gateway_tx, persistence_tx).await);
             actor.execution_backend.set(ExecutionBackend::ExternalAgent(
                 ExternalAgentKind::ClaudeCli,
             ));
@@ -667,7 +670,7 @@ async fn memory_flush_deeper_entry_refuses_external_without_side_effects() {
             let (gateway_tx, _gateway_rx) = tokio::sync::mpsc::unbounded_channel();
             let (persistence_tx, _persistence_rx) = tokio::sync::mpsc::unbounded_channel();
             let actor =
-                Arc::new(create_test_actor(0, 200_000, 80, gateway_tx, persistence_tx).await);
+                Rc::new(create_test_actor(0, 200_000, 80, gateway_tx, persistence_tx).await);
             actor.execution_backend.set(ExecutionBackend::ExternalAgent(
                 ExternalAgentKind::ClaudeCli,
             ));
@@ -704,7 +707,7 @@ async fn dream_slash_rejected_on_external_backend_without_side_effects() {
             let (gateway_tx, _gateway_rx) = tokio::sync::mpsc::unbounded_channel();
             let (persistence_tx, _persistence_rx) = tokio::sync::mpsc::unbounded_channel();
             let actor =
-                Arc::new(create_test_actor(0, 200_000, 80, gateway_tx, persistence_tx).await);
+                Rc::new(create_test_actor(0, 200_000, 80, gateway_tx, persistence_tx).await);
             actor.execution_backend.set(ExecutionBackend::ExternalAgent(
                 ExternalAgentKind::ClaudeCli,
             ));

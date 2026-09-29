@@ -5,6 +5,11 @@ name = "xai-grok-secrets"
 version = "0.1.0"
 description = "Regex sanitizer for Grok Build outbound data (Sentry / Mixpanel / product-event scrubbing)"
 
+repository.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
 [dependencies]
 regex = { workspace = true }
 serde_json = { workspace = true }

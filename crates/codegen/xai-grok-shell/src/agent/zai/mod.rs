@@ -157,10 +157,10 @@ pub fn native_web_search_enabled(capabilities: &IndexMap<String, bool>) -> bool 
 /// Merge Z.ai extensions into a chat completion request body when identity is Z.ai.
 pub fn apply_zai_extensions(body: &mut Value, extensions: &ZaiChatExtensions) {
     if let Some(obj) = body.as_object_mut() {
-        if let Some(thinking) = &extensions.thinking {
-            if let Ok(v) = serde_json::to_value(thinking) {
-                obj.insert("thinking".into(), v);
-            }
+        if let Some(thinking) = &extensions.thinking
+            && let Ok(v) = serde_json::to_value(thinking)
+        {
+            obj.insert("thinking".into(), v);
         }
         if let Some(tool_stream) = extensions.tool_stream {
             obj.insert("tool_stream".into(), Value::Bool(tool_stream));

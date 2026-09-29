@@ -164,7 +164,7 @@ impl TersifyConfig {
 
 /// Test-only: parse a TOML string via the crate's own `toml` (which does not
 /// re-export `IntoDeserializer` at this path; `from_str` is its entry point).
-
+///
 /// Whether the streaming repetition-loop guard is enabled.
 ///
 /// Default ON: a model stuck emitting the same character or n-gram floods

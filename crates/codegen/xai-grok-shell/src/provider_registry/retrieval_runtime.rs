@@ -27,7 +27,7 @@ use xai_grok_inference::{
 use super::id::{BuiltInProviderId, ProviderId};
 use super::instance::{ApiSurface, CredentialRoute, ProviderInstanceDescriptor, ProviderKind};
 use super::lifecycle::{CapabilityMode, ProviderAuthScheme, ProviderMetadata};
-use super::lifecycle_state::{ProviderLifecycleState, load_lifecycle_state};
+use super::lifecycle_state::ProviderLifecycleState;
 use super::route_guard::{RouteGuardError, RouteGuardRequest, assert_route_usable};
 use super::runtime_cache::load_runtime;
 use super::secrets::{application_key_scope_for_kind, read_provider_secret};
@@ -231,17 +231,19 @@ fn resolve_inner(
 
     // Retrieval-strict generation: pinned Some(stale) always fails on mismatch.
     // None means fresh resolve — pin live generation on the result only.
-    if let Some(expected) = opts.session_registry_generation {
-        if generation != 0 && expected != 0 && expected != generation {
-            return Err(RetrievalRuntimeError::RouteGuard(
-                RouteGuardError::GenerationReplaced {
-                    id: provider_id.to_owned(),
-                    expected,
-                    live: generation,
-                }
-                .to_string(),
-            ));
-        }
+    if let Some(expected) = opts.session_registry_generation
+        && generation != 0
+        && expected != 0
+        && expected != generation
+    {
+        return Err(RetrievalRuntimeError::RouteGuard(
+            RouteGuardError::GenerationReplaced {
+                id: provider_id.to_owned(),
+                expected,
+                live: generation,
+            }
+            .to_string(),
+        ));
     }
 
     // Incarnation/tombstone/disabled/missing via shared guard. Do **not** inject
@@ -646,7 +648,7 @@ fn map_auth_scheme(
     let spelling = exact_spelling
         .map(str::trim)
         .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| match meta.auth_scheme {
+        .unwrap_or(match meta.auth_scheme {
             ProviderAuthScheme::Bearer => "bearer",
             ProviderAuthScheme::None => "none",
             ProviderAuthScheme::CustomHeader => "custom_header",
@@ -751,14 +753,12 @@ fn resolve_application_credential(
         }
     }
     // Fallback: metadata primary if descriptor list empty (legacy tables).
-    if env_keys.is_empty() {
-        if let Some(env_name) = meta.env_key.as_deref() {
-            if let Ok(v) = std::env::var(env_name)
-                && !v.trim().is_empty()
-            {
-                return Ok(v);
-            }
-        }
+    if env_keys.is_empty()
+        && let Some(env_name) = meta.env_key.as_deref()
+        && let Ok(v) = std::env::var(env_name)
+        && !v.trim().is_empty()
+    {
+        return Ok(v);
     }
 
     let is_builtin = BuiltInProviderId::parse(provider_id).is_some();

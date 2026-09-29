@@ -29,7 +29,6 @@ use std::time::Duration;
 use bytes::Bytes;
 use xai_grok_config_types::{
     AssetProviderConfig, AssetProviderKind, AssetVisibility, AssetsConfig, AssetsSettings,
-    DEFAULT_ASSET_KEY_PREFIX, DEFAULT_ASSET_REQUEST_TIMEOUT_SECS, DEFAULT_ASSET_TTL_SECS,
     validate_asset_key_prefix, validate_asset_ttl_secs,
 };
 
@@ -699,7 +698,9 @@ impl AssetStore for StubAssetStore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use xai_grok_config_types::{MAX_ASSET_TTL_SECS, MIN_ASSET_TTL_SECS};
+    use xai_grok_config_types::{
+        DEFAULT_ASSET_KEY_PREFIX, DEFAULT_ASSET_TTL_SECS, MAX_ASSET_TTL_SECS, MIN_ASSET_TTL_SECS,
+    };
 
     fn ctx() -> AssetRuntimeContext {
         AssetRuntimeContext::new()

@@ -853,17 +853,16 @@ impl MemoryBackend for MemoryBackendImpl {
         }
 
         // In milvus mode, reconcile with remote schema-v2 collection when unready or reindex claimed.
-        if self.mode == xai_grok_config_types::MemoryMode::Milvus {
-            if let Some(ref handle) = self.vector_mirror
-                && let Some(ref embedder) = embedder
-                && let Some(ref spec) = spec
-                && let Ok(fp) = spec.fingerprint(&self.index_config)
-            {
-                let dims = spec.dimensions as u32;
-                if !handle.is_ready_for(&fp.hash, dims) || reindex_claim.is_some() {
-                    let _ = crate::reconcile_milvus_mode(&mut index, &**embedder, handle, &fp.hash)
-                        .await;
-                }
+        if self.mode == xai_grok_config_types::MemoryMode::Milvus
+            && let Some(ref handle) = self.vector_mirror
+            && let Some(ref embedder) = embedder
+            && let Some(ref spec) = spec
+            && let Ok(fp) = spec.fingerprint(&self.index_config)
+        {
+            let dims = spec.dimensions as u32;
+            if !handle.is_ready_for(&fp.hash, dims) || reindex_claim.is_some() {
+                let _ =
+                    crate::reconcile_milvus_mode(&mut index, &**embedder, handle, &fp.hash).await;
             }
         }
 

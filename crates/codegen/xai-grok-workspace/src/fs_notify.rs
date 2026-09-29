@@ -1,4 +1,3 @@
-#![allow(dead_code)] // Functions consumed by handle.rs event forwarder wiring
 //! FsNotify adapter functions bridging [`xai_fsnotify`] events to
 //! workspace subsystems (hunk tracker, codebase graph, workspace
 //! event broadcast).
@@ -11,7 +10,7 @@
 
 use std::path::{Path, PathBuf};
 
-use xai_fsnotify::{FsEvent, FsEventKind};
+use xai_fsnotify::FsEventKind;
 use xai_hunk_tracker::HunkTrackerHandle;
 
 /// True if `path` lies under a hidden component below `cwd`.
@@ -20,6 +19,7 @@ use xai_hunk_tracker::HunkTrackerHandle;
 /// `/home/u/.config/foo` does not flag paths inside that directory as
 /// hidden. Only components below `cwd` that start with `.` (and are
 /// longer than a bare `.`) are considered hidden.
+#[allow(dead_code)]
 pub(crate) fn is_under_hidden_dir(path: &Path, cwd: &Path) -> bool {
     let rel = path.strip_prefix(cwd).unwrap_or(path);
     rel.components().any(|c| {
@@ -32,6 +32,7 @@ pub(crate) fn is_under_hidden_dir(path: &Path, cwd: &Path) -> bool {
 /// Forward an fs event to the hunk tracker. Hidden-directory paths
 /// (relative to `cwd`) are filtered out so the hunk tracker never
 /// sees `.git/`, `.grok/`, etc.
+#[allow(dead_code)]
 pub(crate) fn forward_to_hunk_tracker(
     paths: &[PathBuf],
     kind: FsEventKind,
@@ -55,6 +56,7 @@ pub(crate) fn forward_to_hunk_tracker(
 }
 
 /// Convert to codebase graph `FileEvent` for incremental index updates.
+#[allow(dead_code)]
 pub(crate) fn fs_event_to_codebase_graph_event(
     paths: &[PathBuf],
     kind: FsEventKind,
@@ -77,6 +79,7 @@ pub(crate) fn fs_event_to_codebase_graph_event(
 /// Identity mapping today; kept explicit so all known variants are
 /// consciously mapped. Unknown future variants fall back to
 /// `Modified` via the `#[non_exhaustive]` wildcard arm.
+#[cfg(test)]
 pub(crate) fn to_workspace_event_kind(kind: FsEventKind) -> xai_grok_workspace_types::FsEventKind {
     match kind {
         FsEventKind::Created => xai_grok_workspace_types::FsEventKind::Created,
@@ -86,76 +89,6 @@ pub(crate) fn to_workspace_event_kind(kind: FsEventKind) -> xai_grok_workspace_t
         // `#[non_exhaustive]` fallback.
         _ => xai_grok_workspace_types::FsEventKind::Modified,
     }
-}
-
-/// Spawn a background task that reads [`FsEvent`]s from a broadcast
-/// receiver, forwards `FilesChanged` to the hunk tracker, and
-/// re-broadcasts each affected path as
-/// [`WorkspaceEvent::FsChanged`](xai_grok_workspace_types::WorkspaceEvent::FsChanged)
-/// on the workspace event bus.
-///
-/// The task exits when:
-/// - the broadcast sender drops (all `FsEventSource`s for this
-///   receiver are gone), or
-/// - `cancel` is cancelled.
-pub(crate) fn spawn_fs_event_forwarder(
-    mut rx: tokio::sync::broadcast::Receiver<FsEvent>,
-    hunk_tracker: HunkTrackerHandle,
-    events_tx: tokio::sync::broadcast::Sender<xai_grok_workspace_types::WorkspaceEvent>,
-    cwd: PathBuf,
-    cancel: tokio_util::sync::CancellationToken,
-    codebase_index: Option<std::sync::Arc<xai_codebase_graph::IndexManagerHandle>>,
-) {
-    tokio::spawn(async move {
-        loop {
-            tokio::select! {
-                biased;
-                _ = cancel.cancelled() => break,
-                result = rx.recv() => {
-                    match result {
-                        Ok(FsEvent::FilesChanged { ref paths, kind }) => {
-                            // Forward to hunk tracker (hidden-dir filtered).
-                            forward_to_hunk_tracker(paths, kind, &hunk_tracker, &cwd);
-                            // Forward to codebase graph for incremental
-                            // index updates (hidden-dir paths are indexed
-                            // -- the graph's own ignore logic handles them).
-                            if let Some(ref idx) = codebase_index {
-                                let graph_event = fs_event_to_codebase_graph_event(paths, kind);
-                                if let Err(e) = idx.send_event(graph_event) {
-                                    tracing::debug!(
-                                        error = %e,
-                                        "failed to forward fs event to codebase graph"
-                                    );
-                                }
-                            }
-                            // Broadcast per-path WorkspaceEvent::FsChanged.
-                            let ws_kind = to_workspace_event_kind(kind);
-                            for path in paths {
-                                let _ = events_tx.send(
-                                    xai_grok_workspace_types::WorkspaceEvent::FsChanged {
-                                        path: path.clone(),
-                                        kind: ws_kind,
-                                    },
-                                );
-                            }
-                        }
-                        Ok(other) => {
-                            // Git meta / operation events -- not yet bridged
-                            // to WorkspaceEvent::GitHeadChanged etc.
-                            tracing::trace!(?other, "fs event forwarder: unhandled event variant");
-                        }
-                        Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
-                            tracing::warn!(
-                                lagged = n,
-                                "fs event forwarder lagged; some events were dropped"
-                            );
-                        }
-                        Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
-                    }
-                }
-            }
-        }
-    });
 }
 
 const GIT_DIFF_REBUILD_THRESHOLD: usize = 500;

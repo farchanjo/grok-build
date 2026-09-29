@@ -123,6 +123,7 @@ const RECAP_BUDGET_HEADROOM_TOKENS: u64 = 4_000;
 ///
 /// `context_window` MUST be the window of the model the recap is actually sent to
 /// (today the session model).
+#[allow(dead_code)]
 pub(crate) fn budget_recap_items(
     conversation: Vec<ConversationItem>,
     tag: &str,

@@ -5,6 +5,11 @@ name = "xai-crash-handler"
 version = "0.1.0"
 description = "Cross-platform crash handler (Unix signals + Windows SEH) with startup crash detection"
 
+repository.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
 [target.'cfg(unix)'.dependencies]
 libc = { workspace = true }
 

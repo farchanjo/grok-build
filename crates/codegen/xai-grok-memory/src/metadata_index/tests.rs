@@ -809,7 +809,7 @@ fn stale_hashes_cannot_install_vectors() {
     let tmp = TempDir::new().unwrap();
     let (_, idx) = open(&tmp);
     let live = item("fmt", "rust-format", "formats rust");
-    idx.replace_inventory(CollectionKind::Skills, 1, &[live.clone()])
+    idx.replace_inventory(CollectionKind::Skills, 1, std::slice::from_ref(&live))
         .unwrap();
     let source = spec("m", 4);
     let (fp, payload) = fp_for(CollectionKind::Skills, &source);
@@ -843,7 +843,7 @@ fn crash_install_pre_commit_keeps_old_vectors() {
     let tmp = TempDir::new().unwrap();
     let (_, idx) = open(&tmp);
     let live = item("fmt", "rust-format", "formats rust");
-    idx.replace_inventory(CollectionKind::Skills, 1, &[live.clone()])
+    idx.replace_inventory(CollectionKind::Skills, 1, std::slice::from_ref(&live))
         .unwrap();
     idx.replace_inventory(
         CollectionKind::CallableAgents,
@@ -914,7 +914,7 @@ fn crash_install_pre_commit_keeps_same_collection_vectors() {
     let tmp = TempDir::new().unwrap();
     let (db_path, idx) = open(&tmp);
     let live = item("fmt", "rust-format", "formats rust");
-    idx.replace_inventory(CollectionKind::Skills, 1, &[live.clone()])
+    idx.replace_inventory(CollectionKind::Skills, 1, std::slice::from_ref(&live))
         .unwrap();
     let source_a = spec("m-a", 4);
     let (fp_a, payload_a) = fp_for(CollectionKind::Skills, &source_a);
@@ -1042,7 +1042,7 @@ fn upsert_embedding_rejects_nan_and_wrong_dim() {
     let tmp = TempDir::new().unwrap();
     let (_, idx) = open(&tmp);
     let live = item("fmt", "rust-format", "formats rust");
-    idx.replace_inventory(CollectionKind::Skills, 1, &[live.clone()])
+    idx.replace_inventory(CollectionKind::Skills, 1, std::slice::from_ref(&live))
         .unwrap();
     let source = spec("m", 4);
     let (fp, payload) = fp_for(CollectionKind::Skills, &source);
@@ -1082,7 +1082,7 @@ fn items_without_embeddings_surfaces_ids_when_rowids_shadow_is_missing() {
     let tmp = TempDir::new().unwrap();
     let (_, idx) = open(&tmp);
     let live = item("fmt", "rust-format", "formats rust");
-    idx.replace_inventory(CollectionKind::Skills, 1, &[live.clone()])
+    idx.replace_inventory(CollectionKind::Skills, 1, std::slice::from_ref(&live))
         .unwrap();
     let source = spec("m", 4);
     let (fp, payload) = fp_for(CollectionKind::Skills, &source);

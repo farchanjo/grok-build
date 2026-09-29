@@ -162,6 +162,7 @@ mod contain {
             open_under(trusted.as_path(), relative.as_path(), path)
         }
 
+        #[allow(dead_code)]
         pub fn path(&self) -> &Path {
             &self.path
         }
@@ -657,7 +658,7 @@ mod contain {
         ))]
         // SAFETY: platform errno accessor.
         {
-            return unsafe { libc::__error() };
+            unsafe { libc::__error() }
         }
         #[cfg(target_os = "linux")]
         // SAFETY: platform errno accessor.
@@ -705,12 +706,6 @@ mod contain {
             ));
         }
         Ok(())
-    }
-
-    /// Test helper: expose raw dirfd open for parent-swap harnesses.
-    #[cfg(test)]
-    pub fn open_root_for_test(session_dir: &Path) -> io::Result<SessionRoot> {
-        SessionRoot::open(session_dir)
     }
 }
 
@@ -1119,14 +1114,11 @@ pub fn commit_summary_and_companion(
         // lock, then journal summary + meta digest update.
         let has_pair =
             root.exists_nofollow(MODEL_ROUTE_FILE)? || root.exists_nofollow(MODEL_IDENTITY_META)?;
-        if has_pair {
-            if let Some(prev) = &previous_summary_bytes {
-                let prev_summary: Summary = serde_json::from_slice(prev).map_err(|e| {
-                    io::Error::new(io::ErrorKind::InvalidData, format!("summary: {e}"))
-                })?;
-                // Inline validate (same root/lock) — no nested re-open.
-                validate_pair_against_summary(&root, &prev_summary)?;
-            }
+        if has_pair && let Some(prev) = &previous_summary_bytes {
+            let prev_summary: Summary = serde_json::from_slice(prev)
+                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("summary: {e}")))?;
+            // Inline validate (same root/lock) — no nested re-open.
+            validate_pair_against_summary(&root, &prev_summary)?;
         }
         return commit_leave_digest_only_locked(&root, summary, previous_summary_bytes.as_deref());
     }
@@ -1195,13 +1187,13 @@ fn validate_pair_against_summary(root: &SessionRoot, summary: &Summary) -> io::R
             "model route pair_id mismatch",
         ));
     }
-    if let Some(expected) = &meta.companion_sha256 {
-        if sha256_hex(&companion_bytes) != *expected {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "model_route companion digest mismatch",
-            ));
-        }
+    if let Some(expected) = &meta.companion_sha256
+        && sha256_hex(&companion_bytes) != *expected
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "model_route companion digest mismatch",
+        ));
     }
     Ok(())
 }
@@ -1396,18 +1388,6 @@ fn stage_and_commit(
         root.rename_nofollow(tmp, final_name)?;
     }
     clear_txn_marker(root)?;
-    let _ = root.fsync_dir();
-    Ok(())
-}
-
-/// Clear companion when model changes without new provenance.
-pub fn clear_route_companion(session_dir: &Path) -> io::Result<()> {
-    let root = SessionRoot::open(session_dir)?;
-    let _lock = root.lock_exclusive()?;
-    recover_identity_txn(&root)?;
-    for name in [MODEL_ROUTE_FILE, MODEL_IDENTITY_META, MODEL_IDENTITY_TXN] {
-        root.unlink_nofollow(name)?;
-    }
     let _ = root.fsync_dir();
     Ok(())
 }
@@ -2469,21 +2449,19 @@ fn finish_private_artifact(root: &SessionRoot, artifact: &PrivateTxnArtifact) ->
     let final_digest = final_bytes.as_deref().map(sha256_hex);
 
     if final_digest.as_deref() == Some(&artifact.intended_sha256) {
-        if let Some(staged_name) = &artifact.staged_name {
-            if root.exists_nofollow(staged_name)? {
-                let staged = root.read_regular_bounded(
-                    staged_name,
-                    private_artifact_bound(&artifact.final_name),
-                )?;
-                if sha256_hex(&staged) != artifact.intended_sha256 {
-                    return Err(io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        "private identity staged digest mismatch",
-                    ));
-                }
-                root.unlink_nofollow(staged_name)?;
-                root.fsync_dir()?;
+        if let Some(staged_name) = &artifact.staged_name
+            && root.exists_nofollow(staged_name)?
+        {
+            let staged = root
+                .read_regular_bounded(staged_name, private_artifact_bound(&artifact.final_name))?;
+            if sha256_hex(&staged) != artifact.intended_sha256 {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "private identity staged digest mismatch",
+                ));
             }
+            root.unlink_nofollow(staged_name)?;
+            root.fsync_dir()?;
         }
         return Ok(());
     }
@@ -2714,6 +2692,7 @@ fn commit_private_artifacts_locked(
 
 /// Commit the first complete primary + companion + private metadata set and
 /// mint its owner generation. Existing artifacts require explicit replacement.
+#[cfg(test)]
 pub(crate) fn commit_private_identity_pair(
     target_dir: &Path,
     primary: &[u8],
@@ -2746,6 +2725,7 @@ pub(crate) fn commit_private_identity_pair_for_subagent(
 
 /// Update either public final under the existing owner generation. The expected
 /// generation is checked under the transaction lock before any files are staged.
+#[cfg(test)]
 pub(crate) fn update_private_identity_pair(
     target_dir: &Path,
     expected_owner_generation: &str,
@@ -2833,6 +2813,7 @@ fn update_private_identity_pair_rooted(
 
 /// Explicitly replace a missing, legacy-primary, or valid set and rotate its
 /// owner generation. Partial or tampered assigned artifacts are never replaced.
+#[cfg(test)]
 pub(crate) fn replace_private_identity_pair(
     target_dir: &Path,
     primary: &[u8],
@@ -2909,6 +2890,7 @@ fn replace_private_identity_pair_rooted(
 }
 
 /// Recover under the private lock and return only the three permitted states.
+#[cfg(test)]
 pub(crate) fn load_private_identity_pair(
     target_dir: &Path,
     max_primary_bytes: usize,

@@ -19,7 +19,9 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use futures::StreamExt;
-use gcloud_storage::client::{Client, ClientConfig};
+use gcloud_storage::client::Client;
+#[cfg(test)]
+use gcloud_storage::client::ClientConfig;
 use gcloud_storage::http::objects::delete::DeleteObjectRequest;
 use gcloud_storage::http::objects::download::Range;
 use gcloud_storage::http::objects::get::GetObjectRequest;
@@ -895,6 +897,7 @@ fn describe(failure: &GcsFailure) -> String {
 }
 
 /// Build a client pointed at an arbitrary endpoint (used by the mock tests).
+#[cfg(test)]
 pub(crate) fn client_for_endpoint(endpoint: &str) -> Client {
     Client::new(
         ClientConfig {
@@ -913,7 +916,7 @@ mod tests {
         extract::Path as AxumPath,
         http::StatusCode,
         response::IntoResponse,
-        routing::{delete, get, post},
+        routing::{get, post},
     };
     use std::collections::HashMap;
     use std::sync::Arc;

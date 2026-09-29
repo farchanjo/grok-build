@@ -38,9 +38,7 @@ impl SessionActor {
         // Read the current TodoState (no mutation).
         let (entries, stale_count) = {
             let res = self
-                .agent
-                .borrow()
-                .tool_bridge()
+                .tool_bridge_owned()
                 .read_resource::<State<TodoState>>()
                 .await;
             let Some(state) = res else {
@@ -197,9 +195,7 @@ impl SessionActor {
         if became_idle {
             self.flush_pending_skill_reminders().await;
             // Idle-gated: a stale completion must not clobber the promoted turn's resources.
-            self.agent
-                .borrow()
-                .tool_bridge()
+            self.tool_bridge_owned()
                 .update_resource(
                     xai_grok_tools::implementations::grok_build::task::types::CurrentPromptIdResource(
                         String::new(),

@@ -1,6 +1,7 @@
 use super::support::*;
 use super::*;
 use crate::auth::{AuthManager, AuthMode, GrokAuth, GrokComConfig};
+use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::mpsc;
@@ -71,7 +72,7 @@ fn auth_error() -> xai_grok_inference::InferenceErrorInfo {
 /// ready for `handle_sampling_failure`.
 async fn make_actor_with_auth_manager(
     auth_manager: Option<Arc<AuthManager>>,
-) -> (Arc<SessionActor>, mpsc::UnboundedReceiver<PersistenceMsg>) {
+) -> (Rc<SessionActor>, mpsc::UnboundedReceiver<PersistenceMsg>) {
     make_actor_with_auth_and_credentials(
         auth_manager,
         xai_chat_state::AuthType::SessionToken,
@@ -87,7 +88,7 @@ async fn make_actor_with_auth_and_credentials(
     auth_manager: Option<Arc<AuthManager>>,
     auth_type: xai_chat_state::AuthType,
     api_key: String,
-) -> (Arc<SessionActor>, mpsc::UnboundedReceiver<PersistenceMsg>) {
+) -> (Rc<SessionActor>, mpsc::UnboundedReceiver<PersistenceMsg>) {
     let method_id = match auth_type {
         xai_chat_state::AuthType::SessionToken => "cached_token",
         xai_chat_state::AuthType::ApiKey => "xai.api_key",
@@ -104,7 +105,7 @@ async fn make_actor_with_method_and_credentials(
     auth_method_id: &str,
     auth_type: xai_chat_state::AuthType,
     api_key: String,
-) -> (Arc<SessionActor>, mpsc::UnboundedReceiver<PersistenceMsg>) {
+) -> (Rc<SessionActor>, mpsc::UnboundedReceiver<PersistenceMsg>) {
     let (gateway_tx, _) = mpsc::unbounded_channel();
     let (persistence_tx, persistence_rx) = mpsc::unbounded_channel();
     let mut actor = create_test_actor(50_000, 100_000, 85, gateway_tx, persistence_tx).await;
@@ -117,7 +118,7 @@ async fn make_actor_with_method_and_credentials(
             auth_type,
             ..Default::default()
         });
-    (Arc::new(actor), persistence_rx)
+    (Rc::new(actor), persistence_rx)
 }
 
 /// `(tempdir, manager)` holding a valid OIDC token (so `get_valid_token()` is a
@@ -1216,7 +1217,7 @@ use crate::auth::test_counting_provider as counting_provider;
 
 /// Seed the per-model memo so `model_auth_provider` resolves without a
 /// config load.
-async fn seed_provider_memo(actor: &Arc<SessionActor>, provider: crate::auth::AuthProviderRef) {
+async fn seed_provider_memo(actor: &Rc<SessionActor>, provider: crate::auth::AuthProviderRef) {
     let model = actor
         .chat_state_handle
         .get_inference_settings()
@@ -1646,11 +1647,11 @@ async fn moonshot_openrouter_401_retains_openrouter_provider_context() {
             err.message = "Unauthorized (401) from https://openrouter.ai/api/v1/chat/completions: \
                  User not found."
                 .to_string();
-            err.diagnostics = Some(ApiErrorDiagnostics {
+            err.diagnostics = Some(Box::new(ApiErrorDiagnostics {
                 provider_name: Some("OpenRouter".to_string()),
                 generation_id: Some("gen-test-moonshot-401".to_string()),
                 ..Default::default()
-            });
+            }));
 
             let result = actor.handle_sampling_failure(err).await;
             assert!(
@@ -2073,10 +2074,10 @@ async fn terminal_failure_diagnostics_redact_secrets_and_prompts() {
                 "Unauthorized (401) Authorization: Bearer sk-CANARY-OPENROUTER-SECRET-KEY \
                  prompt=Please rewrite my confidential memo RESPONSE_BODY_CANARY"
                     .to_string();
-            err.diagnostics = Some(ApiErrorDiagnostics {
+            err.diagnostics = Some(Box::new(ApiErrorDiagnostics {
                 generation_id: Some("gen-safe-id".into()),
                 ..Default::default()
-            });
+            }));
 
             // Exercise the path; redaction is verified by inspecting the
             // provider context construction (allowlisted fields only).
@@ -2085,7 +2086,7 @@ async fn terminal_failure_diagnostics_redact_secrets_and_prompts() {
                     model_slug,
                     Some(401),
                     "provider_credential",
-                    err.diagnostics.as_ref(),
+                    err.diagnostics.as_deref(),
                 )
                 .await
                 .expect("openrouter context");
@@ -3110,7 +3111,7 @@ async fn reconstruct_full_config_keeps_the_session_id() {
                 am,
                 crate::agent::config::Config::default(),
             );
-            let actor = Arc::new(actor);
+            let actor = Rc::new(actor);
 
             let reconstructed = actor
                 .reconstruct_full_config()

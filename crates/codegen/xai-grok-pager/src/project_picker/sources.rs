@@ -34,7 +34,7 @@ pub async fn collect_recent_dirs(limit: usize) -> Vec<(PathBuf, DateTime<Utc>)> 
             }
         })
         .collect();
-    projects.sort_by(|a, b| b.1.cmp(&a.1));
+    projects.sort_by_key(|p| std::cmp::Reverse(p.1));
     projects.truncate(limit);
     projects
 }

@@ -30,10 +30,7 @@ use sha2::{Digest, Sha256};
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use xai_grok_config_types::{
-    EmbeddingModelConfig, PrimeConfig, RerankerModelConfig, RetrievalGraphConfig,
-    RetrievalProfileConfig, normalize_retrieval_id,
-};
+use xai_grok_config_types::{PrimeConfig, RetrievalGraphConfig, normalize_retrieval_id};
 
 const GENERATION_REL: &str = "state/retrieval_graph_generation";
 const LOCK_REL: &str = "state/retrieval_graph.lock";
@@ -264,7 +261,7 @@ impl RetrievalManagementService {
             req.operation_id,
             req.confirm_memory_reindex,
             |graph| {
-                let id = normalize_retrieval_id(&req.id).map_err(|e| e)?;
+                let id = normalize_retrieval_id(&req.id)?;
                 graph.embedding_models.insert(id.clone(), req.config);
                 Ok(vec![format!("embedding_models.{id}")])
             },
@@ -277,7 +274,7 @@ impl RetrievalManagementService {
             req.operation_id,
             req.confirm_memory_reindex,
             |graph| {
-                let id = normalize_retrieval_id(&req.id).map_err(|e| e)?;
+                let id = normalize_retrieval_id(&req.id)?;
                 graph.reranker_models.insert(id.clone(), req.config);
                 Ok(vec![format!("reranker_models.{id}")])
             },
@@ -290,7 +287,7 @@ impl RetrievalManagementService {
             req.operation_id,
             req.confirm_memory_reindex,
             |graph| {
-                let id = normalize_retrieval_id(&req.id).map_err(|e| e)?;
+                let id = normalize_retrieval_id(&req.id)?;
                 graph.retrieval_profiles.insert(id.clone(), req.config);
                 Ok(vec![format!("retrieval_profiles.{id}")])
             },
@@ -732,10 +729,7 @@ impl RetrievalManagementService {
             }
             // Built-ins that exist are always "exists".
             let exists = true;
-            let api_surface = meta.and_then(|m| {
-                // Descriptor path: use kind string as surface hint.
-                Some(desc.kind.as_str().to_owned())
-            });
+            let api_surface = meta.map(|_m| desc.kind.as_str().to_owned());
             let _ = BuiltInProviderId::parse(&id);
             views.push(ProviderCapabilityView {
                 id,
@@ -760,6 +754,7 @@ impl RetrievalManagementService {
             .create(true)
             .read(true)
             .write(true)
+            .truncate(false)
             .open(&path)
             .map_err(|e| format!("open retrieval lock: {e}"))?;
         file.lock_exclusive()
@@ -1082,6 +1077,7 @@ fn stale_result(
 }
 
 // Make WarningTarget::label accessible — it's pub(crate) on the parse module.
+#[allow(dead_code)]
 trait WarningLabel {
     fn label(&self) -> String;
 }

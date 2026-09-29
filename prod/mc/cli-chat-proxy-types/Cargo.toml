@@ -5,6 +5,11 @@ version = "0.1.0"
 edition.workspace = true
 description = "Lightweight request/response types for cli-chat-proxy API"
 
+repository.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
 [features]
 default-bazel = []
 

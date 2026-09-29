@@ -38,7 +38,6 @@ pub fn extra_root_certificate_der() -> &'static [Vec<u8>] {
 /// Every candidate is parsed with `Certificate::from_der` and tested in an
 /// isolated one-root client build before it reaches the caller's builder. A
 /// malformed root is skipped without preventing other roots from being added.
-#[must_use]
 pub fn with_extra_root_certificates(builder: reqwest::ClientBuilder) -> reqwest::ClientBuilder {
     #[cfg(test)]
     ASYNC_ADAPTER_INVOCATIONS.with(|count| count.set(count.get() + 1));
@@ -53,7 +52,6 @@ pub fn with_extra_root_certificates(builder: reqwest::ClientBuilder) -> reqwest:
 ///
 /// Validation is separate from the async adapter so a failure in one adapter
 /// cannot poison the other or the caller's complete client configuration.
-#[must_use]
 pub fn with_extra_root_certificates_blocking(
     builder: reqwest::blocking::ClientBuilder,
 ) -> reqwest::blocking::ClientBuilder {
@@ -395,7 +393,7 @@ lubl+ZOAxg+2uOhbMMzW2ubUN8RtbEEQRwtL31bDFw==
     fn capped_reader_accepts_exact_limit_and_rejects_one_byte_over() {
         let dir = std::env::temp_dir().join(format!("grok-extra-ca-test-{}", uuid::Uuid::now_v7()));
         std::fs::create_dir(&dir).unwrap();
-        let result = (|| {
+        {
             let at_limit = dir.join("at-limit.pem");
             std::fs::write(&at_limit, vec![b'A'; MAX_EXTRA_CA_BUNDLE_BYTES as usize]).unwrap();
             assert_eq!(
@@ -413,16 +411,15 @@ lubl+ZOAxg+2uOhbMMzW2ubUN8RtbEEQRwtL31bDFw==
                 read_bundle_capped(&oversized),
                 Err(BundleReadError::TooLarge)
             ));
-        })();
+        };
         let _ = std::fs::remove_dir_all(dir);
-        result
     }
 
     #[test]
     fn capped_reader_rejects_non_regular_input() {
         let dir = std::env::temp_dir().join(format!("grok-extra-ca-file-{}", uuid::Uuid::now_v7()));
         std::fs::create_dir(&dir).unwrap();
-        let result = (|| {
+        {
             assert!(matches!(
                 read_bundle_capped(&dir),
                 Err(BundleReadError::NotRegular)
@@ -439,9 +436,8 @@ lubl+ZOAxg+2uOhbMMzW2ubUN8RtbEEQRwtL31bDFw==
                     Err(BundleReadError::NotRegular)
                 ));
             }
-        })();
+        };
         let _ = std::fs::remove_dir_all(dir);
-        result
     }
 
     #[cfg(unix)]

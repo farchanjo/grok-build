@@ -41,6 +41,7 @@ pub const CURRENT_QUERY_CAP: usize = 12_000;
 /// Maximum number of images that will be captioned per turn. Only the
 /// **last** N images are described; older ones receive
 /// [`SKIPPED_IMAGE_MARKER`]. Default 16.
+#[allow(dead_code)]
 pub const IMAGE_DESCRIPTION_PROCESSING_LIMIT: usize = 16;
 /// Placeholder stamped on images that fall outside
 /// [`IMAGE_DESCRIPTION_PROCESSING_LIMIT`].

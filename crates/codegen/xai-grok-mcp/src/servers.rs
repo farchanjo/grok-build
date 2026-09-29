@@ -7548,7 +7548,7 @@ mod tests {
             merged.join("\n"),
             format!(
                 "Hand-drawn sketch.\n{MCP_STRUCTURED_CONTENT_MARKER}\n{}",
-                structured.to_string()
+                structured
             )
         );
     }
@@ -7563,10 +7563,7 @@ mod tests {
         let merged = merge_structured_content(vec!["boom".to_string()], Some(&structured));
         assert_eq!(
             merged.join("\n"),
-            format!(
-                "boom\n{MCP_STRUCTURED_CONTENT_MARKER}\n{}",
-                structured.to_string()
-            )
+            format!("boom\n{MCP_STRUCTURED_CONTENT_MARKER}\n{}", structured)
         );
     }
 

@@ -2187,14 +2187,12 @@ fn collect_citation_links(
                     });
                 }
             }
-            RenderBlock::ToolCall(ToolCallBlock::WebFetch(wf)) => {
-                if !wf.url.is_empty() {
-                    links.push(VisibleLink {
-                        rects: vec![block_geom.content_area],
-                        target: crate::render::osc8::LinkTarget::Url(Arc::from(wf.url.as_str())),
-                        id: None,
-                    });
-                }
+            RenderBlock::ToolCall(ToolCallBlock::WebFetch(wf)) if !wf.url.is_empty() => {
+                links.push(VisibleLink {
+                    rects: vec![block_geom.content_area],
+                    target: crate::render::osc8::LinkTarget::Url(Arc::from(wf.url.as_str())),
+                    id: None,
+                });
             }
             _ => {}
         }
@@ -3368,7 +3366,7 @@ pub(crate) mod test_fixtures {
 /// the lazy Mermaid glue (which needs a session dir) can be exercised from the
 /// `mermaid_worker` test module without duplicating the large `AgentSession`
 /// literal.
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(any(test, feature = "test"))]
 pub(crate) fn test_agent_view(session_id: Option<&str>, cwd: std::path::PathBuf) -> AgentView {
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
     AgentView::new(

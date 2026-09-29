@@ -602,15 +602,15 @@ mod tests {
                     let questions = body["questions"].as_object().cloned().unwrap_or_default();
                     let mut out = serde_json::Map::new();
                     for key in questions.keys() {
-                        // t1 keeps both, t2 drops both, t3 keeps only the call.
+                        // Question names carry the pair's short id (`t1`, `t2`,
+                        // `t3`): the first pair keeps both, the second drops
+                        // both, the third keeps only the call.
                         let noul = if key.ends_with("t2") {
                             0.1
-                        } else if key.starts_with("call_") {
-                            0.9
-                        } else if key.ends_with("t1") {
-                            0.9
+                        } else if key.ends_with("t3") {
+                            if key.starts_with("call_") { 0.9 } else { 0.1 }
                         } else {
-                            0.1
+                            0.9
                         };
                         out.insert(key.clone(), json!({ "noul": noul }));
                     }

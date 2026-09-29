@@ -884,7 +884,7 @@ mod tests {
         );
         assert_eq!(meta.env_key.as_deref(), Some("RICH_API_KEY"));
         assert_eq!(meta.admin_env_key.as_deref(), Some("RICH_ADMIN_KEY"));
-        assert_eq!(meta.catalog_enabled, true);
+        assert!(meta.catalog_enabled);
         assert_eq!(meta.capability_mode, CapabilityMode::Manual);
         assert_eq!(meta.catalog_ttl_secs, Some(120));
         assert_eq!(meta.request_timeout_secs, Some(45));
@@ -1139,7 +1139,7 @@ mod tests {
         // An existing `grok_build_openai` preset table with an inline auth
         // helper and no reserved source: the synthesized auth-provider ref
         // must use the actual table key, not the canonical `openai` id.
-        let mut m = entries(
+        let m = entries(
             r#"[model_providers.grok_build_openai]
             kind = "openai"
             base_url = "https://api.openai.com/v1"

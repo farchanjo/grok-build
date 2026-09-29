@@ -1,6 +1,5 @@
 //! Deterministic Z.ai wire fixtures (no network).
 
-use super::{ZaiChatExtensions, ZaiThinking, apply_zai_extensions, extract_reasoning_content};
 use serde_json::{Value, json};
 
 /// Non-streaming text response fixture.
@@ -62,6 +61,10 @@ pub fn parallel_tool_fragments() -> Vec<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agent::zai::ZaiChatExtensions;
+    use crate::agent::zai::ZaiThinking;
+    use crate::agent::zai::apply_zai_extensions;
+    use crate::agent::zai::extract_reasoning_content;
 
     #[test]
     fn tool_stream_args_reconstruct() {

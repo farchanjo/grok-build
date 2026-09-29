@@ -149,6 +149,11 @@ fn hop(path: &str, status: u16, body: &str) -> RecordedHop {
 
 // ── 1. Four accounts (Gate D: visible + selectable + auth isolation) ───────
 
+// The gate lock is a `std::sync::Mutex` guard deliberately held across the
+// awaits below: the whole refresh/publish sequence reads the env, so the
+// process-wide serialization with gate.rs must span it (a tokio mutex would
+// force every sync caller to await).
+#[allow(clippy::await_holding_lock)]
 #[tokio::test]
 async fn four_accounts_distinct_canonical_ids_gate_open_selectable() {
     // Shared process lock with gate.rs tests — hold across env set/restore
@@ -1045,7 +1050,7 @@ async fn mid_flight_cancel_leaves_prior_snapshot() {
     let cancel_c = cancel.clone();
     let id2 = identity("openai", ProviderKind::OpenAi, &base2, 1, true);
     store_simple_catalog(home.path(), &id2, &["kept"]);
-    coord.load_lkg_from_caches(&[id2.clone()]);
+    coord.load_lkg_from_caches(std::slice::from_ref(&id2));
     let short_bounds = CatalogFetchBounds::default()
         .with_request_timeout(Duration::from_millis(200))
         .with_max_duration(Duration::from_millis(300));

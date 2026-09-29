@@ -410,6 +410,7 @@ fn acquire_lifecycle_flock(home: &Path) -> Result<std::fs::File, LifecycleStateE
         .create(true)
         .read(true)
         .write(true)
+        .truncate(false)
         .open(&lock_path)
         .map_err(|e| LifecycleStateError::Io(format!("lifecycle lock: {e}")))?;
     lock_file
@@ -466,10 +467,10 @@ pub fn provenance_matches_lifecycle(
             if live.as_str() != inc {
                 return false;
             }
-            if let Ok(parsed) = ProviderIncarnation::new(inc) {
-                if state.is_tombstoned(provider_id, &parsed) {
-                    return false;
-                }
+            if let Ok(parsed) = ProviderIncarnation::new(inc)
+                && state.is_tombstoned(provider_id, &parsed)
+            {
+                return false;
             }
             true
         }

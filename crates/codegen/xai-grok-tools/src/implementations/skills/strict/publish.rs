@@ -346,13 +346,13 @@ fn remove_verified_staging_holder(dest_parent: &Path, staging_holder: &Path) {
         Ok(_) => {}
         Err(_) => return,
     }
-    let Ok(parent_real) = fs::canonicalize(dest_parent) else {
+    let Ok(parent_real) = dunce::canonicalize(dest_parent) else {
         return;
     };
-    let Ok(root_real) = fs::canonicalize(&staging_root) else {
+    let Ok(root_real) = dunce::canonicalize(&staging_root) else {
         return;
     };
-    let Ok(holder_real) = fs::canonicalize(staging_holder) else {
+    let Ok(holder_real) = dunce::canonicalize(staging_holder) else {
         return;
     };
     if !root_real.starts_with(&parent_real) || !holder_real.starts_with(&root_real) {
@@ -365,8 +365,8 @@ fn verify_collection_stays_under_parent(dest_parent: &Path) -> Result<(), Publis
     let Some(parent) = dest_parent.parent() else {
         return Err(PublishError::PathEscape);
     };
-    let dest_real = fs::canonicalize(dest_parent).map_err(|_| PublishError::Staging)?;
-    let parent_real = fs::canonicalize(parent).map_err(|_| PublishError::PathEscape)?;
+    let dest_real = dunce::canonicalize(dest_parent).map_err(|_| PublishError::Staging)?;
+    let parent_real = dunce::canonicalize(parent).map_err(|_| PublishError::PathEscape)?;
     if !dest_real.starts_with(&parent_real) {
         return Err(PublishError::PathEscape);
     }

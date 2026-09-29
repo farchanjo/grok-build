@@ -574,17 +574,10 @@ impl SubagentsConfig {
 /// See [`Self::resolve`] for full priority chain.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(default)]
+#[derive(Default)]
 pub struct ManagedMcpsConfig {
     pub enabled: bool,
     pub gateway_tools_enabled: bool,
-}
-impl Default for ManagedMcpsConfig {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            gateway_tools_enabled: false,
-        }
-    }
 }
 impl ManagedMcpsConfig {
     /// Priority: env var > TOML > remote > default (disabled; opt in via env,

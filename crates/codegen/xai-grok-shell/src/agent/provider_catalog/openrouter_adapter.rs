@@ -35,14 +35,17 @@ struct OpenRouterPage {
     #[serde(default)]
     data: Vec<OpenRouterModelRow>,
     #[serde(default)]
+    #[allow(dead_code)]
     links: Option<OpenRouterLinks>,
     #[serde(default)]
+    #[allow(dead_code)]
     total_count: Option<i64>,
 }
 
 #[derive(Debug, Deserialize)]
 struct OpenRouterLinks {
     #[serde(default)]
+    #[allow(dead_code)]
     next: Option<String>,
 }
 
@@ -604,10 +607,8 @@ fn parse_openrouter_page(bytes: &[u8]) -> Result<OpenRouterPage, CatalogAdapterE
         .iter()
         .filter_map(|v| serde_json::from_value(v.clone()).ok())
         .collect();
-    let links = value.get("links").and_then(|l| {
-        Some(OpenRouterLinks {
-            next: l.get("next").and_then(|n| n.as_str()).map(str::to_owned),
-        })
+    let links = value.get("links").map(|l| OpenRouterLinks {
+        next: l.get("next").and_then(|n| n.as_str()).map(str::to_owned),
     });
     Ok(OpenRouterPage {
         data: rows,

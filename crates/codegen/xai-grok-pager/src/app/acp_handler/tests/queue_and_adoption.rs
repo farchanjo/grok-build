@@ -1135,7 +1135,7 @@
     /// subagent-completion / notification-drain / goal turns) emit no
     /// `prompt_complete`, so a re-attach must NOT adopt them (adoption would
     /// strand the viewer in `TurnRunning`). Scheduler-fired (`/loop`) turns are
-    //// synthetic but client-driven with a real `prompt_complete`, and plain user
+/// synthetic but client-driven with a real `prompt_complete`, and plain user
     /// turns are always adoptable.
     #[test]
     fn should_adopt_running_prompt_skips_synthetic_non_scheduler() {

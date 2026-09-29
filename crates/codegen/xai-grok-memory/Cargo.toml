@@ -2,12 +2,18 @@
 license = "Apache-2.0"
 name = "xai-grok-memory"
 version = "0.1.0"
+description = "Cross-session memory: markdown storage, indexing, and retrieval backends."
 edition.workspace = true
+
+repository.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
 
 [features]
 # Exposes `#[cfg(test)]`-only helpers (`MemoryStorage::with_paths`,
 # `MockEmbeddingProvider`) to downstream crates' test targets.
-test-support = []
+test = []
 # Milvus vector-mirror backend (`mirror_milvus.rs`). Default-on so fcustom
 # builds include it; slim builds can opt out with `--no-default-features`.
 default = ["milvus"]

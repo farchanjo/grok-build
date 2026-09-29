@@ -1,6 +1,7 @@
 //! Turn-execution concern for `SessionActor` (`handle_prompt`, turn-end,
 //! sampling loop).
 use super::*;
+use std::rc::Rc;
 
 impl SessionActor {
     /// Single effective capability mode key for external runtimes.
@@ -34,11 +35,6 @@ impl SessionActor {
         }
     }
 
-    /// Back-compat alias used by older tests.
-    pub(crate) fn external_host_mode_label(&self) -> String {
-        self.external_effective_mode_key()
-    }
-
     /// Obtain or create the session-scoped external runtime (PermissionHandle +
     /// effective capability mode). Reuses one Arc across turns when kind and
     /// effective mode are unchanged.
@@ -56,10 +52,11 @@ impl SessionActor {
         let effective_mode = self.external_effective_mode_key();
         {
             let guard = self.external_agent_runtime.borrow();
-            if let Some(retained) = guard.as_ref() {
-                if retained.kind == kind && retained.effective_mode == effective_mode {
-                    return Ok(retained.runtime.clone());
-                }
+            if let Some(retained) = guard.as_ref()
+                && retained.kind == kind
+                && retained.effective_mode == effective_mode
+            {
+                return Ok(retained.runtime.clone());
             }
         }
         // Kind or effective capability mode changed: shut down prior instance.
@@ -132,7 +129,7 @@ impl SessionActor {
     /// Reuses the session-scoped runtime Arc. Successful assistant text is
     /// persisted as a text-only ConversationItem (Claude tools are display-only).
     pub(crate) async fn run_external_agent_turn(
-        self: &std::sync::Arc<Self>,
+        self: &Rc<Self>,
         prompt_id: &str,
         prompt_text: &str,
     ) -> crate::session::commands::PromptTurnResult {
@@ -274,23 +271,23 @@ impl SessionActor {
                 }
 
                 // Best-effort envelope on any failure that carries a partial pointer.
-                if let Some(partial) = e.partial_envelope.clone() {
-                    if let Ok(validated) = partial.clone().validated() {
-                        *self.external_runtime.borrow_mut() = Some(validated.clone());
-                        // Canonical selection — not the upstream wire slug.
-                        let model_id = self.selection_model_id.borrow().clone();
-                        let agent_name = self.agent.borrow().definition().name.clone();
-                        let _ = self.notifications.persistence_tx.send(
-                            crate::session::persistence::PersistenceMsg::CurrentModel {
-                                model_id,
-                                agent_name: Some(agent_name),
-                                reasoning_effort: None,
-                                execution_backend: Some(backend),
-                                external_runtime: Some(Some(validated)),
-                                route_provenance: None,
-                            },
-                        );
-                    }
+                if let Some(partial) = e.partial_envelope.clone()
+                    && let Ok(validated) = partial.clone().validated()
+                {
+                    *self.external_runtime.borrow_mut() = Some(validated.clone());
+                    // Canonical selection — not the upstream wire slug.
+                    let model_id = self.selection_model_id.borrow().clone();
+                    let agent_name = self.agent.borrow().definition().name.clone();
+                    let _ = self.notifications.persistence_tx.send(
+                        crate::session::persistence::PersistenceMsg::CurrentModel {
+                            model_id,
+                            agent_name: Some(agent_name),
+                            reasoning_effort: None,
+                            execution_backend: Some(backend),
+                            external_runtime: Some(Some(validated)),
+                            route_provenance: None,
+                        },
+                    );
                 }
 
                 if e.kind == crate::agent::external_runtime::ExternalRuntimeErrorKind::Cancelled {
@@ -457,10 +454,10 @@ impl SessionActor {
         use crate::agent::external_runtime::ExternalRuntimeTurnEvent;
         let mut out = String::new();
         for event in events {
-            if let ExternalRuntimeTurnEvent::TextDelta { text } = event {
-                if !text.is_empty() {
-                    out.push_str(text);
-                }
+            if let ExternalRuntimeTurnEvent::TextDelta { text } = event
+                && !text.is_empty()
+            {
+                out.push_str(text);
             }
         }
         out
@@ -841,7 +838,7 @@ impl SessionActor {
     /// entity re-decode / re-encode). Prompt and prime bodies never reach
     /// debug/telemetry.
     pub(crate) async fn maybe_inject_prime_reminder(
-        self: &Arc<Self>,
+        self: &Rc<Self>,
         origin: &crate::session::PromptOrigin,
         user_query: &str,
         turn_cancel: &tokio_util::sync::CancellationToken,
@@ -878,7 +875,7 @@ impl SessionActor {
         if !skills_enabled && !agents_enabled {
             return Ok(PrimeInjectResult {
                 reminder: None,
-                accounting: PrimeAccounting::Record(LastPrimeOutcome {
+                accounting: PrimeAccounting::Record(Box::new(LastPrimeOutcome {
                     retrieval_snapshot_generation: Some(snapshot.generation),
                     graph_generation: Some(snapshot.graph_generation),
                     provider_generation: Some(snapshot.provider_generation),
@@ -886,7 +883,7 @@ impl SessionActor {
                     selection_mode: Some("disabled".into()),
                     readiness: Some("ready".into()),
                     ..LastPrimeOutcome::default()
-                }),
+                })),
             });
         }
 
@@ -929,8 +926,7 @@ impl SessionActor {
                 xai_grok_workspace::session::git::GitDiscoveryResult::Found(root) => Some(root),
                 _ => None,
             };
-            let mut trusted_roots =
-                Self::prime_trusted_roots(&cwd, git_root.as_deref(), &grok_home);
+            let trusted_roots = Self::prime_trusted_roots(&cwd, git_root.as_deref(), &grok_home);
 
             let semantic_profile = skills_cfg.retrieval_profile.clone();
             let explicit_skill = self.active_skill.lock().clone();
@@ -1141,7 +1137,7 @@ impl SessionActor {
 
         Ok(PrimeInjectResult {
             reminder: prime_skill_reminder,
-            accounting: PrimeAccounting::Record(LastPrimeOutcome {
+            accounting: PrimeAccounting::Record(Box::new(LastPrimeOutcome {
                 retrieval_profile: profile_used,
                 retrieval_snapshot_generation: Some(snapshot.generation),
                 graph_generation: Some(snapshot.graph_generation),
@@ -1156,7 +1152,7 @@ impl SessionActor {
                 status,
                 selection_mode,
                 readiness,
-            }),
+            })),
         })
     }
     #[tracing::instrument(
@@ -1171,7 +1167,7 @@ impl SessionActor {
         )
     )]
     pub(super) async fn handle_prompt(
-        self: &Arc<Self>,
+        self: &Rc<Self>,
         prompt_id: &str,
         origin: super::super::PromptOrigin,
         prompt_blocks: Vec<acp::ContentBlock>,
@@ -1260,13 +1256,7 @@ impl SessionActor {
                 .handle_direct_bash_command(prompt_id, bash_command, &prompt_blocks)
                 .await;
         }
-        let slash_skills = self
-            .agent
-            .borrow()
-            .tool_bridge()
-            .clone()
-            .slash_skills()
-            .await;
+        let slash_skills = self.tool_bridge_owned().slash_skills().await;
         let skill_rewrite = if crate::session::is_cursor_user_template(
             &self.agent.borrow().definition().user_message_template,
         ) {
@@ -1916,7 +1906,7 @@ impl SessionActor {
                 self.chat_state_handle.push_message_batch(items);
             }
             if let Some(outcome) = finalized_prime_outcome {
-                *self.last_prime_outcome.borrow_mut() = Some(outcome);
+                *self.last_prime_outcome.borrow_mut() = Some(*outcome);
             }
         }
         self.dispatch_hook(
@@ -2423,9 +2413,7 @@ impl SessionActor {
                     incomplete,
                 )
             }
-            Err(()) => {
-                crate::extensions::notification::PromptUsage::project_from_ledger(None, true)
-            }
+            Err(_) => crate::extensions::notification::PromptUsage::project_from_ledger(None, true),
         }
     }
     /// When freeze did not attach: incomplete if billed or may under-count; else omit.
@@ -2441,7 +2429,7 @@ impl SessionActor {
                 ledger.as_ref(),
                 may_undercount,
             ),
-            Err(()) => crate::extensions::notification::PromptUsage::for_error_path(None, true),
+            Err(_) => crate::extensions::notification::PromptUsage::for_error_path(None, true),
         }
     }
     /// Sticky incomplete for `prompt_id`, or the live pin when `None`.
@@ -2586,7 +2574,7 @@ impl SessionActor {
         fields(req_id = %req_id, session_id = %self.session_info.id.0)
     )]
     pub(super) async fn process_conversation_turn_with_recovery(
-        self: &Arc<Self>,
+        self: &Rc<Self>,
         req_id: &str,
         trace_gcs_config: Option<crate::session::repo_changes::TraceExportConfig>,
         artifact_tracker: Option<crate::upload::manifest::ArtifactTracker>,
@@ -2598,32 +2586,26 @@ impl SessionActor {
             std::sync::atomic::Ordering::Relaxed,
             std::sync::atomic::Ordering::Relaxed,
         );
-        let agent_ref = self.agent.borrow();
-        let completion_req = match agent_ref.completion_requirement() {
-            Some(req) => req,
-            None => {
-                return self
-                    .process_conversation_turn(
-                        req_id,
-                        trace_gcs_config,
-                        artifact_tracker.as_ref(),
-                        json_schema,
-                    )
-                    .await;
-            }
+        // Cloned out of the `agent` borrow so the early returns below can await.
+        let Some(completion_req) = self.agent.borrow().completion_requirement().cloned() else {
+            return self
+                .process_conversation_turn(
+                    req_id,
+                    trace_gcs_config,
+                    artifact_tracker.as_ref(),
+                    json_schema,
+                )
+                .await;
         };
-        let recovery = match &completion_req.recovery {
-            Some(r) => r.clone(),
-            None => {
-                return self
-                    .process_conversation_turn(
-                        req_id,
-                        trace_gcs_config,
-                        artifact_tracker.as_ref(),
-                        json_schema,
-                    )
-                    .await;
-            }
+        let Some(recovery) = completion_req.recovery.clone() else {
+            return self
+                .process_conversation_turn(
+                    req_id,
+                    trace_gcs_config,
+                    artifact_tracker.as_ref(),
+                    json_schema,
+                )
+                .await;
         };
         let required_tool = completion_req.tool.clone();
         let recovery_prompt = completion_req.reminder.clone();
@@ -2934,7 +2916,7 @@ impl SessionActor {
         )
     )]
     async fn process_conversation_turn(
-        self: &Arc<Self>,
+        self: &Rc<Self>,
         req_id: &str,
         trace_gcs_config: Option<crate::session::repo_changes::TraceExportConfig>,
         artifact_tracker: Option<&crate::upload::manifest::ArtifactTracker>,
@@ -3156,7 +3138,7 @@ write the answer as ordinary text.",
                 && self.should_prefire_two_pass().await
                 && self.compaction.prefire.try_begin()
             {
-                let actor = std::sync::Arc::clone(self);
+                let actor = std::rc::Rc::clone(self);
                 let handle = tokio::task::spawn_local(async move {
                     actor.run_prefire_pass1().await;
                 });
@@ -3494,9 +3476,7 @@ write the answer as ordinary text.",
             if let Some(pt) = prompt_timing.take() {
                 let mcp_count = self.mcp_state.lock().await.configs.len() as u32;
                 let mcp_tools = self
-                    .agent
-                    .borrow()
-                    .tool_bridge()
+                    .tool_bridge_owned()
                     .tool_definitions()
                     .await
                     .iter()
@@ -3810,23 +3790,17 @@ write the answer as ordinary text.",
                 {
                     StructuredOutputStep::Complete(validated) => {
                         turn_tools_called.push(STRUCTURED_OUTPUT_TOOL.to_string());
-                        if language_envelope_active {
-                            match &validated {
-                                Ok(value) => {
-                                    if let Some(decoded) = extract_language_response(value) {
-                                        self.send_update(
-                                            acp::SessionUpdate::AgentMessageChunk(
-                                                acp::ContentChunk::new(acp::ContentBlock::Text(
-                                                    acp::TextContent::new(decoded),
-                                                )),
-                                            ),
-                                            None,
-                                        )
-                                        .await;
-                                    }
-                                }
-                                Err(_) => {}
-                            }
+                        if language_envelope_active
+                            && let Ok(value) = &validated
+                            && let Some(decoded) = extract_language_response(value)
+                        {
+                            self.send_update(
+                                acp::SessionUpdate::AgentMessageChunk(acp::ContentChunk::new(
+                                    acp::ContentBlock::Text(acp::TextContent::new(decoded)),
+                                )),
+                                None,
+                            )
+                            .await;
                         }
                         let snapshot = self
                             .finalize_turn_bookkeeping(

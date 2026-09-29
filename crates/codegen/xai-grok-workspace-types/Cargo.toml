@@ -5,6 +5,11 @@ version = "0.1.0"
 edition.workspace = true
 description = "Wire types for the xAI workspace API (request/chunk/event enums shared by client and server)"
 
+repository.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
 [dependencies]
 base64 = { workspace = true }
 chrono = { workspace = true, features = ["serde"] }

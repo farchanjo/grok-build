@@ -2174,7 +2174,6 @@ mod tests {
 
     #[test]
     fn openrouter_ceiling_becomes_the_default_request_budget() {
-        use super::OPENROUTER_DEFAULT_MAX_COMPLETION_TOKENS;
         let raw_config: toml::Value = toml::from_str(
             r#"
             [model_providers.zdr]

@@ -229,14 +229,6 @@ pub(crate) fn write_jsonl_atomic<T: serde::Serialize>(path: &Path, items: &[T]) 
     write_bytes_atomic(path, &to_jsonl_bytes(items)?)
 }
 
-/// Async sibling of [`write_jsonl_atomic`].
-pub(crate) async fn write_jsonl_atomic_async<T: serde::Serialize>(
-    path: &Path,
-    items: &[T],
-) -> io::Result<()> {
-    write_bytes_atomic_async(path, to_jsonl_bytes(items)?).await
-}
-
 /// A unique sibling temp path, e.g. `summary.json` -> `summary.json.<uuid>.tmp`.
 fn temp_sibling(path: &Path) -> PathBuf {
     let mut name = path.as_os_str().to_owned();
@@ -640,10 +632,13 @@ pub(crate) mod chat_rebuild {
             let text: String = content
                 .iter()
                 .filter_map(|c| match c {
-                    acp::ToolCallContent::Content(acp::Content {
-                        content: acp::ContentBlock::Text(t),
-                        ..
-                    }) => Some(t.text.as_str()),
+                    acp::ToolCallContent::Content(content) => match &**content {
+                        acp::Content {
+                            content: acp::ContentBlock::Text(t),
+                            ..
+                        } => Some(t.text.as_str()),
+                        _ => None,
+                    },
                     _ => None,
                 })
                 .collect::<Vec<_>>()

@@ -283,7 +283,7 @@ async fn pre_tool_use_client_rewrite_updates_real_search_replace_input() {
                     &actor.session_id_string(),
                     actor.tool_context.cwd.as_path().to_path_buf(),
                     actor.tool_context.hunk_tracker_handle.clone(),
-                    actor.agent.borrow().tool_bridge().toolset(),
+                    actor.tool_bridge_owned().toolset(),
                     None,
                 )
                 .expect("workspace session binding succeeds");
@@ -548,10 +548,7 @@ async fn rewritten_use_tool_target_controls_read_only_classification() {
                 >(),
             ])
             .await;
-            actor
-                .agent
-                .borrow()
-                .tool_bridge()
+            actor.tool_bridge_owned()
                 .register_mcp_tools(
                     "fixture__read".to_string(),
                     ReadOnlyMcpFixture,
@@ -854,7 +851,7 @@ async fn post_tool_use_and_failure_never_double_fire() {
                     &actor.session_id_string(),
                     actor.tool_context.cwd.as_path().to_path_buf(),
                     actor.tool_context.hunk_tracker_handle.clone(),
-                    actor.agent.borrow().tool_bridge().toolset(),
+                    actor.tool_bridge_owned().toolset(),
                     None,
                 )
                 .expect("bind_local_session must succeed");

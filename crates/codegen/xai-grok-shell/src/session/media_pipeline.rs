@@ -11,23 +11,16 @@ use std::path::Path;
 use xai_grok_tools::types::output::{AudioContent, VideoContent};
 use xai_grok_tools::util::ffmpeg::{
     self, DEFAULT_EXTRACT_TIMEOUT, DEFAULT_PROBE_TIMEOUT, MAX_MEDIA_INPUT_BYTES, ProcessRunner,
-    SystemProcessRunner,
 };
 
 use crate::config::MediaConfig;
 use crate::session::image_describe::{
     DescribeError, ImageDescribeCache, ImageDescribeSource, content_fingerprint,
-    render_image_description_block, stable_describe_prompt_fingerprint,
+    stable_describe_prompt_fingerprint,
 };
 use crate::session::media_descriptors::{
     MediaDescriptor, MediaDescriptorKey, MediaDescriptorSource, MediaDescriptorStore, MediaModality,
 };
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum MediaFailurePolicy {
-    AbortTurn,
-    Placeholder,
-}
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum MediaPolicyError {
@@ -229,18 +222,6 @@ pub async fn describe_image(
         }
     }
     Ok(description)
-}
-
-pub fn placeholder_for(modality: MediaModality) -> &'static str {
-    match modality {
-        MediaModality::Image => "[image]",
-        MediaModality::Audio => "[audio]",
-        MediaModality::Video => "[video]",
-    }
-}
-
-pub fn descriptor_envelope(description: &str) -> String {
-    render_image_description_block(description)
 }
 
 use crate::session::media_stt::{
@@ -553,16 +534,6 @@ pub async fn understand_video(
         }
     }
     render_video_description_block(&description)
-}
-
-/// Convenience wrapper using the system ffmpeg runner without STT auth.
-pub async fn understand_audio_default(
-    audio: &AudioContent,
-    media: &MediaConfig,
-    store: &MediaDescriptorStore,
-    source: ImageDescribeSource,
-) -> String {
-    understand_audio(audio, media, store, source, &SystemProcessRunner, None).await
 }
 
 pub fn render_audio_description_block(description: &str) -> String {
@@ -1183,8 +1154,10 @@ mod tests {
         let stt = MockAudioTranscriber {
             result: Ok("should not run".into()),
         };
-        let mut media = MediaConfig::default();
-        media.mode = crate::config::MediaMode::ToolsOnly;
+        let media = MediaConfig {
+            mode: crate::config::MediaMode::ToolsOnly,
+            ..Default::default()
+        };
         let text = understand_audio(
             &audio,
             &media,

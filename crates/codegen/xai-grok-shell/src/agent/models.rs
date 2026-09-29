@@ -263,6 +263,7 @@ pub(crate) enum ModelReloadOutcome {
     /// Candidate rejected; prior catalog retained as last-known-good.
     RetainedLastKnownGood,
     /// No-op (input matched live catalog / fetch yielded nothing to apply).
+    #[allow(dead_code)]
     Unchanged,
 }
 
@@ -638,24 +639,6 @@ impl ModelsManager {
         let is_session_auth = self.is_session_auth();
         let models = self.inner.models.read();
         task_model_error_for_catalog(requested, &models, is_session_auth)
-    }
-
-    /// Agent-eligible catalog keys for `Task.model` slug advertisement.
-    ///
-    /// Sorted stably so the task tool description is deterministic across
-    /// rebuilds. Uses the same [`is_task_agent_eligible`] predicate as
-    /// [`Self::task_model_error`] so the advertised slug list and the
-    /// validation surface agree.
-    pub(crate) fn task_eligible_slugs(&self) -> Vec<String> {
-        let is_session_auth = self.is_session_auth();
-        let models = self.inner.models.read();
-        let mut slugs = models
-            .iter()
-            .filter(|(_, entry)| is_task_agent_eligible(entry, is_session_auth))
-            .map(|(slug, _)| slug.clone())
-            .collect::<Vec<_>>();
-        slugs.sort();
-        slugs
     }
 
     pub fn current_model_id(&self) -> acp::ModelId {
@@ -2229,6 +2212,7 @@ pub(crate) fn resolve_catalog_key_with_origins(
 /// entries. Exact key wins when selectable; otherwise the deterministic
 /// resolver runs on the selectable subcatalog only (unique/ambiguous/missing).
 /// A non-selectable exact key never steals a unique selectable alias.
+#[cfg(test)]
 pub(crate) fn selectable_catalog_key_for_persisted(
     models: &IndexMap<String, ModelEntry>,
     available: &IndexMap<acp::ModelId, acp::ModelInfo>,
@@ -2247,6 +2231,7 @@ pub(crate) fn selectable_catalog_key_for_persisted(
 /// Gated additional-account keys are excluded from alias resolution when the
 /// multi-account rollout is off. Ambiguous aliases return `None` (never a
 /// silent sibling).
+#[allow(dead_code)]
 pub(crate) fn selectable_catalog_key_for_persisted_with_origins(
     models: &IndexMap<String, ModelEntry>,
     available: &IndexMap<acp::ModelId, acp::ModelInfo>,
@@ -2304,6 +2289,7 @@ fn is_campaign_only_flip(
 /// resolver (exact canonical / permanent alias / unique legacy alias).
 /// Ambiguous labels, missing instances, and gated additional-account keys
 /// fail closed into the fallback path — never silent sibling selection.
+#[cfg(test)]
 pub(crate) fn resolve_default_model(
     cfg: &config::Config,
     catalog: &IndexMap<String, ModelEntry>,
@@ -2320,6 +2306,7 @@ pub(crate) fn resolve_default_model(
 }
 
 /// Origin-aware default resolution (production path).
+#[allow(dead_code)]
 pub(crate) fn resolve_default_model_with_origins(
     cfg: &config::Config,
     catalog: &IndexMap<String, ModelEntry>,
@@ -2385,7 +2372,7 @@ pub(crate) fn resolve_default_model_with_origins(
     // Exact key / unique alias only. Ambiguous returns candidates so the
     // fallback path can exclude those siblings (never silent pick).
     enum PrefResolve {
-        Hit(String, ModelEntry),
+        Hit(String, Box<ModelEntry>),
         Ambiguous(Vec<String>),
         Miss,
     }
@@ -2397,7 +2384,7 @@ pub(crate) fn resolve_default_model_with_origins(
             ModelIdentityResolution::Resolved(resolved) => {
                 let key = resolved.canonical_id.as_str().to_owned();
                 match visible.get(&key) {
-                    Some(entry) => PrefResolve::Hit(key, entry.clone()),
+                    Some(entry) => PrefResolve::Hit(key, Box::new(entry.clone())),
                     None => PrefResolve::Miss,
                 }
             }
@@ -2431,7 +2418,7 @@ pub(crate) fn resolve_default_model_with_origins(
         }
         Some(pref) => {
             let (exclude_siblings, hit) = match resolve_pref(&pref.value) {
-                PrefResolve::Hit(key, entry) => (Vec::new(), Some((key, entry))),
+                PrefResolve::Hit(key, entry) => (Vec::new(), Some((key, *entry))),
                 PrefResolve::Ambiguous(candidates) => (candidates, None),
                 PrefResolve::Miss => (Vec::new(), None),
             };
@@ -2468,14 +2455,13 @@ pub(crate) fn resolve_default_model_with_origins(
                         .pre_campaign_default
                         .as_deref()
                         .filter(|s| !s.is_empty())
+                    && let PrefResolve::Hit(key, entry) = resolve_pref(prev)
                 {
-                    if let PrefResolve::Hit(key, entry) = resolve_pref(prev) {
-                        tracing::info!(
-                            unavailable = %pref.value, fallback = %prev,
-                            "campaign-driven default unavailable in catalog; recovering the pre-campaign default"
-                        );
-                        return (key, entry, config::ConfigSource::Config);
-                    }
+                    tracing::info!(
+                        unavailable = %pref.value, fallback = %prev,
+                        "campaign-driven default unavailable in catalog; recovering the pre-campaign default"
+                    );
+                    return (key, *entry, config::ConfigSource::Config);
                 }
                 // Exclude ambiguous candidates so we never "resolve" by
                 // picking the first sibling after an Ambiguous rejection.

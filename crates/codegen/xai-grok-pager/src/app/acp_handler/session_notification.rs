@@ -219,23 +219,20 @@ pub(super) fn handle_session_notification(notif: &acp::ExtNotification, app: &mu
                 provider: Some(provider),
                 ..
             } = retry
+                && binding.matches_failure(&provider.provider_id, provider.credential_generation)
+                && let Some(key) = binding.map_key()
             {
-                if binding.matches_failure(&provider.provider_id, provider.credential_generation)
-                    && let Some(key) = binding.map_key()
+                const MAX_PENDING: usize = 16;
+                if agent.pending_route_bindings.len() >= MAX_PENDING
+                    && let Some(old) = agent
+                        .pending_route_bindings
+                        .keys()
+                        .min_by_key(|(_, failure_gen)| *failure_gen)
+                        .cloned()
                 {
-                    const MAX_PENDING: usize = 16;
-                    if agent.pending_route_bindings.len() >= MAX_PENDING {
-                        if let Some(old) = agent
-                            .pending_route_bindings
-                            .keys()
-                            .min_by_key(|(_, failure_gen)| *failure_gen)
-                            .cloned()
-                        {
-                            agent.pending_route_bindings.remove(&old);
-                        }
-                    }
-                    agent.pending_route_bindings.insert(key, binding);
+                    agent.pending_route_bindings.remove(&old);
                 }
+                agent.pending_route_bindings.insert(key, binding);
             }
             changed
         }

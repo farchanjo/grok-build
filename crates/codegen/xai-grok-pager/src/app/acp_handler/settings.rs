@@ -152,9 +152,11 @@ pub(super) fn handle_providers_update(notif: &acp::ExtNotification, app: &mut Ap
                     // Clean editor: auto reload detail.
                     effects.push(crate::app::actions::Effect::ProviderOperation {
                         agent_id: *agent_id,
-                        operation: crate::app::actions::ProviderOperation::LoadEditorDetail {
-                            provider_id: ed.detail.id.clone(),
-                        },
+                        operation: Box::new(
+                            crate::app::actions::ProviderOperation::LoadEditorDetail {
+                                provider_id: ed.detail.id.clone(),
+                            },
+                        ),
                         repair: None,
                     });
                 }
@@ -163,7 +165,7 @@ pub(super) fn handle_providers_update(notif: &acp::ExtNotification, app: &mut Ap
             // Clean list: auto LoadListSnapshot.
             effects.push(crate::app::actions::Effect::ProviderOperation {
                 agent_id: *agent_id,
-                operation: crate::app::actions::ProviderOperation::LoadListSnapshot,
+                operation: Box::new(crate::app::actions::ProviderOperation::LoadListSnapshot),
                 repair: None,
             });
         }
@@ -901,10 +903,11 @@ mod providers_update_handler_tests {
         assert!(
             app.pending_effects.iter().any(|e| matches!(
                 e,
-                crate::app::actions::Effect::ProviderOperation {
-                    operation: crate::app::actions::ProviderOperation::LoadListSnapshot,
-                    ..
-                }
+                crate::app::actions::Effect::ProviderOperation { operation, .. }
+                    if matches!(
+                        **operation,
+                        crate::app::actions::ProviderOperation::LoadListSnapshot
+                    )
             )),
             "clean list must auto LoadListSnapshot"
         );

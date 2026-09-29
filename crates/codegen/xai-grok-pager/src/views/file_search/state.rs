@@ -128,13 +128,7 @@ impl FileSearchState {
 
     /// Set the hovered index. Returns `true` if changed.
     pub fn set_hovered(&mut self, index: Option<usize>) -> bool {
-        let clamped = index.and_then(|i| {
-            if i < self.results.topk.len() {
-                Some(i)
-            } else {
-                None
-            }
-        });
+        let clamped = index.filter(|&i| i < self.results.topk.len());
         let changed = clamped != self.hovered;
         self.hovered = clamped;
         changed

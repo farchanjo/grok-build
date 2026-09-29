@@ -10,9 +10,7 @@ mod tests {
     use std::path::{Path, PathBuf};
 
     fn repo_root() -> PathBuf {
-        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../../..")
-            .canonicalize()
+        dunce::canonicalize(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../.."))
             .expect("repo root")
     }
 

@@ -1,4 +1,5 @@
 #![cfg_attr(rustfmt, rustfmt::skip)]
+use crate::agent::subagent::handle_request::handle_subagent_request;
 use super::*;
 use super::exact_route::ExactRoute;
 use super::handle_request::{
@@ -3350,7 +3351,7 @@ async fn invalid_reasoning_effort_fails_before_subagent_spawn() {
     use crate::agent::config::{EndpointsConfig, ModelEntry};
     use xai_grok_inference_types::{ReasoningEffortSelection, ReasoningEffortOption};
 
-    let mut ctx = ctx_with_toggle(HashMap::new());
+    let ctx = ctx_with_toggle(HashMap::new());
     let mut entry = ModelEntry::fallback("test", &EndpointsConfig::default());
     entry.info.reasoning_effort_selection = ReasoningEffortSelection::Exact;
     entry.info.reasoning_efforts = vec![ReasoningEffortOption {
@@ -4621,7 +4622,7 @@ fn skills_hint_duplicate_names_do_not_duplicate_entries() {
 fn allow_deny_tools_filter_matches_ids_and_client_names() {
     use xai_grok_tools::registry::types::{ToolConfig, ToolServerConfig};
     use xai_grok_tools::types::tool::ToolKind;
-    let mut tc = |id: &str, kind: ToolKind| {
+    let tc = |id: &str, kind: ToolKind| {
         let mut c = ToolConfig::from_id(id);
         c.kind = Some(kind);
         c

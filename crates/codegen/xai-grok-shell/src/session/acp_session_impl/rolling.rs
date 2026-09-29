@@ -1122,7 +1122,7 @@ mod tests {
                 let job = job.unwrap();
                 assert!(job.identity.source_start == 1, "source_start should skip system message");
                 assert!(
-                    job.source_items.len() >= 1,
+                    !job.source_items.is_empty(),
                     "should have source items to compact"
                 );
             })

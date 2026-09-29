@@ -352,6 +352,12 @@ pub fn is_undo_input(key: &KeyEvent) -> bool {
             || key.modifiers.contains(KeyModifiers::SUPER))
 }
 
+impl Default for TextArea {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl TextArea {
     /// Compute the number of lines to scroll per mouse wheel tick based on
     /// the viewport height.  Small viewports scroll slowly (1 line), large
@@ -5133,7 +5139,7 @@ mod tests {
             "Expected wrapping to produce at least 2 lines, got {} lines. \
              Line ranges: {:?}",
             lines.len(),
-            &*lines,
+            *lines,
         );
     }
 
@@ -5157,7 +5163,7 @@ mod tests {
             2,
             "Expected 2 wrapped lines, got {}. Ranges: {:?}",
             lines.len(),
-            &*lines,
+            *lines,
         );
     }
 
@@ -5192,12 +5198,7 @@ mod tests {
         // Check wrapping (drop the Ref before rendering)
         {
             let lines = t.wrapped_lines(8);
-            assert_eq!(
-                lines.len(),
-                2,
-                "Should wrap into 2 lines, got {:?}",
-                &*lines
-            );
+            assert_eq!(lines.len(), 2, "Should wrap into 2 lines, got {:?}", *lines);
         }
 
         // Render and verify
@@ -5241,7 +5242,7 @@ mod tests {
             "Element with internal \\n should NOT create extra visual lines. \
              Got {} lines: {:?}",
             lines.len(),
-            &*lines,
+            *lines,
         );
     }
 

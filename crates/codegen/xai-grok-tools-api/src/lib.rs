@@ -4,8 +4,6 @@
 //! Used by both the tools library and the gRPC server, and by host services
 //! that must not depend on the tools implementation crate.
 
-#![allow(clippy::derive_partial_eq_without_eq)]
-
 /// Generated protobuf types.
 pub mod pb {
     include!(concat!(env!("OUT_DIR"), "/xai.grok.tools.v1.rs"));

@@ -1396,10 +1396,9 @@ pub fn handle_settings_mouse(
                 }
                 if let Some((key, _)) = state.focused_setting()
                     && key == "open_subscriptions"
+                    && state.try_enter_picking_subscriptions()
                 {
-                    if state.try_enter_picking_subscriptions() {
-                        return SettingsKeyOutcome::Action(Action::FetchMcpSubscriptions);
-                    }
+                    return SettingsKeyOutcome::Action(Action::FetchMcpSubscriptions);
                 }
             }
             // Selection moved (or was already on this row); the
@@ -1556,11 +1555,8 @@ fn handle_group_mouse(
     // Bool children toggle in one click; Enum children open their picker
     // (a click on the language rows must not be a silent no-op).
     if !matches!(state.value_for(child_key), Some(SettingValue::Bool(_))) {
-        return if state.try_enter_picking_enum_for_key(child_key) {
-            SettingsKeyOutcome::Changed
-        } else {
-            SettingsKeyOutcome::Changed
-        };
+        state.try_enter_picking_enum_for_key(child_key);
+        return SettingsKeyOutcome::Changed;
     }
     let cur = matches!(state.value_for(child_key), Some(SettingValue::Bool(true)));
     match action_for_bool(child_key, !cur) {

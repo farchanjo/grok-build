@@ -13,6 +13,7 @@
 
 use super::support::*;
 use super::*;
+use std::rc::Rc;
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -87,7 +88,7 @@ async fn wait_for_command(rx: &mut ChildQueue) -> crate::session::commands::Sess
 /// Actor with the stub client installed as an *owned* server, plus the event
 /// lane left unwired so a test can wire it itself.
 async fn setup_unwired() -> (
-    Arc<crate::session::acp_session::SessionActor>,
+    Rc<crate::session::acp_session::SessionActor>,
     Arc<McpClient>,
 ) {
     setup_unwired_with(false).await
@@ -98,14 +99,14 @@ async fn setup_unwired() -> (
 async fn setup_unwired_with(
     is_subagent: bool,
 ) -> (
-    Arc<crate::session::acp_session::SessionActor>,
+    Rc<crate::session::acp_session::SessionActor>,
     Arc<McpClient>,
 ) {
     let (gateway_tx, _gateway_rx) = tokio::sync::mpsc::unbounded_channel();
     let (persistence_tx, _persistence_rx) = mpsc::unbounded_channel();
     let (mut actor, _ev) = create_test_actor_ex(0, 256_000, 85, gateway_tx, persistence_tx).await;
     actor.startup_hints.is_subagent = is_subagent;
-    let actor = Arc::new(actor);
+    let actor = Rc::new(actor);
 
     let client = Arc::new(McpClient::new_acp(
         SERVER.to_string(),
@@ -130,7 +131,7 @@ async fn setup_unwired_with(
 }
 
 async fn setup() -> (
-    Arc<crate::session::acp_session::SessionActor>,
+    Rc<crate::session::acp_session::SessionActor>,
     Arc<McpClient>,
     tokio::sync::mpsc::UnboundedSender<McpClientEvent>,
 ) {
@@ -455,6 +456,7 @@ async fn live_owners_supersede_a_stale_stash() {
 /// A push owned by a session that already exited is delivered locally and
 /// re-stamped onto the holder, so delivery and the sheet stay consistent
 /// (adoption, matching the task/wait paths).
+#[tokio::test]
 async fn push_with_dead_owner_is_adopted_locally() {
     tokio::task::LocalSet::new()
         .run_until(async {
@@ -564,7 +566,7 @@ impl xai_grok_mcp::acp_transport::AcpReverseInvoker for GrowingStubServer {
 async fn setup_growing(
     text: Arc<std::sync::Mutex<String>>,
 ) -> (
-    Arc<crate::session::acp_session::SessionActor>,
+    Rc<crate::session::acp_session::SessionActor>,
     Arc<McpClient>,
     tokio::sync::mpsc::UnboundedSender<McpClientEvent>,
     ChildQueue,
@@ -572,7 +574,7 @@ async fn setup_growing(
     let (gateway_tx, _gateway_rx) = tokio::sync::mpsc::unbounded_channel();
     let (persistence_tx, _persistence_rx) = mpsc::unbounded_channel();
     let (actor, _ev) = create_test_actor_ex(0, 256_000, 85, gateway_tx, persistence_tx).await;
-    let actor = Arc::new(actor);
+    let actor = Rc::new(actor);
 
     let client = Arc::new(McpClient::new_acp(
         SERVER.to_string(),
@@ -612,7 +614,7 @@ fn injected_body(command: crate::session::commands::SessionCommand) -> String {
                 .collect::<Vec<_>>()
                 .join("\n")
         }
-        other => panic!("expected InjectNotification, got a different SessionCommand"),
+        _other => panic!("expected InjectNotification, got a different SessionCommand"),
     }
 }
 

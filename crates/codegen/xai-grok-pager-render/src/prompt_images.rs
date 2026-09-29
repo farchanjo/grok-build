@@ -702,7 +702,7 @@ impl PromptImagePreview {
         self.finish(PromptImagePreviewResult::Failed);
     }
 
-    #[cfg(any(test, feature = "test-support"))]
+    #[cfg(any(test, feature = "test"))]
     pub fn ready_for_test(bytes: Vec<u8>, dimensions: (u32, u32)) -> Self {
         let preview = Self::default();
         preview.finish(PromptImagePreviewResult::Ready {

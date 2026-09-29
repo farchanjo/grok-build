@@ -2,6 +2,7 @@
 //! plus auto-start of queued prompts (`maybe_start_running_task`).
 
 use super::*;
+use std::rc::Rc;
 
 /// Maximum number of pending notifications before oldest are dropped.
 pub(super) const MAX_PENDING_NOTIFICATIONS: usize = 50;
@@ -173,7 +174,7 @@ impl SessionActor {
     }
 
     pub(super) async fn maybe_start_running_task(
-        self: Arc<Self>,
+        self: Rc<Self>,
         completion_tx: mpsc::UnboundedSender<(String, PromptTurnResult)>,
     ) {
         if self.compaction.cancel.cancel_command_pending() {
@@ -323,9 +324,7 @@ impl SessionActor {
                 SessionActor::running_display_from_item(front),
             )
         };
-        self.agent
-            .borrow()
-            .tool_bridge()
+        self.tool_bridge_owned()
             .update_resource(
                 xai_grok_tools::implementations::grok_build::task::types::CurrentPromptIdResource(
                     prompt_id.clone(),
@@ -412,9 +411,7 @@ impl SessionActor {
                 ));
             });
         if promoted.is_none() {
-            self.agent
-                .borrow()
-                .tool_bridge()
+            self.tool_bridge_owned()
                 .update_resource(
                     xai_grok_tools::implementations::grok_build::task::types::CurrentPromptIdResource(
                         String::new(),
@@ -433,7 +430,7 @@ impl SessionActor {
     /// becomes one model turn per arrival. Turn-end, cancel, and explicit
     /// drains keep calling [`Self::maybe_drain_notifications`] directly.
     pub(super) async fn schedule_notification_drain(
-        self: Arc<Self>,
+        self: Rc<Self>,
         completion_tx: mpsc::UnboundedSender<(String, PromptTurnResult)>,
     ) {
         {
@@ -464,7 +461,7 @@ impl SessionActor {
     /// `---` separators between content blocks. The take+push happens in a
     /// single lock acquisition to avoid interleaving.
     pub(super) async fn maybe_drain_notifications(
-        self: Arc<Self>,
+        self: Rc<Self>,
         completion_tx: mpsc::UnboundedSender<(String, PromptTurnResult)>,
     ) {
         // Auto-wake notification turns are DROPPED both while the goal loop is

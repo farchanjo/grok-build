@@ -31,11 +31,10 @@ pub fn canonical_selection_id(identity: &CatalogAccountIdentity, upstream: &str)
 /// (`chatgpt`, `codex`) and user-configured instances remain instance-qualified
 /// so they cannot silently collide with built-in catalog keys.
 pub fn is_built_in_compatibility_instance(instance_id: &str, kind: ProviderKind) -> bool {
-    match (instance_id, kind) {
-        ("openai", ProviderKind::OpenAi) => true,
-        ("openrouter", ProviderKind::OpenRouter) => true,
-        _ => false,
-    }
+    matches!(
+        (instance_id, kind),
+        ("openai", ProviderKind::OpenAi) | ("openrouter", ProviderKind::OpenRouter)
+    )
 }
 
 /// True when `instance_id` is exactly a built-in compatibility product id.

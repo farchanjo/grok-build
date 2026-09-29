@@ -5,6 +5,7 @@
 //! completion, and successor promotion never wait for hook execution.
 
 use super::*;
+use std::rc::Rc;
 use xai_grok_hooks::event::{self, StopCancelledReason, StopFailureKind};
 
 const TURN_END_DRAIN_BUDGET: std::time::Duration = std::time::Duration::from_millis(250);
@@ -143,13 +144,13 @@ pub(super) fn cancel_details(kind: &PromptCompletionKind) -> Option<String> {
 
 #[must_use = "the FIFO turn-end worker must be drained during session teardown"]
 pub(super) struct TurnEndQueue {
-    session: Arc<SessionActor>,
+    session: Rc<SessionActor>,
     tx: Option<tokio::sync::mpsc::UnboundedSender<QueueItem>>,
     worker: Option<tokio::task::JoinHandle<()>>,
 }
 
 impl TurnEndQueue {
-    pub(super) fn spawn(session: Arc<SessionActor>) -> Self {
+    pub(super) fn spawn(session: Rc<SessionActor>) -> Self {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<QueueItem>();
         *session.turn_end_tx.borrow_mut() = Some(tx.clone());
         let worker = tokio::task::spawn_local({

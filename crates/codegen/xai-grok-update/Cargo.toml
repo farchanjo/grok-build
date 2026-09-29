@@ -2,7 +2,13 @@
 license = "Apache-2.0"
 name = "xai-grok-update"
 version = "0.1.220-alpha.4"
+description = "Auto-update plumbing: channel resolution, minimum-version enforcement, and version cache."
 edition.workspace = true
+
+repository.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
 
 [dependencies]
 anyhow = { workspace = true }

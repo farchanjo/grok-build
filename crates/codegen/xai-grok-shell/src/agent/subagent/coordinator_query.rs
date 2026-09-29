@@ -1,29 +1,10 @@
 #![cfg_attr(rustfmt, rustfmt::skip)]
-#![allow(unused_imports)]
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use agent_client_protocol as acp;
-use tokio::sync::{Notify, mpsc, oneshot};
-use tokio_util::sync::CancellationToken;
-use crate::extensions::notification::{SessionNotification, SessionUpdate};
+use crate::extensions::notification::SessionUpdate;
 use crate::session::{
-    self, SessionCommand, SessionHandle, SessionThread,
-    commands::{PromptCompletionKind, PromptTurnResult as SubagentPromptTurnResult},
-    fs_watch::FsWatchCapabilities, info::Info as SessionInfo,
+    self, info::Info as SessionInfo,
 };
-use crate::terminal::AsyncTerminalRunner;
-use crate::tools::ToolContext;
-use crate::upload::trace::{
-    GCS_SCHEMA_VERSION, PromptMetadata, SubagentSpawnedRef, TurnResultMetadata,
-    local_sandbox_telemetry, upload_metadata, upload_session_state,
-    upload_subagent_metadata, upload_turn_result,
-};
-use crate::upload::turn::{PromptTraceContext, complete_prompt_trace};
-use xai_acp_lib::AcpAgentGatewaySender as GatewaySender;
-use xai_grok_tools::implementations::grok_build::task::types::*;
-use xai_grok_workspace::file_system::AsyncFileSystem;
-use xai_hunk_tracker::HunkTrackerHandle;
 use super::*;
 impl SubagentCoordinator {
     /// Synchronous lookup of a subagent by ID.
@@ -242,6 +223,7 @@ impl SubagentCoordinator {
     /// Fast path: checks the in-memory `completed` map first. When that
     /// misses (e.g. after cap eviction), falls back to on-disk metadata
     /// in `{parent_session_dir}/subagents/{id}/meta.json`.
+    #[cfg(test)]
     pub(crate) fn resumable_source_for(
         &self,
         id: &str,
@@ -287,7 +269,7 @@ impl SubagentCoordinator {
         let (meta, assigned_owner) = match lookup {
             identity_store::Lookup::Missing => return Ok(None),
             identity_store::Lookup::LegacyUnassigned { meta } => (meta, None),
-            identity_store::Lookup::Assigned { meta, owner } => (meta, Some(owner)),
+            identity_store::Lookup::Assigned { meta, owner } => (meta, Some(*owner)),
         };
         if meta.parent_session_id != parent_session_id {
             return Ok(None);

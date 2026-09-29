@@ -5,6 +5,11 @@ name = "xai-grok-paths"
 version = "0.1.0"
 description = "Type-safe path wrappers for absolute and relative UTF-8 paths"
 
+repository.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
 [dependencies]
 camino = { workspace = true }
 serde = { workspace = true }

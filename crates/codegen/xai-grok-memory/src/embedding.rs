@@ -380,7 +380,7 @@ impl EmbeddingProvider for PlatformEmbeddingProvider {
             let params_val = serde_json::json!({
                 "body": {
                     "model": self.model,
-                    "input": batch.iter().copied().collect::<Vec<_>>(),
+                    "input": batch.to_vec(),
                     "dimensions": self.dimensions,
                 }
             });
@@ -422,7 +422,7 @@ impl EmbeddingProvider for PlatformEmbeddingProvider {
 
 /// A mock embedding provider for testing that returns deterministic vectors.
 /// Uses blake3 hash of text → float values for reproducible results.
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(any(test, feature = "test"))]
 pub struct MockEmbeddingProvider {
     pub dimensions: usize,
 }
@@ -477,7 +477,7 @@ impl EmbeddingProvider for RetrievalEmbeddingProvider {
     }
 }
 
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(any(test, feature = "test"))]
 #[async_trait]
 impl EmbeddingProvider for MockEmbeddingProvider {
     async fn embed_batch(

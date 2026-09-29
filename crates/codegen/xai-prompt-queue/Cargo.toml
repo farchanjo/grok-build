@@ -5,6 +5,11 @@ name = "xai-prompt-queue"
 version = "0.1.0"
 description = "Shared prompt-queue wire types for xai-grok-shell and xai-grok-pager"
 
+repository.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
 [dependencies]
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }

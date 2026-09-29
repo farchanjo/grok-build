@@ -6,6 +6,7 @@
 use super::support::*;
 use super::*;
 use serial_test::serial;
+use std::rc::Rc as StdRc;
 use std::sync::Arc as StdArc;
 use std::sync::atomic::{AtomicUsize, Ordering as SeqOrd};
 use tempfile::TempDir;
@@ -126,7 +127,7 @@ fn spawn_planner_coordinator_capturing(
 async fn make_planner_actor(
     coordinator_tx: Option<tokio::sync::mpsc::UnboundedSender<SubagentEvent>>,
     planner_enabled: bool,
-) -> (StdArc<SessionActor>, TempDir) {
+) -> (StdRc<SessionActor>, TempDir) {
     let tmp = TempDir::new().expect("tempdir");
     let (gateway_tx, _gateway_rx) =
         tokio::sync::mpsc::unbounded_channel::<xai_acp_lib::AcpClientMessage>();
@@ -143,7 +144,7 @@ async fn make_planner_actor(
     if let Some(tx) = coordinator_tx {
         actor.tool_context.subagent_event_tx = Some(tx);
     }
-    (StdArc::new(actor), tmp)
+    (StdRc::new(actor), tmp)
 }
 
 /// Like [`make_planner_actor`] but retains the persistence receiver
@@ -154,7 +155,7 @@ async fn make_planner_actor_capturing(
     coordinator_tx: Option<tokio::sync::mpsc::UnboundedSender<SubagentEvent>>,
     planner_enabled: bool,
 ) -> (
-    StdArc<SessionActor>,
+    StdRc<SessionActor>,
     TempDir,
     tokio::sync::mpsc::UnboundedReceiver<PersistenceMsg>,
 ) {
@@ -173,7 +174,7 @@ async fn make_planner_actor_capturing(
     if let Some(tx) = coordinator_tx {
         actor.tool_context.subagent_event_tx = Some(tx);
     }
-    (StdArc::new(actor), tmp, persistence_rx)
+    (StdRc::new(actor), tmp, persistence_rx)
 }
 
 /// Drain every persisted `GoalUpdated` notification and project to
@@ -274,7 +275,7 @@ async fn planner_fork_inherits_parent_model() {
             // since the radix prefix is per-model. Without the Step-7 forcing this
             // configured model would flow through and the assertion below would
             // catch the regression.
-            let actor = StdArc::new(SessionActor {
+            let actor = StdRc::new(SessionActor {
                 goal_role_models: crate::session::GoalRoleModelConfig {
                     planner: crate::agent::config::GoalRoleModelChoice::Explicit(
                         crate::util::config::GoalRoleModel {
@@ -284,7 +285,7 @@ async fn planner_fork_inherits_parent_model() {
                     ),
                     ..Default::default()
                 },
-                ..StdArc::try_unwrap(actor).ok().expect("single-owner actor")
+                ..StdRc::try_unwrap(actor).ok().expect("single-owner actor")
             });
             create_test_goal(&actor);
 

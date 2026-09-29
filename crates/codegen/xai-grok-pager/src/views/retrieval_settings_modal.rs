@@ -619,10 +619,7 @@ impl RetrievalSettingsState {
 
     /// Strict op-id match (provider Gate E): mutation completes require Some/Some equal.
     pub fn mutation_op_matches(pending: Option<&str>, echo: Option<&str>) -> bool {
-        match (pending, echo) {
-            (Some(p), Some(e)) if p == e => true,
-            _ => false,
-        }
+        matches!((pending, echo), (Some(p), Some(e)) if p == e)
     }
 
     pub fn apply_mutation_result(&mut self, result: RetrievalMutationResult) {
@@ -1895,16 +1892,16 @@ impl RetrievalSettingsState {
             }
         }
 
-        if self.page == RetrievalPage::Validate {
-            if let Some(p) = &self.last_preview {
-                lines.push(Line::from(""));
-                lines.push(Line::from(Span::styled(
-                    "Preview (network-free)",
-                    Style::default().add_modifier(Modifier::BOLD),
-                )));
-                for m in &p.messages {
-                    lines.push(Line::from(m.as_str()));
-                }
+        if self.page == RetrievalPage::Validate
+            && let Some(p) = &self.last_preview
+        {
+            lines.push(Line::from(""));
+            lines.push(Line::from(Span::styled(
+                "Preview (network-free)",
+                Style::default().add_modifier(Modifier::BOLD),
+            )));
+            for m in &p.messages {
+                lines.push(Line::from(m.as_str()));
             }
         }
 

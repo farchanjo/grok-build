@@ -26,7 +26,7 @@ pub mod gcs_store;
 pub mod jobs;
 pub mod key;
 pub mod local_store;
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(any(test, feature = "test"))]
 pub mod mock;
 pub mod progress;
 pub mod s3_store;
@@ -44,7 +44,7 @@ pub use jobs::{
 };
 pub use key::{AssetKey, AssetPrefix, ContentType, ContentTypeError, KeyError};
 pub use local_store::LocalAssetStore;
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(any(test, feature = "test"))]
 pub use mock::{MockAssetStore, MockAssetStoreBuilder};
 pub use progress::{PROGRESS_CHUNK_BYTES, ProgressHandle};
 pub use s3_store::S3AssetStore;

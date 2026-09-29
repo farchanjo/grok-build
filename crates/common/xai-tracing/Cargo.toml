@@ -3,6 +3,12 @@ license = "Apache-2.0"
 edition.workspace = true
 name = "xai-tracing"
 version = "0.1.0"
+description = "Tracing and timing helpers: fastrace/OTLP dispatch, gRPC client, and timers."
+
+repository.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
 
 [dependencies]
 async-trait = { workspace = true }

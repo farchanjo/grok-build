@@ -332,7 +332,7 @@ async fn read_file_source_text_stays_on_session_and_does_not_hit_file_model() {
             let (gateway_tx, _) =
                 tokio::sync::mpsc::unbounded_channel::<xai_acp_lib::AcpClientMessage>();
             let (persistence_tx, _) = tokio::sync::mpsc::unbounded_channel::<PersistenceMsg>();
-            let mut actor = create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await;
+            let actor = create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await;
 
             let mut active_settings = actor
                 .chat_state_handle

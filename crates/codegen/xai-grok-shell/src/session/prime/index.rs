@@ -151,6 +151,7 @@ impl PrimeMirrorPair {
 
 /// Process-level handle. Cheap to clone (`Arc` internals).
 pub struct PrimeIndexHandle {
+    #[allow(dead_code)]
     home: PathBuf,
     workspace_identity: String,
     db_path: PathBuf,
@@ -587,9 +588,7 @@ impl PrimeIndexHandle {
                 discard_collection_rebuild(&self.db_path, collection);
                 return Err(PrimeIndexError::StagingIncomplete);
             }
-            if let Err(e) = self.assert_install_matches_frozen(&frozen, generation, true) {
-                return Err(e);
-            }
+            self.assert_install_matches_frozen(&frozen, generation, true)?;
             // Post-commit mirror resync (plan Phase 3): the SQLite install is
             // authoritative and complete; stream the collection into the
             // remote mirror best-effort. Failures never fail the vector job —
@@ -856,7 +855,7 @@ impl PrimeIndexHandle {
         limit: usize,
     ) -> Result<Vec<MetadataFtsHit>, PrimeIndexError> {
         let idx = self.open()?;
-        idx.search_fts(collection, query, limit.max(1).min(DEFAULT_SEARCH_LIMIT))
+        idx.search_fts(collection, query, limit.clamp(1, DEFAULT_SEARCH_LIMIT))
             .map_err(|_| PrimeIndexError::Unavailable)
     }
 
@@ -921,7 +920,7 @@ impl PrimeIndexHandle {
             .search_knn(
                 pin.collection(),
                 query_embedding,
-                k.max(1).min(DEFAULT_SEARCH_LIMIT),
+                k.clamp(1, DEFAULT_SEARCH_LIMIT),
             )
             .map_err(|_| PrimeIndexError::Unavailable)?;
         Self::require_knn_space(&idx, pin)?;
@@ -944,7 +943,7 @@ impl PrimeIndexHandle {
         if query_embedding.len() != pin.dimensions() {
             return Err(PrimeIndexError::SpaceMismatch);
         }
-        let bounded_k = k.max(1).min(DEFAULT_SEARCH_LIMIT);
+        let bounded_k = k.clamp(1, DEFAULT_SEARCH_LIMIT);
         // Sync gate: one SQLite read set (space pin + row count) decides the
         // source before any await; owned data only crosses the mirror call.
         let mirror_target = self.mirror_pair().and_then(|pair| {
@@ -1172,8 +1171,9 @@ pub fn skill_rerank_document(skill: &SkillInfo) -> String {
 fn skill_body_for_index(skill: &SkillInfo) -> String {
     use std::collections::HashMap;
     use std::sync::{Mutex, OnceLock};
-    static CACHE: OnceLock<Mutex<HashMap<String, (Option<std::time::SystemTime>, String)>>> =
-        OnceLock::new();
+    /// `path -> (mtime, body)`; entries invalidate on mtime change.
+    type BodyCache = HashMap<String, (Option<std::time::SystemTime>, String)>;
+    static CACHE: OnceLock<Mutex<BodyCache>> = OnceLock::new();
     if let Some(body) = skill.body.as_deref() {
         return body.trim().to_owned();
     }
@@ -1186,10 +1186,10 @@ fn skill_body_for_index(skill: &SkillInfo) -> String {
     let Ok(mut guard) = cache.lock() else {
         return String::new();
     };
-    if let Some((cached_mtime, body)) = guard.get(path) {
-        if *cached_mtime == mtime {
-            return body.clone();
-        }
+    if let Some((cached_mtime, body)) = guard.get(path)
+        && *cached_mtime == mtime
+    {
+        return body.clone();
     }
     // Strip the YAML frontmatter so index documents carry instructions only.
     let raw = std::fs::read_to_string(path).unwrap_or_default();
@@ -2164,7 +2164,8 @@ mod tests {
         // and proceed, instead of refusing forever.
         handle.inventory_generation.store(1, Ordering::Relaxed);
         let embedder = Arc::new(MockEmbeddingProvider { dimensions: 4 });
-        let written = handle
+        // `written` is informational here; the assertion below is on the snapshot.
+        let _written = handle
             .backfill(
                 embedder,
                 handle.freeze_pin().unwrap(),

@@ -215,7 +215,7 @@ pub fn render_skills(loaded: &[LoadedSkill], budgets: &RenderBudgets) -> Rendere
     }
 
     let footer_chars = footer.chars().count();
-    let footer_bytes = footer.len();
+    let _footer_bytes = footer.len();
 
     // Assemble within aggregate char + token budgets. The token budget applies
     // to **body rows only** (the constant wrapper header/footer are excluded);

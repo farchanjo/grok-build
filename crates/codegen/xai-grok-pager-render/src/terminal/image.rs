@@ -75,7 +75,7 @@ pub fn scrollback_inline_overlay_forced_off() -> bool {
     INLINE_OVERLAY_FORCE_OFF.load(Ordering::Relaxed)
 }
 
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(any(test, feature = "test"))]
 thread_local! {
     /// Per-test override so tests don't depend on the host terminal or the
     /// process-wide `GRAPHICS_PROTOCOL` cache.
@@ -85,7 +85,7 @@ thread_local! {
 
 /// Detect and cache the graphics protocol for the current terminal.
 pub fn detect_graphics_protocol() -> GraphicsProtocol {
-    #[cfg(any(test, feature = "test-support"))]
+    #[cfg(any(test, feature = "test"))]
     if let Some(p) = TEST_PROTOCOL_OVERRIDE.with(|c| c.get()) {
         return p;
     }
@@ -119,12 +119,12 @@ pub fn scrollback_inline_overlay_active() -> bool {
     scrollback_inline_overlay_active_for_brand(protocol, terminal_context().brand)
 }
 
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(any(test, feature = "test"))]
 fn test_protocol_override_active() -> bool {
     TEST_PROTOCOL_OVERRIDE.with(|c| c.get().is_some())
 }
 
-#[cfg(not(any(test, feature = "test-support")))]
+#[cfg(not(any(test, feature = "test")))]
 fn test_protocol_override_active() -> bool {
     false
 }
@@ -145,17 +145,17 @@ fn scrollback_inline_overlay_active_for_brand(
 
 /// Set a per-thread protocol override for tests. Returns a guard that
 /// clears it on drop.
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(any(test, feature = "test"))]
 pub fn set_protocol_for_test(p: GraphicsProtocol) -> TestProtocolGuard {
     TEST_PROTOCOL_OVERRIDE.with(|c| c.set(Some(p)));
     TestProtocolGuard
 }
 
 /// RAII guard that clears the test protocol override on drop.
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(any(test, feature = "test"))]
 pub struct TestProtocolGuard;
 
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(any(test, feature = "test"))]
 impl Drop for TestProtocolGuard {
     fn drop(&mut self) {
         TEST_PROTOCOL_OVERRIDE.with(|c| c.set(None));

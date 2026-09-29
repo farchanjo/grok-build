@@ -630,9 +630,7 @@ pub fn run_eval_suite_with_arm(
     }
     let all_passed = !cancelled && stable && results.values().all(|r| r.passed);
     let any_failed = results.values().any(|r| !r.passed);
-    let status = if cancelled {
-        SkillHealthStatus::Untested
-    } else if results.is_empty() {
+    let status = if cancelled || results.is_empty() {
         SkillHealthStatus::Untested
     } else if !stable || any_failed {
         SkillHealthStatus::Failed

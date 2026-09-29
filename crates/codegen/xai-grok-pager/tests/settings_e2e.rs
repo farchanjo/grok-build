@@ -1970,7 +1970,7 @@ fn render_with_filter_active_and_small_viewport_clamps_scroll() {
     );
     let visible = s.filtered_indices().len();
     assert!(
-        s.scroll_offset <= visible.saturating_sub(1).max(0),
+        s.scroll_offset <= visible.saturating_sub(1),
         "scroll_offset ({}) must be within filtered_indices bounds ({})",
         s.scroll_offset,
         visible
@@ -8572,7 +8572,7 @@ fn compaction_jev_enabled_is_off_by_default_shell_owned_bool() {
     assert_eq!(meta.label, "Jev-guided pruning");
     match &meta.kind {
         SettingKind::Bool { default } => {
-            assert!(*default == false, "compaction_jev_enabled must default OFF")
+            assert!(!*default, "compaction_jev_enabled must default OFF")
         }
         other => panic!("compaction_jev_enabled must be Bool, got {other:?}"),
     }

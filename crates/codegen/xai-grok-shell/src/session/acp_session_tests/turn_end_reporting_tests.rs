@@ -4,10 +4,11 @@ use super::support::*;
 use super::turn_end_hooks::{ReportOutcome, TurnEnd, TurnEndQueue};
 use super::turn_report_slot::{CommitOutcome, TurnReportState};
 use super::*;
+use std::rc::Rc;
 use xai_grok_hooks::event::{HookEventName, StopCancelledReason, StopFailureKind};
 
 struct Harness {
-    actor: Arc<SessionActor>,
+    actor: Rc<SessionActor>,
     gateway: tokio::sync::mpsc::UnboundedReceiver<xai_acp_lib::AcpClientMessage>,
     queue: Option<TurnEndQueue>,
 }
@@ -17,7 +18,7 @@ impl Harness {
         let (gateway_tx, gateway) = tokio::sync::mpsc::unbounded_channel();
         let (persistence_tx, mut persistence) = tokio::sync::mpsc::unbounded_channel();
         tokio::task::spawn_local(async move { while persistence.recv().await.is_some() {} });
-        let actor = Arc::new(create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await);
+        let actor = Rc::new(create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await);
         Self {
             queue: Some(TurnEndQueue::spawn(actor.clone())),
             actor,

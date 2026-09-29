@@ -91,11 +91,11 @@ impl AssignedMetaOwner {
 pub(crate) enum Lookup {
     Missing,
     LegacyUnassigned {
-        meta: SubagentMeta,
+        meta: Box<SubagentMeta>,
     },
     Assigned {
-        meta: SubagentMeta,
-        owner: AssignedMetaOwner,
+        meta: Box<SubagentMeta>,
+        owner: Box<AssignedMetaOwner>,
     },
 }
 
@@ -209,6 +209,7 @@ pub(crate) fn update_expected(
     )
 }
 
+#[allow(dead_code)]
 pub(crate) fn replace(
     parent_session_dir: &Path,
     subagent_id: &str,
@@ -268,11 +269,11 @@ pub(crate) fn lookup(parent_session_dir: &Path, subagent_id: &str) -> io::Result
                 })?;
             validate_assigned(subagent_id, &meta, &identity)?;
             Ok(Lookup::Assigned {
-                meta,
-                owner: AssignedMetaOwner {
+                meta: Box::new(meta),
+                owner: Box::new(AssignedMetaOwner {
                     owner_generation,
                     identity,
-                },
+                }),
             })
         }
     }

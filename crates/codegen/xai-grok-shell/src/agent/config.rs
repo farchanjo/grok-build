@@ -4007,10 +4007,7 @@ fn warn_budget_above_ceiling(model_key: &str, user_max: Option<u32>, ceiling: Op
 /// Guard-rail predicate: a user budget above a known ceiling for the same
 /// model. Pure so the rule is unit-testable without capturing a log event.
 fn budget_exceeds_ceiling(user_max: Option<u32>, ceiling: Option<u32>) -> bool {
-    match (user_max, ceiling) {
-        (Some(user_max), Some(ceiling)) if user_max > ceiling => true,
-        _ => false,
-    }
+    matches!((user_max, ceiling), (Some(user_max), Some(ceiling)) if user_max > ceiling)
 }
 
 /// Assemble the final model map. Priority (highest wins):
@@ -4162,16 +4159,16 @@ pub fn resolve_model_list(
     }
     {
         let default_cw = DEFAULT_CONTEXT_WINDOW;
-        let donors: std::collections::HashMap<
-            String,
-            (
-                std::num::NonZeroU64,
-                ApiBackend,
-                Option<bool>,
-                Option<bool>,
-                Option<bool>,
-            ),
-        > = resolved
+        /// Per-model donor row: `(context window, backend, plus three
+        /// capability flags)` gathered from sibling model entries.
+        type DonorRow = (
+            std::num::NonZeroU64,
+            ApiBackend,
+            Option<bool>,
+            Option<bool>,
+            Option<bool>,
+        );
+        let donors: std::collections::HashMap<String, DonorRow> = resolved
             .values()
             .filter(|e| {
                 e.info.context_window.get() != default_cw
@@ -7414,7 +7411,7 @@ mod tests {
             tools: Some(vec!["read_file".into()]),
             ..Default::default()
         };
-        let mut cases = vec![(AgentDefinition::default_grok_build(), true)];
+        let cases = vec![(AgentDefinition::default_grok_build(), true)];
         for (mut definition, expected_injection) in cases {
             overrides.apply_to_definition(&mut definition);
             assert_eq!(definition.tools, vec!["read_file".to_string()]);
@@ -10315,7 +10312,7 @@ reasoning_effort = "low"
         );
         // When installed into config (with Anthropic configured), the flag
         // lands on ConfigModelOverride.
-        let mut override_entry = ConfigModelOverride {
+        let override_entry = ConfigModelOverride {
             supports_native_schema: sonnet.supports_native_schema,
             supports_strict_tools: sonnet.supports_strict_tools,
             supports_image_input: None,

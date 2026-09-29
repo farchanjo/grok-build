@@ -1,9 +1,15 @@
 [package]
 name = "xai-ratatui-inline"
 version = "0.1.0"
+description = "Inline (non-alt-screen) ratatui backend with scrollback and resize handling."
 edition.workspace = true
 license = "Apache-2.0"
 authors = ["xAI"]
+
+repository.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
 
 [dependencies]
 # ANSI escape parsing for the line splitter (production). Same VTE-style

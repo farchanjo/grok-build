@@ -16,6 +16,7 @@
 use super::support::*;
 use super::*;
 use crate::agent::config::{LazinessDetectorPerModelConfig, ModelInfo};
+use std::rc::Rc;
 
 /// Build a minimal `ModelEntry` configured for laziness detection
 /// with the supplied opt-in flags. Uses `ModelInfo::fallback`
@@ -54,7 +55,7 @@ fn detector_entry(
 /// the file outlives the actor).
 async fn make_laziness_actor(
     detector: LazinessDetectorPerModelConfig,
-) -> (Arc<SessionActor>, tempfile::TempDir) {
+) -> (Rc<SessionActor>, tempfile::TempDir) {
     let tmp = tempfile::TempDir::new().expect("tempdir");
     let (gateway_tx, _gateway_rx) =
         tokio::sync::mpsc::unbounded_channel::<xai_acp_lib::AcpClientMessage>();
@@ -73,7 +74,7 @@ async fn make_laziness_actor(
     actor
         .models_manager
         .set_current_model_id(acp::ModelId::new("test-laziness-model"));
-    (Arc::new(actor), tmp)
+    (Rc::new(actor), tmp)
 }
 
 fn events_log(tmp: &tempfile::TempDir) -> String {
@@ -103,7 +104,7 @@ async fn disabled_detector_is_a_no_op() {
             })
             .await;
             SessionActor::maybe_fire_laziness_check(actor.clone()).await;
-            drop(Arc::try_unwrap(actor).ok().unwrap()); // flush events.jsonl
+            drop(Rc::try_unwrap(actor).ok().unwrap()); // flush events.jsonl
             let log = events_log(&tmp);
             // Tightened to a single substring check so
             // a future `laziness_nudge_fired` (or any other
@@ -142,7 +143,7 @@ async fn user_input_bump_during_idle_wait_aborts_with_user_input() {
             });
             SessionActor::maybe_fire_laziness_check(actor.clone()).await;
             bump_task.await.unwrap();
-            drop(Arc::try_unwrap(actor).ok().unwrap());
+            drop(Rc::try_unwrap(actor).ok().unwrap());
             let log = events_log(&tmp);
             assert!(
                 has_event_with(&log, "laziness_classifier_aborted", |v| v["reason"]
@@ -176,7 +177,7 @@ async fn model_switch_during_idle_wait_aborts_with_model_switch() {
             });
             SessionActor::maybe_fire_laziness_check(actor.clone()).await;
             switch_task.await.unwrap();
-            drop(Arc::try_unwrap(actor).ok().unwrap());
+            drop(Rc::try_unwrap(actor).ok().unwrap());
             let log = events_log(&tmp);
             assert!(
                 has_event_with(&log, "laziness_classifier_aborted", |v| v["reason"]
@@ -246,7 +247,7 @@ async fn turn_start_ms_chain_feeds_turn_elapsed_seconds_helper() {
                 (4..=15).contains(&elapsed),
                 "elapsed ~5 s tolerant range, got {elapsed}",
             );
-            drop(Arc::try_unwrap(actor).ok().unwrap());
+            drop(Rc::try_unwrap(actor).ok().unwrap());
         })
         .await;
 }
@@ -274,7 +275,7 @@ async fn sampler_error_aborts_with_classifier_error() {
                 let state = actor.state.lock().await;
                 (state.nudges_used_this_session, state.pending_inputs.len())
             };
-            drop(Arc::try_unwrap(actor).ok().unwrap());
+            drop(Rc::try_unwrap(actor).ok().unwrap());
             assert_eq!(nudges, 0, "no nudge on sampler error");
             // Invisibility contract: the classifier must NEVER
             // push a synthetic InputItem into `pending_inputs`,
@@ -350,7 +351,7 @@ async fn idle_recheck_after_sleep_short_circuits_silently() {
             SessionActor::maybe_fire_laziness_check(actor.clone()).await;
             poison_task.await.unwrap();
             let nudges = actor.state.lock().await.nudges_used_this_session;
-            drop(Arc::try_unwrap(actor).ok().unwrap());
+            drop(Rc::try_unwrap(actor).ok().unwrap());
             assert_eq!(nudges, 0, "no state mutation on idle re-check failure");
             let log = events_log(&tmp);
             // The re-check failure is a silent return (the
@@ -473,7 +474,7 @@ async fn emit_laziness_abort_writes_each_reason_with_the_correct_const() {
             for reason in LazinessAbortReason::all() {
                 actor.emit_laziness_abort(*reason);
             }
-            drop(Arc::try_unwrap(actor).ok().unwrap());
+            drop(Rc::try_unwrap(actor).ok().unwrap());
             let log = events_log(&tmp);
             for reason in LazinessAbortReason::all() {
                 let expected = reason.as_const_str();
@@ -542,7 +543,7 @@ fn arm_debug_log(actor: &mut SessionActor, path: std::path::PathBuf) {
 /// Returns `(actor, tmp, log_path)`.
 async fn make_debug_actor(
     detector: LazinessDetectorPerModelConfig,
-) -> (Arc<SessionActor>, tempfile::TempDir, std::path::PathBuf) {
+) -> (Rc<SessionActor>, tempfile::TempDir, std::path::PathBuf) {
     let tmp = tempfile::TempDir::new().expect("tempdir");
     let (gateway_tx, _gateway_rx) =
         tokio::sync::mpsc::unbounded_channel::<xai_acp_lib::AcpClientMessage>();
@@ -560,7 +561,7 @@ async fn make_debug_actor(
         .set_current_model_id(acp::ModelId::new("test-laziness-model"));
     let log_path = tmp.path().join("debug.jsonl");
     arm_debug_log(&mut actor, log_path.clone());
-    (Arc::new(actor), tmp, log_path)
+    (Rc::new(actor), tmp, log_path)
 }
 
 /// Dev-flag contract gate 1: `cfg.enabled = false` MUST NOT
@@ -588,7 +589,7 @@ async fn debug_mode_fires_classifier_even_with_per_model_enable_false() {
                 let state = actor.state.lock().await;
                 (state.nudges_used_this_session, state.pending_inputs.len())
             };
-            drop(Arc::try_unwrap(actor).ok().unwrap());
+            drop(Rc::try_unwrap(actor).ok().unwrap());
 
             let contents = std::fs::read_to_string(&log_path)
                 .expect("debug log file must exist after debug-mode fire");
@@ -636,7 +637,7 @@ async fn debug_mode_bypasses_idle_wait() {
             let started = std::time::Instant::now();
             SessionActor::maybe_fire_laziness_check(actor.clone()).await;
             let elapsed = started.elapsed();
-            drop(Arc::try_unwrap(actor).ok().unwrap());
+            drop(Rc::try_unwrap(actor).ok().unwrap());
             // 2s ceiling: the bypass path still does a chat-state
             // MPSC roundtrip, two tool-bridge reads,
             // `prepare_chat_completion` + JWT refresh, a TCP
@@ -684,7 +685,7 @@ async fn debug_mode_writes_log_and_does_not_inject_synthetic_turn() {
             .await;
             SessionActor::maybe_fire_laziness_check(actor.clone()).await;
             let pending = actor.state.lock().await.pending_inputs.len();
-            drop(Arc::try_unwrap(actor).ok().unwrap());
+            drop(Rc::try_unwrap(actor).ok().unwrap());
             assert_eq!(
                 pending, 0,
                 "no synthetic InputItem may be enqueued, even with cap available",

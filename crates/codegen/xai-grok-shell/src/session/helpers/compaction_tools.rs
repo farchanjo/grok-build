@@ -25,8 +25,6 @@
 //! exploration and lets the summary proceed from the history alone. A broken
 //! resolver must never turn into a failed compaction.
 
-use std::sync::Arc;
-
 use async_trait::async_trait;
 use xai_grok_inference::InferenceConfig;
 use xai_grok_inference_types::{ConversationItem, ToolCall, ToolSpec};
@@ -315,6 +313,7 @@ fn truncate_chars(text: &str, max_chars: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
 
     fn spec(name: &str) -> ToolSpec {
         ToolSpec {
@@ -329,7 +328,7 @@ mod tests {
     /// summarizer is never offered a tool the session would refuse to run.
     #[test]
     fn resolver_advertises_only_allowlisted_read_only_tools() {
-        let specs = vec![
+        let specs = [
             spec("read_file"),
             spec("grep"),
             spec("list_dir"),

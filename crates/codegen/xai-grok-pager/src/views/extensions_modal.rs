@@ -3246,13 +3246,13 @@ pub fn render_extensions_modal(
                             }));
                         }
                     }
-                    if let Some(anchor) = state.skills_anchor_identity.take() {
-                        if let Some(pos) = entry_data_indices.iter().position(|idx| {
+                    if let Some(anchor) = state.skills_anchor_identity.take()
+                        && let Some(pos) = entry_data_indices.iter().position(|idx| {
                             idx.and_then(|si| snapshot.rows.get(si))
                                 .is_some_and(|row| row.identity == anchor)
-                        }) {
-                            state.picker_state.selected = pos;
-                        }
+                        })
+                    {
+                        state.picker_state.selected = pos;
                     }
                 } else if let TabDataState::Error(ref msg) = state.skills_data {
                     entry_labels.push(format!("Error: {}", msg));

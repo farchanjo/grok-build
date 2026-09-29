@@ -72,7 +72,7 @@ pub(crate) fn execute(
             repair,
         } => {
             let tx = acp_tx.clone();
-            tasks.spawn(run_provider_operation(agent_id, operation, repair, tx));
+            tasks.spawn(run_provider_operation(agent_id, *operation, repair, tx));
         }
         Effect::SaveModelParam {
             agent_id,
@@ -100,10 +100,7 @@ pub(crate) fn execute(
                             )
                         }
                         crate::config_toml_edit::ModelParam::MaxCompletionTokens => {
-                            let value = match value {
-                                Some(v) => Some(u64::try_from(v as i64).unwrap_or(0)),
-                                None => None,
-                            };
+                            let value = value.map(|v| u64::try_from(v as i64).unwrap_or(0));
                             crate::config_toml_edit::write_model_param_u64(
                                 &model_id,
                                 crate::config_toml_edit::ModelParam::MaxCompletionTokens,
@@ -5506,7 +5503,7 @@ async fn run_provider_operation(
         ProviderOperation::LoadEditorDetail { provider_id } => {
             let svc = xai_grok_shell::provider_registry::ProviderManagementService::from_grok_home();
             management = Some(match svc.detail(&provider_id) {
-                Ok(d) => actions::ProviderManagementResult::Detail(d),
+                Ok(d) => actions::ProviderManagementResult::Detail(Box::new(d)),
                 Err(e) => actions::ProviderManagementResult::Error(e),
             });
             (
@@ -5559,7 +5556,7 @@ async fn run_provider_operation(
                 ProviderSaveRequest {
                     id: id.clone(),
                     expected_generation: RegistryGeneration(expected_generation),
-                    patch,
+                    patch: *patch,
                 },
                 &credential_update,
                 app.as_deref(),
@@ -5935,7 +5932,7 @@ async fn run_retrieval_operation(
     let svc = RetrievalManagementService::from_grok_home();
     let result = match operation {
         RetrievalOperation::LoadSnapshot => match svc.graph_snapshot() {
-            Ok(snap) => RetrievalManagementResult::Snapshot(snap),
+            Ok(snap) => RetrievalManagementResult::Snapshot(Box::new(snap)),
             Err(e) => RetrievalManagementResult::Error(e),
         },
         RetrievalOperation::Preview {
@@ -5948,7 +5945,7 @@ async fn run_retrieval_operation(
             | RetrievalCommand::ValidateAndReload
             | RetrievalCommand::DismissConflictReload
             | RetrievalCommand::DismissConflictKeepDraft => match svc.graph_snapshot() {
-                Ok(snap) => RetrievalManagementResult::Snapshot(snap),
+                Ok(snap) => RetrievalManagementResult::Snapshot(Box::new(snap)),
                 Err(e) => RetrievalManagementResult::Error(e),
             },
             RetrievalCommand::ValidatePreview {
@@ -5968,39 +5965,39 @@ async fn run_retrieval_operation(
                 expected_generation,
                 confirm_memory_reindex,
                 operation_id,
-            } => RetrievalManagementResult::Mutation(svc.upsert_embedding(UpsertEmbeddingRequest {
+            } => RetrievalManagementResult::Mutation(Box::new(svc.upsert_embedding(UpsertEmbeddingRequest {
                 expected_generation,
                 id,
                 config,
                 confirm_memory_reindex,
                 operation_id: Some(operation_id),
-            })),
+            }))),
             RetrievalCommand::UpsertReranker {
                 id,
                 config,
                 expected_generation,
                 confirm_memory_reindex,
                 operation_id,
-            } => RetrievalManagementResult::Mutation(svc.upsert_reranker(UpsertRerankerRequest {
+            } => RetrievalManagementResult::Mutation(Box::new(svc.upsert_reranker(UpsertRerankerRequest {
                 expected_generation,
                 id,
                 config,
                 confirm_memory_reindex,
                 operation_id: Some(operation_id),
-            })),
+            }))),
             RetrievalCommand::UpsertProfile {
                 id,
                 config,
                 expected_generation,
                 confirm_memory_reindex,
                 operation_id,
-            } => RetrievalManagementResult::Mutation(svc.upsert_profile(UpsertProfileRequest {
+            } => RetrievalManagementResult::Mutation(Box::new(svc.upsert_profile(UpsertProfileRequest {
                 expected_generation,
                 id,
                 config,
                 confirm_memory_reindex,
                 operation_id: Some(operation_id),
-            })),
+            }))),
             RetrievalCommand::CloneEntity {
                 kind,
                 source_id,
@@ -6008,51 +6005,51 @@ async fn run_retrieval_operation(
                 expected_generation,
                 confirm_memory_reindex,
                 operation_id,
-            } => RetrievalManagementResult::Mutation(svc.clone_entity(CloneRetrievalEntityRequest {
+            } => RetrievalManagementResult::Mutation(Box::new(svc.clone_entity(CloneRetrievalEntityRequest {
                 expected_generation,
                 kind,
                 source_id,
                 new_id,
                 confirm_memory_reindex,
                 operation_id: Some(operation_id),
-            })),
+            }))),
             RetrievalCommand::DeleteEntity {
                 kind,
                 id,
                 expected_generation,
                 confirm_memory_reindex,
                 operation_id,
-            } => RetrievalManagementResult::Mutation(svc.delete_entity(DeleteRetrievalEntityRequest {
+            } => RetrievalManagementResult::Mutation(Box::new(svc.delete_entity(DeleteRetrievalEntityRequest {
                 expected_generation,
                 kind,
                 id,
                 confirm_memory_reindex,
                 operation_id: Some(operation_id),
-            })),
+            }))),
             RetrievalCommand::Reorder {
                 kind,
                 ordered_ids,
                 expected_generation,
                 confirm_memory_reindex,
                 operation_id,
-            } => RetrievalManagementResult::Mutation(svc.reorder(ReorderRetrievalRequest {
+            } => RetrievalManagementResult::Mutation(Box::new(svc.reorder(ReorderRetrievalRequest {
                 expected_generation,
                 kind,
                 ordered_ids,
                 confirm_memory_reindex,
                 operation_id: Some(operation_id),
-            })),
+            }))),
             RetrievalCommand::SavePrime {
                 prime,
                 expected_generation,
                 confirm_memory_reindex,
                 operation_id,
-            } => RetrievalManagementResult::Mutation(svc.save_prime(
+            } => RetrievalManagementResult::Mutation(Box::new(svc.save_prime(
                 expected_generation,
                 prime,
                 confirm_memory_reindex,
                 Some(operation_id),
-            )),
+            ))),
             RetrievalCommand::SaveMemoryProfile {
                 profile,
                 mode,
@@ -6068,14 +6065,14 @@ async fn run_retrieval_operation(
                     &mode_str,
                     vector_store.as_deref(),
                 );
-                RetrievalManagementResult::Mutation(svc.save_memory_profile(
+                RetrievalManagementResult::Mutation(Box::new(svc.save_memory_profile(
                     expected_generation,
                     profile,
                     mode,
                     vector_store,
                     confirm_memory_reindex,
                     Some(operation_id),
-                ))
+                )))
             }
             // Confirm without pending draft is a programming error; fail closed.
             RetrievalCommand::ConfirmMemoryReindex => RetrievalManagementResult::Error(

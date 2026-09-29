@@ -343,13 +343,15 @@ fn merge_call_runs(history: &[Entry], pinned: &dyn Fn(&Entry) -> bool) -> Vec<En
     };
     let mut merged: Vec<Entry> = Vec::new();
     for entry in history {
-        if let Some(previous) = merged.last_mut() {
-            if foldable(previous) && foldable(entry) && previous.role == entry.role {
-                let mut combined = previous.calls.take().unwrap_or_default();
-                combined.extend(entry.calls.clone().unwrap_or_default());
-                previous.calls = Some(combined);
-                continue;
-            }
+        if let Some(previous) = merged.last_mut()
+            && foldable(previous)
+            && foldable(entry)
+            && previous.role == entry.role
+        {
+            let mut combined = previous.calls.take().unwrap_or_default();
+            combined.extend(entry.calls.clone().unwrap_or_default());
+            previous.calls = Some(combined);
+            continue;
         }
         merged.push(entry.clone());
     }
@@ -425,11 +427,11 @@ pub fn fit_state(
             .collect();
         unpinned.into_iter().chain(pinned_idx).collect()
     };
-    let mut shrink = |history: &mut Vec<Entry>,
-                      per_entry: &mut Vec<usize>,
-                      tokens: &mut usize,
-                      index: usize,
-                      change: &dyn Fn(&mut Entry)| {
+    let shrink = |history: &mut Vec<Entry>,
+                  per_entry: &mut Vec<usize>,
+                  tokens: &mut usize,
+                  index: usize,
+                  change: &dyn Fn(&mut Entry)| {
         let Some(entry) = history.get_mut(index) else {
             return;
         };

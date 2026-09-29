@@ -1386,10 +1386,10 @@ fn write_params_with_session_id(
     let params = serde_json::from_str::<RawSessionIdPeek<'_>>(raw_params)
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
     let range = raw_subslice_range(raw_params, params.session_id.get())?;
-    writer.write_all(raw_params[..range.start].as_bytes())?;
+    writer.write_all(&raw_params.as_bytes()[..range.start])?;
     serde_json::to_writer(writer.by_ref(), target_session_id)
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
-    writer.write_all(raw_params[range.end..].as_bytes())
+    writer.write_all(&raw_params.as_bytes()[range.end..])
 }
 
 #[derive(Default)]
@@ -1456,13 +1456,14 @@ impl<'a> ForkUpdateWriter<'a> {
         if let Some(raw_params) = envelope.as_ref().and_then(|value| value.params) {
             let params_range = raw_subslice_range(line, raw_params.get())?;
             self.writer
-                .write_all(line[..params_range.start].as_bytes())?;
+                .write_all(&line.as_bytes()[..params_range.start])?;
             write_params_with_session_id(
                 &mut self.writer,
                 raw_params.get(),
                 self.target_session_id,
             )?;
-            self.writer.write_all(line[params_range.end..].as_bytes())?;
+            self.writer
+                .write_all(&line.as_bytes()[params_range.end..])?;
         } else {
             let timestamp = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -1540,8 +1541,7 @@ fn build_rewind_filtered_scratch(
                 scratch.set_len(truncate_to)?;
                 scratch.seek(io::SeekFrom::Start(truncate_to))?;
                 let retained_offsets = (target as u64)
-                    .checked_mul(8)
-                    .unwrap_or(u64::MAX)
+                    .saturating_mul(8)
                     .min(prompt_offsets.metadata()?.len());
                 prompt_offsets.set_len(retained_offsets)?;
                 prompt_offsets.seek(io::SeekFrom::End(0))?;

@@ -6,7 +6,6 @@
 
 // Illustrative mock structs whose fields exist to model memory layout; not all
 // are read back, which is expected for a microbenchmark.
-#![allow(dead_code)]
 
 use std::sync::Arc;
 use std::time::Instant;

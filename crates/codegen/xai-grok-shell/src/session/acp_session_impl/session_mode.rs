@@ -119,14 +119,13 @@ impl SessionActor {
                 tool_configs = def.tool_config.tools.len(),
                 "Resolved AgentDefinition for session mode"
             );
-            self.agent
-                .borrow()
-                .update_policies_from_definition(def)
-                .await;
+            let agent = self.agent.borrow().clone();
+            agent.update_policies_from_definition(def).await;
             *self.active_agent_type.lock() = Some(def.name.clone());
         }
         if let Some(ref def) = agent_def {
-            let new_prompt = self.agent.borrow().render_prompt_for_definition(def).await;
+            let agent = self.agent.borrow().clone();
+            let new_prompt = agent.render_prompt_for_definition(def).await;
             let mut conversation = self.chat_state_handle.get_conversation().await;
             for item in conversation.iter_mut() {
                 if let ConversationItem::System(sys) = item {
@@ -344,9 +343,7 @@ impl SessionActor {
             "plan_path": plan_path.display().to_string(),
             "plan_has_content": plan_has_content,
         });
-        self.agent
-            .borrow()
-            .tool_bridge()
+        self.tool_bridge_owned()
             .render_prompt(template, &extra)
             .await
     }

@@ -8,6 +8,10 @@
 //! excluded) so tests can assert how many downloads actually happened, and
 //! supports a "slow" mode that widens the race window so concurrent
 //! installers genuinely overlap in flight.
+// Every integration binary that includes this module compiles its own copy
+// and exercises a subset of the helpers, so per-target `dead_code` is
+// structural here rather than a smell.
+#![allow(dead_code)]
 
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};

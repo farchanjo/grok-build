@@ -1,10 +1,3 @@
-#![allow(
-    unused_imports,
-    unused_variables,
-    unused_mut,
-    unreachable_code,
-    dead_code
-)]
 //! OS-level sandboxing for Grok Build via [nono](https://crates.io/crates/nono).
 //!
 //! Applied once at process startup. Covers in-process `tokio::fs` calls
@@ -66,8 +59,10 @@ struct GlobalSandboxState {
     applied: bool,
     restrict_network_at_known_linux_launches: bool,
     /// Kernel/FS mechanism that was successfully applied (if any).
+    #[allow(dead_code)]
     mechanism: SandboxMechanism,
     /// Whether descendants inherit the applied FS sandbox contractually.
+    #[allow(dead_code)]
     descendants_inherit_fs: bool,
 }
 fn restrict_network_at_known_linux_launches(applied: bool, configured: bool) -> bool {
@@ -219,14 +214,14 @@ pub fn compute_child_sandbox_posture(
         notes.push(
             "macOS Seatbelt applied to process; descendants inherit the Seatbelt profile".into(),
         );
-        return ChildSandboxPosture {
+        ChildSandboxPosture {
             parent_applied: true,
             profile: profile.map(|s| s.to_owned()),
             mechanism: SandboxMechanism::MacOsSeatbelt,
             descendants_inherit_fs: true,
             process_network_open_for_api: true,
             notes,
-        };
+        }
     }
     #[cfg(target_os = "linux")]
     {

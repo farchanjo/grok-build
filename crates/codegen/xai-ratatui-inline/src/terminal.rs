@@ -2,7 +2,6 @@
 // Upstream: https://github.com/ratatui/ratatui — Copyright (c) The Ratatui Developers.
 // Modified for inline viewport support. See ../NOTICE and repository THIRD-PARTY-NOTICES.
 //
-#![allow(clippy::collapsible_if)]
 
 use std::io::{self, Write};
 use std::sync::Arc;

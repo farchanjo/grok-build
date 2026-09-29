@@ -13,7 +13,7 @@ integration tests, `xai-grok-pager-pty-harness` (`ContentController`), and
 
 How-to-test discovery lives with the pager PTY harness crate
 (`xai-grok-pager-pty-harness`). This file is the API reference for the shared
-test-support surface.
+`test` feature surface.
 
 ## Module map
 

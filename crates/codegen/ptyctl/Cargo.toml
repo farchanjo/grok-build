@@ -6,6 +6,11 @@ edition.workspace = true
 description = "Headless PTY controller built on alacritty_terminal"
 publish = false
 
+repository.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
 [dependencies]
 alacritty_terminal = { workspace = true }
 portable-pty = { workspace = true }

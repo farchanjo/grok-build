@@ -151,7 +151,7 @@ mod tests {
     fn gate_d_default_enabled_and_kill_switch() {
         with_multi_account_rollout_env(|| {
             unsafe { std::env::remove_var(MULTI_ACCOUNT_ROLLOUT_ENV) };
-            assert!(MULTI_ACCOUNT_ROLLOUT_DEFAULT_ENABLED);
+            const { assert!(MULTI_ACCOUNT_ROLLOUT_DEFAULT_ENABLED) };
             assert!(multi_account_rollout_enabled());
             for off in ["0", "false", "off", "no"] {
                 unsafe { std::env::set_var(MULTI_ACCOUNT_ROLLOUT_ENV, off) };

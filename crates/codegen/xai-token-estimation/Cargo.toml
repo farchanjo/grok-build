@@ -5,6 +5,11 @@ version = "0.1.0"
 edition.workspace = true
 description = "Pure shared token-estimation primitives."
 
+repository.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
 [dependencies]
 
 [lints]

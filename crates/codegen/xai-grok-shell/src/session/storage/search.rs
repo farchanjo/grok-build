@@ -547,9 +547,9 @@ async fn flush_ready(
 #[derive(Debug)]
 enum UpsertOutcome {
     /// Content was indexed (new or changed).
-    Indexed { bytes_read: u64 },
+    Indexed,
     /// Content hash matched existing index entry — no update needed.
-    Unchanged { bytes_read: u64 },
+    Unchanged,
     /// No updates file available (storage backend doesn't expose paths).
     NoContent,
 }
@@ -608,9 +608,9 @@ async fn upsert_session(
                 .upsert_doc_incremental(&doc)
                 .map_err(sqlite_to_io_error)?
             {
-                Ok(UpsertOutcome::Indexed { bytes_read })
+                Ok(UpsertOutcome::Indexed)
             } else {
-                Ok(UpsertOutcome::Unchanged { bytes_read })
+                Ok(UpsertOutcome::Unchanged)
             }
         })
         .unwrap_or(Ok(UpsertOutcome::NoContent))

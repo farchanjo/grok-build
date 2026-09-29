@@ -1056,7 +1056,7 @@ mod tests {
         let git_worktrees = repo.join(".git").join("worktrees");
         let entries = std::fs::read_dir(&git_worktrees).ok()?;
         let target_git = worktree_path.join(".git");
-        let target_canon = target_git.canonicalize().ok();
+        let target_canon = dunce::canonicalize(&target_git).ok();
         for entry in entries.flatten() {
             let registration = entry.path();
             let Ok(backlink) = std::fs::read_to_string(registration.join("gitdir")) else {
@@ -1072,7 +1072,7 @@ mod tests {
                 || target_canon
                     .as_ref()
                     .is_some_and(|canon| backlink_abs == *canon)
-                || target_canon.as_ref() == backlink_abs.canonicalize().ok().as_ref()
+                || target_canon.as_ref() == dunce::canonicalize(&backlink_abs).ok().as_ref()
             {
                 return Some(registration);
             }

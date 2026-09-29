@@ -479,15 +479,12 @@ fn apply_language_layer_merge(merged: &mut toml::Value, layers: &ConfigLayers) {
         language.insert("validate_prose".to_owned(), toml::Value::Boolean(true));
     }
 
-    match merged {
-        toml::Value::Table(table) => {
-            if language.is_empty() {
-                table.remove("language");
-            } else {
-                table.insert("language".to_owned(), toml::Value::Table(language));
-            }
+    if let toml::Value::Table(table) = merged {
+        if language.is_empty() {
+            table.remove("language");
+        } else {
+            table.insert("language".to_owned(), toml::Value::Table(language));
         }
-        _ => {}
     }
 }
 

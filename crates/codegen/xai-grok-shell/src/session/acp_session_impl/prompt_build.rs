@@ -1,7 +1,6 @@
 //! User-message construction concern for `SessionActor`: templated prefix
 //! building, rules partitioning, large-prompt offload/truncation, and image
 //! payload preparation.
-#![allow(clippy::items_after_test_module)]
 use super::*;
 /// Normalize a free-form name (e.g. an MCP server identifier) into a
 /// single safe filesystem segment.
@@ -522,7 +521,7 @@ impl SessionActor {
         use xai_grok_agent::prompt::user_message::UserMessageContext;
         self.wait_for_mcp_templated_prefix_ready(&template).await;
         let cwd_str = cwd.to_string_lossy().to_string();
-        let bridge = self.agent.borrow().tool_bridge().clone();
+        let bridge = self.tool_bridge_owned();
         let (vcs_root, vcs_status) = self.gather_vcs_for_prefix(cwd).await;
         let agents_files = read_agents_config_with_paths(&cwd_str, self.rebuild_spec.compat).await;
         let grok_home = xai_grok_config::grok_home();

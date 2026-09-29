@@ -861,33 +861,6 @@ impl SessionSearchIndex {
         Ok(owned)
     }
 
-    fn is_claim_owner(
-        &self,
-        now_unix: i64,
-        lease: Duration,
-        token: &str,
-    ) -> Result<bool, rusqlite::Error> {
-        self.db
-            .query_row(
-                &format!(
-                    "SELECT 1 FROM meta
-                     WHERE key = ?1
-                       AND {CLAIM_TOKEN_SQL} = ?2
-                       AND CAST(value AS INTEGER) > ?3
-                       AND CAST(value AS INTEGER) <= ?4"
-                ),
-                params![
-                    META_KEY_BOOTSTRAP_CLAIM,
-                    token,
-                    now_unix.saturating_sub(lease.as_secs() as i64),
-                    now_unix.saturating_add(lease.as_secs() as i64),
-                ],
-                |_| Ok(()),
-            )
-            .optional()
-            .map(|owner| owner.is_some())
-    }
-
     /// Prune under one immediate transaction. A stale claimant cannot delete
     /// rows based on an obsolete disk snapshot, and rows created, relocated,
     /// updated, or deleted incrementally after the claim snapshot are retained.

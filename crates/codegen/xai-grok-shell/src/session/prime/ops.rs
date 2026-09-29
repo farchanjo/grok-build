@@ -21,9 +21,7 @@ use xai_grok_memory::CollectionKind;
 use xai_grok_memory::embedding::EmbeddingProvider;
 use xai_grok_tools::implementations::skills::strict::SKILLS_API_VERSION;
 
-use super::index::{
-    FrozenEmbeddingPin, PinnedServiceEmbedder, PrimeIndexError, PrimeIndexHandle, prime_index_for,
-};
+use super::index::{PinnedServiceEmbedder, PrimeIndexError, PrimeIndexHandle, prime_index_for};
 use super::notify;
 use crate::retrieval::registry_for_home;
 
@@ -280,6 +278,7 @@ impl VersionError {
         }
     }
 
+    #[allow(dead_code)]
     fn code(self) -> &'static str {
         match self {
             Self::Missing => "version_missing",
@@ -354,7 +353,7 @@ fn extract_confirm_required_token(raw: &str) -> Option<&str> {
         .split(|c: char| c.is_whitespace() || c.is_control())
         .next()
         .filter(|t| !t.is_empty())?;
-    let token = token.trim_end_matches(|c: char| matches!(c, '.' | ',' | ';' | ')' | '"' | '\''));
+    let token = token.trim_end_matches(['.', ',', ';', ')', '"', '\'']);
     if token == PRIME_FAILURE_CONFIRM_REQUIRED || token.starts_with("confirm_required:") {
         Some(token)
     } else {
@@ -384,7 +383,7 @@ pub fn confirm_required_display_route(raw: &str) -> Option<&str> {
     if rest.is_empty() || rest.chars().any(|c| c.is_control() || c.is_whitespace()) {
         return None;
     }
-    let rest = rest.trim_end_matches(|c: char| matches!(c, '.' | ',' | ';' | ')' | '"' | '\''));
+    let rest = rest.trim_end_matches(['.', ',', ';', ')', '"', '\'']);
     displayable_configured_route(Some(rest))
 }
 

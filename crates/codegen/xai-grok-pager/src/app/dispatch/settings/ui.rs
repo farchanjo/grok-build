@@ -233,7 +233,7 @@ pub(in crate::app::dispatch) fn dispatch_open_providers(app: &mut AppView) -> Ve
     // preserves those fields if the list result lands after a Refresh.
     effects.push(Effect::ProviderOperation {
         agent_id: id,
-        operation: crate::app::actions::ProviderOperation::LoadListSnapshot,
+        operation: Box::new(crate::app::actions::ProviderOperation::LoadListSnapshot),
         repair: None,
     });
     for provider in crate::views::providers_modal::ProviderKind::BUILTINS
@@ -242,7 +242,7 @@ pub(in crate::app::dispatch) fn dispatch_open_providers(app: &mut AppView) -> Ve
     {
         effects.push(Effect::ProviderOperation {
             agent_id: id,
-            operation: crate::app::actions::ProviderOperation::Refresh(provider),
+            operation: Box::new(crate::app::actions::ProviderOperation::Refresh(provider)),
             repair: None,
         });
     }
@@ -290,19 +290,18 @@ pub(in crate::app::dispatch) fn dispatch_open_retrieval_settings(app: &mut AppVi
         agent_id: id,
         operation: crate::app::actions::RetrievalOperation::LoadSnapshot,
     });
-    if app.prime_index.status {
-        if let Some(session_id) = app
+    if app.prime_index.status
+        && let Some(session_id) = app
             .agents
             .get(&id)
             .and_then(|a| a.session.session_id.clone())
-        {
-            effects.push(Effect::FetchPrimeIndexStatus {
-                agent_id: id,
-                session_id,
-                expected_generation: None,
-                expected_fingerprint: None,
-            });
-        }
+    {
+        effects.push(Effect::FetchPrimeIndexStatus {
+            agent_id: id,
+            session_id,
+            expected_generation: None,
+            expected_fingerprint: None,
+        });
     }
     effects
 }
@@ -541,7 +540,7 @@ pub(in crate::app::dispatch) fn dispatch_provider_command(
                         ProviderOperation::SaveEditor {
                             id,
                             expected_generation,
-                            patch,
+                            patch: Box::new(patch),
                             credential_update,
                             application_key,
                             admin_key,
@@ -652,7 +651,7 @@ pub(in crate::app::dispatch) fn dispatch_provider_command(
 
     vec![Effect::ProviderOperation {
         agent_id,
-        operation,
+        operation: Box::new(operation),
         repair,
     }]
 }

@@ -14,7 +14,6 @@ use crate::agent::provider_catalog::{
     CatalogAccountIdentity, CatalogCredential, CatalogFetchBounds, CatalogFetchSource,
     CatalogRefreshCoordinator, CatalogRefreshTarget, build_account_identity, fetch_openai_catalog,
     fetch_openrouter_catalog, load_cached_account, models_list_url_from_base,
-    parse_openai_models_body,
 };
 use crate::provider_registry::id::ProviderId;
 use crate::provider_registry::lifecycle::namespaced_model_id;
@@ -473,6 +472,7 @@ fn _source_marker() -> CatalogFetchSource {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agent::provider_catalog::parse_openai_models_body;
 
     #[test]
     fn extracts_ids_compat() {

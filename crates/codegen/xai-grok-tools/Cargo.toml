@@ -5,6 +5,11 @@ name = "xai-grok-tools"
 version = "0.1.220-alpha.4"
 description = "Grok tools library"
 
+repository.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
 [dependencies]
 anyhow = { workspace = true }
 arc-swap = { workspace = true }
@@ -106,8 +111,8 @@ windows = { workspace = true, features = ["Win32_Storage_FileSystem"] }
 
 [dev-dependencies]
 dirs = { workspace = true }
-# `test-support` exposes `assets::MockAssetStore` for the `asset_*` tool tests.
-xai-file-utils = { path = "../xai-file-utils", features = ["test-support"] }
+# The `test` feature exposes `assets::MockAssetStore` for the `asset_*` tool tests.
+xai-file-utils = { path = "../xai-file-utils", features = ["test"] }
 tokio = { workspace = true, features = ["test-util"] }
 tracing-subscriber = { workspace = true, features = ["fmt"] }
 wiremock = { workspace = true }

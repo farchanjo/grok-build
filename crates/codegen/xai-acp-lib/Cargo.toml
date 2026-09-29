@@ -2,7 +2,13 @@
 license = "Apache-2.0"
 name = "xai-acp-lib"
 version = "0.1.0"
+description = "ACP plumbing: typed message routing, line framing, and stdio bridges for the agent surfaces."
 edition.workspace = true
+
+repository.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
 
 [dependencies]
 agent-client-protocol = { workspace = true, features = ["unstable"] }

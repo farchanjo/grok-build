@@ -1923,7 +1923,8 @@ async fn handle_toggle(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
                 "The server {capitalized} can't be enabled due to an organization policy ({path}).",
             )));
         }
-        let server_config_resolved = match found {
+
+        match found {
             Some(s) => Some(s.server),
             None => {
                 // The gated catalog merge can legitimately miss a server the
@@ -1972,8 +1973,7 @@ async fn handle_toggle(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
                     }
                 }
             }
-        };
-        server_config_resolved
+        }
     } else if let Some(connector_id) = gateway_connector_id {
         handle
             .toggle_managed_gateway_tool(connector_id.to_string(), String::new(), false)

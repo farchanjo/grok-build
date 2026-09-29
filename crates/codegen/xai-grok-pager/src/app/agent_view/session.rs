@@ -587,10 +587,10 @@ impl AgentView {
         if let Some(pid) = self.loading_placeholder_id.take() {
             self.scrollback.remove_entry(pid);
         }
-        let dropped_heavy;
-        if success && reload.saw_replay {
+
+        let dropped_heavy = if success && reload.saw_replay {
             self.scrollback.end_batch();
-            dropped_heavy = true;
+            true
         } else if success {
             let tail = std::mem::replace(&mut self.scrollback, reload.scrollback);
             self.scrollback.append_entries_from(tail);
@@ -625,7 +625,7 @@ impl AgentView {
             if !reload.saw_todo_update {
                 self.todo = reload.todo;
             }
-            dropped_heavy = false;
+            false
         } else {
             let floor = self.scrollback.id_floor();
             let staging_generations = self.scrollback.invalidation_generations();
@@ -642,8 +642,8 @@ impl AgentView {
             self.last_seen_event_id = reload.last_seen_event_id;
             self.last_applied_event_seq = reload.last_applied_event_seq;
             self.last_applied_xai_event_seq = reload.last_applied_xai_event_seq;
-            dropped_heavy = true;
-        }
+            true
+        };
         self.session.loading_replay = false;
         self.session.prompt_history_loading = false;
         self.session.tracker.clear_user_echo_skip();

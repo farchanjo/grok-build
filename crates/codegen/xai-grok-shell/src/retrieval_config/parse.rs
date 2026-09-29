@@ -1015,12 +1015,8 @@ fn parse_memory_retrieval_profile(
     warnings: &mut Vec<ConfigWarning>,
 ) -> Option<String> {
     let mem = raw.get("memory")?;
-    let Some(table) = mem.as_table() else {
-        return None;
-    };
-    let Some(v) = table.get("retrieval_profile") else {
-        return None;
-    };
+    let table = mem.as_table()?;
+    let v = table.get("retrieval_profile")?;
     match v.as_str() {
         Some(s) => {
             let t = s.trim();

@@ -1,5 +1,3 @@
-#![allow(clippy::await_holding_refcell_ref)]
-#![allow(clippy::arc_with_non_send_sync)]
 //! Session actor implementation for the MVP ACP agent.
 //!
 //! Each session runs as an actor with its own chat history and tool context.
@@ -794,7 +792,7 @@ impl LastPrimeOutcome {
 #[derive(Debug)]
 pub(crate) enum PrimeAccounting {
     Unchanged,
-    Record(LastPrimeOutcome),
+    Record(Box<LastPrimeOutcome>),
 }
 
 /// Result of [`SessionActor::maybe_inject_prime_reminder`].
@@ -1606,7 +1604,7 @@ impl SessionActor {
     /// callers that need both gating and the wire payload should call
     /// once and pass the slice to `build_command_availability`.
     async fn registered_tool_names(&self) -> Vec<String> {
-        let bridge = self.agent.borrow().tool_bridge().clone();
+        let bridge = self.tool_bridge_owned();
         bridge
             .tool_definitions()
             .await
@@ -1671,7 +1669,7 @@ impl SessionActor {
     /// across `.await` would panic if anything on the suspended path
     /// did `self.agent.borrow_mut()`.
     fn tool_bridge_handle(&self) -> Arc<xai_grok_tools::bridge::ToolBridge> {
-        Arc::clone(self.agent.borrow().tool_bridge())
+        Arc::clone(&self.tool_bridge_owned())
     }
 
     /// Adopt validated routing, strategy, trigger, and band settings while

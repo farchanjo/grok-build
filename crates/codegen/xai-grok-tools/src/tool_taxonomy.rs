@@ -365,7 +365,7 @@ mod tests {
                 .and_then(|o| o.as_array())
                 .is_some_and(|entries| {
                     entries
-                        .get(0)
+                        .first()
                         .and_then(|e| e.get("enum"))
                         .is_some_and(|e| e.is_array())
                 });

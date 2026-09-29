@@ -250,7 +250,7 @@ pub enum SessionCommand {
     SetSessionModel {
         /// Canonical catalog selection id (never the upstream wire slug).
         selection_model_id: acp::ModelId,
-        inference_config: xai_grok_inference::InferenceConfig,
+        inference_config: Box<xai_grok_inference::InferenceConfig>,
         use_concise: bool,
         /// When `false`, skip the system prompt rewrite (concise/default swap).
         /// Set to `false` for forked sessions so mid-session model switches

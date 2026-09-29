@@ -167,10 +167,10 @@ impl CatalogRefreshCoordinator {
         let mut lkg = self.last_known_good.write();
         let reg = (self.registry_generation)();
         for identity in identities {
-            if let Some(result) = load_cached_account(&self.grok_home, identity, reg, 0) {
-                if result.is_complete_publishable() {
-                    lkg.insert(identity.instance_id.as_str().to_owned(), result);
-                }
+            if let Some(result) = load_cached_account(&self.grok_home, identity, reg, 0)
+                && result.is_complete_publishable()
+            {
+                lkg.insert(identity.instance_id.as_str().to_owned(), result);
             }
         }
     }
@@ -220,11 +220,8 @@ impl CatalogRefreshCoordinator {
 
         let mut updates: IndexMap<String, AccountRefreshOutcome> = IndexMap::new();
         for handle in handles {
-            match handle.await {
-                Ok((id, outcome)) => {
-                    updates.insert(id, outcome);
-                }
-                Err(_) => {}
+            if let Ok((id, outcome)) = handle.await {
+                updates.insert(id, outcome);
             }
         }
 

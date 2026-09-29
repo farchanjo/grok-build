@@ -5,6 +5,11 @@ version = "0.1.0"
 edition.workspace = true
 description = "Render Mermaid diagram source to a rasterized PNG behind a swappable engine trait"
 
+repository.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
 [dependencies]
 # SVG -> PNG rasterization. `resvg` re-exports the matching `usvg` (0.47) and
 # `tiny_skia`; we deliberately use `resvg::usvg` rather than the workspace

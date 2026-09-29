@@ -4,8 +4,6 @@
 //! file; the spawn is hidden behind [`GoalPlannerSpawner`] so tests can inject
 //! a deterministic spawner.
 
-#![allow(dead_code)]
-
 use crate::session::events::{Event, GoalPlannerFailClosedReason, GoalRoleModelFailOpenReason};
 use crate::session::goal_role_tools::RoleToolNames;
 use std::path::{Path, PathBuf};
@@ -256,6 +254,7 @@ pub(crate) fn parse_terminal_response(text: &str) -> bool {
 // Production spawner
 
 pub(crate) struct ChannelSpawner {
+    #[allow(dead_code)]
     pub(crate) event_tx: tokio::sync::mpsc::UnboundedSender<
         xai_grok_tools::implementations::grok_build::task::types::SubagentEvent,
     >,
@@ -336,8 +335,11 @@ impl ChannelSpawner {
         model: Option<String>,
         harness_agent_type: Option<String>,
     ) -> Result<String, SpawnError> {
+        // `SubagentEvent` is only built on the legacy cfg(test) arm below.
+        #[cfg(test)]
+        use xai_grok_tools::implementations::grok_build::task::types::SubagentEvent;
         use xai_grok_tools::implementations::grok_build::task::types::{
-            SubagentEvent, SubagentRequest, SubagentRuntimeOverrides,
+            SubagentRequest, SubagentRuntimeOverrides,
         };
         let (result_tx, result_rx) = tokio::sync::oneshot::channel();
         let request = SubagentRequest {

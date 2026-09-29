@@ -2146,10 +2146,8 @@ fn open_providers_loads_list_snapshot_and_refreshes_builtins_once() {
         .filter(|e| {
             matches!(
                 e,
-                Effect::ProviderOperation {
-                    operation: ProviderOperation::LoadListSnapshot,
-                    ..
-                }
+                Effect::ProviderOperation { operation, .. }
+                    if matches!(**operation, ProviderOperation::LoadListSnapshot)
             )
         })
         .count();
@@ -2161,10 +2159,8 @@ fn open_providers_loads_list_snapshot_and_refreshes_builtins_once() {
         assert!(
             effects.iter().any(|e| matches!(
                 e,
-                Effect::ProviderOperation {
-                    operation: ProviderOperation::Refresh(p),
-                    ..
-                } if p == provider
+                Effect::ProviderOperation { operation, .. }
+                    if matches!(**operation, ProviderOperation::Refresh(ref p) if p == provider)
             )),
             "open must refresh built-in {provider:?}, got {effects:?}"
         );

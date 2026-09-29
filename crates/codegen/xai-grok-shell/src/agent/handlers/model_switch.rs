@@ -275,7 +275,7 @@ async fn apply_with_execution_backend(
         .cmd_tx
         .send(SessionCommand::SetSessionModel {
             selection_model_id: selection_model_id.clone(),
-            inference_config: model_sampling,
+            inference_config: Box::new(model_sampling),
             use_concise,
             apply_prompt_override,
             skip_prompt_rewrite: did_rebuild || model_unchanged,

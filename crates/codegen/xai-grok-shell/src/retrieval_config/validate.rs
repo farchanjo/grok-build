@@ -435,11 +435,7 @@ pub fn issues_to_warnings(issues: &[GraphValidationIssue]) -> Vec<ConfigWarning>
         .map(|i| {
             ConfigWarning::memory_retrieval(
                 Some(i.path.as_str()),
-                if i.hard_error {
-                    ConfigWarningKind::InvalidValue
-                } else {
-                    ConfigWarningKind::InvalidValue
-                },
+                ConfigWarningKind::InvalidValue,
                 i.message.clone(),
             )
         })
@@ -606,8 +602,10 @@ mod tests {
 
     #[test]
     fn memory_profile_must_exist() {
-        let mut g = RetrievalGraphConfig::default();
-        g.memory_retrieval_profile = Some("missing".into());
+        let g = RetrievalGraphConfig {
+            memory_retrieval_profile: Some("missing".into()),
+            ..Default::default()
+        };
         let issues = validate_retrieval_graph(&g);
         assert!(
             issues

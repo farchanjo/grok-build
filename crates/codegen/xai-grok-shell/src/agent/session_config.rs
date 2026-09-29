@@ -1,12 +1,15 @@
 use agent_client_protocol as acp;
 use serde::Serialize;
 use xai_grok_inference_types::{
-    REASONING_EFFORT_LADDER_CANONICAL, ReasoningEffort, ReasoningEffortOption,
-    ReasoningEffortSelection, legacy_effort_options,
+    ReasoningEffort, ReasoningEffortOption, ReasoningEffortSelection, legacy_effort_options,
 };
+
+#[cfg(test)]
+use xai_grok_inference_types::REASONING_EFFORT_LADDER_CANONICAL;
 
 use crate::session::unified_list::SessionKind;
 
+#[cfg(test)]
 pub(crate) const LEGACY_SELECTABLE_EFFORTS: &[ReasoningEffort] = REASONING_EFFORT_LADDER_CANONICAL;
 
 #[derive(Debug, Clone, Serialize)]

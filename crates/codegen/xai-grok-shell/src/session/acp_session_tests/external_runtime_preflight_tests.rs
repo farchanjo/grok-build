@@ -6,7 +6,7 @@ use super::support::*;
 use super::*;
 use crate::agent::execution_backend::{ExecutionBackend, ExternalAgentKind};
 use crate::agent::external_runtime::EXTERNAL_RUNTIME_UNAVAILABLE;
-use std::sync::Arc;
+use std::rc::Rc;
 
 #[tokio::test(flavor = "current_thread")]
 async fn external_unavailable_preflight_leaves_turn_and_history_unchanged() {
@@ -16,7 +16,7 @@ async fn external_unavailable_preflight_leaves_turn_and_history_unchanged() {
             let (gateway_tx, _gateway_rx) = tokio::sync::mpsc::unbounded_channel();
             let (persistence_tx, _persistence_rx) = tokio::sync::mpsc::unbounded_channel();
             let actor =
-                Arc::new(create_test_actor(0, 200_000, 80, gateway_tx, persistence_tx).await);
+                Rc::new(create_test_actor(0, 200_000, 80, gateway_tx, persistence_tx).await);
             actor.execution_backend.set(ExecutionBackend::ExternalAgent(
                 ExternalAgentKind::ClaudeCli,
             ));
@@ -117,7 +117,7 @@ async fn external_session_goal_slash_does_not_mutate_goal_state() {
             let (gateway_tx, _gateway_rx) = tokio::sync::mpsc::unbounded_channel();
             let (persistence_tx, _persistence_rx) = tokio::sync::mpsc::unbounded_channel();
             let actor =
-                Arc::new(create_test_actor(0, 200_000, 80, gateway_tx, persistence_tx).await);
+                Rc::new(create_test_actor(0, 200_000, 80, gateway_tx, persistence_tx).await);
             actor.execution_backend.set(ExecutionBackend::ExternalAgent(
                 ExternalAgentKind::ClaudeCli,
             ));

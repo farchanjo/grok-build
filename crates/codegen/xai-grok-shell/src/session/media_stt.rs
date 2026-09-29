@@ -85,9 +85,7 @@ pub fn validate_audio_stt_route(audio_model: Option<&str>) -> Result<(), AudioSt
     match audio_model.map(str::trim).filter(|s| !s.is_empty()) {
         None => Ok(()),
         Some(p)
-            if crate::session::auxiliary_route::MEDIA_STT_ROUTE_ALIASES
-                .iter()
-                .any(|a| *a == p)
+            if crate::session::auxiliary_route::MEDIA_STT_ROUTE_ALIASES.contains(&p)
                 || p == XAI_STREAMING_STT_ROUTE =>
         {
             Ok(())
@@ -166,12 +164,14 @@ impl XaiStreamingAudioTranscriber {
         }
     }
 
+    #[allow(dead_code)]
     pub fn with_timeout(mut self, timeout: Duration) -> Self {
         self.timeout = timeout;
         self
     }
 
     /// Prefer the session xAI API base when present so enterprise proxies work.
+    #[allow(dead_code)]
     pub fn with_api_base(mut self, api_base: impl Into<String>) -> Self {
         let base = api_base.into().trim().trim_end_matches('/').to_owned();
         if !base.is_empty() {
@@ -260,6 +260,7 @@ impl AsyncAudioTranscriber for XaiStreamingAudioTranscriber {
 
 /// Test/mock transcriber with a fixed response or error.
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct MockAudioTranscriber {
     pub result: Result<String, String>,
 }
@@ -295,10 +296,9 @@ pub fn maybe_xai_stt_transcriber(
 ) -> Option<Arc<dyn AsyncAudioTranscriber>> {
     let auth = if let Some(am) = auth_manager {
         voice_auth_from_manager(am.clone())
-    } else if let Some(provider) = api_key_provider {
-        voice_auth_from_api_key_provider(provider.clone())
     } else {
-        return None;
+        let provider = api_key_provider?;
+        voice_auth_from_api_key_provider(provider.clone())
     };
     Some(Arc::new(XaiStreamingAudioTranscriber::new(auth, config)))
 }
@@ -350,8 +350,10 @@ mod tests {
                 Box::pin(async { None })
             }
         }
-        let mut config = VoiceConfig::default();
-        config.api_base = "https://enterprise.example/xai/v1".to_owned();
+        let config = VoiceConfig {
+            api_base: "https://enterprise.example/xai/v1".to_owned(),
+            ..Default::default()
+        };
         let transcriber = XaiStreamingAudioTranscriber::new(Arc::new(NoAuth), config);
         assert_eq!(
             transcriber.config.api_base,

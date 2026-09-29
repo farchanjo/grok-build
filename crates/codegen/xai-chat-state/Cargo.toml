@@ -5,6 +5,11 @@ version = "0.1.0"
 edition.workspace = true
 description = "Actor-based chat state management for xAI agents"
 
+repository.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
 [features]
 default-bazel = []
 

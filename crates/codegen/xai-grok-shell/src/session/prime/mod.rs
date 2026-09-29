@@ -443,7 +443,7 @@ pub async fn run_prime_selection(
     }
 
     // ── Bounded inventory (blocking walk off the executor) ────────────────
-    let mut owned_inventory;
+    let owned_inventory;
     let default_inventory = WorkspaceInventory::default();
     let mut walk_failed = false;
     let inventory: &WorkspaceInventory = if let Some(i) = input.inventory {
@@ -613,9 +613,11 @@ mod tests {
 
     #[tokio::test]
     async fn pre_cancelled_token_returns_empty_without_err() {
-        let mut cfg = SkillPrimeConfig::default();
-        cfg.enabled = true;
-        cfg.deadline_ms = 1000;
+        let cfg = SkillPrimeConfig {
+            enabled: true,
+            deadline_ms: 1000,
+            ..Default::default()
+        };
         let input = PrimeInput {
             eligible_skills: &[],
             refresh_skills: &(|| async { Vec::new() }),
@@ -641,9 +643,11 @@ mod tests {
 
     #[tokio::test]
     async fn zero_deadline_aborts_with_cancelled_true() {
-        let mut cfg = SkillPrimeConfig::default();
-        cfg.enabled = true;
-        cfg.deadline_ms = 0;
+        let cfg = SkillPrimeConfig {
+            enabled: true,
+            deadline_ms: 0,
+            ..Default::default()
+        };
         let input = PrimeInput {
             config: cfg,
             ..PrimeInput::default()
@@ -658,9 +662,11 @@ mod tests {
 
     #[test]
     fn render_budgets_respect_context_fraction_zero_and_clamp() {
-        let mut cfg = SkillPrimeConfig::default();
-        cfg.max_tokens = 10_000;
-        cfg.max_context_fraction = 0.01;
+        let mut cfg = SkillPrimeConfig {
+            max_tokens: 10_000,
+            max_context_fraction: 0.01,
+            ..Default::default()
+        };
         // 100k-token window * 1% = 1000 tokens allowed < 10k.
         let b = render_budgets(&cfg, Some(100_000));
         assert_eq!(b.max_tokens, Some(1_000));
@@ -721,14 +727,16 @@ mod tests {
             let s = snapshot.clone();
             async move { s }
         };
-        let mut cfg = SkillPrimeConfig::default();
-        cfg.enabled = true;
-        cfg.max_results = 5;
+        let cfg = SkillPrimeConfig {
+            enabled: true,
+            max_results: 5,
+            ..Default::default()
+        };
         let input = PrimeInput {
             eligible_skills: &skills,
             refresh_skills: &refresh,
             workspace_root: &root,
-            trusted_roots: &[root.clone()],
+            trusted_roots: std::slice::from_ref(&root),
             prompt: "",
             explicit_skill: None,
             config: cfg,
@@ -779,12 +787,12 @@ mod tests {
         let roots = validated_roots(
             &[dunce::canonicalize(unrelated.path()).unwrap()],
             &root,
-            &[a.clone()],
+            std::slice::from_ref(&a),
         );
         assert_eq!(roots, vec![root.clone()], "unrelated root must be dropped");
 
         // The workspace root alone is retained only when it is an ancestor.
-        let roots = validated_roots(&[], &root, &[a.clone()]);
+        let roots = validated_roots(&[], &root, std::slice::from_ref(&a));
         assert_eq!(roots, vec![root.clone()]);
 
         // A workspace root that is not an ancestor of any eligible skill is

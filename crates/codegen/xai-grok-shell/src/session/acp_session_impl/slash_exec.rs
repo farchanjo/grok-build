@@ -1,9 +1,10 @@
 use super::*;
+use std::rc::Rc;
 
 impl SessionActor {
     /// Execute a built-in slash command (e.g. `/compact`, `/yolo`).
     pub(super) async fn execute_builtin_slash_command(
-        self: &Arc<Self>,
+        self: &Rc<Self>,
         action: BuiltinAction,
     ) -> PromptTurnResult {
         xai_grok_telemetry::session_ctx::log_event(xai_grok_telemetry::events::SlashCommandUsed {
@@ -731,7 +732,9 @@ impl SessionActor {
             }
             BuiltinAction::Feedback { text } => self.execute_feedback_command(text).await,
             BuiltinAction::MemoryBrowse => {
-                let file_infos = if let Some(ref storage) = *self.memory.storage.borrow() {
+                // Hoisted so the `storage` borrow ends before the awaits below.
+                let storage = self.memory.storage.borrow().clone();
+                let file_infos = if let Some(ref storage) = storage {
                     match storage.list_memory_files() {
                         Ok(files) => files
                             .into_iter()
@@ -813,7 +816,7 @@ impl SessionActor {
                             let backend: std::sync::Arc<
                                 dyn xai_grok_tools::types::memory_backend::MemoryBackend,
                             > = std::sync::Arc::new(backend);
-                            let bridge = self.agent.borrow().tool_bridge().clone();
+                            let bridge = self.tool_bridge_owned();
                             bridge.update_resource(backend.clone()).await;
                             if let Err(e) = self.register_memory_tools(&bridge).await {
                                 tracing::warn!(error = %e, "memory tool registration failed during toggle");
@@ -825,7 +828,7 @@ impl SessionActor {
                         "Memory cannot be enabled (not configured for this session).".to_owned()
                     }
                 } else if !enabled && self.memory.is_enabled() {
-                    let bridge = self.agent.borrow().tool_bridge().clone();
+                    let bridge = self.tool_bridge_owned();
                     if !bridge.unregister_tool_by_name(
                         xai_grok_tools::implementations::memory::MEMORY_SEARCH_TOOL_NAME,
                     ) {
@@ -1041,7 +1044,7 @@ impl SessionActor {
         }
     }
 
-    async fn execute_feedback_command(self: &Arc<Self>, text: String) -> PromptTurnResult {
+    async fn execute_feedback_command(self: &Rc<Self>, text: String) -> PromptTurnResult {
         if text.is_empty() {
             self.send_host_turn_slash_command_output("Usage: /feedback <text>")
                 .await;

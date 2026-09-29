@@ -13,8 +13,8 @@
 
 use super::support::*;
 use super::*;
+use std::rc::Rc;
 
-use std::sync::Arc;
 use std::time::Instant;
 
 use crate::extensions::mcp::McpSubscriptionState;
@@ -159,7 +159,7 @@ async fn listing_keeps_label_and_marks_dead_when_client_removed_body() {
     let (gateway_tx, _gateway_rx) = tokio::sync::mpsc::unbounded_channel();
     let (persistence_tx, _persistence_rx) = mpsc::unbounded_channel();
     let (actor, _ev) = create_test_actor_ex(0, 256_000, 85, gateway_tx, persistence_tx).await;
-    let actor = Arc::new(actor);
+    let actor = Rc::new(actor);
 
     // Subscribe-time sync recorded a labeled subscription with pump stats;
     // afterwards the ssh client vanished from the session's MCP state
@@ -216,7 +216,7 @@ async fn pump_marks_subscriptions_dead_on_client_removal_and_revives_on_ready_bo
     let (gateway_tx, _gateway_rx) = tokio::sync::mpsc::unbounded_channel();
     let (persistence_tx, _persistence_rx) = mpsc::unbounded_channel();
     let (actor, _ev) = create_test_actor_ex(0, 256_000, 85, gateway_tx, persistence_tx).await;
-    let actor = Arc::new(actor);
+    let actor = Rc::new(actor);
 
     let key = ("ssh".to_string(), "command://1".to_string());
     {

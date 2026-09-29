@@ -245,14 +245,14 @@ impl<'a> SkillEntry<'a> {
             format!(
                 "<agent_skill fullPath=\"{}\">{} Use when: {}</agent_skill>\n",
                 jsx_attr_escape(&self.display_path),
-                clean_skill_description(&self.description),
+                clean_skill_description(self.description),
                 wtu,
             )
         } else {
             format!(
                 "<agent_skill fullPath=\"{}\">{}</agent_skill>\n",
                 jsx_attr_escape(&self.display_path),
-                clean_skill_description(&self.description),
+                clean_skill_description(self.description),
             )
         }
     }

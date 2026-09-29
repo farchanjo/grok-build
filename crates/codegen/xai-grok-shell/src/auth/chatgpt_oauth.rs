@@ -171,6 +171,7 @@ struct TokenResponse {
 #[derive(Debug, Deserialize)]
 struct IdTokenClaims {
     chatgpt_account_id: Option<String>,
+    #[allow(dead_code)]
     email: Option<String>,
     organizations: Option<Vec<OrgClaim>>,
     #[serde(rename = "https://api.openai.com/auth")]

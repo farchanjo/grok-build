@@ -404,47 +404,47 @@ impl ProviderManagementService {
         let toml_patch = save_patch_to_toml(&patch);
         let or_prefs = openrouter_prefs_from_save(&patch);
         let has_meta = !is_empty_toml_patch(&toml_patch) || or_prefs.is_some();
-        if has_meta {
-            if let Err(e) = apply_provider_patch_with_openrouter(
+        if has_meta
+            && let Err(e) = apply_provider_patch_with_openrouter(
                 &self.config_path,
                 &pid,
                 &toml_patch,
                 or_prefs.as_ref(),
-            ) {
-                return err_result(pid.as_str(), self.current_generation(), e.to_string());
-            }
+            )
+        {
+            return err_result(pid.as_str(), self.current_generation(), e.to_string());
         }
 
         let creds_changed = credentials.application != SecretFieldUpdate::Preserve
             || credentials.admin != SecretFieldUpdate::Preserve
             || credentials.oauth != SecretFieldUpdate::Preserve;
-        if creds_changed {
-            if let Err(e) = self.apply_credential_updates_unlocked(
+        if creds_changed
+            && let Err(e) = self.apply_credential_updates_unlocked(
                 &req.id,
                 credentials,
                 application_secret,
                 admin_secret,
-            ) {
-                // Metadata may already be durable; force-record generation and
-                // return partial-commit (never pure stale).
-                let finalized =
-                    self.finalize_after_durable_write(&req.id, req.expected_generation, true);
-                return ProviderMutationResult {
-                    ok: false,
-                    id: req.id.clone(),
-                    generation: finalized.generation,
-                    error: Some(format!(
-                        "metadata saved but credential update failed: {e}. Reload and retry."
-                    )),
-                    stale: false,
-                    guidance: Some(STALE_GUIDANCE.into()),
-                    partial_commit: true,
-                    incarnation: finalized.incarnation,
-                    operation_id: None,
-                    conflict: None,
-                    changed_fields: finalized.changed_fields,
-                };
-            }
+            )
+        {
+            // Metadata may already be durable; force-record generation and
+            // return partial-commit (never pure stale).
+            let finalized =
+                self.finalize_after_durable_write(&req.id, req.expected_generation, true);
+            return ProviderMutationResult {
+                ok: false,
+                id: req.id.clone(),
+                generation: finalized.generation,
+                error: Some(format!(
+                    "metadata saved but credential update failed: {e}. Reload and retry."
+                )),
+                stale: false,
+                guidance: Some(STALE_GUIDANCE.into()),
+                partial_commit: true,
+                incarnation: finalized.incarnation,
+                operation_id: None,
+                conflict: None,
+                changed_fields: finalized.changed_fields,
+            };
         }
 
         if !has_meta && !creds_changed {
@@ -1767,6 +1767,7 @@ impl ProviderManagementService {
             .create(true)
             .read(true)
             .write(true)
+            .truncate(false)
             .open(&path)
             .map_err(|e| format!("provider lifecycle lock: {e}"))?;
         file.lock_exclusive()
@@ -2256,7 +2257,6 @@ fn save_patch_to_toml(patch: &ProviderSavePatch) -> ProviderTomlPatch {
         max_completion_tokens: patch.max_completion_tokens,
         api_surface: patch.api_surface.clone(),
         credential_route: patch.credential_route.clone(),
-        ..Default::default()
     }
 }
 
@@ -2316,9 +2316,11 @@ fn is_empty_toml_patch(p: &ProviderTomlPatch) -> bool {
 
 fn restrict_builtin_patch(patch: &mut ProviderSavePatch) -> Result<(), String> {
     // Whitelist: display_name + enabled only.
-    let mut clean = ProviderSavePatch::default();
-    clean.display_name = patch.display_name.clone();
-    clean.enabled = patch.enabled;
+    let clean = ProviderSavePatch {
+        display_name: patch.display_name.clone(),
+        enabled: patch.enabled,
+        ..Default::default()
+    };
     // Detect disallowed fields that were set.
     let disallowed = patch.kind.is_some()
         || patch.base_url.is_some()
@@ -2471,6 +2473,7 @@ fn ok_result(id: String, generation: RegistryGeneration) -> ProviderMutationResu
     }
 }
 
+#[allow(dead_code)]
 fn stale_result(id: &str, live: RegistryGeneration, msg: String) -> ProviderMutationResult {
     // Prefer stale_result_with_expected when the client generation is known.
     stale_result_with_expected(
@@ -3116,7 +3119,7 @@ catalog_enabled = true
         };
         with_multi_account_rollout_env(|| {
             unsafe { std::env::remove_var(MULTI_ACCOUNT_ROLLOUT_ENV) };
-            assert!(MULTI_ACCOUNT_ROLLOUT_DEFAULT_ENABLED);
+            const { assert!(MULTI_ACCOUNT_ROLLOUT_DEFAULT_ENABLED) };
             assert!(multi_account_rollout_enabled());
         });
     }

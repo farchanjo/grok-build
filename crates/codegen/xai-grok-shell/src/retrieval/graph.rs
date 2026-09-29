@@ -11,7 +11,7 @@ use indexmap::IndexMap;
 use sha2::{Digest, Sha256};
 use xai_grok_config_types::{
     EmbeddingEncoding, EmbeddingModelConfig, EmbeddingProtocol, PrimeConfig, RerankerModelConfig,
-    RerankerProtocol, RetrievalFallbackStrategy, RetrievalGraphConfig, RetrievalProfileConfig,
+    RetrievalFallbackStrategy, RetrievalGraphConfig, RetrievalProfileConfig,
 };
 
 use super::bounds::ProfileBudgetLimits;

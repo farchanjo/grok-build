@@ -18,9 +18,6 @@
 mod fs;
 mod identity;
 
-#[cfg(test)]
-mod tests;
-
 use std::io;
 use std::path::Path;
 
@@ -283,10 +280,9 @@ mod fault {
 #[cfg(test)]
 fn maybe_fault(point: ProviderCacheTxnFault) -> io::Result<()> {
     if fault::take_if(point) {
-        return Err(io::Error::new(
-            io::ErrorKind::Other,
-            format!("provider cache failpoint: {point:?}"),
-        ));
+        return Err(io::Error::other(format!(
+            "provider cache failpoint: {point:?}"
+        )));
     }
     Ok(())
 }
@@ -488,7 +484,7 @@ impl ProviderCacheStore {
         };
         let _lock = InstanceLock::acquire(&inst)?;
         recover_transaction(&inst)?;
-        Ok(load_state_unlocked(&inst)?)
+        load_state_unlocked(&inst)
     }
 
     pub fn tombstone(
@@ -578,10 +574,9 @@ impl ProviderCacheStore {
             && let Some(marker) = &state.legacy_import
             && marker.source == source_name
             && marker.source_sha256 == source_sha
+            && let Ok(Some(entry)) = Self::load_catalog(grok_home, identity)
         {
-            if let Ok(Some(entry)) = Self::load_catalog(grok_home, identity) {
-                return Ok(Some(entry));
-            }
+            return Ok(Some(entry));
         }
 
         let entry = CatalogCacheEntry {
@@ -607,19 +602,16 @@ impl ProviderCacheStore {
             recover_transaction(inst)?;
             ensure_lock_live(lock, inst)?;
 
-            if load_state_unlocked(inst)?.is_none() {
-                if let Some(bytes) =
+            if load_state_unlocked(inst)?.is_none()
+                && let Some(bytes) =
                     read_optional_regular_relative(inst, CATALOG_FILE, MAX_CATALOG_BYTES)?
-                {
-                    if let Ok(existing) = serde_json::from_slice::<CatalogCacheEntry>(&bytes)
-                        && existing.version == CATALOG_CACHE_VERSION
-                        && existing.provider_id == identity.instance_id.as_str()
-                        && existing.base_url_origin == identity.endpoint_origin
-                        && !existing.models.is_empty()
-                    {
-                        return Ok(Some(existing));
-                    }
-                }
+                && let Ok(existing) = serde_json::from_slice::<CatalogCacheEntry>(&bytes)
+                && existing.version == CATALOG_CACHE_VERSION
+                && existing.provider_id == identity.instance_id.as_str()
+                && existing.base_url_origin == identity.endpoint_origin
+                && !existing.models.is_empty()
+            {
+                return Ok(Some(existing));
             }
 
             if let Some(state) = load_state_unlocked(inst)? {
@@ -683,8 +675,8 @@ impl CatalogCacheStore {
         expected_origin_host: &str,
     ) -> Result<Option<CatalogCacheEntry>, CacheValidationError> {
         match TrustedInstanceDir::open(grok_home, provider_id.as_str(), false) {
-            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
-            Err(e) => return Err(e.into()),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(e.into()),
             Ok(inst) => {
                 let _lock = InstanceLock::acquire(&inst)?;
                 recover_transaction(&inst)?;
@@ -832,8 +824,8 @@ impl CapabilityCacheStore {
         expected_baseline: &str,
     ) -> Result<Option<CapabilityCacheEntry>, CacheValidationError> {
         match TrustedInstanceDir::open(grok_home, provider_id.as_str(), false) {
-            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
-            Err(e) => return Err(e.into()),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(e.into()),
             Ok(inst) => {
                 let _lock = InstanceLock::acquire(&inst)?;
                 recover_transaction(&inst)?;
@@ -981,7 +973,7 @@ impl CapabilityCacheStore {
 
 pub fn remove_all_provider_caches(grok_home: &Path, provider_id: &ProviderId) -> io::Result<()> {
     ProviderCacheStore::remove_instance(grok_home, provider_id)
-        .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))
+        .map_err(|e| io::Error::other(e.to_string()))
 }
 
 // ---------------------------------------------------------------------------
@@ -1439,20 +1431,20 @@ fn intent_matches(
 }
 
 fn validate_marker_temp_names(marker: &TxnMarker) -> io::Result<()> {
-    if let Some(name) = &marker.catalog_tmp {
-        if !is_valid_staged_temp_name(name, CATALOG_FILE) {
-            return Err(invalid_data("invalid catalog temp name in journal"));
-        }
+    if let Some(name) = &marker.catalog_tmp
+        && !is_valid_staged_temp_name(name, CATALOG_FILE)
+    {
+        return Err(invalid_data("invalid catalog temp name in journal"));
     }
-    if let Some(name) = &marker.capabilities_tmp {
-        if !is_valid_staged_temp_name(name, CAPABILITIES_FILE) {
-            return Err(invalid_data("invalid capabilities temp name in journal"));
-        }
+    if let Some(name) = &marker.capabilities_tmp
+        && !is_valid_staged_temp_name(name, CAPABILITIES_FILE)
+    {
+        return Err(invalid_data("invalid capabilities temp name in journal"));
     }
-    if let Some(name) = &marker.state_tmp {
-        if !is_valid_staged_temp_name(name, STATE_FILE) {
-            return Err(invalid_data("invalid state temp name in journal"));
-        }
+    if let Some(name) = &marker.state_tmp
+        && !is_valid_staged_temp_name(name, STATE_FILE)
+    {
+        return Err(invalid_data("invalid state temp name in journal"));
     }
     Ok(())
 }
@@ -1482,10 +1474,10 @@ fn cleanup_txn_temps(inst: &TrustedInstanceDir, marker: &TxnMarker) -> io::Resul
         (marker.capabilities_tmp.as_deref(), CAPABILITIES_FILE),
         (marker.state_tmp.as_deref(), STATE_FILE),
     ] {
-        if let Some(n) = name {
-            if is_valid_staged_temp_name(n, final_name) {
-                let _ = unlink_relative(inst, n);
-            }
+        if let Some(n) = name
+            && is_valid_staged_temp_name(n, final_name)
+        {
+            let _ = unlink_relative(inst, n);
         }
     }
     Ok(())
@@ -1510,10 +1502,10 @@ fn apply_one_payload(
     if clear {
         if hashes_match(dest_hash.clone(), previous) || dest_hash.is_none() {
             unlink_relative(inst, dest)?;
-            if let Some(t) = tmp {
-                if is_valid_staged_temp_name(t, dest) {
-                    let _ = unlink_relative(inst, t);
-                }
+            if let Some(t) = tmp
+                && is_valid_staged_temp_name(t, dest)
+            {
+                let _ = unlink_relative(inst, t);
             }
             return Ok(());
         }
@@ -1529,10 +1521,10 @@ fn apply_one_payload(
         return Ok(());
     }
     if hashes_match(dest_hash.clone(), intended) {
-        if let Some(t) = tmp {
-            if is_valid_staged_temp_name(t, dest) {
-                let _ = unlink_relative(inst, t);
-            }
+        if let Some(t) = tmp
+            && is_valid_staged_temp_name(t, dest)
+        {
+            let _ = unlink_relative(inst, t);
         }
         return Ok(());
     }
@@ -1821,11 +1813,14 @@ fn legacy_file_for(
     }
 }
 
+/// Legacy catalog payload: file name, raw model entries, recorded fetch time.
+type LegacyCatalogRow = (&'static str, Vec<serde_json::Value>, Option<u64>);
+
 fn read_legacy_builtin_catalog(
     grok_home: &Path,
     built_in: BuiltInProviderId,
     identity: &ProviderCacheIdentity,
-) -> Result<Option<(&'static str, Vec<serde_json::Value>, Option<u64>)>, CacheValidationError> {
+) -> Result<Option<LegacyCatalogRow>, CacheValidationError> {
     let Some(name) = legacy_file_for(built_in, identity) else {
         return Ok(None);
     };
@@ -1852,3 +1847,6 @@ fn read_legacy_builtin_catalog(
         .or_else(|| value.get("fetched_at_unix").and_then(|v| v.as_u64()));
     Ok(Some((name, models, fetched_at)))
 }
+
+#[cfg(test)]
+mod tests;

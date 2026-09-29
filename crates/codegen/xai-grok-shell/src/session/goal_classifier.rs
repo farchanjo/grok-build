@@ -10,8 +10,6 @@
 //! constant names retain the `classifier` prefix to keep the env /
 //! remote / config wire contract stable across the rewire.
 
-#![allow(dead_code)]
-
 pub(crate) mod evidence;
 
 use crate::session::events::{Event, GoalClassifierFailOpenReason};
@@ -509,6 +507,7 @@ pub(crate) fn record_subagent_trace(
 /// seals the panel into its own sibling trace turn so the subagents are
 /// discoverable in data collection.
 pub(crate) struct ChannelSpawner {
+    #[allow(dead_code)]
     pub(crate) event_tx: tokio::sync::mpsc::UnboundedSender<
         xai_grok_tools::implementations::grok_build::task::types::SubagentEvent,
     >,
@@ -601,8 +600,11 @@ impl ChannelSpawner {
         harness_agent_type: Option<String>,
         resume_from: Option<&str>,
     ) -> Result<String, SpawnError> {
+        // `SubagentEvent` is only built on the legacy cfg(test) arm below.
+        #[cfg(test)]
+        use xai_grok_tools::implementations::grok_build::task::types::SubagentEvent;
         use xai_grok_tools::implementations::grok_build::task::types::{
-            SubagentEvent, SubagentRequest, SubagentRuntimeOverrides,
+            SubagentRequest, SubagentRuntimeOverrides,
         };
         let (result_tx, result_rx) = tokio::sync::oneshot::channel();
         let request = SubagentRequest {
@@ -2450,14 +2452,6 @@ async fn write_details_file(path: &Path, body: &str) {
 #[cfg(test)]
 pub(crate) fn parse_verdict_path_from_prompt(prompt: &str) -> Option<String> {
     parse_prompt_path(prompt, "goal-verdict-", ".json")
-}
-
-/// Pull the per-skeptic `{DETAILS_FILE}` path out of a rendered verifier
-/// prompt (anchor: the `-skeptic-` file-name marker). Shared by the
-/// classifier and strategist e2e suites.
-#[cfg(test)]
-pub(crate) fn parse_skeptic_details_path_from_prompt(prompt: &str) -> Option<String> {
-    parse_prompt_path(prompt, "-skeptic-", ".md")
 }
 
 /// Extract an absolute artifact path from a rendered prompt: the files

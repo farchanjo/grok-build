@@ -5,8 +5,8 @@
 //! generic `Value` / `HttpRequestSpec` bypass path for supported operations.
 
 use super::generated_dispatch::dispatch_typed_operation;
-use super::generated_ops::{CLI_OPERATIONS, find_cli_operation, operations_for_namespace};
-use super::output::{ExitCode, read_typed_input, write_json};
+use super::generated_ops::{find_cli_operation, operations_for_namespace};
+use super::output::{ExitCode, write_json};
 use clap::{Parser, Subcommand};
 use serde_json::{Value, json};
 use std::path::PathBuf;
@@ -515,6 +515,8 @@ pub async fn call_namespace(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cli::CLI_OPERATIONS;
+    use crate::cli::output::read_typed_input;
     use clap::Parser;
 
     #[test]

@@ -282,6 +282,7 @@ impl CallableAgentAuthority {
         }
     }
 
+    #[allow(dead_code)]
     pub(crate) fn generation(&self) -> Option<u64> {
         self.generation
     }
@@ -584,14 +585,17 @@ fn rank_agents(
 // ── Metadata-only semantic layer ────────────────────────────────────
 
 /// Per-part and aggregate caps for agent metadata text.
+#[allow(dead_code)]
 const MAX_METADATA_PART_CHARS: usize = 96;
 const MAX_METADATA_TOTAL_CHARS: usize = 1024;
 /// Cap on how many selected-skill names reach the bounded retrieval query.
+#[allow(dead_code)]
 const MAX_SKILL_NAMES_IN_METADATA: usize = 8;
 
 /// Metadata-only text for semantic shipping: name + safe frontmatter
 /// description + qualified/source label + bounded selected-skill names. No
 /// agent prompt/system body ever reaches the provider.
+#[allow(dead_code)]
 fn metadata_text(a: &CallableAgentDescriptor, selected_skills: &[String]) -> String {
     let mut parts = vec![cap_chars(&a.name, MAX_METADATA_PART_CHARS)];
     if let Some(d) = &a.description
@@ -632,6 +636,7 @@ fn build_semantic_query(prompt: &str, selected_skills: &[String]) -> String {
 /// Unique, path-free candidate identifier (`sourceLabel|name|#sha256`) — the
 /// full SHA-256 digest of (label, name), so no absolute/home path ever appears
 /// in candidate ids, and label collisions across sources stay distinct.
+#[allow(dead_code)]
 fn candidate_id(a: &CallableAgentDescriptor) -> String {
     use sha2::{Digest, Sha256};
     let mut hasher = Sha256::new();
@@ -807,7 +812,7 @@ async fn semantic_fill_agents(
     .await
     {
         Ok(()) => outcome,
-        Err(e) if matches!(e, OrchestratorError::Cancelled { .. }) => {
+        Err(OrchestratorError::Cancelled { .. }) => {
             outcome.cancelled = true;
             outcome.order = ranked.to_vec();
             outcome
@@ -1517,8 +1522,7 @@ mod tests {
 
     use crate::retrieval::bounds::ProfileBudgetLimits;
     use crate::retrieval::graph::{
-        EmbeddingRouteDescriptor, EmbeddingSpaceId, RerankerRouteDescriptor, RetrievalSnapshot,
-        SnapshotProfile,
+        EmbeddingRouteDescriptor, EmbeddingSpaceId, RerankerRouteDescriptor, SnapshotProfile,
     };
     use crate::retrieval::{RetrievalRegistry, RetrievalService};
 
@@ -1604,7 +1608,7 @@ mod tests {
             .iter()
             .map(|n| {
                 if n.contains(':') {
-                    plugin(n, &n.split(':').next().unwrap_or(""))
+                    plugin(n, n.split(':').next().unwrap_or(""))
                 } else {
                     builtin(n)
                 }
@@ -1968,9 +1972,11 @@ mod tests {
     async fn pre_cancelled_returns_empty_cancelled() {
         let cancel = CancellationToken::new();
         cancel.cancel();
-        let mut cfg = AgentPrimeConfig::default();
-        cfg.enabled = true;
-        cfg.deadline_ms = 1000;
+        let cfg = AgentPrimeConfig {
+            enabled: true,
+            deadline_ms: 1000,
+            ..Default::default()
+        };
         let input = AgentInput {
             config: cfg,
             ..AgentInput::default()
@@ -1982,9 +1988,11 @@ mod tests {
 
     #[test]
     fn render_budgets_honor_fraction_zero_and_clamp() {
-        let mut cfg = AgentPrimeConfig::default();
-        cfg.max_tokens = 10_000;
-        cfg.max_context_fraction = 0.01;
+        let mut cfg = AgentPrimeConfig {
+            max_tokens: 10_000,
+            max_context_fraction: 0.01,
+            ..Default::default()
+        };
         let b = agent_render_budgets(&cfg, Some(100_000));
         assert_eq!(b.max_tokens, Some(1_000));
         cfg.max_context_fraction = 0.0;
@@ -2193,11 +2201,13 @@ mod tests {
     };
 
     fn snapshot_for_tests() -> crate::retrieval::graph::RetrievalSnapshot {
-        let mut cfg = RetrievalProfileConfig::default();
-        cfg.embedding_models = vec!["emb-1".into()];
-        cfg.reranker_models = vec!["rr-1".into()];
-        cfg.max_attempts = 4;
-        cfg.deadline_ms = 2_000;
+        let cfg = RetrievalProfileConfig {
+            embedding_models: vec!["emb-1".into()],
+            reranker_models: vec!["rr-1".into()],
+            max_attempts: 4,
+            deadline_ms: 2_000,
+            ..Default::default()
+        };
         let budgets = ProfileBudgetLimits::from_profile(&cfg, 8);
         let mut emb = indexmap::IndexMap::new();
         emb.insert(
@@ -2554,7 +2564,7 @@ mod tests {
         );
 
         let rendered = render_agents(
-            &[selected.clone()],
+            std::slice::from_ref(&selected),
             &AgentRenderBudgets {
                 per_agent_chars: 10_000,
                 max_total_chars: 100_000,
@@ -2979,7 +2989,9 @@ mod tests {
         std::fs::create_dir_all(&home).unwrap();
         let ghost = builtin("ghost");
         let handle = crate::session::prime::prime_index_for(&home, &cwd);
-        handle.reconcile_callable_agents(&[ghost.clone()]).unwrap();
+        handle
+            .reconcile_callable_agents(std::slice::from_ref(&ghost))
+            .unwrap();
         assert_eq!(handle.list_callable_items().unwrap().len(), 1);
 
         let (live_agents, ctx) = callable_set(cwd.clone(), &["explore"]);

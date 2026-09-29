@@ -46,7 +46,7 @@ async fn prime_enabled_actor_and_agents(
     std::sync::Arc<std::sync::Mutex<Vec<crate::session::storage::SessionUpdate>>>,
 ) {
     let tmp = tempfile::TempDir::new().unwrap();
-    let cwd = tmp.path().canonicalize().unwrap();
+    let cwd = dunce::canonicalize(tmp.path()).unwrap();
     let skill_dir = cwd.join("skills").join("deploy");
     std::fs::create_dir_all(&skill_dir).unwrap();
     std::fs::write(
@@ -90,7 +90,7 @@ async fn prime_enabled_actor_and_agents(
         ..SkillInfo::default()
     };
     {
-        let bridge = actor.agent.borrow().tool_bridge().clone();
+        let bridge = actor.tool_bridge_owned();
         bridge
             .seed_skill_discovery(
                 Some(cwd.clone()),
@@ -151,7 +151,7 @@ async fn prime_enabled_actor_with_degraded_snapshot(
     std::sync::Arc<std::sync::Mutex<Vec<crate::session::storage::SessionUpdate>>>,
 ) {
     let tmp = tempfile::TempDir::new().unwrap();
-    let cwd = tmp.path().canonicalize().unwrap();
+    let cwd = dunce::canonicalize(tmp.path()).unwrap();
     let skill_dir = cwd.join("skills").join("deploy");
     std::fs::create_dir_all(&skill_dir).unwrap();
     std::fs::write(
@@ -191,7 +191,7 @@ async fn prime_enabled_actor_with_degraded_snapshot(
         ..SkillInfo::default()
     };
     {
-        let bridge = actor.agent.borrow().tool_bridge().clone();
+        let bridge = actor.tool_bridge_owned();
         bridge
             .seed_skill_discovery(
                 Some(cwd.clone()),
@@ -236,7 +236,7 @@ async fn prime_enabled_actor_with_degraded_snapshot(
 /// after the user pair is pushed/persisted, before inference) and return the
 /// actor, the spawned task, and the resolved conversation snapshot.
 async fn drive_prompt(
-    actor: std::sync::Arc<SessionActor>,
+    actor: std::rc::Rc<SessionActor>,
     prompt_id: &str,
     origin: crate::session::PromptOrigin,
     text: &str,
@@ -306,7 +306,7 @@ async fn real_user_turn_injects_hidden_skill_prime_reminder_before_user() {
         .run_until(async {
             let (actor, _workspace, _registry, _persisted_updates) =
                 prime_enabled_actor(true, true, false).await;
-            let actor = std::sync::Arc::new(actor);
+            let actor = std::rc::Rc::new(actor);
             let (prompt_task, conv) = drive_prompt(
                 actor.clone(),
                 "pr19-user",
@@ -371,7 +371,7 @@ async fn scheduler_fired_cron_never_primes_and_shapes_scheduler_fired() {
         .run_until(async {
             let (actor, _workspace, _registry, _persisted_updates) =
                 prime_enabled_actor(true, true, false).await;
-            let actor = std::sync::Arc::new(actor);
+            let actor = std::rc::Rc::new(actor);
             // The typed origin the shell reader produces for the pager's
             // `_meta.promptOrigin: "scheduler_fired"` stamp.
             let cron_origin = crate::session::PromptOrigin::from_prompt_origin_meta(Some(
@@ -416,7 +416,7 @@ async fn subagent_assignment_never_primes_but_later_user_turn_does() {
         .run_until(async {
             let (actor, _workspace, _registry, _persisted_updates) =
                 prime_enabled_actor(true, true, false).await;
-            let actor = std::sync::Arc::new(actor);
+            let actor = std::rc::Rc::new(actor);
             let (prompt_task, conv) = drive_prompt(
                 actor.clone(),
                 "subagent-assignment-1",
@@ -458,7 +458,7 @@ async fn unknown_origin_never_primes() {
         .run_until(async {
             let (actor, _workspace, _registry, _persisted_updates) =
                 prime_enabled_actor(true, true, false).await;
-            let actor = std::sync::Arc::new(actor);
+            let actor = std::rc::Rc::new(actor);
             let (prompt_task, conv) = drive_prompt(
                 actor.clone(),
                 "legacy-1",
@@ -485,7 +485,7 @@ async fn external_backend_user_turn_omits_prime_reminder() {
         .run_until(async {
             let (actor, _workspace, _registry, _persisted_updates) =
                 prime_enabled_actor(true, true, false).await;
-            let actor = std::sync::Arc::new(actor);
+            let actor = std::rc::Rc::new(actor);
             actor.execution_backend.set(
                 crate::agent::execution_backend::ExecutionBackend::ExternalAgent(
                     crate::agent::execution_backend::ExternalAgentKind::ClaudeCli,
@@ -520,7 +520,7 @@ async fn disabled_prime_omits_reminder() {
         .run_until(async {
             let (actor, _workspace, _registry, _persisted_updates) =
                 prime_enabled_actor(true, false, false).await;
-            let actor = std::sync::Arc::new(actor);
+            let actor = std::rc::Rc::new(actor);
             let (prompt_task, conv) = drive_prompt(
                 actor.clone(),
                 "pr19-disabled",
@@ -548,7 +548,7 @@ async fn pre_cancelled_turn_omits_prime_but_keeps_user_item() {
         .run_until(async {
             let (actor, _workspace, _registry, _persisted_updates) =
                 prime_enabled_actor(true, true, false).await;
-            let actor = std::sync::Arc::new(actor);
+            let actor = std::rc::Rc::new(actor);
             // Cancel the turn before the prompt runs: prime sees the shared
             // turn-cancel token and returns cancelled (no reminder); the user
             // item is still pushed.
@@ -630,7 +630,7 @@ async fn hard_prime_failure_leaves_monotonic_index_gap_then_success_primes_disti
         .run_until(async {
             let (actor, _workspace, _registry, persisted_updates) =
                 prime_enabled_actor(true, true, true).await;
-            let actor = std::sync::Arc::new(actor);
+            let actor = std::rc::Rc::new(actor);
 
             // Turn 1: hard prime failure. The user pair is never emitted or
             // persisted, so await the task result directly.
@@ -850,7 +850,7 @@ async fn real_user_turn_records_primed_outcome_with_skill_names_and_injected_bud
         .run_until(async {
             let (actor, _workspace, _registry, _persisted_updates) =
                 prime_enabled_actor(true, true, false).await;
-            let actor = std::sync::Arc::new(actor);
+            let actor = std::rc::Rc::new(actor);
             let (prompt_task, _conv) = drive_prompt(
                 actor.clone(),
                 "pr22-accounting-1",
@@ -899,7 +899,7 @@ async fn real_user_turn_skills_disabled_agents_disabled_records_disabled() {
         .run_until(async {
             let (actor, _workspace, _registry, _persisted_updates) =
                 prime_enabled_actor(true, false, false).await;
-            let actor = std::sync::Arc::new(actor);
+            let actor = std::rc::Rc::new(actor);
             let (prompt_task, _conv) = drive_prompt(
                 actor.clone(),
                 "pr22-disabled-accounting",
@@ -932,7 +932,7 @@ async fn synthetic_origins_do_not_overwrite_last_prime_outcome() {
         .run_until(async {
             let (actor, _workspace, _registry, _persisted_updates) =
                 prime_enabled_actor(true, true, false).await;
-            let actor = std::sync::Arc::new(actor);
+            let actor = std::rc::Rc::new(actor);
             let (prompt_task, _conv) = drive_prompt(
                 actor.clone(),
                 "pr22-base-record",
@@ -981,7 +981,7 @@ async fn cancelled_prime_leaves_previous_outcome_unchanged() {
         .run_until(async {
             let (actor, _workspace, _registry, _persisted_updates) =
                 prime_enabled_actor(true, true, false).await;
-            let actor = std::sync::Arc::new(actor);
+            let actor = std::rc::Rc::new(actor);
             let (prompt_task, _conv) = drive_prompt(
                 actor.clone(),
                 "pr22-before-cancel",
@@ -1035,7 +1035,7 @@ async fn agents_enabled_records_names_without_inserting_agent_reminder() {
             def.name = "steve".into();
             actor.rebuild_spec =
                 crate::session::agent_rebuild::test_rebuild_spec_enabled_subagents(vec![def]);
-            let actor = std::sync::Arc::new(actor);
+            let actor = std::rc::Rc::new(actor);
             let (prompt_task, conv) = drive_prompt(
                 actor.clone(),
                 "pr22-agents",
@@ -1077,7 +1077,7 @@ async fn degraded_semantic_records_safe_degradation_labels_only() {
         .run_until(async {
             let (actor, _workspace, _registry, _persisted_updates) =
                 prime_enabled_actor_with_degraded_snapshot(false).await;
-            let actor = std::sync::Arc::new(actor);
+            let actor = std::rc::Rc::new(actor);
             let (prompt_task, _conv) = drive_prompt(
                 actor.clone(),
                 "pr22-degraded",
@@ -1124,7 +1124,7 @@ async fn degraded_skill_selection_still_records_callable_agent_recommendations()
                 crate::session::agent_rebuild::test_rebuild_spec_enabled_subagents(vec![
                     definition,
                 ]);
-            let actor = std::sync::Arc::new(actor);
+            let actor = std::rc::Rc::new(actor);
             let (prompt_task, _conv) = drive_prompt(
                 actor.clone(),
                 "pr22-degraded-skills-agents",

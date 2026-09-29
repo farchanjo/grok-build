@@ -5,6 +5,11 @@ version = "0.1.0"
 edition.workspace = true
 description = "Wire-protocol types for the xAI Computer Hub"
 
+repository.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
 [dependencies]
 xai-tool-types = { workspace = true }
 serde = { workspace = true, features = ["derive"] }

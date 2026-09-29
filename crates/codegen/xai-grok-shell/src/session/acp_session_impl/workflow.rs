@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::rc::Rc;
 
 use super::super::acp_session::SessionActor;
 
@@ -42,18 +42,14 @@ impl SessionActor {
             xai_grok_tools::implementations::grok_build::workflow::with_workflow_catalog(
                 base, &entries,
             );
-        self.agent
-            .borrow()
-            .tool_bridge()
-            .toolset()
-            .set_tool_description(
-                xai_grok_tools::implementations::grok_build::WORKFLOW_TOOL_NAME,
-                &description,
-            );
+        self.tool_bridge_owned().toolset().set_tool_description(
+            xai_grok_tools::implementations::grok_build::WORKFLOW_TOOL_NAME,
+            &description,
+        );
     }
 
     pub(crate) async fn launch_named_workflow(
-        self: &Arc<Self>,
+        self: &Rc<Self>,
         registry: &crate::session::workflow::registry::WorkflowRegistry,
         name: &str,
         input: &str,
@@ -105,7 +101,7 @@ impl SessionActor {
         }
     }
 
-    pub(crate) async fn manage_workflow_run(self: &Arc<Self>, run_id: &str, op: &str) -> String {
+    pub(crate) async fn manage_workflow_run(self: &Rc<Self>, run_id: &str, op: &str) -> String {
         use crate::session::workflow::tracker::WorkflowRunStatus;
 
         const USAGE: &str = "Usage: /workflow <name> [args] to launch a saved workflow, or \

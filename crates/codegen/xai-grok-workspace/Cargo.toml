@@ -5,6 +5,11 @@ version = "0.1.220-alpha.4"
 edition.workspace = true
 description = "Core host-local workspace library (FS, VCS, execution, discovery) for xai-grok-shell and remote sampler"
 
+repository.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
 [dependencies]
 anyhow = { workspace = true }
 arc-swap = { workspace = true }
@@ -127,7 +132,7 @@ path = "src/bin/workspace_server_probe.rs"
 [features]
 default = ["sandbox-enforce"]
 compression = []
-test-support = []
+test = []
 sandbox-enforce = ["xai-grok-sandbox/enforce"]
 default-bazel = [
     "sandbox-enforce",

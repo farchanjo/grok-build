@@ -22,8 +22,6 @@
 //! `milvus-standalone` container for ~30–60 s. A `Drop` guard restarts the
 //! container even when an assertion panics between stop and start.
 
-#![allow(clippy::unwrap_used, reason = "test fixtures unwrap intentionally")]
-
 use std::process::Command;
 use std::sync::Arc;
 use std::time::{Duration, Instant};

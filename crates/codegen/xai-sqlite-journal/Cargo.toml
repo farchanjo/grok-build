@@ -5,6 +5,11 @@ version = "0.1.0"
 edition.workspace = true
 description = "Filesystem-aware SQLite journal-mode selection: WAL on local disks, rollback journal on network mounts where WAL's mmap'd -shm is unsafe"
 
+repository.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
 [dependencies]
 # Matches the pinned rusqlite of every consumer (bundled = self-contained SQLite).
 rusqlite = { version = "0.37", features = ["bundled"] }

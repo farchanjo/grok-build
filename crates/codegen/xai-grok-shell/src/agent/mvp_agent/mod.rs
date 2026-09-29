@@ -1,9 +1,7 @@
 #![cfg_attr(rustfmt, rustfmt::skip)]
-#![allow(unused_imports)]
 use std::path::PathBuf;
 use std::sync::OnceLock;
 use std::{cell::RefCell, collections::HashMap, rc::Rc, sync::Arc};
-use tokio::sync::mpsc;
 /// A `'static` reference to a value on a single-threaded `LocalSet`.
 ///
 /// Encapsulates the raw-pointer pattern used when `spawn_local` tasks need
@@ -56,12 +54,11 @@ use crate::agent::config::{self, Config as AgentConfig, ModelEntry, resolve_cred
 use crate::agent::feedback_client::FeedbackClient;
 use crate::agent::folder_trust;
 use crate::agent::models::{
-    resolve_catalog_key, resolve_catalog_key_with_origins,
-    selectable_catalog_key_for_persisted, selectable_catalog_key_for_persisted_with_origins,
+    resolve_catalog_key, resolve_catalog_key_with_origins, selectable_catalog_key_for_persisted_with_origins,
 };
 use crate::agent::session_config;
 use xai_grok_inference_types::{
-    REASONING_EFFORT_META_KEY, ReasoningEffortOption, ReasoningEffortSelection,
+    REASONING_EFFORT_META_KEY,
     reasoning_effort_meta_value,
 };
 use crate::agent::update_chunk_merge;
@@ -254,7 +251,7 @@ fn parse_session_kind(
 }
 /// Hard-off in release builds: `kind: "chat"` meta is ignored and
 /// sessions stay on the local Build path.
-fn is_chat_session_kind(meta: Option<&acp::Meta>) -> bool {
+fn is_chat_session_kind(_meta: Option<&acp::Meta>) -> bool {
     false
 }
 fn chat_initial_model(
@@ -1247,8 +1244,6 @@ mod session_lifecycle;
 mod subagent_coordinator;
 mod agent_ops;
 mod acp_agent;
-pub(crate) use session_lifecycle::RegistrySnapshot;
-pub(super) use super::ext_parsers;
 /// Emit the `auth.lifecycle` login span with optional user id and error
 /// category. Named `auth.lifecycle` (not `auth`) to avoid colliding with the
 /// pre-existing per-request `AuthManager::auth()` `#[instrument]` span.

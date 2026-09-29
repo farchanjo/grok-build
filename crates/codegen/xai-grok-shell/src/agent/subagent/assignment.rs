@@ -59,7 +59,6 @@ pub(super) struct Assignments {
 }
 
 impl Assignments {
-    #[must_use]
     pub(super) fn insert(
         &mut self,
         key: AssignmentKey,
@@ -119,6 +118,21 @@ impl Assignments {
     }
 }
 
+fn assignment_bytes(key: &AssignmentKey, route: &ExactRoute) -> Option<usize> {
+    [
+        key.as_str().len(),
+        route.canonical().as_str().len(),
+        route.upstream().as_str().len(),
+        route.context().instance_id().len(),
+        route.context().incarnation().map_or(0, str::len),
+        route.context().origin().map_or(0, str::len),
+        route.context().model_partition().map_or(0, str::len),
+        128,
+    ]
+    .into_iter()
+    .try_fold(0usize, usize::checked_add)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -153,19 +167,4 @@ mod tests {
         assert!(AssignmentKey::new(" ").is_some());
         assert!(AssignmentKey::new("x".repeat(513)).is_none());
     }
-}
-
-fn assignment_bytes(key: &AssignmentKey, route: &ExactRoute) -> Option<usize> {
-    [
-        key.as_str().len(),
-        route.canonical().as_str().len(),
-        route.upstream().as_str().len(),
-        route.context().instance_id().len(),
-        route.context().incarnation().map_or(0, str::len),
-        route.context().origin().map_or(0, str::len),
-        route.context().model_partition().map_or(0, str::len),
-        128,
-    ]
-    .into_iter()
-    .try_fold(0usize, usize::checked_add)
 }

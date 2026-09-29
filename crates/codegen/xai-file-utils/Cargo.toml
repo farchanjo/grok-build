@@ -6,6 +6,11 @@ edition.workspace = true
 description = "Local data collection: per-turn event tracking"
 authors = ["xAI"]
 
+repository.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
 [dependencies]
 anyhow = { workspace = true }
 async-trait = { workspace = true }
@@ -45,6 +50,7 @@ async-compression = { workspace = true, features = ["tokio"] }
 # with "invalid URL, scheme is not http". The asset GCS adapter is the first
 # caller to actually make one, so opt the feature back in here.
 gcloud-storage = { workspace = true, features = ["rustls-tls"] }
+jsonwebtoken = { version = "10", features = ["rust_crypto"] }
 opentelemetry = { workspace = true }
 reflink-copy = { workspace = true }
 tracing-opentelemetry = { workspace = true }
@@ -61,7 +67,7 @@ zstd.workspace = true
 default-bazel = []
 # Exposes `assets::MockAssetStore` (and its builder) to downstream crates that
 # need an in-memory `AssetStore` seam in their own tests.
-test-support = []
+test = []
 
 
 [dev-dependencies]
