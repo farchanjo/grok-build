@@ -1,6 +1,6 @@
 [package]
 name = "xai-grok-pager-bin"
-version = "1.6.12"
+version = "1.6.13"
 description = "Executable composition root: CLI parsing, sandbox init, and mode dispatch for the released binary."
 edition.workspace = true
 license = "Apache-2.0"
