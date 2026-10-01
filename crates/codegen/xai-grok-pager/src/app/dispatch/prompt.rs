@@ -616,6 +616,9 @@ pub(super) fn dispatch_send_prompt_inner(
                         .unwrap_or_default()
                         .as_str()
                         .to_owned(),
+                    // `/tool-search status` reports the catalog width from the
+                    // live catalog, the same source the settings sheet uses.
+                    tool_catalog: agent.session.tool_catalog.clone().unwrap_or_default(),
                     ..Default::default()
                 },
             };
