@@ -22,6 +22,7 @@ use std::sync::Mutex;
 
 use async_trait::async_trait;
 use bm25::{Language, SearchEngineBuilder};
+use futures::StreamExt;
 use tokio::sync::Mutex as AsyncMutex;
 use tokio_util::sync::CancellationToken;
 use xai_grok_tools::types::tool_index::{
@@ -164,6 +165,14 @@ const FUSION_POOL: usize = 10;
 /// `InputBudgetExceeded`. 24 KiB leaves headroom under the 32 KiB a default
 /// 8 192-token profile allows, plus room for the query riding the first chunk.
 const MAX_EMBED_BYTES: usize = 24 * 1024;
+
+/// Chunks embedded in parallel while a dense rebuild is cold.
+///
+/// The chunks are independent calls, so the wall time is the slowest wave
+/// instead of the sum of every round trip; a 300-tool catalog is several
+/// chunks, and a cold one costs tens of seconds when they run one at a time.
+/// The bound keeps a large toolset from opening one request per chunk.
+const MAX_PARALLEL_EMBED_CHUNKS: usize = 4;
 
 /// One embedding batch, in input order, plus the space it was produced in.
 pub struct DenseEmbedding {
@@ -310,6 +319,11 @@ impl DenseToolIndex {
 
     /// Embed the whole toolset, with the query riding the first chunk so it
     /// lands in the same space as the documents it is compared against.
+    ///
+    /// Chunks are independent calls and run concurrently, bounded by
+    /// [`MAX_PARALLEL_EMBED_CHUNKS`] and kept in document order; a cold rebuild
+    /// is several of them, so this is the difference between one wave and the
+    /// sum of every round trip.
     async fn rebuild(
         &self,
         cache: &mut DenseCache,
@@ -317,21 +331,48 @@ impl DenseToolIndex {
         query: &str,
         documents: &[String],
     ) -> Result<Vec<(usize, f32)>, String> {
+        let requests: Vec<Vec<String>> = chunk_documents(documents)
+            .into_iter()
+            .enumerate()
+            .map(|(index, chunk)| {
+                let mut inputs = Vec::with_capacity(chunk.len() + 1);
+                if index == 0 {
+                    inputs.push(query.to_owned());
+                }
+                inputs.extend(chunk.iter().cloned());
+                inputs
+            })
+            .collect();
+        // Each chunk owns its embedder handle inside an `async move` block, so
+        // the futures carry no borrowed lifetime for `buffered` to generalise.
+        let embedder = self.embedder.clone();
+        let embeddings = futures::stream::iter(requests)
+            .map(move |inputs| {
+                let embedder = embedder.clone();
+                async move { embedder.embed(inputs).await }
+            })
+            .buffered(MAX_PARALLEL_EMBED_CHUNKS)
+            .collect::<Vec<_>>()
+            .await;
+
         let mut vectors: Vec<Vec<f32>> = Vec::with_capacity(documents.len());
-        let mut space = None;
+        let mut space: Option<String> = None;
         let mut query_vec = None;
-        for chunk in chunk_documents(documents) {
-            let mut inputs = Vec::with_capacity(chunk.len() + 1);
-            if query_vec.is_none() {
-                inputs.push(query.to_owned());
-            }
-            inputs.extend(chunk.iter().cloned());
-            let out = self.embedder.embed(inputs).await?;
-            if space.is_none() {
-                space = out.space;
+        for (index, embedding) in embeddings.into_iter().enumerate() {
+            let out = embedding?;
+            if let Some(found) = out.space.as_deref() {
+                match space.as_deref() {
+                    // Vectors from two spaces are never compared with each
+                    // other, so a build that straddles them is not usable.
+                    Some(known) if known != found => {
+                        return Err("chunk embedding landed in a different space".into());
+                    }
+                    None => space = Some(found.to_owned()),
+                    _ => {}
+                }
             }
             let mut batch = out.vectors.into_iter();
-            if query_vec.is_none() {
+            if index == 0 {
                 query_vec = batch.next();
             }
             vectors.extend(batch);
@@ -2938,6 +2979,12 @@ mod tests {
         calls: std::sync::Mutex<Vec<Vec<String>>>,
         space: std::sync::Mutex<String>,
         failing: std::sync::atomic::AtomicBool,
+        /// Per-call space override, consumed front to back; empty means `space`.
+        space_sequence: std::sync::Mutex<Vec<String>>,
+        /// Sleep before answering, so concurrent chunks are observable.
+        delay_ms: std::sync::atomic::AtomicU64,
+        in_flight: std::sync::atomic::AtomicUsize,
+        max_in_flight: std::sync::atomic::AtomicUsize,
     }
 
     impl FakeEmbedder {
@@ -2947,6 +2994,10 @@ mod tests {
                 calls: std::sync::Mutex::new(Vec::new()),
                 space: std::sync::Mutex::new("space-a".into()),
                 failing: std::sync::atomic::AtomicBool::new(false),
+                space_sequence: std::sync::Mutex::new(Vec::new()),
+                delay_ms: std::sync::atomic::AtomicU64::new(0),
+                in_flight: std::sync::atomic::AtomicUsize::new(0),
+                max_in_flight: std::sync::atomic::AtomicUsize::new(0),
             })
         }
 
@@ -2968,13 +3019,29 @@ mod tests {
     #[async_trait::async_trait]
     impl ToolDocEmbedder for FakeEmbedder {
         async fn embed(&self, inputs: Vec<String>) -> Result<DenseEmbedding, String> {
+            use std::sync::atomic::Ordering::SeqCst;
             self.calls.lock().unwrap().push(inputs.clone());
-            if self.failing.load(std::sync::atomic::Ordering::SeqCst) {
+            let in_flight = self.in_flight.fetch_add(1, SeqCst) + 1;
+            self.max_in_flight.fetch_max(in_flight, SeqCst);
+            let delay = self.delay_ms.load(SeqCst);
+            if delay > 0 {
+                tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
+            }
+            self.in_flight.fetch_sub(1, SeqCst);
+            if self.failing.load(SeqCst) {
                 return Err("embedding down".into());
             }
+            let space = {
+                let mut sequence = self.space_sequence.lock().unwrap();
+                if sequence.is_empty() {
+                    self.space.lock().unwrap().clone()
+                } else {
+                    sequence.remove(0)
+                }
+            };
             Ok(DenseEmbedding {
                 vectors: inputs.iter().map(|text| (self.vector_for)(text)).collect(),
-                space: Some(self.space.lock().unwrap().clone()),
+                space: Some(space),
             })
         }
     }
@@ -3117,6 +3184,59 @@ mod tests {
             calls.last().unwrap().len() > 1,
             "a changed toolset must re-embed its documents"
         );
+    }
+
+    /// One document per chunk, each just over half the byte budget.
+    fn chunk_per_document_documents(count: usize) -> Vec<String> {
+        (0..count)
+            .map(|index| format!("{}{index}", "d".repeat(12 * 1024 + 1)))
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn dense_rebuild_embeds_chunks_concurrently_and_keeps_order() {
+        let documents = chunk_per_document_documents(6);
+        // The query matches document 3 only, so a lost order shows in the ranks.
+        let embedder = FakeEmbedder::new(|text: &str| {
+            if text.starts_with("query") || text.ends_with('3') {
+                vec![0.0, 1.0]
+            } else {
+                vec![1.0, 0.0]
+            }
+        });
+        embedder
+            .delay_ms
+            .store(40, std::sync::atomic::Ordering::SeqCst);
+        let index = DenseToolIndex::new(embedder.clone());
+
+        let ranks = index.rank("query", &documents).await.unwrap().unwrap();
+
+        assert_eq!(
+            embedder.call_count(),
+            documents.len(),
+            "one embedding call per chunk"
+        );
+        assert_eq!(ranks[0].0, 3, "chunk order must map back to document order");
+        let max = embedder
+            .max_in_flight
+            .load(std::sync::atomic::Ordering::SeqCst);
+        assert!(max > 1, "chunks must overlap, saw {max} in flight");
+        assert!(
+            max <= MAX_PARALLEL_EMBED_CHUNKS,
+            "the concurrency bound is respected, saw {max}"
+        );
+    }
+
+    #[tokio::test]
+    async fn dense_rebuild_rejects_chunks_that_straddle_spaces() {
+        let documents = chunk_per_document_documents(2);
+        let embedder = FakeEmbedder::new(|_: &str| vec![1.0, 0.0]);
+        *embedder.space_sequence.lock().unwrap() = vec!["space-a".into(), "space-b".into()];
+        let index = DenseToolIndex::new(embedder);
+
+        let err = index.rank("query", &documents).await.unwrap_err();
+
+        assert!(err.contains("different space"), "{err}");
     }
 
     #[tokio::test]
