@@ -441,7 +441,7 @@ fn transport_with_partial(
         msg,
         Some(ExternalAgentKind::ClaudeCli),
     );
-    err.partial_envelope = env;
+    err.partial_envelope = env.map(Box::new);
     err.partial_events = events;
     err
 }

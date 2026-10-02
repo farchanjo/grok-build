@@ -14,11 +14,11 @@ use super::claude_cli::gates;
 use super::claude_cli::mcp_config::{self, ApprovedExternalMcpServer, config_is_strict_only};
 use super::claude_cli::permission_bridge::{
     self, BRIDGE_MCP_SERVER_NAME, ClaudePermissionBroker, ClaudePermissionRequest,
-    ClaudePermissionResponse, PolicyPermissionBroker, ScriptedBroker, capability_precheck,
+    ClaudePermissionResponse, PolicyPermissionBroker, capability_precheck,
     parse_permission_request, permission_prompt_tool_flag,
 };
 use super::claude_cli::persistent::{self, label_claude_owned_events};
-use super::claude_cli::process::{self, ProcessLimits};
+use super::claude_cli::process::ProcessLimits;
 use super::claude_cli::provider_status::{self, ApiKeyStatusNote};
 use super::claude_cli::resume_guard::{self, ResumeHardeningError};
 use super::claude_cli::runtime::ClaudeCliRuntime;
@@ -67,23 +67,6 @@ where
         }
     }
     result
-}
-
-fn empty_argv(exe: PathBuf) -> ClaudeCliTurnArgv {
-    ClaudeCliTurnArgv {
-        executable: exe,
-        prompt: "hi".into(),
-        model: None,
-        effort: None,
-        max_budget_usd: None,
-        session_id: None,
-        resume_session: None,
-        cwd: None,
-        mcp_config: None,
-        permission_prompt_tool: None,
-        capability_mode: None,
-        persistent_input: false,
-    }
 }
 
 // ---------------------------------------------------------------------------

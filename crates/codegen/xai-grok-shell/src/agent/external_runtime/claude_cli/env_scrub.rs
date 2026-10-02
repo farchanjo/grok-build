@@ -253,7 +253,7 @@ pub fn apply_scrubbed_env(cmd: &mut tokio::process::Command, extra: &[(&str, OsS
 
 /// Convenience: set cwd-related extras without secrets.
 pub fn workspace_extras(cwd: Option<&Path>) -> Vec<(String, OsString)> {
-    let mut v = Vec::new();
+    let v = Vec::new();
     if let Some(cwd) = cwd {
         // PWD is not on the default allowlist; cwd is set via Command::current_dir.
         let _ = cwd;

@@ -571,7 +571,9 @@ mod tests {
     #[test]
     fn feature_off_means_not_selectable_via_gates() {
         if !cfg!(feature = "claude-cli-runtime") {
-            const { assert!(!capability_matrix::CLAUDE_CLI_MODEL_SELECTABLE) };
+            // Runtime assert, not `const { .. }`: a const block inside this
+            // `if` still evaluates when the feature is compiled in.
+            assert!(!capability_matrix::CLAUDE_CLI_MODEL_SELECTABLE);
             assert!(!capability_matrix::claude_cli_selectable());
         }
     }

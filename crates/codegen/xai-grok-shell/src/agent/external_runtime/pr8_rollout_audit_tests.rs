@@ -229,7 +229,9 @@ fn default_build_feature_flag_matches_cfg() {
     if !cfg!(feature = "claude-cli-runtime") {
         assert!(!gates::claude_cli_feature_compiled());
         assert!(!gates::claude_cli_both_gates_open());
-        const { assert!(!capability_matrix::CLAUDE_CLI_MODEL_SELECTABLE) };
+        // Runtime assert, not `const { .. }`: a const block inside this `if`
+        // still evaluates when the feature is compiled in.
+        assert!(!capability_matrix::CLAUDE_CLI_MODEL_SELECTABLE);
         assert!(!capability_matrix::claude_cli_selectable());
     }
 }

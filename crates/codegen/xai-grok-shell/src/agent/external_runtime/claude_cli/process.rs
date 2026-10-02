@@ -9,7 +9,7 @@ use std::path::Path;
 use std::process::Stdio;
 use std::time::Duration;
 
-use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, Command};
 use tokio_util::sync::CancellationToken;
 use xai_tty_utils::{ProcessGroup, new_process_group};

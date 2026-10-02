@@ -21,7 +21,6 @@ use super::{
     ExternalAgentRuntime, ExternalRuntimeErrorKind, ExternalRuntimeTurnEvent, ExternalStartRequest,
     ExternalTurnRequest, capability_matrix,
 };
-use crate::agent::execution_backend::ExternalAgentKind;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
