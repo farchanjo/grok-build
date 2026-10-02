@@ -85,15 +85,18 @@ owner-only `anthropic_models_cache.json`. Disconnect removes that cache only.
 
 ## Claude Agent CLI (experimental, gated)
 
-Subscription-backed Claude Agent CLI is **experimental**, off in default and
-`release-dist` builds, and requires:
+Subscription-backed Claude Agent CLI is **experimental**, absent from the
+`default` and `release-dist` feature lists, and requires:
 
-1. compile feature `claude-cli-runtime` (not in ordinary releases),
+1. compile feature `claude-cli-runtime` — the release workflow passes it
+   explicitly on non-Windows targets (the bridge is unix-only), and local
+   builds opt in with `make build FEATURES=claude-cli-runtime`,
 2. env `GROK_CLAUDE_CLI_RUNTIME=1` (or `true` / `yes` / `on`),
 3. a successful official `claude` binary probe.
 
-Ordinary release builds do not show or select the subscription CLI card.
-Release availability is **pending authorization**. See the user guide for the
+Without the env opt-in the card stays hidden, so ordinary use is unchanged;
+published non-Windows binaries expose it once that gate is set. Release
+availability is **pending authorization**. See the user guide for the
 capability matrix, safe-mode, permission bridge, and cross-mode session rules.
 
 ## Ops

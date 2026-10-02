@@ -251,9 +251,23 @@ jobs:
         # SIGILLs on the runner CPU (observed on proc-macro2). RUSTFLAGS
         # replaces (does not extend) the .cargo/config.toml target rustflags;
         # matrix.rustflags already repeats those base flags per target.
+        #
+        # Published binaries also compile the experimental Claude Agent CLI
+        # runtime, so a release can expose subscription mode. Its permission
+        # bridge uses unix-only std APIs (UnixStream, PermissionsExt), hence
+        # the Windows guard. The feature pulls no new dependencies (Cargo.lock
+        # and --locked stay valid) and is inert until GROK_CLAUDE_CLI_RUNTIME
+        # opts in at runtime. Rollback: drop the `features=` block.
+        shell: bash
         env:
           RUSTFLAGS: ${{ matrix.rustflags }}
-        run: cargo build --target ${{ matrix.target }} -p xai-grok-pager-bin --profile release-dist --locked
+        run: |
+          features=""
+          if [ "${{ runner.os }}" != "Windows" ]; then
+            features="--features claude-cli-runtime"
+          fi
+          cargo build --target ${{ matrix.target }} -p xai-grok-pager-bin \
+            --profile release-dist --locked $features
 
       - name: Stage artifact
         shell: bash

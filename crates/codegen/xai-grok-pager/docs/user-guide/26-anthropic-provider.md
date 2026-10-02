@@ -259,9 +259,11 @@ separately configured OpenRouter. See [OpenRouter](11-custom-models.md) and
 
 ## 6. Claude Agent CLI (experimental subscription mode)
 
-> **Status:** experimental. **Not** in default features. **Not** in
-> `release-dist`. Ordinary release binaries do not expose the subscription CLI
-> card. Full release enablement is **pending legal/product authorization**.
+> **Status:** experimental. **Not** in the `default` / `release-dist` feature
+> lists; the release workflow compiles it explicitly on non-Windows targets,
+> so published binaries expose the subscription CLI card once the runtime env
+> gate is set. Full release enablement is **pending legal/product
+> authorization**.
 
 ### Gates (all required)
 

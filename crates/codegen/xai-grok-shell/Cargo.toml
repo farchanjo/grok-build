@@ -18,9 +18,9 @@ default = []
 unstable = []
 dhat-heap = ["dep:dhat"]
 default-bazel = []
-# Experimental Claude Agent CLI process runtime (PR6). Off by default; released
-# builds must not enable this feature. Runtime opt-in is still required when
-# the feature is compiled in.
+# Experimental Claude Agent CLI process runtime (PR6). Off by default and not
+# part of release-dist; the release workflow compiles it explicitly on unix
+# targets. Runtime opt-in is still required when the feature is compiled in.
 claude-cli-runtime = []
 
 [dependencies]
